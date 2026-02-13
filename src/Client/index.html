@@ -5,7 +5,70 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Worktree Monitor</title>
     <style>
-        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; color: #1a1a1a; }
+
+        .dashboard { padding: 16px; max-width: 2000px; margin: 0 auto; }
+        .dashboard-header { margin-bottom: 16px; }
+        .dashboard-header h1 { margin: 0 0 4px; font-size: 1.4em; font-weight: 600; }
+
+        .card-grid {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: 1fr;
+        }
+        @media (min-width: 768px)  { .card-grid { grid-template-columns: repeat(2, 1fr); } }
+        @media (min-width: 1200px) { .card-grid { grid-template-columns: repeat(3, 1fr); } }
+        @media (min-width: 1800px) { .card-grid { grid-template-columns: repeat(4, 1fr); } }
+
+        .wt-card {
+            background: #fff;
+            border-radius: 8px;
+            padding: 12px 14px;
+            border-left: 4px solid #ccc;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+        .wt-card.cc-active  { border-left-color: #22c55e; }
+        .wt-card.cc-recent  { border-left-color: #eab308; }
+        .wt-card.cc-idle    { border-left-color: #9ca3af; }
+        .wt-card.cc-unknown { border-left-color: #d1d5db; }
+        .wt-card.stale      { opacity: 0.5; }
+
+        .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .cc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+        .cc-dot.active  { background: #22c55e; }
+        .cc-dot.recent  { background: #eab308; }
+        .cc-dot.idle    { background: #9ca3af; }
+        .cc-dot.unknown { background: #d1d5db; }
+
+        .commit-line { font-size: 0.85em; color: #555; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .commit-time { color: #888; margin-left: 6px; }
+
+        .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.82em; }
+        .beads-counts { display: flex; gap: 6px; color: #666; }
+        .beads-counts span { display: inline-flex; align-items: center; gap: 2px; }
+
+        .progress-bar { flex: 1; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; min-width: 40px; }
+        .progress-fill { height: 100%; background: #22c55e; border-radius: 3px; transition: width 0.3s; }
+
+        .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
+        .pr-badge { background: #e0e7ff; color: #3730a3; padding: 1px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+        .pr-badge.draft { background: #f3f4f6; color: #6b7280; }
+        .vote-summary { color: #666; white-space: nowrap; }
+        .thread-badge { background: #fee2e2; color: #b91c1c; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
+        .thread-badge.none { background: #f3f4f6; color: #9ca3af; font-weight: 400; }
+
+        .build-badge { padding: 1px 6px; border-radius: 4px; font-size: 0.82em; font-weight: 500; white-space: nowrap; }
+        .build-badge.succeeded { background: #dcfce7; color: #166534; }
+        .build-badge.failed { background: #fee2e2; color: #b91c1c; }
+        .build-badge.building { background: #fef3c7; color: #92400e; }
+        .build-badge.partial { background: #fef3c7; color: #92400e; }
+        .build-badge.canceled { background: #f3f4f6; color: #6b7280; }
+
+        .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #888; padding: 8px 0 4px; }
+        .error-bar { color: #b91c1c; background: #fee2e2; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.9em; }
     </style>
 </head>
 <body>
