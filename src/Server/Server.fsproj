@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
+    <Compile Include="ClaudeStatus.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
