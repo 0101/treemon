@@ -5,7 +5,7 @@ open Microsoft.Extensions.DependencyInjection
 
 let webApp =
     choose [
-        route Shared.Route.apiWorktrees >=> text "[]"
+        route "/" >=> text "mait"
     ]
 
 [<EntryPoint>]

@@ -20,7 +20,7 @@
 - On AzDo CLI failure: show "unknown" for PR status (don't block other data)
 
 ## Technical Approach
-- **Stack**: F# server (Saturn/Giraffe) + Fable/Elmish client, shared domain types via Thoth.Json
+- **Stack**: F# server (Saturn/Giraffe) + Fable/Elmish client, shared domain types via Fable.Remoting (automatic type-safe serialization, no manual encoders/decoders)
 - **Data sources**: git CLI for worktree/commit info, `bd count --by-status --json --db <wt>/.beads/beads.db` for task counts, `~/.claude/projects/` file mtimes for CC activity, `az repos pr list` for PR status, `az pipelines runs list` for build status
 - **PR remote detection**: Parse org/project/repo from git remote URL of the monitored repository (handles both `dev.azure.com` and `visualstudio.com` formats)
 - **PR branch matching**: Use `git rev-parse @{u}` to resolve upstream, strip `origin/` prefix, match against PR `sourceRefName`
@@ -39,5 +39,5 @@
 - `bd` CLI for beads counts: `bd count --by-status --json --db <path>` avoids custom JSONL parsing, works remotely via `--db` flag
 - Polling over WebSocket: simpler, sufficient for 15s refresh, no connection management
 - Target net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK; global.json pins to 9.0.x
-- Thoth.Json.Core 0.8.0 in Shared, Thoth.Json.Newtonsoft 0.3.3 in Server: platform-agnostic encoder/decoder API shared between .NET and Fable
+- Fable.Remoting for client-server communication: type-safe RPC, automatic serialization of shared F# types, no manual JSON encoding/decoding. Shared API contract as `type IWorktreeApi = { getWorktrees : unit -> Async<WorktreeStatus list> }`. Server implements it via `Fable.Remoting.Giraffe`, client calls it via `Fable.Remoting.Client` proxy.
 - Solution uses .slnx format (new in .NET 9 SDK)

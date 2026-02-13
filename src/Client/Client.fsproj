@@ -13,6 +13,7 @@
     <PackageReference Include="Fable.Core" Version="4.*" />
     <PackageReference Include="Fable.Elmish" Version="4.*" />
     <PackageReference Include="Fable.Elmish.React" Version="4.*" />
+    <PackageReference Include="Fable.Remoting.Client" Version="7.*" />
     <PackageReference Include="Feliz" Version="2.*" />
   </ItemGroup>
 

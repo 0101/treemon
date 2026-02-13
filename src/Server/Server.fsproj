@@ -11,7 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="Saturn" Version="0.17.0" />
-    <PackageReference Include="Thoth.Json.Newtonsoft" Version="0.3.3" />
+    <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
   </ItemGroup>
 
   <ItemGroup>
