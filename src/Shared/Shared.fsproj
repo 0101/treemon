@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Types.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Thoth.Json.Core" Version="0.8.0" />
+  </ItemGroup>
+
+</Project>

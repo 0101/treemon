@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "scripts": {
+    "start": "dotnet fable src/Client --outDir src/Client/output --watch --run npx vite",
+    "build": "dotnet fable src/Client --outDir src/Client/output && npx vite build"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  }
+}

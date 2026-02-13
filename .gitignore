@@ -1,0 +1,18 @@
+.agents/
+.claude/
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# Node / Fable
+node_modules/
+dist/
+src/Client/output/
+
+# IDE
+.vs/
+.idea/
+*.swp

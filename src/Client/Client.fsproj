@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="App.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Browser.Dom" Version="2.*" />
+    <PackageReference Include="Fable.Core" Version="4.*" />
+    <PackageReference Include="Fable.Elmish" Version="4.*" />
+    <PackageReference Include="Fable.Elmish.React" Version="4.*" />
+    <PackageReference Include="Feliz" Version="2.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Shared\Shared.fsproj" />
+  </ItemGroup>
+
+</Project>
