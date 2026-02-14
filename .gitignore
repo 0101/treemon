@@ -11,6 +11,7 @@ obj/
 node_modules/
 dist/
 src/Client/output/
+*.fs.js
 
 # IDE
 .vs/
@@ -19,3 +20,4 @@ src/Client/output/
 
 # bv (beads viewer) local config and caches
 .bv/
+*.beads*.db
