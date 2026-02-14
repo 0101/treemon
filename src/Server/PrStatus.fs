@@ -81,6 +81,14 @@ let private runProcess (fileName: string) (arguments: string) =
 let getRemoteUrl (repoRoot: string) =
     runProcess "git" $"-C \"{repoRoot}\" remote get-url origin"
 
+type private ParsedPr =
+    { BranchName: string
+      PrId: int
+      Title: string
+      IsDraft: bool
+      IsMerged: bool
+      ClosedDate: DateTimeOffset option }
+
 let private parsePrList (json: string) =
     try
         let doc = JsonDocument.Parse(json)
@@ -100,7 +108,24 @@ let private parsePrList (json: string) =
                     else
                         sourceRef
 
-                Some(branchName, prId, title, isDraft)
+                let status = el.GetProperty("status").GetString()
+                let isMerged = status = "completed"
+
+                let closedDate =
+                    match el.TryGetProperty("closedDate") with
+                    | true, v when v.ValueKind <> JsonValueKind.Null ->
+                        match DateTimeOffset.TryParse(v.GetString()) with
+                        | true, dt -> Some dt
+                        | _ -> None
+                    | _ -> None
+
+                Some
+                    { BranchName = branchName
+                      PrId = prId
+                      Title = title
+                      IsDraft = isDraft
+                      IsMerged = isMerged
+                      ClosedDate = closedDate }
             with ex ->
                 Log.log "PR" $"Failed to parse PR entry: {ex.Message}"
                 None)
@@ -212,39 +237,55 @@ let private fetchBuildStatus (remote: AzDoRemote) (branchName: string) =
         return buildStatus, buildUrl
     }
 
+let private firstPerBranch (prs: ParsedPr list) =
+    prs
+    |> List.sortBy (fun pr ->
+        // Active PRs first (isMerged=false sorts before true), then most recently closed
+        pr.IsMerged,
+        pr.ClosedDate |> Option.defaultValue DateTimeOffset.MaxValue |> (fun d -> -d.Ticks))
+    |> List.distinctBy (fun pr -> pr.BranchName)
+
 let fetchPrStatuses (remote: AzDoRemote) =
     async {
         let args =
-            $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status active -o json"
+            $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status all -o json"
 
         let! output = runProcess "az" args
 
         match output with
         | None -> return Map.empty
         | Some json ->
-            let prs = parsePrList json
+            let prs = parsePrList json |> firstPerBranch
 
             let! entries =
                 prs
-                |> List.map (fun (branchName, prId, title, isDraft) ->
+                |> List.map (fun pr ->
                     async {
-                        let! threadCounts = fetchPrThreadCount remote prId
-                        let! buildStatus, buildUrl = fetchBuildStatus remote branchName
+                        let! threadCounts, buildStatus, buildUrl =
+                            match pr.IsMerged with
+                            | true ->
+                                async { return { Unresolved = 0; Total = 0 }, BuildStatus.NoBuild, None }
+                            | false ->
+                                async {
+                                    let! tc = fetchPrThreadCount remote pr.PrId
+                                    let! bs, bu = fetchBuildStatus remote pr.BranchName
+                                    return tc, bs, bu
+                                }
 
                         let url =
-                            sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo prId
+                            sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo pr.PrId
 
                         return
-                            branchName,
+                            pr.BranchName,
                             HasPr
-                                { Id = prId
-                                  Title = title
+                                { Id = pr.PrId
+                                  Title = pr.Title
                                   Url = url
-                                  IsDraft = isDraft
+                                  IsDraft = pr.IsDraft
                                   ThreadCounts = threadCounts
                                   BuildStatus = buildStatus
                                   BuildUrl = buildUrl
-                                  IsMerged = false }
+                                  IsMerged = pr.IsMerged }
                     })
                 |> Async.Parallel
 
