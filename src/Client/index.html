@@ -6,20 +6,20 @@
     <title>Worktree Monitor</title>
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; color: #1a1a1a; }
+        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; }
 
         .dashboard { padding: 16px; max-width: 2000px; margin: 0 auto; }
         .dashboard-header { margin-bottom: 16px; }
-        .dashboard-header h1 { margin: 0 0 4px; font-size: 1.4em; font-weight: 600; }
+        .dashboard-header h1 { margin: 0 0 4px; font-size: 1.4em; font-weight: 600; color: #cdd6f4; }
         .header-top { display: flex; align-items: center; justify-content: space-between; }
         .header-controls { display: flex; gap: 6px; }
         .ctrl-btn {
-            background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
-            padding: 4px 10px; font-size: 0.82em; cursor: pointer; color: #374151;
+            background: #313244; border: 1px solid #45475a; border-radius: 6px;
+            padding: 4px 10px; font-size: 0.82em; cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s;
         }
-        .ctrl-btn:hover { background: #f3f4f6; border-color: #9ca3af; }
-        .ctrl-btn.active { background: #e0e7ff; border-color: #6366f1; color: #3730a3; }
+        .ctrl-btn:hover { background: #45475a; border-color: #585b70; }
+        .ctrl-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
 
         .card-grid {
             display: grid;
@@ -31,59 +31,60 @@
         @media (min-width: 1800px) { .card-grid { grid-template-columns: repeat(4, 1fr); } }
 
         .wt-card {
-            background: #fff;
+            background: #2a2a3c;
             border-radius: 8px;
             padding: 12px 14px;
-            border-left: 4px solid #ccc;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            border-left: 4px solid #585b70;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
         }
-        .wt-card.cc-active  { border-left-color: #22c55e; }
-        .wt-card.cc-recent  { border-left-color: #eab308; }
-        .wt-card.cc-idle    { border-left-color: #9ca3af; }
-        .wt-card.cc-unknown { border-left-color: #d1d5db; }
+        .wt-card.cc-active  { border-left-color: #a6e3a1; }
+        .wt-card.cc-recent  { border-left-color: #f9e2af; }
+        .wt-card.cc-idle    { border-left-color: #7f849c; }
+        .wt-card.cc-unknown { border-left-color: #585b70; }
         .wt-card.stale      { opacity: 0.5; }
         .wt-card.compact     { padding: 6px 10px; }
         .wt-card.compact .card-header { margin-bottom: 2px; }
         .wt-card.compact .branch-name { font-size: 0.88em; }
         .compact-detail { display: flex; align-items: center; gap: 6px; font-size: 0.8em; flex-wrap: wrap; }
-        .beads-inline { color: #666; }
+        .beads-inline { color: #a6adc8; }
 
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-        .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
         .cc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-        .cc-dot.active  { background: #22c55e; }
-        .cc-dot.recent  { background: #eab308; }
-        .cc-dot.idle    { background: #9ca3af; }
-        .cc-dot.unknown { background: #d1d5db; }
+        .cc-dot.active  { background: #a6e3a1; }
+        .cc-dot.recent  { background: #f9e2af; }
+        .cc-dot.idle    { background: #7f849c; }
+        .cc-dot.unknown { background: #585b70; }
 
-        .commit-line { font-size: 0.85em; color: #555; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .commit-time { color: #888; margin-left: 6px; }
+        .commit-line { font-size: 0.85em; color: #a6adc8; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .commit-time { color: #7f849c; margin-left: 6px; }
 
         .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.82em; }
-        .beads-counts { display: flex; gap: 6px; color: #666; }
+        .beads-counts { display: flex; gap: 6px; color: #a6adc8; }
         .beads-counts span { display: inline-flex; align-items: center; gap: 2px; }
 
-        .progress-bar { flex: 1; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; min-width: 40px; }
-        .progress-fill { height: 100%; background: #22c55e; border-radius: 3px; transition: width 0.3s; }
+        .progress-bar { flex: 1; height: 6px; background: #313244; border-radius: 3px; overflow: hidden; min-width: 40px; }
+        .progress-fill { height: 100%; background: #a6e3a1; border-radius: 3px; transition: width 0.3s; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
-        .pr-badge { background: #e0e7ff; color: #3730a3; padding: 1px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; text-decoration: none; cursor: pointer; }
-        .pr-badge:hover { background: #c7d2fe; }
-        .pr-badge.draft { background: #f3f4f6; color: #6b7280; }
-        .vote-summary { color: #666; white-space: nowrap; }
-        .thread-badge { background: #fee2e2; color: #b91c1c; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
-        .thread-badge.none { background: #f3f4f6; color: #9ca3af; font-weight: 400; }
+        .pr-badge { background: #2e3452; color: #b4befe; padding: 1px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; text-decoration: none; cursor: pointer; }
+        .pr-badge:hover { background: #3b4068; }
+        .pr-badge.draft { background: #313244; color: #7f849c; }
+        .pr-badge.merged { background: #2e3245; color: #cba6f7; }
+        .vote-summary { color: #a6adc8; white-space: nowrap; }
+        .thread-badge { background: #3b2030; color: #f38ba8; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
+        .thread-badge.none, .thread-badge.dimmed { background: #313244; color: #7f849c; font-weight: 400; }
 
         .build-badge { padding: 1px 6px; border-radius: 4px; font-size: 0.82em; font-weight: 500; white-space: nowrap; }
-        .build-badge.succeeded { background: #dcfce7; color: #166534; }
-        .build-badge.failed { background: #fee2e2; color: #b91c1c; }
-        .build-badge.building { background: #fef3c7; color: #92400e; }
-        .build-badge.partial { background: #fef3c7; color: #92400e; }
-        .build-badge.canceled { background: #f3f4f6; color: #6b7280; }
+        .build-badge.succeeded { background: #1e3a2f; color: #a6e3a1; }
+        .build-badge.failed { background: #3b2030; color: #f38ba8; }
+        .build-badge.building { background: #3a3020; color: #f9e2af; }
+        .build-badge.partial { background: #3a2e20; color: #fab387; }
+        .build-badge.canceled { background: #313244; color: #7f849c; }
 
-        .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #888; padding: 8px 0 4px; }
-        .error-bar { color: #b91c1c; background: #fee2e2; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.9em; }
+        .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #7f849c; padding: 8px 0 4px; }
+        .error-bar { color: #f38ba8; background: #3b2030; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 0.9em; }
     </style>
 </head>
 <body>
