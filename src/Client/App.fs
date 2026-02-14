@@ -137,6 +137,46 @@ let buildBadge (bs: BuildStatus) =
     | PartiallySucceeded -> Html.span [ prop.className "build-badge partial"; prop.text "Partial" ]
     | Canceled -> Html.span [ prop.className "build-badge canceled"; prop.text "Canceled" ]
 
+let compactWorktreeCard (wt: WorktreeStatus) =
+    Html.div [
+        prop.className (cardClassName wt + " compact")
+        prop.children [
+            Html.div [
+                prop.className "card-header"
+                prop.children [
+                    Html.span [ prop.className (sprintf "cc-dot %s" (ccClassName wt.Claude)) ]
+                    Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                ]
+            ]
+            Html.div [
+                prop.className "compact-detail"
+                prop.children [
+                    Html.span [
+                        prop.className "beads-inline"
+                        prop.text (sprintf "O:%d P:%d D:%d" wt.Beads.Open wt.Beads.InProgress wt.Beads.Closed)
+                    ]
+                    match wt.Pr with
+                    | NoPr -> Html.none
+                    | HasPr pr ->
+                        Html.span [
+                            prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
+                            prop.text (sprintf "PR #%d" pr.Id)
+                            prop.title pr.Title
+                        ]
+                        match pr.UnresolvedThreadCount with
+                        | 0 -> Html.none
+                        | n ->
+                            Html.span [
+                                prop.className "thread-badge"
+                                prop.text (sprintf "%d" n)
+                            ]
+                        buildBadge pr.BuildStatus
+                ]
+            ]
+        ]
+    ]
+
 let worktreeCard (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt)
@@ -208,14 +248,44 @@ let worktreeCard (wt: WorktreeStatus) =
         ]
     ]
 
-let view model _dispatch =
+let renderCard isCompact =
+    match isCompact with
+    | true -> compactWorktreeCard
+    | false -> worktreeCard
+
+let sortLabel =
+    function
+    | ByName -> "A-Z"
+    | ByActivity -> "Recent"
+
+let view model dispatch =
     Html.div [
         prop.className "dashboard"
         prop.children [
             Html.div [
                 prop.className "dashboard-header"
                 prop.children [
-                    Html.h1 "Worktree Monitor"
+                    Html.div [
+                        prop.className "header-top"
+                        prop.children [
+                            Html.h1 "Worktree Monitor"
+                            Html.div [
+                                prop.className "header-controls"
+                                prop.children [
+                                    Html.button [
+                                        prop.className "ctrl-btn"
+                                        prop.onClick (fun _ -> dispatch ToggleSort)
+                                        prop.text (sprintf "Sort: %s" (sortLabel model.SortMode))
+                                    ]
+                                    Html.button [
+                                        prop.className (match model.IsCompact with true -> "ctrl-btn active" | false -> "ctrl-btn")
+                                        prop.onClick (fun _ -> dispatch ToggleCompact)
+                                        prop.text "Compact"
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
                     Html.div [
                         prop.className "status-bar"
                         prop.children [
@@ -235,7 +305,7 @@ let view model _dispatch =
 
             Html.div [
                 prop.className "card-grid"
-                prop.children (model.Worktrees |> List.map worktreeCard)
+                prop.children (model.Worktrees |> List.map (renderCard model.IsCompact))
             ]
         ]
     ]

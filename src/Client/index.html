@@ -11,6 +11,15 @@
         .dashboard { padding: 16px; max-width: 2000px; margin: 0 auto; }
         .dashboard-header { margin-bottom: 16px; }
         .dashboard-header h1 { margin: 0 0 4px; font-size: 1.4em; font-weight: 600; }
+        .header-top { display: flex; align-items: center; justify-content: space-between; }
+        .header-controls { display: flex; gap: 6px; }
+        .ctrl-btn {
+            background: #fff; border: 1px solid #d1d5db; border-radius: 6px;
+            padding: 4px 10px; font-size: 0.82em; cursor: pointer; color: #374151;
+            font-family: inherit; transition: background 0.15s, border-color 0.15s;
+        }
+        .ctrl-btn:hover { background: #f3f4f6; border-color: #9ca3af; }
+        .ctrl-btn.active { background: #e0e7ff; border-color: #6366f1; color: #3730a3; }
 
         .card-grid {
             display: grid;
@@ -33,6 +42,11 @@
         .wt-card.cc-idle    { border-left-color: #9ca3af; }
         .wt-card.cc-unknown { border-left-color: #d1d5db; }
         .wt-card.stale      { opacity: 0.5; }
+        .wt-card.compact     { padding: 6px 10px; }
+        .wt-card.compact .card-header { margin-bottom: 2px; }
+        .wt-card.compact .branch-name { font-size: 0.88em; }
+        .compact-detail { display: flex; align-items: center; gap: 6px; font-size: 0.8em; flex-wrap: wrap; }
+        .beads-inline { color: #666; }
 
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
