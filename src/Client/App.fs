@@ -166,7 +166,7 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                             prop.target "_blank"
                             prop.text (sprintf "PR #%d" pr.Id)
                         ]
-                        match pr.UnresolvedThreadCount with
+                        match pr.ThreadCounts.Unresolved with
                         | 0 -> Html.none
                         | n ->
                             Html.span [
@@ -235,16 +235,9 @@ let worktreeCard (wt: WorktreeStatus) =
                             prop.target "_blank"
                             prop.text (sprintf "PR #%d" pr.Id)
                         ]
-                        match pr.ReviewerVotes |> Map.isEmpty with
-                        | true -> Html.none
-                        | false ->
-                            Html.span [
-                                prop.className "vote-summary"
-                                prop.text (voteSummary pr.ReviewerVotes)
-                            ]
                         Html.span [
-                            prop.className (match pr.UnresolvedThreadCount with 0 -> "thread-badge none" | _ -> "thread-badge")
-                            prop.text (sprintf "%d threads" pr.UnresolvedThreadCount)
+                            prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge none" | _ -> "thread-badge")
+                            prop.text (sprintf "%d threads" pr.ThreadCounts.Unresolved)
                         ]
                         buildBadge pr.BuildStatus
                     ]

@@ -100,18 +100,7 @@ let private parsePrList (json: string) =
                     else
                         sourceRef
 
-                let reviewerVotes =
-                    match el.TryGetProperty("reviewers") with
-                    | true, reviewers ->
-                        reviewers.EnumerateArray()
-                        |> Seq.map (fun r ->
-                            let name = r.GetProperty("displayName").GetString()
-                            let vote = r.GetProperty("vote").GetInt32()
-                            name, vote)
-                        |> Map.ofSeq
-                    | _ -> Map.empty
-
-                Some(branchName, prId, title, isDraft, reviewerVotes)
+                Some(branchName, prId, title, isDraft)
             with ex ->
                 Log.log "PR" $"Failed to parse PR entry: {ex.Message}"
                 None)
@@ -120,19 +109,40 @@ let private parsePrList (json: string) =
         Log.log "PR" $"Failed to parse PR list JSON: {ex.Message}"
         []
 
-let private countUnresolvedThreads (json: string) =
+let private parseThreadCounts (json: string) =
     try
         let doc = JsonDocument.Parse(json)
 
-        doc.RootElement.EnumerateArray()
-        |> Seq.filter (fun thread ->
-            match thread.TryGetProperty("status") with
-            | true, status -> status.GetString() = "active"
-            | _ -> false)
-        |> Seq.length
+        let threads =
+            doc.RootElement.GetProperty("value").EnumerateArray()
+            |> Seq.filter (fun thread ->
+                let isDeleted =
+                    match thread.TryGetProperty("isDeleted") with
+                    | true, v -> v.GetBoolean()
+                    | _ -> false
+
+                let hasStatus =
+                    match thread.TryGetProperty("status") with
+                    | true, _ -> true
+                    | _ -> false
+
+                not isDeleted && hasStatus)
+            |> Seq.toList
+
+        let unresolved =
+            threads
+            |> List.filter (fun thread ->
+                match thread.GetProperty("status").GetString() with
+                | "active"
+                | "pending" -> true
+                | _ -> false)
+            |> List.length
+
+        { Unresolved = unresolved
+          Total = threads.Length }
     with ex ->
         Log.log "PR" $"Failed to parse thread list JSON: {ex.Message}"
-        0
+        { Unresolved = 0; Total = 0 }
 
 let private parseBuildStatus (json: string) =
     try
@@ -164,10 +174,14 @@ let private parseBuildStatus (json: string) =
 let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
     async {
         let args =
-            $"repos pr thread list --id {prId} --org https://dev.azure.com/{remote.Org} -o json"
+            $"devops invoke --area git --resource pullRequestThreads --route-parameters project={remote.Project} repositoryId={remote.Repo} pullRequestId={prId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
 
         let! output = runProcess "az" args
-        return output |> Option.map countUnresolvedThreads |> Option.defaultValue 0
+
+        return
+            output
+            |> Option.map parseThreadCounts
+            |> Option.defaultValue { Unresolved = 0; Total = 0 }
     }
 
 let private fetchBuildStatus (remote: AzDoRemote) (branchName: string) =
@@ -193,9 +207,9 @@ let fetchPrStatuses (remote: AzDoRemote) =
 
             let! entries =
                 prs
-                |> List.map (fun (branchName, prId, title, isDraft, reviewerVotes) ->
+                |> List.map (fun (branchName, prId, title, isDraft) ->
                     async {
-                        let! threadCount = fetchPrThreadCount remote prId
+                        let! threadCounts = fetchPrThreadCount remote prId
                         let! buildStatus = fetchBuildStatus remote branchName
 
                         let url =
@@ -208,9 +222,10 @@ let fetchPrStatuses (remote: AzDoRemote) =
                                   Title = title
                                   Url = url
                                   IsDraft = isDraft
-                                  ReviewerVotes = reviewerVotes
-                                  UnresolvedThreadCount = threadCount
-                                  BuildStatus = buildStatus }
+                                  ThreadCounts = threadCounts
+                                  BuildStatus = buildStatus
+                                  BuildUrl = None
+                                  IsMerged = false }
                     })
                 |> Async.Parallel
 
