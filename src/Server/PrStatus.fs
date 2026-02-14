@@ -33,17 +33,26 @@ let parseAzureDevOpsUrl (url: string) =
             let project = parts.[gitIdx - 1]
             Some { Org = org; Project = project; Repo = repo }
         else
+            Log.log "PR" $"URL not recognized as Azure DevOps: {url}"
             None
-    with _ ->
+    with ex ->
+        Log.log "PR" $"Failed to parse Azure DevOps URL '{url}': {ex.Message}"
         None
 
 let private runProcess (fileName: string) (arguments: string) =
     async {
         try
+            let file, args =
+                match Runtime.InteropServices.RuntimeInformation.IsOSPlatform(Runtime.InteropServices.OSPlatform.Windows) with
+                | true -> "cmd", $"/c {fileName} {arguments}"
+                | false -> fileName, arguments
+
+            Log.log "PR" $"Running: {fileName} {arguments}"
+
             let psi =
                 ProcessStartInfo(
-                    fileName,
-                    arguments,
+                    file,
+                    args,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -52,10 +61,21 @@ let private runProcess (fileName: string) (arguments: string) =
 
             use proc = Process.Start(psi)
             let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            let! stderr = proc.StandardError.ReadToEndAsync() |> Async.AwaitTask
             do! proc.WaitForExitAsync() |> Async.AwaitTask
-            return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+
+            match proc.ExitCode with
+            | 0 ->
+                let truncated = if output.Length > 200 then output.Substring(0, 200) + "..." else output.TrimEnd()
+                Log.log "PR" $"Exit 0: {truncated}"
+                return Some(output.TrimEnd())
+            | code ->
+                Log.log "PR" $"Exit {code}: {stderr.TrimEnd()}"
+                return None
         with
-        | :? System.ComponentModel.Win32Exception -> return None
+        | :? System.ComponentModel.Win32Exception as ex ->
+            Log.log "PR" $"Process failed: {ex.Message}"
+            return None
     }
 
 let getRemoteUrl (repoRoot: string) =
@@ -92,10 +112,12 @@ let private parsePrList (json: string) =
                     | _ -> Map.empty
 
                 Some(branchName, prId, title, isDraft, reviewerVotes)
-            with _ ->
+            with ex ->
+                Log.log "PR" $"Failed to parse PR entry: {ex.Message}"
                 None)
         |> Seq.toList
-    with _ ->
+    with ex ->
+        Log.log "PR" $"Failed to parse PR list JSON: {ex.Message}"
         []
 
 let private countUnresolvedThreads (json: string) =
@@ -108,7 +130,8 @@ let private countUnresolvedThreads (json: string) =
             | true, status -> status.GetString() = "active"
             | _ -> false)
         |> Seq.length
-    with _ ->
+    with ex ->
+        Log.log "PR" $"Failed to parse thread list JSON: {ex.Message}"
         0
 
 let private parseBuildStatus (json: string) =
@@ -134,7 +157,8 @@ let private parseBuildStatus (json: string) =
                 | _ -> BuildStatus.NoBuild
             | _ -> BuildStatus.NoBuild
         | None -> BuildStatus.NoBuild
-    with _ ->
+    with ex ->
+        Log.log "PR" $"Failed to parse build status JSON: {ex.Message}"
         BuildStatus.NoBuild
 
 let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
@@ -174,11 +198,15 @@ let fetchPrStatuses (remote: AzDoRemote) =
                         let! threadCount = fetchPrThreadCount remote prId
                         let! buildStatus = fetchBuildStatus remote branchName
 
+                        let url =
+                            sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo prId
+
                         return
                             branchName,
                             HasPr
                                 { Id = prId
                                   Title = title
+                                  Url = url
                                   IsDraft = isDraft
                                   ReviewerVotes = reviewerVotes
                                   UnresolvedThreadCount = threadCount

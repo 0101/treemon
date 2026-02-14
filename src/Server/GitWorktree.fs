@@ -30,11 +30,24 @@ let private runGit (workingDir: string) (arguments: string) =
                 )
 
             use proc = Process.Start(psi)
-            let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            let! stdout = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            let! stderr = proc.StandardError.ReadToEndAsync() |> Async.AwaitTask
             do! proc.WaitForExitAsync() |> Async.AwaitTask
-            return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+            let exitCode = proc.ExitCode
+
+            match exitCode with
+            | 0 ->
+                let trimmed = stdout.TrimEnd()
+                let preview = if trimmed.Length > 200 then trimmed.Substring(0, 200) + "..." else trimmed
+                Log.log "Git" (sprintf "git %s (in %s) -> exit 0, stdout: %s" arguments workingDir preview)
+                return Some trimmed
+            | _ ->
+                Log.log "Git" (sprintf "git %s (in %s) -> exit %d, stderr: %s" arguments workingDir exitCode (stderr.TrimEnd()))
+                return None
         with
-        | :? System.ComponentModel.Win32Exception -> return None
+        | :? System.ComponentModel.Win32Exception as ex ->
+            Log.log "Git" (sprintf "git %s (in %s) -> failed to start: %s" arguments workingDir ex.Message)
+            return None
     }
 
 let private parseWorktreeList (porcelainOutput: string) =
@@ -91,8 +104,12 @@ let getLastCommit (worktreePath: string) =
                             { Hash = hash
                               Message = message
                               Time = time }
-                    | _ -> None
-                | _ -> None)
+                    | _ ->
+                        Log.log "Git" (sprintf "getLastCommit(%s): failed to parse time '%s'" worktreePath timeStr)
+                        None
+                | _ ->
+                    Log.log "Git" (sprintf "getLastCommit(%s): expected 3 lines (hash/message/time), got %d" worktreePath lines.Length)
+                    None)
     }
 
 let getUpstreamBranch (worktreePath: string) =
