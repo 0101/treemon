@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Log.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeStatus.fs" />
