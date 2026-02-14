@@ -50,5 +50,9 @@ type WorktreeStatus =
       Pr: PrStatus
       IsStale: bool }
 
+type WorktreeResponse =
+    { RootFolderName: string
+      Worktrees: WorktreeStatus list }
+
 type IWorktreeApi =
-    { getWorktrees: unit -> Async<WorktreeStatus list> }
+    { getWorktrees: unit -> Async<WorktreeResponse> }

@@ -27,7 +27,8 @@ type DashboardTests() =
     member this.``Dashboard loads with title``() =
         task {
             let! heading = this.Page.Locator("h1").TextContentAsync()
-            Assert.That(heading, Is.EqualTo("Worktree Monitor"))
+            Assert.That(heading, Does.StartWith("Worktree Monitor"))
+            Assert.That(heading, Does.Contain(":"))
         }
 
     [<Test>]
@@ -339,4 +340,57 @@ type DashboardTests() =
                         .Or.Contain("partial")
                         .Or.Contain("canceled")
                 )
+        }
+
+    [<Test>]
+    member this.``Thread badge text matches N/M threads pattern``() =
+        task {
+            let threadBadges = this.Page.Locator(".wt-card .thread-badge")
+            let! count = threadBadges.CountAsync()
+
+            if count > 0 then
+                let! text = threadBadges.First.TextContentAsync()
+                Assert.That(text, Does.Match(@"\d+/\d+"))
+        }
+
+    [<Test>]
+    member this.``Build badge is a clickable link to Azure DevOps``() =
+        task {
+            let buildLinks = this.Page.Locator(".wt-card a.build-badge")
+            let! count = buildLinks.CountAsync()
+
+            if count > 0 then
+                let! href = buildLinks.First.GetAttributeAsync("href")
+                Assert.That(href, Is.Not.Null.And.Not.Empty)
+                Assert.That(href, Does.Contain("dev.azure.com"))
+                Assert.That(href, Does.Contain("_build/results"))
+
+                let! target = buildLinks.First.GetAttributeAsync("target")
+                Assert.That(target, Is.EqualTo("_blank"))
+        }
+
+    [<Test>]
+    member this.``No vote summary elements exist on cards``() =
+        task {
+            let voteSummaries = this.Page.Locator(".wt-card .vote-summary")
+            let! count = voteSummaries.CountAsync()
+            Assert.That(count, Is.EqualTo(0))
+        }
+
+    [<Test>]
+    member this.``Merged PR badge has correct class when present``() =
+        task {
+            let mergedBadges = this.Page.Locator(".wt-card .pr-badge.merged")
+            let! count = mergedBadges.CountAsync()
+
+            if count > 0 then
+                let! text = mergedBadges.First.TextContentAsync()
+                Assert.That(text, Is.EqualTo("Merged"))
+
+                let! tagName = mergedBadges.First.EvaluateAsync<string>("el => el.tagName.toLowerCase()")
+                Assert.That(tagName, Is.EqualTo("a"))
+
+                let! href = mergedBadges.First.GetAttributeAsync("href")
+                Assert.That(href, Is.Not.Null.And.Not.Empty)
+                Assert.That(href, Does.Contain("pullrequest"))
         }

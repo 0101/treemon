@@ -11,13 +11,14 @@ type SortMode =
 
 type Model =
     { Worktrees: WorktreeStatus list
+      RootFolderName: string
       IsLoading: bool
       HasError: bool
       SortMode: SortMode
       IsCompact: bool }
 
 type Msg =
-    | DataLoaded of WorktreeStatus list
+    | DataLoaded of WorktreeResponse
     | DataFailed of exn
     | ToggleSort
     | ToggleCompact
@@ -32,6 +33,7 @@ let fetchWorktrees () =
 
 let init () =
     { Worktrees = []
+      RootFolderName = ""
       IsLoading = true
       HasError = false
       SortMode = ByName
@@ -47,9 +49,10 @@ let sortWorktrees sortMode worktrees =
 
 let update msg model =
     match msg with
-    | DataLoaded worktrees ->
+    | DataLoaded response ->
         { model with
-            Worktrees = sortWorktrees model.SortMode worktrees
+            Worktrees = sortWorktrees model.SortMode response.Worktrees
+            RootFolderName = response.RootFolderName
             IsLoading = false
             HasError = false },
         Cmd.none
@@ -285,7 +288,18 @@ let view model dispatch =
                     Html.div [
                         prop.className "header-top"
                         prop.children [
-                            Html.h1 "Worktree Monitor"
+                            Html.h1 [
+                                prop.children [
+                                    Html.text "Worktree Monitor"
+                                    match model.RootFolderName with
+                                    | "" -> Html.none
+                                    | name ->
+                                        Html.span [
+                                            prop.className "folder-accent"
+                                            prop.text (sprintf ": %s" name)
+                                        ]
+                                ]
+                            ]
                             Html.div [
                                 prop.className "header-controls"
                                 prop.children [

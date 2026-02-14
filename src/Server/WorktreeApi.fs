@@ -54,7 +54,7 @@ let private assembleWorktreeStatus
             return degraded
     }
 
-let getWorktrees (worktreeRoot: string) : Async<WorktreeStatus list> =
+let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =
     async {
         let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
         let! prMap = PrStatus.Cache.getCachedPrStatuses worktreeRoot
@@ -64,7 +64,11 @@ let getWorktrees (worktreeRoot: string) : Async<WorktreeStatus list> =
             |> List.map (assembleWorktreeStatus worktreeRoot prMap)
             |> Async.Parallel
 
-        return statuses |> Array.toList
+        let folderName = System.IO.Path.GetFileName worktreeRoot
+
+        return
+            { RootFolderName = folderName
+              Worktrees = statuses |> Array.toList }
     }
 
 let worktreeApi (worktreeRoot: string) : IWorktreeApi =
