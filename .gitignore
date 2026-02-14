@@ -1,5 +1,6 @@
 .agents/
 .claude/
+logs/
 
 # .NET
 bin/

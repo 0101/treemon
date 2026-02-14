@@ -4,7 +4,7 @@ open System
 open System.IO
 
 let private logPath =
-    Path.Combine(Directory.GetCurrentDirectory(), ".agents", "server.log")
+    Path.Combine(Directory.GetCurrentDirectory(), "logs", "server.log")
 
 let init () =
     logPath |> Path.GetDirectoryName |> Directory.CreateDirectory |> ignore
