@@ -43,7 +43,7 @@ try {
     $serverJob = Start-Job -ScriptBlock {
         param($root, $projectPath)
         Set-Location $projectPath
-        dotnet run --project src/Server -- $root
+        dotnet watch run --project src/Server -- $root
     } -ArgumentList $WorktreeRoot, $PSScriptRoot
 
     Write-Host "Starting Vite dev server..." -ForegroundColor Gray

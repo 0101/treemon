@@ -28,6 +28,7 @@ type PrStatus =
 and PrInfo =
     { Id: int
       Title: string
+      Url: string
       IsDraft: bool
       ReviewerVotes: Map<string, int>
       UnresolvedThreadCount: int
