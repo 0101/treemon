@@ -121,6 +121,19 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
+let getMainBehindCount (worktreePath: string) =
+    async {
+        let! output = runGit worktreePath "rev-list --count HEAD..origin/main"
+
+        return
+            output
+            |> Option.bind (fun s ->
+                match Int32.TryParse(s.Trim()) with
+                | true, count -> Some count
+                | _ -> None)
+            |> Option.defaultValue 0
+    }
+
 let getUpstreamBranch (worktreePath: string) =
     async {
         let! output = runGit worktreePath "rev-parse --abbrev-ref @{u}"
@@ -166,6 +179,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
     async {
         let! commit = getLastCommit worktreePath
         let! upstream = getUpstreamBranch worktreePath
+        let! mainBehind = getMainBehindCount worktreePath
 
         let commitHash = commit |> Option.map (fun c -> c.Hash) |> Option.defaultValue ""
         let commitMessage = commit |> Option.map (fun c -> c.Message) |> Option.defaultValue ""
@@ -192,5 +206,6 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
               Beads = { Open = 0; InProgress = 0; Closed = 0 }
               Claude = ClaudeCodeStatus.Unknown
               Pr = NoPr
-              IsStale = false }
+              IsStale = false
+              MainBehindCount = mainBehind }
     }

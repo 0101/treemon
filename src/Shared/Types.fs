@@ -48,7 +48,8 @@ type WorktreeStatus =
       Beads: BeadsSummary
       Claude: ClaudeCodeStatus
       Pr: PrStatus
-      IsStale: bool }
+      IsStale: bool
+      MainBehindCount: int }
 
 type WorktreeResponse =
     { RootFolderName: string

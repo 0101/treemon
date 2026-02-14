@@ -49,7 +49,8 @@ let private assembleWorktreeStatus
                   Beads = { Open = 0; InProgress = 0; Closed = 0 }
                   Claude = Unknown
                   Pr = NoPr
-                  IsStale = true }
+                  IsStale = true
+                  MainBehindCount = 0 }
 
             return degraded
     }

@@ -148,6 +148,19 @@ let beadsProgressBar (b: BeadsSummary) =
         ]
     ]
 
+let mainBehindIndicator (count: int) =
+    match count with
+    | 0 ->
+        Html.span [
+            prop.className "main-behind up-to-date"
+            prop.text "up to date"
+        ]
+    | n ->
+        Html.span [
+            prop.className (match n > 20 with true -> "main-behind behind-warning" | false -> "main-behind")
+            prop.text (sprintf "%d behind main" n)
+        ]
+
 let buildBadge (bs: BuildStatus) (buildUrl: string option) =
     let badgeProps className (text: string) =
         match buildUrl with
@@ -193,6 +206,7 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                             Html.span [ prop.className "beads-closed"; prop.text (string wt.Beads.Closed) ]
                         ]
                     ]
+                    mainBehindIndicator wt.MainBehindCount
                     match wt.Pr with
                     | NoPr -> Html.none
                     | HasPr pr ->
@@ -253,6 +267,8 @@ let worktreeCard (wt: WorktreeStatus) =
                     beadsProgressBar wt.Beads
                 ]
             ]
+
+            mainBehindIndicator wt.MainBehindCount
 
             match wt.Pr with
             | NoPr -> Html.none
