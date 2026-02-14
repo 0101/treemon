@@ -87,29 +87,38 @@ let listWorktrees (repoRoot: string) =
             |> List.filter (fun wt -> Directory.Exists(wt.Path))
     }
 
+let private parseCommitOutput (worktreePath: string) (output: string option) =
+    output
+    |> Option.bind (fun raw ->
+        match raw with
+        | "" -> None
+        | _ ->
+            let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
+
+            match lines with
+            | [| hash; message; timeStr |] ->
+                match DateTimeOffset.TryParse(timeStr) with
+                | true, time ->
+                    Some
+                        { Hash = hash
+                          Message = message
+                          Time = time }
+                | _ ->
+                    Log.log "Git" (sprintf "getLastCommit(%s): failed to parse time '%s'" worktreePath timeStr)
+                    None
+            | _ ->
+                Log.log "Git" (sprintf "getLastCommit(%s): expected 3 lines (hash/message/time), got %d" worktreePath lines.Length)
+                None)
+
 let getLastCommit (worktreePath: string) =
     async {
-        let! output = runGit worktreePath "log -1 --format=%H%n%s%n%aI"
+        let! branchLocal = runGit worktreePath "log --first-parent --no-merges -1 --format=%H%n%s%n%aI"
 
-        return
-            output
-            |> Option.bind (fun raw ->
-                let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
-
-                match lines with
-                | [| hash; message; timeStr |] ->
-                    match DateTimeOffset.TryParse(timeStr) with
-                    | true, time ->
-                        Some
-                            { Hash = hash
-                              Message = message
-                              Time = time }
-                    | _ ->
-                        Log.log "Git" (sprintf "getLastCommit(%s): failed to parse time '%s'" worktreePath timeStr)
-                        None
-                | _ ->
-                    Log.log "Git" (sprintf "getLastCommit(%s): expected 3 lines (hash/message/time), got %d" worktreePath lines.Length)
-                    None)
+        match parseCommitOutput worktreePath branchLocal with
+        | Some commit -> return Some commit
+        | None ->
+            let! fallback = runGit worktreePath "log -1 --format=%H%n%s%n%aI"
+            return parseCommitOutput worktreePath fallback
     }
 
 let getUpstreamBranch (worktreePath: string) =
