@@ -161,30 +161,55 @@ let mainBehindIndicator (count: int) =
             prop.text (sprintf "%d behind main" n)
         ]
 
-let buildBadge (build: BuildInfo) =
-    let badgeProps className (text: string) =
+let abbreviatePipelineName (repoName: string) (name: string) =
+    let stripped =
+        match repoName.Length > 0 && name.Length >= repoName.Length && name.[..repoName.Length-1].ToLowerInvariant() = repoName.ToLowerInvariant() with
+        | true -> name.[repoName.Length..].TrimStart()
+        | false -> name
+    match stripped.Length >= 5 && stripped.[stripped.Length-5..].ToLowerInvariant() = " - pr" with
+    | true -> stripped.[..stripped.Length-6].TrimEnd()
+    | false -> stripped
+
+let buildBadge (repoName: string) (build: BuildInfo) =
+    let statusText =
+        match build.Status with
+        | NoBuild -> None
+        | Building -> Some "Building"
+        | Succeeded -> Some "Passed"
+        | Failed -> Some "Failed"
+        | PartiallySucceeded -> Some "Partial"
+        | Canceled -> Some "Canceled"
+    match statusText with
+    | None -> Html.none
+    | Some status ->
+        let abbreviated = abbreviatePipelineName repoName build.Name
+        let text =
+            match abbreviated with
+            | "" -> status
+            | name -> sprintf "%s: %s" name status
+        let className =
+            match build.Status with
+            | Building -> "build-badge building"
+            | Succeeded -> "build-badge succeeded"
+            | Failed -> "build-badge failed"
+            | PartiallySucceeded -> "build-badge partial"
+            | Canceled -> "build-badge canceled"
+            | NoBuild -> "build-badge"
         match build.Url with
         | Some url ->
             Interop.createElement "a" [
-                prop.className (sprintf "build-badge %s" className)
+                prop.className className
                 prop.text text
                 prop.href url
                 prop.target "_blank"
             ]
         | None ->
-            Html.span [ prop.className (sprintf "build-badge %s" className); prop.text text ]
-    match build.Status with
-    | NoBuild -> Html.none
-    | Building -> badgeProps "building" "Building"
-    | Succeeded -> badgeProps "succeeded" "Passed"
-    | Failed -> badgeProps "failed" "Failed"
-    | PartiallySucceeded -> badgeProps "partial" "Partial"
-    | Canceled -> badgeProps "canceled" "Canceled"
+            Html.span [ prop.className className; prop.text text ]
 
-let buildBadges (builds: BuildInfo list) =
-    React.fragment (builds |> List.map buildBadge)
+let buildBadges (repoName: string) (builds: BuildInfo list) =
+    React.fragment (builds |> List.map (buildBadge repoName))
 
-let compactWorktreeCard (wt: WorktreeStatus) =
+let compactWorktreeCard (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt + " compact")
         prop.children [
@@ -237,13 +262,13 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                                     prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
                                     prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
                                 ]
-                            buildBadges pr.Builds
+                            buildBadges repoName pr.Builds
                 ]
             ]
         ]
     ]
 
-let worktreeCard (wt: WorktreeStatus) =
+let worktreeCard (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt)
         prop.children [
@@ -303,16 +328,16 @@ let worktreeCard (wt: WorktreeStatus) =
                                     prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
                                     prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
                                 ]
-                            buildBadges pr.Builds
+                            buildBadges repoName pr.Builds
                     ]
                 ]
         ]
     ]
 
-let renderCard isCompact =
+let renderCard isCompact repoName =
     match isCompact with
-    | true -> compactWorktreeCard
-    | false -> worktreeCard
+    | true -> compactWorktreeCard repoName
+    | false -> worktreeCard repoName
 
 let sortLabel =
     function
@@ -377,7 +402,7 @@ let view model dispatch =
 
             Html.div [
                 prop.className "card-grid"
-                prop.children (model.Worktrees |> List.map (renderCard model.IsCompact))
+                prop.children (model.Worktrees |> List.map (renderCard model.IsCompact model.RootFolderName))
             ]
         ]
     ]
