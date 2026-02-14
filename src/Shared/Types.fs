@@ -21,6 +21,10 @@ type BuildStatus =
     | PartiallySucceeded
     | Canceled
 
+type ThreadCounts =
+    { Unresolved: int
+      Total: int }
+
 type PrStatus =
     | NoPr
     | HasPr of PrInfo
@@ -30,9 +34,10 @@ and PrInfo =
       Title: string
       Url: string
       IsDraft: bool
-      ReviewerVotes: Map<string, int>
-      UnresolvedThreadCount: int
-      BuildStatus: BuildStatus }
+      ThreadCounts: ThreadCounts
+      BuildStatus: BuildStatus
+      BuildUrl: string option
+      IsMerged: bool }
 
 type WorktreeStatus =
     { Branch: string

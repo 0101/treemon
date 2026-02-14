@@ -84,10 +84,24 @@ Key DUs: `ClaudeCodeStatus` (Active|Recent|Idle|Unknown), `PrStatus` (NoPr|HasPr
 
 - **git** — worktree enumeration and commit data
 - **bd** (beads CLI) — `bd count --by-status --json --db <path>/.beads/beads.db`
-- **az** (Azure CLI) — `az repos pr list`, `az repos pr thread list`, `az pipelines runs list`
+- **az** (Azure CLI) — `az repos pr list`, `az devops invoke` (PR threads), `az pipelines runs list`
 - **Claude session files** — reads `~/.claude/projects/<encoded-path>/*.jsonl` mtimes
 - **.NET SDK 9.0.205** — pinned in global.json (Fable 4.28.0 has issues with .NET 10)
 - **Node.js** — for Vite and npm
+
+## E2E Verification
+
+All features should include Playwright E2E verification tasks. The dashboard is read-only (polls git, az CLI, file mtimes) so tests run safely against live data.
+
+**How to run:**
+```
+dotnet test src/Tests/Tests.fsproj    # starts server + Vite automatically via ServerFixture
+```
+
+- `ServerFixture.fs` starts the server against `Q:\code\AITestAgent` (port 5000) and Vite (port 5173)
+- Tests use real AzDo data — PRs, threads, builds are all live
+- Tests should assert on CSS classes and DOM structure, not specific data values (data changes over time)
+- Every feature plan should include a `verify`-labeled beads task with Playwright tests
 
 ## Key Implementation Details
 
