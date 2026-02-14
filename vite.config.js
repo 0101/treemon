@@ -8,7 +8,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://localhost:5000",
+      "/IWorktreeApi": "http://localhost:5000",
     },
   },
 });

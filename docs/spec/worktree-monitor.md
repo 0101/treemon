@@ -39,5 +39,6 @@
 - `bd` CLI for beads counts: `bd count --by-status --json --db <path>` avoids custom JSONL parsing, works remotely via `--db` flag
 - Polling over WebSocket: simpler, sufficient for 15s refresh, no connection management
 - Target net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK; global.json pins to 9.0.x
-- Fable.Remoting for client-server communication: type-safe RPC, automatic serialization of shared F# types, no manual JSON encoding/decoding. Shared API contract as `type IWorktreeApi = { getWorktrees : unit -> Async<WorktreeStatus list> }`. Server implements it via `Fable.Remoting.Giraffe`, client calls it via `Fable.Remoting.Client` proxy.
+- Fable.Remoting for client-server communication: type-safe RPC, automatic serialization of shared F# types, no manual JSON encoding/decoding. Shared API contract as `type IWorktreeApi = { getWorktrees : unit -> Async<WorktreeStatus list> }`. Server implements it via `Fable.Remoting.Giraffe`, client calls it via `Fable.Remoting.Client` proxy. Default route format: `/{TypeName}/{MethodName}` (e.g. `/IWorktreeApi/getWorktrees`). Vite proxy must match this prefix, not `/api`.
 - Solution uses .slnx format (new in .NET 9 SDK)
+- E2E tests use Microsoft.Playwright.NUnit. Test fixture starts F# server + Vite dev server as processes, waits for both to be ready, runs headless Chromium against Vite URL. Tests verify: dashboard loads, cards render with branch/commit/CC/beads data, responsive breakpoints, compact mode toggle, sort toggle.

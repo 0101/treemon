@@ -3,5 +3,6 @@
     <Project Path="src/Client/Client.fsproj" />
     <Project Path="src/Server/Server.fsproj" />
     <Project Path="src/Shared/Shared.fsproj" />
+    <Project Path="src/Tests/Tests.fsproj" />
   </Folder>
 </Solution>
