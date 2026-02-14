@@ -22,20 +22,36 @@ let private assembleWorktreeStatus
     (wt: GitWorktree.WorktreeInfo)
     =
     async {
-        let! gitData = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
-        let! beads = BeadsStatus.Cache.getCachedBeadsSummary wt.Path
-        let claude = ClaudeStatus.Cache.getCachedClaudeStatus wt.Path
+        try
+            let! gitData = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
+            let! beads = BeadsStatus.Cache.getCachedBeadsSummary wt.Path
+            let claude = ClaudeStatus.Cache.getCachedClaudeStatus wt.Path
 
-        let upstreamBranch = gitData.UpstreamBranch
-        let pr = PrStatus.Cache.lookupPrStatus prMap upstreamBranch
+            let upstreamBranch = gitData.UpstreamBranch
+            let pr = PrStatus.Cache.lookupPrStatus prMap upstreamBranch
 
-        let status =
-            { gitData with
-                Beads = beads
-                Claude = claude
-                Pr = pr }
+            let status =
+                { gitData with
+                    Beads = beads
+                    Claude = claude
+                    Pr = pr }
 
-        return { status with IsStale = isStale status }
+            return { status with IsStale = isStale status }
+        with ex ->
+            Log.log "API" (sprintf "Failed to assemble status for worktree %s (%s): %s" wt.Path (wt.Branch |> Option.defaultValue "(detached)") ex.Message)
+
+            let degraded =
+                { Branch = wt.Branch |> Option.defaultValue "(detached)"
+                  Head = ""
+                  LastCommitMessage = ""
+                  LastCommitTime = DateTimeOffset.MinValue
+                  UpstreamBranch = None
+                  Beads = { Open = 0; InProgress = 0; Closed = 0 }
+                  Claude = Unknown
+                  Pr = NoPr
+                  IsStale = true }
+
+            return degraded
     }
 
 let getWorktrees (worktreeRoot: string) : Async<WorktreeStatus list> =

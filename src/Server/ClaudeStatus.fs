@@ -16,12 +16,16 @@ let encodeWorktreePath (worktreePath: string) =
     worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
 
 let private findLatestJsonl (projectDir: string) =
-    if Directory.Exists(projectDir) then
-        Directory.GetFiles(projectDir, "*.jsonl")
-        |> Array.map (fun f -> FileInfo(f))
-        |> Array.sortByDescending (fun fi -> fi.LastWriteTimeUtc)
-        |> Array.tryHead
-    else
+    try
+        if Directory.Exists(projectDir) then
+            Directory.GetFiles(projectDir, "*.jsonl")
+            |> Array.map (fun f -> FileInfo(f))
+            |> Array.sortByDescending (fun fi -> fi.LastWriteTimeUtc)
+            |> Array.tryHead
+        else
+            None
+    with ex ->
+        Log.log "Claude" (sprintf "Failed to list directory %s: %s" projectDir ex.Message)
         None
 
 let private statusFromAge (age: TimeSpan) =
@@ -36,8 +40,12 @@ let getClaudeStatus (worktreePath: string) =
 
     match findLatestJsonl projectDir with
     | Some fi ->
-        let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-        statusFromAge age
+        try
+            let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+            statusFromAge age
+        with ex ->
+            Log.log "Claude" (sprintf "Failed to read mtime for %s: %s" fi.FullName ex.Message)
+            Unknown
     | None -> Unknown
 
 module Cache =
