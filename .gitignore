@@ -16,3 +16,6 @@ src/Client/output/
 .vs/
 .idea/
 *.swp
+
+# bv (beads viewer) local config and caches
+.bv/

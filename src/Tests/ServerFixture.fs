@@ -13,7 +13,7 @@ let private repoRoot =
 let private serverProjectPath =
     Path.Combine(repoRoot, "src", "Server")
 
-let private worktreeRoot = repoRoot
+let private worktreeRoot = @"Q:\code\AITestAgent"
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None

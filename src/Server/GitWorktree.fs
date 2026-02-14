@@ -2,6 +2,7 @@ module Server.GitWorktree
 
 open System
 open System.Diagnostics
+open System.IO
 open Shared
 
 type WorktreeInfo =
@@ -16,21 +17,24 @@ type CommitInfo =
 
 let private runGit (workingDir: string) (arguments: string) =
     async {
-        let psi =
-            ProcessStartInfo(
-                "git",
-                arguments,
-                WorkingDirectory = workingDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            )
+        try
+            let psi =
+                ProcessStartInfo(
+                    "git",
+                    arguments,
+                    WorkingDirectory = workingDir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                )
 
-        use proc = Process.Start(psi)
-        let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
-        do! proc.WaitForExitAsync() |> Async.AwaitTask
-        return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+            use proc = Process.Start(psi)
+            let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            do! proc.WaitForExitAsync() |> Async.AwaitTask
+            return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+        with
+        | :? System.ComponentModel.Win32Exception -> return None
     }
 
 let private parseWorktreeList (porcelainOutput: string) =
@@ -67,6 +71,7 @@ let listWorktrees (repoRoot: string) =
             output
             |> Option.map parseWorktreeList
             |> Option.defaultValue []
+            |> List.filter (fun wt -> Directory.Exists(wt.Path))
     }
 
 let getLastCommit (worktreePath: string) =

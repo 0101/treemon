@@ -9,20 +9,23 @@ open Shared
 
 let private runBd (dbPath: string) =
     async {
-        let psi =
-            ProcessStartInfo(
-                "bd",
-                $"count --by-status --json --db \"{dbPath}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            )
+        try
+            let psi =
+                ProcessStartInfo(
+                    "bd",
+                    $"count --by-status --json --db \"{dbPath}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                )
 
-        use proc = Process.Start(psi)
-        let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
-        do! proc.WaitForExitAsync() |> Async.AwaitTask
-        return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+            use proc = Process.Start(psi)
+            let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            do! proc.WaitForExitAsync() |> Async.AwaitTask
+            return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+        with
+        | :? System.ComponentModel.Win32Exception -> return None
     }
 
 let private parseCountResponse (json: string) =

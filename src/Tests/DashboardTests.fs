@@ -19,7 +19,7 @@ type DashboardTests() =
     member this.NavigateToDashboard() =
         task {
             let! _ = this.Page.GotoAsync(baseUrl)
-            let! _ = this.Page.WaitForSelectorAsync(".wt-card", PageWaitForSelectorOptions(Timeout = 45000.0f))
+            do! this.Page.Locator(".wt-card").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
             return ()
         }
 

@@ -18,6 +18,9 @@ let main args =
     let remotingApi =
         Remoting.createApi ()
         |> Remoting.fromValue (WorktreeApi.worktreeApi worktreeRoot)
+        |> Remoting.withErrorHandler (fun ex routeInfo ->
+            eprintfn "API error in %s: %s" routeInfo.methodName (ex.ToString())
+            Propagate ex.Message)
         |> Remoting.buildHttpHandler
 
     let app =
