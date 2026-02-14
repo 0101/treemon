@@ -9,11 +9,13 @@ open Shared
 
 let private runBd (dbPath: string) =
     async {
+        let args = $"count --by-status --json --db \"{dbPath}\""
+
         try
             let psi =
                 ProcessStartInfo(
                     "bd",
-                    $"count --by-status --json --db \"{dbPath}\"",
+                    args,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -22,10 +24,21 @@ let private runBd (dbPath: string) =
 
             use proc = Process.Start(psi)
             let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            let! stderr = proc.StandardError.ReadToEndAsync() |> Async.AwaitTask
             do! proc.WaitForExitAsync() |> Async.AwaitTask
-            return if proc.ExitCode = 0 then Some(output.TrimEnd()) else None
+
+            match proc.ExitCode with
+            | 0 ->
+                let trimmed = output.TrimEnd()
+                Log.log "Beads" $"bd {args} -> exit 0, stdout: {trimmed}"
+                return Some trimmed
+            | code ->
+                Log.log "Beads" $"bd {args} -> exit {code}, stderr: {stderr.TrimEnd()}"
+                return None
         with
-        | :? System.ComponentModel.Win32Exception -> return None
+        | :? System.ComponentModel.Win32Exception as ex ->
+            Log.log "Beads" $"bd {args} -> failed to start: {ex.Message}"
+            return None
     }
 
 let private parseCountResponse (json: string) =
@@ -53,7 +66,8 @@ let private parseCountResponse (json: string) =
         { Open = findCount "open"
           InProgress = findCount "in_progress"
           Closed = findCount "closed" }
-    with _ ->
+    with ex ->
+        Log.log "Beads" $"Failed to parse bd JSON: {ex.Message}, raw input: {json}"
         { Open = 0; InProgress = 0; Closed = 0 }
 
 let private zeroCounts =
