@@ -10,6 +10,7 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeStatus.fs" />
     <Compile Include="PrStatus.fs" />
+    <Compile Include="WorktreeApi.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

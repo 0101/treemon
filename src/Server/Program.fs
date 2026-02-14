@@ -1,12 +1,8 @@
 open Saturn
-open Giraffe
+open Fable.Remoting.Server
+open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Builder
-open Microsoft.Extensions.DependencyInjection
-
-let webApp =
-    choose [
-        route "/" >=> text "mait"
-    ]
+open Server
 
 [<EntryPoint>]
 let main args =
@@ -19,9 +15,14 @@ let main args =
 
     printfn "Monitoring worktrees under: %s" worktreeRoot
 
+    let remotingApi =
+        Remoting.createApi ()
+        |> Remoting.fromValue (WorktreeApi.worktreeApi worktreeRoot)
+        |> Remoting.buildHttpHandler
+
     let app =
         application {
-            use_router webApp
+            use_router remotingApi
             url "http://0.0.0.0:5000"
             use_static "wwwroot"
             use_gzip
