@@ -25,6 +25,11 @@ type ThreadCounts =
     { Unresolved: int
       Total: int }
 
+type BuildInfo =
+    { Name: string
+      Status: BuildStatus
+      Url: string option }
+
 type PrStatus =
     | NoPr
     | HasPr of PrInfo
@@ -35,8 +40,7 @@ and PrInfo =
       Url: string
       IsDraft: bool
       ThreadCounts: ThreadCounts
-      BuildStatus: BuildStatus
-      BuildUrl: string option
+      Builds: BuildInfo list
       IsMerged: bool }
 
 type WorktreeStatus =

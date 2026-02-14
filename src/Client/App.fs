@@ -161,9 +161,9 @@ let mainBehindIndicator (count: int) =
             prop.text (sprintf "%d behind main" n)
         ]
 
-let buildBadge (bs: BuildStatus) (buildUrl: string option) =
+let buildBadge (build: BuildInfo) =
     let badgeProps className (text: string) =
-        match buildUrl with
+        match build.Url with
         | Some url ->
             Interop.createElement "a" [
                 prop.className (sprintf "build-badge %s" className)
@@ -173,13 +173,16 @@ let buildBadge (bs: BuildStatus) (buildUrl: string option) =
             ]
         | None ->
             Html.span [ prop.className (sprintf "build-badge %s" className); prop.text text ]
-    match bs with
+    match build.Status with
     | NoBuild -> Html.none
     | Building -> badgeProps "building" "Building"
     | Succeeded -> badgeProps "succeeded" "Passed"
     | Failed -> badgeProps "failed" "Failed"
     | PartiallySucceeded -> badgeProps "partial" "Partial"
     | Canceled -> badgeProps "canceled" "Canceled"
+
+let buildBadges (builds: BuildInfo list) =
+    React.fragment (builds |> List.map buildBadge)
 
 let compactWorktreeCard (wt: WorktreeStatus) =
     Html.div [
@@ -234,7 +237,7 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                                     prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
                                     prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
                                 ]
-                            buildBadge pr.BuildStatus pr.BuildUrl
+                            buildBadges pr.Builds
                 ]
             ]
         ]
@@ -300,7 +303,7 @@ let worktreeCard (wt: WorktreeStatus) =
                                     prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
                                     prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
                                 ]
-                            buildBadge pr.BuildStatus pr.BuildUrl
+                            buildBadges pr.Builds
                     ]
                 ]
         ]
