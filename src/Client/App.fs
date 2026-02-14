@@ -106,20 +106,6 @@ let cardClassName (wt: WorktreeStatus) =
     | true  -> sprintf "wt-card cc-%s stale" cc
     | false -> sprintf "wt-card cc-%s" cc
 
-let voteText (vote: int) =
-    match vote with
-    | 10 -> "Approved"
-    | 5  -> "Approved w/ suggestions"
-    | -5 -> "Waiting"
-    | -10 -> "Rejected"
-    | _ -> "No vote"
-
-let voteSummary (votes: Map<string, int>) =
-    votes
-    |> Map.toList
-    |> List.map (fun (name, v) -> sprintf "%s: %s" name (voteText v))
-    |> String.concat ", "
-
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
 
 let beadsProgressPct (b: BeadsSummary) =
@@ -128,14 +114,25 @@ let beadsProgressPct (b: BeadsSummary) =
     | 0 -> 0
     | _ -> (b.Closed * 100) / total
 
-let buildBadge (bs: BuildStatus) =
+let buildBadge (bs: BuildStatus) (buildUrl: string option) =
+    let badgeProps className (text: string) =
+        match buildUrl with
+        | Some url ->
+            Interop.createElement "a" [
+                prop.className (sprintf "build-badge %s" className)
+                prop.text text
+                prop.href url
+                prop.target "_blank"
+            ]
+        | None ->
+            Html.span [ prop.className (sprintf "build-badge %s" className); prop.text text ]
     match bs with
     | NoBuild -> Html.none
-    | Building -> Html.span [ prop.className "build-badge building"; prop.text "Building" ]
-    | Succeeded -> Html.span [ prop.className "build-badge succeeded"; prop.text "Passed" ]
-    | Failed -> Html.span [ prop.className "build-badge failed"; prop.text "Failed" ]
-    | PartiallySucceeded -> Html.span [ prop.className "build-badge partial"; prop.text "Partial" ]
-    | Canceled -> Html.span [ prop.className "build-badge canceled"; prop.text "Canceled" ]
+    | Building -> badgeProps "building" "Building"
+    | Succeeded -> badgeProps "succeeded" "Passed"
+    | Failed -> badgeProps "failed" "Failed"
+    | PartiallySucceeded -> badgeProps "partial" "Partial"
+    | Canceled -> badgeProps "canceled" "Canceled"
 
 let compactWorktreeCard (wt: WorktreeStatus) =
     Html.div [
@@ -159,21 +156,31 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                     match wt.Pr with
                     | NoPr -> Html.none
                     | HasPr pr ->
-                        Interop.createElement "a" [
-                            prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
-                            prop.title pr.Title
-                            prop.href pr.Url
-                            prop.target "_blank"
-                            prop.text (sprintf "PR #%d" pr.Id)
-                        ]
-                        match pr.ThreadCounts.Unresolved with
-                        | 0 -> Html.none
-                        | n ->
-                            Html.span [
-                                prop.className "thread-badge"
-                                prop.text (sprintf "%d" n)
+                        match pr.IsMerged with
+                        | true ->
+                            Interop.createElement "a" [
+                                prop.className "pr-badge merged"
+                                prop.title pr.Title
+                                prop.href pr.Url
+                                prop.target "_blank"
+                                prop.text "Merged"
                             ]
-                        buildBadge pr.BuildStatus
+                        | false ->
+                            Interop.createElement "a" [
+                                prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
+                                prop.title pr.Title
+                                prop.href pr.Url
+                                prop.target "_blank"
+                                prop.text (sprintf "PR #%d" pr.Id)
+                            ]
+                            match pr.ThreadCounts.Total with
+                            | 0 -> Html.none
+                            | total ->
+                                Html.span [
+                                    prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
+                                    prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
+                                ]
+                            buildBadge pr.BuildStatus pr.BuildUrl
                 ]
             ]
         ]
@@ -228,18 +235,31 @@ let worktreeCard (wt: WorktreeStatus) =
                 Html.div [
                     prop.className "pr-row"
                     prop.children [
-                        Interop.createElement "a" [
-                            prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
-                            prop.title pr.Title
-                            prop.href pr.Url
-                            prop.target "_blank"
-                            prop.text (sprintf "PR #%d" pr.Id)
-                        ]
-                        Html.span [
-                            prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge none" | _ -> "thread-badge")
-                            prop.text (sprintf "%d threads" pr.ThreadCounts.Unresolved)
-                        ]
-                        buildBadge pr.BuildStatus
+                        match pr.IsMerged with
+                        | true ->
+                            Interop.createElement "a" [
+                                prop.className "pr-badge merged"
+                                prop.title pr.Title
+                                prop.href pr.Url
+                                prop.target "_blank"
+                                prop.text "Merged"
+                            ]
+                        | false ->
+                            Interop.createElement "a" [
+                                prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
+                                prop.title pr.Title
+                                prop.href pr.Url
+                                prop.target "_blank"
+                                prop.text (sprintf "PR #%d" pr.Id)
+                            ]
+                            match pr.ThreadCounts.Total with
+                            | 0 -> Html.none
+                            | total ->
+                                Html.span [
+                                    prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
+                                    prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
+                                ]
+                            buildBadge pr.BuildStatus pr.BuildUrl
                     ]
                 ]
         ]
