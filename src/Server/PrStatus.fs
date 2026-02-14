@@ -151,25 +151,33 @@ let private parseBuildStatus (json: string) =
 
         match runs with
         | Some run ->
+            let buildId =
+                match run.TryGetProperty("id") with
+                | true, v -> Some(v.GetInt32())
+                | _ -> None
+
             let status = run.GetProperty("status").GetString()
 
-            match status with
-            | "inProgress" -> BuildStatus.Building
-            | "completed" ->
-                match run.TryGetProperty("result") with
-                | true, result ->
-                    match result.GetString() with
-                    | "succeeded" -> BuildStatus.Succeeded
-                    | "failed" -> BuildStatus.Failed
-                    | "partiallySucceeded" -> BuildStatus.PartiallySucceeded
-                    | "canceled" -> BuildStatus.Canceled
+            let buildStatus =
+                match status with
+                | "inProgress" -> BuildStatus.Building
+                | "completed" ->
+                    match run.TryGetProperty("result") with
+                    | true, result ->
+                        match result.GetString() with
+                        | "succeeded" -> BuildStatus.Succeeded
+                        | "failed" -> BuildStatus.Failed
+                        | "partiallySucceeded" -> BuildStatus.PartiallySucceeded
+                        | "canceled" -> BuildStatus.Canceled
+                        | _ -> BuildStatus.NoBuild
                     | _ -> BuildStatus.NoBuild
                 | _ -> BuildStatus.NoBuild
-            | _ -> BuildStatus.NoBuild
-        | None -> BuildStatus.NoBuild
+
+            buildStatus, buildId
+        | None -> BuildStatus.NoBuild, None
     with ex ->
         Log.log "PR" $"Failed to parse build status JSON: {ex.Message}"
-        BuildStatus.NoBuild
+        BuildStatus.NoBuild, None
 
 let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
     async {
@@ -190,7 +198,18 @@ let private fetchBuildStatus (remote: AzDoRemote) (branchName: string) =
             $"pipelines runs list --branch \"{branchName}\" --reason pullRequest --top 1 --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" -o json"
 
         let! output = runProcess "az" args
-        return output |> Option.map parseBuildStatus |> Option.defaultValue BuildStatus.NoBuild
+
+        let buildStatus, buildId =
+            output
+            |> Option.map parseBuildStatus
+            |> Option.defaultValue (BuildStatus.NoBuild, None)
+
+        let buildUrl =
+            buildId
+            |> Option.map (fun id ->
+                sprintf "https://dev.azure.com/%s/%s/_build/results?buildId=%d" remote.Org remote.Project id)
+
+        return buildStatus, buildUrl
     }
 
 let fetchPrStatuses (remote: AzDoRemote) =
@@ -210,7 +229,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
                 |> List.map (fun (branchName, prId, title, isDraft) ->
                     async {
                         let! threadCounts = fetchPrThreadCount remote prId
-                        let! buildStatus = fetchBuildStatus remote branchName
+                        let! buildStatus, buildUrl = fetchBuildStatus remote branchName
 
                         let url =
                             sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo prId
@@ -224,7 +243,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
                                   IsDraft = isDraft
                                   ThreadCounts = threadCounts
                                   BuildStatus = buildStatus
-                                  BuildUrl = None
+                                  BuildUrl = buildUrl
                                   IsMerged = false }
                     })
                 |> Async.Parallel
