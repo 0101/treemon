@@ -62,11 +62,18 @@
         .commit-time { color: #7f849c; margin-left: 6px; }
 
         .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.82em; }
-        .beads-counts { display: flex; gap: 6px; color: #a6adc8; }
-        .beads-counts span { display: inline-flex; align-items: center; gap: 2px; }
+        .beads-counts { display: flex; gap: 4px; align-items: center; }
+        .beads-open { color: #f9e2af; font-weight: 600; }
+        .beads-inprogress { color: #89b4fa; font-weight: 600; }
+        .beads-closed { color: #a6e3a1; font-weight: 600; }
+        .beads-sep { color: #585b70; }
+        .beads-inline { display: flex; gap: 4px; align-items: center; }
 
-        .progress-bar { flex: 1; height: 6px; background: #313244; border-radius: 3px; overflow: hidden; min-width: 40px; }
-        .progress-fill { height: 100%; background: #a6e3a1; border-radius: 3px; transition: width 0.3s; }
+        .progress-bar { flex: 1; height: 6px; background: #313244; border-radius: 3px; overflow: hidden; min-width: 40px; display: flex; }
+        .progress-segment { height: 100%; transition: width 0.3s; }
+        .progress-segment.seg-open { background: #f9e2af; }
+        .progress-segment.seg-inprogress { background: #89b4fa; }
+        .progress-segment.seg-closed { background: #a6e3a1; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 1px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; text-decoration: none; cursor: pointer; }

@@ -120,10 +120,21 @@ type DashboardTests() =
             let! count = beadsCounts.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let! beadsText = beadsCounts.First.TextContentAsync()
-            Assert.That(beadsText, Does.Contain("O:"))
-            Assert.That(beadsText, Does.Contain("P:"))
-            Assert.That(beadsText, Does.Contain("D:"))
+            let openSpan = beadsCounts.First.Locator(".beads-open")
+            let! openCount = openSpan.CountAsync()
+            Assert.That(openCount, Is.EqualTo(1))
+
+            let inprogressSpan = beadsCounts.First.Locator(".beads-inprogress")
+            let! inprogressCount = inprogressSpan.CountAsync()
+            Assert.That(inprogressCount, Is.EqualTo(1))
+
+            let closedSpan = beadsCounts.First.Locator(".beads-closed")
+            let! closedCount = closedSpan.CountAsync()
+            Assert.That(closedCount, Is.EqualTo(1))
+
+            let sepSpans = beadsCounts.First.Locator(".beads-sep")
+            let! sepCount = sepSpans.CountAsync()
+            Assert.That(sepCount, Is.EqualTo(2))
         }
 
     [<Test>]
@@ -133,9 +144,9 @@ type DashboardTests() =
             let! count = progressBars.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let progressFills = this.Page.Locator(".wt-card .progress-fill")
-            let! fillCount = progressFills.CountAsync()
-            Assert.That(fillCount, Is.GreaterThanOrEqualTo(1))
+            let segments = this.Page.Locator(".wt-card .progress-segment")
+            let! segCount = segments.CountAsync()
+            Assert.That(segCount, Is.GreaterThanOrEqualTo(3))
         }
 
     [<Test>]
@@ -244,8 +255,9 @@ type DashboardTests() =
             let! count = beadsInline.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let! beadsText = beadsInline.First.TextContentAsync()
-            Assert.That(beadsText, Does.Contain("O:"))
+            let openSpan = beadsInline.First.Locator(".beads-open")
+            let! openCount = openSpan.CountAsync()
+            Assert.That(openCount, Is.EqualTo(1))
         }
 
     [<Test>]

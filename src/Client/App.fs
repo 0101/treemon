@@ -111,11 +111,42 @@ let cardClassName (wt: WorktreeStatus) =
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
 
-let beadsProgressPct (b: BeadsSummary) =
-    let total = beadsTotal b
+let segmentPct count total =
     match total with
     | 0 -> 0
-    | _ -> (b.Closed * 100) / total
+    | _ -> (count * 100) / total
+
+let beadsCounts (b: BeadsSummary) =
+    Html.div [
+        prop.className "beads-counts"
+        prop.children [
+            Html.span [ prop.className "beads-open"; prop.text (string b.Open) ]
+            Html.span [ prop.className "beads-sep"; prop.text "/" ]
+            Html.span [ prop.className "beads-inprogress"; prop.text (string b.InProgress) ]
+            Html.span [ prop.className "beads-sep"; prop.text "/" ]
+            Html.span [ prop.className "beads-closed"; prop.text (string b.Closed) ]
+        ]
+    ]
+
+let beadsProgressBar (b: BeadsSummary) =
+    let total = beadsTotal b
+    Html.div [
+        prop.className "progress-bar"
+        prop.children [
+            Html.div [
+                prop.className "progress-segment seg-open"
+                prop.style [ style.width (length.percent (segmentPct b.Open total)) ]
+            ]
+            Html.div [
+                prop.className "progress-segment seg-inprogress"
+                prop.style [ style.width (length.percent (segmentPct b.InProgress total)) ]
+            ]
+            Html.div [
+                prop.className "progress-segment seg-closed"
+                prop.style [ style.width (length.percent (segmentPct b.Closed total)) ]
+            ]
+        ]
+    ]
 
 let buildBadge (bs: BuildStatus) (buildUrl: string option) =
     let badgeProps className (text: string) =
@@ -154,7 +185,13 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                 prop.children [
                     Html.span [
                         prop.className "beads-inline"
-                        prop.text (sprintf "O:%d P:%d D:%d" wt.Beads.Open wt.Beads.InProgress wt.Beads.Closed)
+                        prop.children [
+                            Html.span [ prop.className "beads-open"; prop.text (string wt.Beads.Open) ]
+                            Html.span [ prop.className "beads-sep"; prop.text "/" ]
+                            Html.span [ prop.className "beads-inprogress"; prop.text (string wt.Beads.InProgress) ]
+                            Html.span [ prop.className "beads-sep"; prop.text "/" ]
+                            Html.span [ prop.className "beads-closed"; prop.text (string wt.Beads.Closed) ]
+                        ]
                     ]
                     match wt.Pr with
                     | NoPr -> Html.none
@@ -212,23 +249,8 @@ let worktreeCard (wt: WorktreeStatus) =
             Html.div [
                 prop.className "beads-row"
                 prop.children [
-                    Html.div [
-                        prop.className "beads-counts"
-                        prop.children [
-                            Html.span [ prop.text (sprintf "O:%d" wt.Beads.Open) ]
-                            Html.span [ prop.text (sprintf "P:%d" wt.Beads.InProgress) ]
-                            Html.span [ prop.text (sprintf "D:%d" wt.Beads.Closed) ]
-                        ]
-                    ]
-                    Html.div [
-                        prop.className "progress-bar"
-                        prop.children [
-                            Html.div [
-                                prop.className "progress-fill"
-                                prop.style [ style.width (length.percent (beadsProgressPct wt.Beads)) ]
-                            ]
-                        ]
-                    ]
+                    beadsCounts wt.Beads
+                    beadsProgressBar wt.Beads
                 ]
             ]
 
