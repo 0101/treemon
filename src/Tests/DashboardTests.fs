@@ -149,6 +149,21 @@ type DashboardTests() =
         }
 
     [<Test>]
+    member this.``PR badge is a clickable link with href``() =
+        task {
+            let prLinks = this.Page.Locator(".wt-card a.pr-badge")
+            let! count = prLinks.CountAsync()
+
+            if count > 0 then
+                let! href = prLinks.First.GetAttributeAsync("href")
+                Assert.That(href, Is.Not.Null.And.Not.Empty)
+                Assert.That(href, Does.Contain("pullrequest"))
+
+                let! target = prLinks.First.GetAttributeAsync("target")
+                Assert.That(target, Is.EqualTo("_blank"))
+        }
+
+    [<Test>]
     member this.``Thread badge shows on PR cards``() =
         task {
             let threadBadges = this.Page.Locator(".wt-card .thread-badge")

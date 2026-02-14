@@ -159,12 +159,12 @@ let compactWorktreeCard (wt: WorktreeStatus) =
                     match wt.Pr with
                     | NoPr -> Html.none
                     | HasPr pr ->
-                        Html.a [
+                        Interop.createElement "a" [
                             prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
-                            prop.text (sprintf "PR #%d" pr.Id)
                             prop.title pr.Title
                             prop.href pr.Url
                             prop.target "_blank"
+                            prop.text (sprintf "PR #%d" pr.Id)
                         ]
                         match pr.UnresolvedThreadCount with
                         | 0 -> Html.none
@@ -228,12 +228,12 @@ let worktreeCard (wt: WorktreeStatus) =
                 Html.div [
                     prop.className "pr-row"
                     prop.children [
-                        Html.a [
+                        Interop.createElement "a" [
                             prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
-                            prop.text (sprintf "PR #%d" pr.Id)
                             prop.title pr.Title
                             prop.href pr.Url
                             prop.target "_blank"
+                            prop.text (sprintf "PR #%d" pr.Id)
                         ]
                         match pr.ReviewerVotes |> Map.isEmpty with
                         | true -> Html.none
