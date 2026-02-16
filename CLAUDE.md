@@ -65,12 +65,15 @@ type WorktreeStatus =
     { Branch: string; Head: string; LastCommitMessage: string
       LastCommitTime: DateTimeOffset; UpstreamBranch: string option
       Beads: BeadsSummary; Claude: ClaudeCodeStatus
-      Pr: PrStatus; IsStale: bool }
+      Pr: PrStatus; IsStale: bool; MainBehindCount: int }
 
-type IWorktreeApi = { getWorktrees: unit -> Async<WorktreeStatus list> }
+type WorktreeResponse =
+    { RootFolderName: string; Worktrees: WorktreeStatus list }
+
+type IWorktreeApi = { getWorktrees: unit -> Async<WorktreeResponse> }
 ```
 
-Key DUs: `ClaudeCodeStatus` (Active|Recent|Idle|Unknown), `PrStatus` (NoPr|HasPr of PrInfo), `BuildStatus` (NoBuild|Building|Succeeded|Failed|PartiallySucceeded|Canceled).
+Key DUs: `ClaudeCodeStatus` (Active|Recent|Idle|Unknown), `PrStatus` (NoPr|HasPr of PrInfo), `BuildStatus` (NoBuild|Building|Succeeded|Failed|PartiallySucceeded|Canceled). `PrInfo` includes `ThreadCounts`, `IsMerged`, and `Builds: BuildInfo list`.
 
 ## Architecture
 
