@@ -334,7 +334,7 @@ let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
 let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int) =
     async {
         let args =
-            $"devops invoke --area build --resource builds --route-parameters project={remote.Project} --query-parameters \"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&$top=10\" --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            $"devops invoke --area build --resource builds --route-parameters project={remote.Project} --query-parameters \"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&queryOrder=queueTimeDescending&$top=10\" --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
 
         let! output = runAz args
 
