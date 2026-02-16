@@ -586,6 +586,87 @@ type DashboardTests() =
         }
 
     [<Test>]
+    member this.``Terminal button present on every full-view card``() =
+        task {
+            let cards = this.Page.Locator(".wt-card:not(.compact)")
+            let! cardCount = cards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one full-view card")
+
+            let terminalBtns = this.Page.Locator(".wt-card:not(.compact) .terminal-btn")
+            let! btnCount = terminalBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), "Every full-view card should have a terminal button")
+        }
+
+    [<Test>]
+    member this.``Terminal button present on every compact card``() =
+        task {
+            let compactBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+            do! compactBtn.ClickAsync()
+
+            let compactCards = this.Page.Locator(".wt-card.compact")
+            let! cardCount = compactCards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one compact card")
+
+            let terminalBtns = this.Page.Locator(".wt-card.compact .terminal-btn")
+            let! btnCount = terminalBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), "Every compact card should have a terminal button")
+        }
+
+    [<Test>]
+    member this.``Terminal button is inside card header``() =
+        task {
+            let headerBtns = this.Page.Locator(".wt-card .card-header .terminal-btn")
+            let! count = headerBtns.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Terminal button should be inside .card-header")
+
+            let allBtns = this.Page.Locator(".wt-card .terminal-btn")
+            let! allCount = allBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(allCount), "All terminal buttons should be inside card headers")
+        }
+
+    [<Test>]
+    member this.``Terminal button has correct text and title``() =
+        task {
+            let btn = this.Page.Locator(".wt-card .terminal-btn").First
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! text = btn.TextContentAsync()
+            Assert.That(text, Is.EqualTo(">"), "Terminal button text should be '>'")
+
+            let! title = btn.GetAttributeAsync("title")
+            Assert.That(title, Is.EqualTo("Open terminal"), "Terminal button title should be 'Open terminal'")
+        }
+
+    [<Test>]
+    member this.``Terminal button has correct styling``() =
+        task {
+            let btn = this.Page.Locator(".wt-card .terminal-btn").First
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! fontFamily = btn.EvaluateAsync<string>("el => getComputedStyle(el).fontFamily")
+            Assert.That(fontFamily, Does.Contain("monospace"), "Terminal button should use monospace font")
+
+            let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
+            Assert.That(cursor, Is.EqualTo("pointer"), "Terminal button should have pointer cursor")
+        }
+
+    [<Test>]
+    member this.``Terminal button is aligned to the right in card header``() =
+        task {
+            let header = this.Page.Locator(".wt-card .card-header").First
+            let btn = header.Locator(".terminal-btn")
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! isRightAligned =
+                btn.EvaluateAsync<bool>(
+                    "el => { const hr = el.parentElement.getBoundingClientRect(); const br = el.getBoundingClientRect(); return (hr.right - br.right) < 20; }"
+                )
+            Assert.That(isRightAligned, Is.True, "Terminal button should be positioned near the right edge of card header")
+        }
+
+    [<Test>]
     member this.``Multiple build badges can appear on a single PR card``() =
         task {
             let prCards = this.Page.Locator(".wt-card:has(.pr-badge:not(.merged))")
