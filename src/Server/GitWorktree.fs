@@ -165,7 +165,8 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
                     u)
 
         return
-            { Branch = branch |> Option.defaultValue "(detached)"
+            { Path = worktreePath
+              Branch = branch |> Option.defaultValue "(detached)"
               Head = commitHash
               LastCommitMessage = commitMessage
               LastCommitTime = commitTime

@@ -49,7 +49,8 @@ and PrInfo =
       IsMerged: bool }
 
 type WorktreeStatus =
-    { Branch: string
+    { Path: string
+      Branch: string
       Head: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
@@ -65,4 +66,5 @@ type WorktreeResponse =
       Worktrees: WorktreeStatus list }
 
 type IWorktreeApi =
-    { getWorktrees: unit -> Async<WorktreeResponse> }
+    { getWorktrees: unit -> Async<WorktreeResponse>
+      openTerminal: string -> Async<unit> }

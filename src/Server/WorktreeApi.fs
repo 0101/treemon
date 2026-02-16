@@ -1,6 +1,7 @@
 module Server.WorktreeApi
 
 open System
+open System.Diagnostics
 open Shared
 
 let private isStale (status: WorktreeStatus) =
@@ -41,7 +42,8 @@ let private assembleWorktreeStatus
             Log.log "API" (sprintf "Failed to assemble status for worktree %s (%s): %s" wt.Path (wt.Branch |> Option.defaultValue "(detached)") ex.Message)
 
             let degraded =
-                { Branch = wt.Branch |> Option.defaultValue "(detached)"
+                { Path = wt.Path
+                  Branch = wt.Branch |> Option.defaultValue "(detached)"
                   Head = ""
                   LastCommitMessage = ""
                   LastCommitTime = DateTimeOffset.MinValue
@@ -73,5 +75,31 @@ let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =
               Worktrees = statuses |> Array.toList }
     }
 
+let private openTerminal (worktreeRoot: string) (path: string) =
+    async {
+        let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+
+        let isKnownWorktree =
+            worktrees
+            |> List.exists (fun wt ->
+                String.Equals(wt.Path, path, StringComparison.OrdinalIgnoreCase))
+
+        match isKnownWorktree with
+        | false ->
+            Log.log "API" (sprintf "openTerminal: rejected unknown path '%s'" path)
+        | true ->
+            let startInfo =
+                ProcessStartInfo(
+                    FileName = "wt.exe",
+                    Arguments = sprintf "-w 0 new-tab pwsh -NoExit -Command \"Set-Location '%s'\"" path,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                )
+
+            Log.log "API" (sprintf "openTerminal: launching terminal for '%s'" path)
+            Process.Start(startInfo) |> ignore
+    }
+
 let worktreeApi (worktreeRoot: string) : IWorktreeApi =
-    { getWorktrees = fun () -> getWorktrees worktreeRoot }
+    { getWorktrees = fun () -> getWorktrees worktreeRoot
+      openTerminal = openTerminal worktreeRoot }
