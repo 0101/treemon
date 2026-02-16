@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy")]
     [string]$Command,
 
     [Parameter(Position = 1)]
@@ -25,6 +25,8 @@ if (-not $Command) {
     Write-Host "  restart        Stop + start (reuses previously configured worktree root)"
     Write-Host "  status         Show production server status"
     Write-Host "  log            Tail the production server log"
+    Write-Host "  dev <path>     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
+    Write-Host "  deploy         Build frontend and deploy to wwwroot/ (restarts prod if running)"
     exit 0
 }
 
@@ -151,6 +153,96 @@ function Show-Log {
     Get-Content $LogFile -Tail 50 -Wait
 }
 
+function Start-DevMode([string]$Root) {
+    $devApiPort = 5001
+    $devVitePort = 5174
+
+    Write-Host "Starting dev mode..." -ForegroundColor Cyan
+    Write-Host "  Server:  http://localhost:$devApiPort (dotnet watch)" -ForegroundColor Gray
+    Write-Host "  Vite:    http://localhost:$devVitePort" -ForegroundColor Gray
+    Write-Host "  Press Ctrl+C to stop both processes" -ForegroundColor Gray
+    Write-Host ""
+
+    $env:VITE_PORT = $devVitePort
+    $env:API_PORT = $devApiPort
+
+    $serverProcess = $null
+    $viteProcess = $null
+
+    try {
+        $serverProcess = Start-Process -FilePath "dotnet" `
+            -ArgumentList "watch", "run", "--project", (Join-Path $ScriptDir "src/Server"), "--", $Root, "--port", $devApiPort `
+            -WorkingDirectory $ScriptDir `
+            -PassThru `
+            -NoNewWindow
+
+        $viteProcess = Start-Process -FilePath "npx" `
+            -ArgumentList "vite", "--port", $devVitePort `
+            -WorkingDirectory (Join-Path $ScriptDir "src/Client") `
+            -PassThru `
+            -NoNewWindow
+
+        Write-Host "Dev server started (PID: $($serverProcess.Id)), Vite started (PID: $($viteProcess.Id))" -ForegroundColor Green
+
+        while (-not $serverProcess.HasExited -and -not $viteProcess.HasExited) {
+            Start-Sleep -Milliseconds 500
+        }
+    } finally {
+        Write-Host ""
+        Write-Host "Shutting down dev processes..." -ForegroundColor Yellow
+
+        if ($serverProcess -and -not $serverProcess.HasExited) {
+            Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($viteProcess -and -not $viteProcess.HasExited) {
+            Stop-Process -Id $viteProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+
+        Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
+        Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+
+        Write-Host "Dev mode stopped" -ForegroundColor Green
+    }
+}
+
+function Deploy-Frontend {
+    Write-Host "Building frontend..." -ForegroundColor Cyan
+    Push-Location $ScriptDir
+    try {
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+
+        $distDir = Join-Path $ScriptDir "dist"
+        if (-not (Test-Path $distDir)) { throw "dist/ not found after build" }
+
+        if (-not (Test-Path $WwwRoot)) { New-Item -ItemType Directory -Path $WwwRoot | Out-Null }
+
+        Get-ChildItem $WwwRoot -Recurse | Remove-Item -Recurse -Force
+        Copy-Item -Path (Join-Path $distDir "*") -Destination $WwwRoot -Recurse -Force
+        Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
+    } finally {
+        Pop-Location
+    }
+
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Restarting production server..." -ForegroundColor Cyan
+        $config = Get-SavedConfig
+        $root = if ($config) { $config.WorktreeRoot } else { $null }
+
+        if (-not $root) {
+            Write-Host "Warning: could not find saved worktree root, skipping restart" -ForegroundColor Yellow
+            return
+        }
+
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer $root
+    } else {
+        Write-Host "Production server is not running, skipping restart" -ForegroundColor Gray
+    }
+}
+
 switch ($Command) {
     "start" {
         if (-not $WorktreeRoot) {
@@ -193,5 +285,26 @@ switch ($Command) {
     }
     "log" {
         Show-Log
+    }
+    "dev" {
+        if (-not $WorktreeRoot) {
+            $config = Get-SavedConfig
+            if ($config) {
+                $WorktreeRoot = $config.WorktreeRoot
+                Write-Host "Using previously configured worktree root: $WorktreeRoot" -ForegroundColor Gray
+            } else {
+                Write-Host "Error: worktree root path is required for first dev start" -ForegroundColor Red
+                Write-Host "Usage: .\mait.ps1 dev <worktree-root-path>" -ForegroundColor Gray
+                exit 1
+            }
+        }
+        if (-not (Test-Path $WorktreeRoot)) {
+            Write-Host "Error: worktree root path does not exist: $WorktreeRoot" -ForegroundColor Red
+            exit 1
+        }
+        Start-DevMode $WorktreeRoot
+    }
+    "deploy" {
+        Deploy-Frontend
     }
 }
