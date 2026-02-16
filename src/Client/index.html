@@ -52,6 +52,14 @@
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
+        .terminal-btn {
+            margin-left: auto; flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer; font-family: monospace; font-size: 0.78em;
+            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
+        }
+        .terminal-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+
         .cc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .cc-dot.active  { background: #a6e3a1; }
         .cc-dot.recent  { background: #f9e2af; }

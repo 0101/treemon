@@ -23,6 +23,7 @@ type Msg =
     | ToggleSort
     | ToggleCompact
     | Tick
+    | OpenTerminal of string
 
 let worktreeApi =
     Remoting.createApi ()
@@ -75,6 +76,9 @@ let update msg model =
 
     | ToggleCompact ->
         { model with IsCompact = not model.IsCompact }, Cmd.none
+
+    | OpenTerminal path ->
+        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
 
     | Tick ->
         model, fetchWorktrees ()
@@ -225,7 +229,15 @@ let buildBadge (repoName: string) (build: BuildInfo) =
 let buildBadges (repoName: string) (builds: BuildInfo list) =
     React.fragment (builds |> List.map (buildBadge repoName))
 
-let compactWorktreeCard (repoName: string) (wt: WorktreeStatus) =
+let terminalButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "terminal-btn"
+        prop.title "Open terminal"
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenTerminal wt.Path))
+        prop.text ">"
+    ]
+
+let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt + " compact")
         prop.children [
@@ -235,6 +247,7 @@ let compactWorktreeCard (repoName: string) (wt: WorktreeStatus) =
                     Html.span [ prop.className (sprintf "cc-dot %s" (ccClassName wt.Claude)) ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    terminalButton dispatch wt
                 ]
             ]
             Html.div [
@@ -284,7 +297,7 @@ let compactWorktreeCard (repoName: string) (wt: WorktreeStatus) =
         ]
     ]
 
-let worktreeCard (repoName: string) (wt: WorktreeStatus) =
+let worktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt)
         prop.children [
@@ -293,6 +306,7 @@ let worktreeCard (repoName: string) (wt: WorktreeStatus) =
                 prop.children [
                     Html.span [ prop.className (sprintf "cc-dot %s" (ccClassName wt.Claude)) ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                    terminalButton dispatch wt
                 ]
             ]
 
@@ -350,10 +364,10 @@ let worktreeCard (repoName: string) (wt: WorktreeStatus) =
         ]
     ]
 
-let renderCard isCompact repoName =
+let renderCard dispatch isCompact repoName =
     match isCompact with
-    | true -> compactWorktreeCard repoName
-    | false -> worktreeCard repoName
+    | true -> compactWorktreeCard dispatch repoName
+    | false -> worktreeCard dispatch repoName
 
 let sortLabel =
     function
@@ -418,7 +432,7 @@ let view model dispatch =
 
             Html.div [
                 prop.className "card-grid"
-                prop.children (model.Worktrees |> List.map (renderCard model.IsCompact model.RootFolderName))
+                prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName))
             ]
         ]
     ]
