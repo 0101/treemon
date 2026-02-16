@@ -81,17 +81,17 @@ type DashboardTests() =
         task {
             let activeDots = this.Page.Locator(".cc-dot.active")
             let! count = activeDots.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees; active dots should be present")
 
-            if count > 0 then
-                let! bg = activeDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-                Assert.That(bg, Is.EqualTo("rgb(243, 139, 168)"), "Active CC dot should be red (#f38ba8)")
+            let! bg = activeDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(bg, Is.EqualTo("rgb(243, 139, 168)"), "Active CC dot should be red (#f38ba8)")
 
             let activeCards = this.Page.Locator(".wt-card.cc-active")
             let! activeCardCount = activeCards.CountAsync()
+            Assert.That(activeCardCount, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees; cc-active cards should be present")
 
-            if activeCardCount > 0 then
-                let! borderColor = activeCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
-                Assert.That(borderColor, Is.EqualTo("rgb(243, 139, 168)"), "Active card border-left should be red (#f38ba8)")
+            let! borderColor = activeCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
+            Assert.That(borderColor, Is.EqualTo("rgb(243, 139, 168)"), "Active card border-left should be red (#f38ba8)")
         }
 
     [<Test>]
@@ -99,17 +99,17 @@ type DashboardTests() =
         task {
             let idleDots = this.Page.Locator(".cc-dot.idle")
             let! count = idleDots.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has Idle Claude worktrees; idle dots should be present")
 
-            if count > 0 then
-                let! bg = idleDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-                Assert.That(bg, Is.EqualTo("rgb(137, 180, 250)"), "Idle CC dot should be blue (#89b4fa)")
+            let! bg = idleDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(bg, Is.EqualTo("rgb(137, 180, 250)"), "Idle CC dot should be blue (#89b4fa)")
 
             let idleCards = this.Page.Locator(".wt-card.cc-idle")
             let! idleCardCount = idleCards.CountAsync()
+            Assert.That(idleCardCount, Is.GreaterThanOrEqualTo(1), "Fixture has Idle Claude worktrees; cc-idle cards should be present")
 
-            if idleCardCount > 0 then
-                let! borderColor = idleCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
-                Assert.That(borderColor, Is.EqualTo("rgb(137, 180, 250)"), "Idle card border-left should be blue (#89b4fa)")
+            let! borderColor = idleCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
+            Assert.That(borderColor, Is.EqualTo("rgb(137, 180, 250)"), "Idle card border-left should be blue (#89b4fa)")
         }
 
     [<Test>]
@@ -117,10 +117,10 @@ type DashboardTests() =
         task {
             let recentDots = this.Page.Locator(".cc-dot.recent")
             let! count = recentDots.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has Recent Claude worktrees; recent dots should be present")
 
-            if count > 0 then
-                let! bg = recentDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-                Assert.That(bg, Is.EqualTo("rgb(249, 226, 175)"), "Recent CC dot should remain yellow (#f9e2af)")
+            let! bg = recentDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(bg, Is.EqualTo("rgb(249, 226, 175)"), "Recent CC dot should remain yellow (#f9e2af)")
         }
 
     [<Test>]
@@ -254,10 +254,10 @@ type DashboardTests() =
         task {
             let prBadges = this.Page.Locator(".wt-card .pr-badge")
             let! count = prBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PRs; PR badges should be present")
 
-            if count > 0 then
-                let! prText = prBadges.First.TextContentAsync()
-                Assert.That(prText, Does.StartWith("PR #"))
+            let! prText = prBadges.First.TextContentAsync()
+            Assert.That(prText, Does.StartWith("PR #").Or.EqualTo("Merged"))
         }
 
     [<Test>]
@@ -265,14 +265,14 @@ type DashboardTests() =
         task {
             let prLinks = this.Page.Locator(".wt-card a.pr-badge")
             let! count = prLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PRs; PR badge links should be present")
 
-            if count > 0 then
-                let! href = prLinks.First.GetAttributeAsync("href")
-                Assert.That(href, Is.Not.Null.And.Not.Empty)
-                Assert.That(href, Does.Contain("pullrequest"))
+            let! href = prLinks.First.GetAttributeAsync("href")
+            Assert.That(href, Is.Not.Null.And.Not.Empty)
+            Assert.That(href, Does.Contain("pullrequest"))
 
-                let! target = prLinks.First.GetAttributeAsync("target")
-                Assert.That(target, Is.EqualTo("_blank"))
+            let! target = prLinks.First.GetAttributeAsync("target")
+            Assert.That(target, Is.EqualTo("_blank"))
         }
 
     [<Test>]
@@ -280,10 +280,10 @@ type DashboardTests() =
         task {
             let threadBadges = this.Page.Locator(".wt-card .thread-badge")
             let! count = threadBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
-            if count > 0 then
-                let! threadText = threadBadges.First.TextContentAsync()
-                Assert.That(threadText, Does.Contain("thread").Or.Match("\\d+"))
+            let! threadText = threadBadges.First.TextContentAsync()
+            Assert.That(threadText, Does.Match(@"\d+/\d+"))
         }
 
     [<Test>]
@@ -441,17 +441,17 @@ type DashboardTests() =
         task {
             let buildBadges = this.Page.Locator(".wt-card .build-badge")
             let! count = buildBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badges should be present")
 
-            if count > 0 then
-                let! badgeClass = buildBadges.First.GetAttributeAsync("class")
-                Assert.That(
-                    badgeClass,
-                    Does.Contain("succeeded")
-                        .Or.Contain("failed")
-                        .Or.Contain("building")
-                        .Or.Contain("partial")
-                        .Or.Contain("canceled")
-                )
+            let! badgeClass = buildBadges.First.GetAttributeAsync("class")
+            Assert.That(
+                badgeClass,
+                Does.Contain("succeeded")
+                    .Or.Contain("failed")
+                    .Or.Contain("building")
+                    .Or.Contain("partial")
+                    .Or.Contain("canceled")
+            )
         }
 
     [<Test>]
@@ -459,10 +459,10 @@ type DashboardTests() =
         task {
             let threadBadges = this.Page.Locator(".wt-card .thread-badge")
             let! count = threadBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
-            if count > 0 then
-                let! text = threadBadges.First.TextContentAsync()
-                Assert.That(text, Does.Match(@"\d+/\d+"))
+            let! text = threadBadges.First.TextContentAsync()
+            Assert.That(text, Does.Match(@"\d+/\d+"))
         }
 
     [<Test>]
@@ -470,15 +470,15 @@ type DashboardTests() =
         task {
             let buildLinks = this.Page.Locator(".wt-card a.build-badge")
             let! count = buildLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badge links should be present")
 
-            if count > 0 then
-                let! href = buildLinks.First.GetAttributeAsync("href")
-                Assert.That(href, Is.Not.Null.And.Not.Empty)
-                Assert.That(href, Does.Contain("dev.azure.com"))
-                Assert.That(href, Does.Contain("_build/results"))
+            let! href = buildLinks.First.GetAttributeAsync("href")
+            Assert.That(href, Is.Not.Null.And.Not.Empty)
+            Assert.That(href, Does.Contain("dev.azure.com"))
+            Assert.That(href, Does.Contain("_build/results"))
 
-                let! target = buildLinks.First.GetAttributeAsync("target")
-                Assert.That(target, Is.EqualTo("_blank"))
+            let! target = buildLinks.First.GetAttributeAsync("target")
+            Assert.That(target, Is.EqualTo("_blank"))
         }
 
     [<Test>]
@@ -494,17 +494,17 @@ type DashboardTests() =
         task {
             let mergedBadges = this.Page.Locator(".wt-card .pr-badge.merged")
             let! count = mergedBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a worktree with merged PR; merged badge should be present")
 
-            if count > 0 then
-                let! text = mergedBadges.First.TextContentAsync()
-                Assert.That(text, Is.EqualTo("Merged"))
+            let! text = mergedBadges.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("Merged"))
 
-                let! tagName = mergedBadges.First.EvaluateAsync<string>("el => el.tagName.toLowerCase()")
-                Assert.That(tagName, Is.EqualTo("a"))
+            let! tagName = mergedBadges.First.EvaluateAsync<string>("el => el.tagName.toLowerCase()")
+            Assert.That(tagName, Is.EqualTo("a"))
 
-                let! href = mergedBadges.First.GetAttributeAsync("href")
-                Assert.That(href, Is.Not.Null.And.Not.Empty)
-                Assert.That(href, Does.Contain("pullrequest"))
+            let! href = mergedBadges.First.GetAttributeAsync("href")
+            Assert.That(href, Is.Not.Null.And.Not.Empty)
+            Assert.That(href, Does.Contain("pullrequest"))
         }
 
     [<Test>]
@@ -618,13 +618,13 @@ type DashboardTests() =
         task {
             let upToDate = this.Page.Locator(".wt-card .main-behind.up-to-date")
             let! count = upToDate.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with MainBehindCount=0; up-to-date indicators should be present")
 
-            if count > 0 then
-                let! text = upToDate.First.TextContentAsync()
-                Assert.That(text, Is.EqualTo("up to date"))
+            let! text = upToDate.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("up to date"))
 
-                let! color = upToDate.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
-                Assert.That(color, Is.EqualTo("rgb(127, 132, 156)"), "up-to-date should be muted gray (#7f849c)")
+            let! color = upToDate.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(color, Is.EqualTo("rgb(127, 132, 156)"), "up-to-date should be muted gray (#7f849c)")
         }
 
     [<Test>]
@@ -632,16 +632,16 @@ type DashboardTests() =
         task {
             let behindWarning = this.Page.Locator(".wt-card .main-behind.behind-warning")
             let! count = behindWarning.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with high MainBehindCount; behind-warning indicators should be present")
 
-            if count > 0 then
-                let! text = behindWarning.First.TextContentAsync()
-                Assert.That(text, Does.Contain("behind main"))
+            let! text = behindWarning.First.TextContentAsync()
+            Assert.That(text, Does.Contain("behind main"))
 
-                let! color = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
-                Assert.That(color, Is.EqualTo("rgb(243, 139, 168)"), "behind-warning should be red (#f38ba8)")
+            let! color = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(color, Is.EqualTo("rgb(243, 139, 168)"), "behind-warning should be red (#f38ba8)")
 
-                let! fontWeight = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).fontWeight")
-                Assert.That(fontWeight, Is.EqualTo("600").Or.EqualTo("bold"), "behind-warning should have bold font weight")
+            let! fontWeight = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).fontWeight")
+            Assert.That(fontWeight, Is.EqualTo("600").Or.EqualTo("bold"), "behind-warning should have bold font weight")
         }
 
     [<Test>]
@@ -664,16 +664,10 @@ type DashboardTests() =
             let! count = commitLines.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let mutable allNonMerge = true
-            let mutable idx = 0
-            let maxIdx = count - 1
-
-            while idx <= maxIdx do
-                let! text = commitLines.Nth(idx).TextContentAsync()
-                if text.StartsWith("Merge branch") || text.StartsWith("Merge pull request") then
-                    allNonMerge <- false
-                idx <- idx + 1
-
+            let! allNonMerge =
+                commitLines.EvaluateAllAsync<bool>(
+                    "els => els.every(el => !el.textContent.startsWith('Merge branch') && !el.textContent.startsWith('Merge pull request'))"
+                )
             Assert.That(allNonMerge, Is.True, "Commit messages should not show merge commits (using --first-parent --no-merges)")
         }
 
@@ -771,11 +765,11 @@ type DashboardTests() =
         task {
             let prCards = this.Page.Locator(".wt-card:has(.pr-badge:not(.merged))")
             let! prCardCount = prCards.CountAsync()
+            Assert.That(prCardCount, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with non-merged PRs")
 
-            if prCardCount > 0 then
-                let allBadges = prCards.First.Locator(".build-badge")
-                let! badgeCount = allBadges.CountAsync()
-                Assert.That(badgeCount, Is.GreaterThanOrEqualTo(1), "PR card should have at least one build badge")
+            let allBadges = prCards.First.Locator(".build-badge")
+            let! badgeCount = allBadges.CountAsync()
+            Assert.That(badgeCount, Is.GreaterThanOrEqualTo(1), "PR card should have at least one build badge")
         }
 
     [<Test>]
@@ -783,26 +777,13 @@ type DashboardTests() =
         task {
             let buildLinks = this.Page.Locator(".wt-card a.build-badge")
             let! count = buildLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badge links should be present")
 
-            if count > 0 then
-                let! allValid =
-                    task {
-                        let mutable valid = true
-                        let mutable idx = 0
-
-                        while idx < count do
-                            let! href = buildLinks.Nth(idx).GetAttributeAsync("href")
-                            if href = null || not (href.Contains("dev.azure.com")) || not (href.Contains("_build/results")) then
-                                valid <- false
-                            let! target = buildLinks.Nth(idx).GetAttributeAsync("target")
-                            if target <> "_blank" then
-                                valid <- false
-                            idx <- idx + 1
-
-                        return valid
-                    }
-
-                Assert.That(allValid, Is.True, "Every build badge link should point to dev.azure.com with _build/results path and target=_blank")
+            let! allValid =
+                buildLinks.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.href && el.href.includes('dev.azure.com') && el.href.includes('_build/results') && el.target === '_blank')"
+                )
+            Assert.That(allValid, Is.True, "Every build badge link should point to dev.azure.com with _build/results path and target=_blank")
         }
 
     [<Test>]
@@ -810,23 +791,13 @@ type DashboardTests() =
         task {
             let buildBadges = this.Page.Locator(".wt-card .build-badge")
             let! count = buildBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badges should be present")
 
-            if count > 0 then
-                let! allHaveText =
-                    task {
-                        let mutable valid = true
-                        let mutable idx = 0
-
-                        while idx < count do
-                            let! text = buildBadges.Nth(idx).TextContentAsync()
-                            if System.String.IsNullOrWhiteSpace(text) then
-                                valid <- false
-                            idx <- idx + 1
-
-                        return valid
-                    }
-
-                Assert.That(allHaveText, Is.True, "Every build badge should have non-empty text content")
+            let! allHaveText =
+                buildBadges.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.textContent && el.textContent.trim().length > 0)"
+                )
+            Assert.That(allHaveText, Is.True, "Every build badge should have non-empty text content")
         }
 
     [<Test>]
@@ -834,13 +805,11 @@ type DashboardTests() =
         task {
             let behindCards = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindCards.CountAsync()
+            Assert.That(behindCount, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind-main rows should be present")
 
-            if behindCount > 0 then
-                let syncBtns = behindCards.First.Locator(".sync-btn, .sync-cancel-btn")
-                let! btnCount = syncBtns.CountAsync()
-                Assert.That(btnCount, Is.EqualTo(1), "Cards with MainBehindCount > 0 should show a sync button or cancel button")
-            else
-                Assert.Pass("No cards currently behind main; skipping sync button visibility test")
+            let syncBtns = behindCards.First.Locator(".sync-btn, .sync-cancel-btn")
+            let! btnCount = syncBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(1), "Cards with MainBehindCount > 0 should show a sync button or cancel button")
         }
 
     [<Test>]
@@ -848,13 +817,11 @@ type DashboardTests() =
         task {
             let upToDateRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind.up-to-date)")
             let! count = upToDateRows.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with MainBehindCount=0; up-to-date rows should be present")
 
-            if count > 0 then
-                let syncBtns = upToDateRows.First.Locator(".sync-btn, .sync-cancel-btn")
-                let! btnCount = syncBtns.CountAsync()
-                Assert.That(btnCount, Is.EqualTo(0), "Cards with MainBehindCount = 0 should not show a sync button")
-            else
-                Assert.Pass("No up-to-date cards currently; skipping sync button hidden test")
+            let syncBtns = upToDateRows.First.Locator(".sync-btn, .sync-cancel-btn")
+            let! btnCount = syncBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(0), "Cards with MainBehindCount = 0 should not show a sync button")
         }
 
     [<Test>]
@@ -862,30 +829,24 @@ type DashboardTests() =
         task {
             let activeCards = this.Page.Locator(".wt-card.cc-active:not(.compact)")
             let! activeCount = activeCards.CountAsync()
+            Assert.That(activeCount, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees")
 
-            if activeCount > 0 then
-                let behindRow = activeCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
-                let! behindCount = behindRow.CountAsync()
+            let behindRow = activeCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+            let! behindCount = behindRow.CountAsync()
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture Active Claude worktree is behind main")
 
-                if behindCount > 0 then
-                    let syncBtn = behindRow.Locator(".sync-btn")
-                    let! btnCount = syncBtn.CountAsync()
+            let syncBtn = behindRow.Locator(".sync-btn")
+            let! btnCount = syncBtn.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Active Claude card behind main")
 
-                    if btnCount > 0 then
-                        let! cssClass = syncBtn.GetAttributeAsync("class")
-                        Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Active")
+            let! cssClass = syncBtn.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Active")
 
-                        let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-                        Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Active")
+            let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Active")
 
-                        let! title = syncBtn.GetAttributeAsync("title")
-                        Assert.That(title, Is.EqualTo("Claude is active"), "Disabled sync button should show 'Claude is active' tooltip")
-                    else
-                        Assert.Pass("Active Claude card is syncing (cancel button shown); skipping disabled check")
-                else
-                    Assert.Pass("Active Claude card is up-to-date; skipping disabled button check")
-            else
-                Assert.Pass("No cards with Active Claude status; skipping disabled button test")
+            let! title = syncBtn.GetAttributeAsync("title")
+            Assert.That(title, Is.EqualTo("Claude is active"), "Disabled sync button should show 'Claude is active' tooltip")
         }
 
     [<Test>]
@@ -893,27 +854,21 @@ type DashboardTests() =
         task {
             let recentCards = this.Page.Locator(".wt-card.cc-recent:not(.compact)")
             let! recentCount = recentCards.CountAsync()
+            Assert.That(recentCount, Is.GreaterThanOrEqualTo(1), "Fixture has Recent Claude worktrees")
 
-            if recentCount > 0 then
-                let behindRow = recentCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
-                let! behindCount = behindRow.CountAsync()
+            let behindRow = recentCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+            let! behindCount = behindRow.CountAsync()
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture Recent Claude worktree is behind main")
 
-                if behindCount > 0 then
-                    let syncBtn = behindRow.Locator(".sync-btn")
-                    let! btnCount = syncBtn.CountAsync()
+            let syncBtn = behindRow.Locator(".sync-btn")
+            let! btnCount = syncBtn.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Recent Claude card behind main")
 
-                    if btnCount > 0 then
-                        let! cssClass = syncBtn.GetAttributeAsync("class")
-                        Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Recent")
+            let! cssClass = syncBtn.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Recent")
 
-                        let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-                        Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Recent")
-                    else
-                        Assert.Pass("Recent Claude card is syncing; skipping disabled check")
-                else
-                    Assert.Pass("Recent Claude card is up-to-date; skipping disabled button check")
-            else
-                Assert.Pass("No cards with Recent Claude status; skipping disabled button test")
+            let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Recent")
         }
 
     [<Test>]
@@ -921,22 +876,20 @@ type DashboardTests() =
         task {
             let syncBtns = this.Page.Locator(".wt-card:not(.compact) .sync-btn")
             let! count = syncBtns.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; sync buttons should be present")
 
-            if count > 0 then
-                let btn = syncBtns.First
-                let! text = btn.TextContentAsync()
-                Assert.That(text, Is.EqualTo("Sync"), "Sync button text should be 'Sync'")
+            let btn = syncBtns.First
+            let! text = btn.TextContentAsync()
+            Assert.That(text, Is.EqualTo("Sync"), "Sync button text should be 'Sync'")
 
-                let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
-                let! cssClass = btn.GetAttributeAsync("class")
-                let isDisabled = cssClass.Contains("disabled")
-                match isDisabled with
-                | true ->
-                    Assert.That(cursor, Is.EqualTo("not-allowed"), "Disabled sync button should have not-allowed cursor")
-                | false ->
-                    Assert.That(cursor, Is.EqualTo("pointer"), "Enabled sync button should have pointer cursor")
-            else
-                Assert.Pass("No sync buttons visible; skipping styling test")
+            let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
+            let! cssClass = btn.GetAttributeAsync("class")
+            let isDisabled = cssClass.Contains("disabled")
+            match isDisabled with
+            | true ->
+                Assert.That(cursor, Is.EqualTo("not-allowed"), "Disabled sync button should have not-allowed cursor")
+            | false ->
+                Assert.That(cursor, Is.EqualTo("pointer"), "Enabled sync button should have pointer cursor")
         }
 
     [<Test>]
@@ -944,23 +897,21 @@ type DashboardTests() =
         task {
             let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
             let! count = eventLogs.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
 
-            if count > 0 then
-                let entries = eventLogs.First.Locator(".event-entry")
-                let! entryCount = entries.CountAsync()
-                Assert.That(entryCount, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
-                    "Event log should show between 1 and 3 entries")
+            let entries = eventLogs.First.Locator(".event-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
+                "Event log should show between 1 and 3 entries")
 
-                let firstEntry = entries.First
-                let source = firstEntry.Locator(".event-source")
-                let! sourceCount = source.CountAsync()
-                Assert.That(sourceCount, Is.EqualTo(1), "Each event entry should have an event-source")
+            let firstEntry = entries.First
+            let source = firstEntry.Locator(".event-source")
+            let! sourceCount = source.CountAsync()
+            Assert.That(sourceCount, Is.EqualTo(1), "Each event entry should have an event-source")
 
-                let message = firstEntry.Locator(".event-message")
-                let! messageCount = message.CountAsync()
-                Assert.That(messageCount, Is.EqualTo(1), "Each event entry should have an event-message")
-            else
-                Assert.Pass("No event logs currently visible; this is expected when no sync has run and no Claude messages exist")
+            let message = firstEntry.Locator(".event-message")
+            let! messageCount = message.CountAsync()
+            Assert.That(messageCount, Is.EqualTo(1), "Each event entry should have an event-message")
         }
 
     [<Test>]
@@ -968,24 +919,22 @@ type DashboardTests() =
         task {
             let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
             let! count = eventLogs.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
 
-            if count > 0 then
-                let log = eventLogs.First
+            let log = eventLogs.First
 
-                let! borderTop = log.EvaluateAsync<string>("el => getComputedStyle(el).borderTopStyle")
-                Assert.That(borderTop, Is.EqualTo("solid"), "Event log should have a top border separator")
+            let! borderTop = log.EvaluateAsync<string>("el => getComputedStyle(el).borderTopStyle")
+            Assert.That(borderTop, Is.EqualTo("solid"), "Event log should have a top border separator")
 
-                let entries = log.Locator(".event-entry")
-                let! entryCount = entries.CountAsync()
-                Assert.That(entryCount, Is.LessThanOrEqualTo(3), "Event log should show at most 3 entries")
+            let entries = log.Locator(".event-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.LessThanOrEqualTo(3), "Event log should show at most 3 entries")
 
-                let! display = log.EvaluateAsync<string>("el => getComputedStyle(el).display")
-                Assert.That(display, Is.EqualTo("flex"), "Event log should use flex layout")
+            let! display = log.EvaluateAsync<string>("el => getComputedStyle(el).display")
+            Assert.That(display, Is.EqualTo("flex"), "Event log should use flex layout")
 
-                let! flexDir = log.EvaluateAsync<string>("el => getComputedStyle(el).flexDirection")
-                Assert.That(flexDir, Is.EqualTo("column"), "Event log should use column flex direction")
-            else
-                Assert.Pass("No event logs visible; skipping DOM structure test")
+            let! flexDir = log.EvaluateAsync<string>("el => getComputedStyle(el).flexDirection")
+            Assert.That(flexDir, Is.EqualTo("column"), "Event log should use column flex direction")
         }
 
     [<Test>]
@@ -993,19 +942,17 @@ type DashboardTests() =
         task {
             let statusBadges = this.Page.Locator(".wt-card .event-status")
             let! count = statusBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has sync events with statuses; event-status badges should be present")
 
-            if count > 0 then
-                let! cssClass = statusBadges.First.GetAttributeAsync("class")
-                Assert.That(
-                    cssClass,
-                    Does.Contain("running")
-                        .Or.Contain("success")
-                        .Or.Contain("failed")
-                        .Or.Contain("cancelled"),
-                    "Event status badge should have a status CSS class"
-                )
-            else
-                Assert.Pass("No event status badges visible; skipping CSS class test")
+            let! cssClass = statusBadges.First.GetAttributeAsync("class")
+            Assert.That(
+                cssClass,
+                Does.Contain("running")
+                    .Or.Contain("success")
+                    .Or.Contain("failed")
+                    .Or.Contain("cancelled"),
+                "Event status badge should have a status CSS class"
+            )
         }
 
     [<Test>]
@@ -1043,13 +990,11 @@ type DashboardTests() =
         task {
             let behindRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
             let! count = behindRows.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind rows should be present")
 
-            if count > 0 then
-                let btns = behindRows.First.Locator(".sync-btn, .sync-cancel-btn")
-                let! btnCount = btns.CountAsync()
-                Assert.That(btnCount, Is.EqualTo(1), "Behind-main row should contain exactly one sync/cancel button")
-            else
-                Assert.Pass("No cards currently behind main; skipping sync button layout test")
+            let btns = behindRows.First.Locator(".sync-btn, .sync-cancel-btn")
+            let! btnCount = btns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(1), "Behind-main row should contain exactly one sync/cancel button")
         }
 
     [<Test>]
@@ -1057,15 +1002,13 @@ type DashboardTests() =
         task {
             let cancelBtns = this.Page.Locator(".wt-card .sync-cancel-btn")
             let! count = cancelBtns.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a branch with Running sync event; cancel button should be present")
 
-            if count > 0 then
-                let! text = cancelBtns.First.TextContentAsync()
-                Assert.That(text, Is.EqualTo("Cancel"), "Cancel button text should be 'Cancel'")
+            let! text = cancelBtns.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("Cancel"), "Cancel button text should be 'Cancel'")
 
-                let! borderColor = cancelBtns.First.EvaluateAsync<string>("el => getComputedStyle(el).borderColor")
-                Assert.That(borderColor, Does.Contain("rgb(243, 139, 168)"), "Cancel button border should be red (#f38ba8)")
-            else
-                Assert.Pass("No cancel buttons visible (no sync in progress); skipping cancel button test")
+            let! borderColor = cancelBtns.First.EvaluateAsync<string>("el => getComputedStyle(el).borderColor")
+            Assert.That(borderColor, Does.Contain("rgb(243, 139, 168)"), "Cancel button border should be red (#f38ba8)")
         }
 
     [<Test>]
