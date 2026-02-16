@@ -61,9 +61,16 @@ type WorktreeStatus =
       IsStale: bool
       MainBehindCount: int }
 
+type SyncTimes =
+    { Git: DateTimeOffset option
+      Beads: DateTimeOffset option
+      Claude: DateTimeOffset option
+      Pr: DateTimeOffset option }
+
 type WorktreeResponse =
     { RootFolderName: string
-      Worktrees: WorktreeStatus list }
+      Worktrees: WorktreeStatus list
+      SyncTimes: SyncTimes }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<WorktreeResponse>

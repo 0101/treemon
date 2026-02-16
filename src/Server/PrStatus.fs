@@ -471,6 +471,11 @@ module Cache =
                     return statuses
         }
 
+    let getCachedAt (repoRoot: string) =
+        match cache.TryGetValue(repoRoot) with
+        | true, entry -> Some entry.CachedAt
+        | _ -> None
+
     let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
         branchName
         |> Option.bind (fun b -> prMap |> Map.tryFind b)

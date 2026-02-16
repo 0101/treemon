@@ -65,3 +65,9 @@ module Cache =
             let status = getClaudeStatus worktreePath
             cache.[worktreePath] <- { Value = status; CachedAt = now }
             status
+
+    let getOldestCachedAt () =
+        cache.Values
+        |> Seq.map (fun entry -> entry.CachedAt)
+        |> Seq.sortBy id
+        |> Seq.tryHead

@@ -75,3 +75,9 @@ module Cache =
                 cache.[worktreePath] <- { Value = summary; CachedAt = now }
                 return summary
         }
+
+    let getOldestCachedAt () =
+        cache.Values
+        |> Seq.map (fun entry -> entry.CachedAt)
+        |> Seq.sortBy id
+        |> Seq.tryHead

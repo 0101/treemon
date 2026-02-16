@@ -142,6 +142,11 @@ module Cache =
                 return worktrees
         }
 
+    let getCachedAt (repoRoot: string) =
+        match worktreeListCache.TryGetValue(repoRoot) with
+        | true, entry -> Some entry.CachedAt
+        | _ -> None
+
 let collectWorktreeGitData (worktreePath: string) (branch: string option) =
     async {
         let! commit = getLastCommit worktreePath

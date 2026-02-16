@@ -70,9 +70,16 @@ let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =
 
         let folderName = System.IO.Path.GetFileName worktreeRoot
 
+        let syncTimes =
+            { Git = GitWorktree.Cache.getCachedAt worktreeRoot
+              Beads = BeadsStatus.Cache.getOldestCachedAt ()
+              Claude = ClaudeStatus.Cache.getOldestCachedAt ()
+              Pr = PrStatus.Cache.getCachedAt worktreeRoot }
+
         return
             { RootFolderName = folderName
-              Worktrees = statuses |> Array.toList }
+              Worktrees = statuses |> Array.toList
+              SyncTimes = syncTimes }
     }
 
 let private openTerminal (worktreeRoot: string) (path: string) =
