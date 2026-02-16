@@ -40,8 +40,8 @@ let parseAzureDevOpsUrl (url: string) =
         None
 
 let private runAz (arguments: string) =
-    cli { Shell CMD; Command $"az {arguments}" }
-    |> ProcessRunner.runShell "PR"
+    cli { Exec "az.cmd"; Arguments arguments }
+    |> ProcessRunner.runExec "PR"
 
 let getRemoteUrl (repoRoot: string) =
     cli { Exec "git"; Arguments $"""-C "{repoRoot}" remote get-url origin""" }
