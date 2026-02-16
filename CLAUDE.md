@@ -12,14 +12,29 @@ For detailed requirements, expected behavior, and design decisions see `docs/spe
 ## Quick Reference
 
 ```
-.\start.ps1 -WorktreeRoot "Q:\code\AITestAgent"   # start both servers (dev)
-dotnet run --project src/Server -- "Q:\code\AITestAgent"  # server only (port 5000)
-npm start                                          # Fable + Vite dev server (port 5173)
-npm run build                                      # production build → dist/
-dotnet test src/Tests/Tests.fsproj                  # E2E tests (Playwright, needs both servers)
+.\mait.ps1 start "Q:\code\AITestAgent"   # production server (port 5000, serves wwwroot/)
+.\mait.ps1 stop                          # stop production
+.\mait.ps1 restart                       # restart production
+.\mait.ps1 status                        # show PID, port, uptime
+.\mait.ps1 log                           # tail production log
+.\mait.ps1 dev "Q:\code\AITestAgent"     # dev mode (server :5001 + Vite :5174)
+.\mait.ps1 deploy                        # build frontend → wwwroot/, restart prod if running
+dotnet test src/Tests/Tests.fsproj        # E2E tests (Playwright, auto-starts dev servers)
 ```
 
-Open http://localhost:5173 in dev mode (Vite proxies API calls to server).
+Open http://localhost:5174 in dev mode (Vite proxies API calls to server on :5001).
+Open http://localhost:5000 for production (serves pre-built files from wwwroot/).
+
+## Deployment
+
+Only deploy after all Playwright E2E tests pass (`dotnet test src/Tests/Tests.fsproj`). Never deploy with failing tests.
+
+```
+dotnet test src/Tests/Tests.fsproj    # must pass first
+.\mait.ps1 deploy                    # builds frontend, copies to wwwroot/, restarts prod
+```
+
+`deploy` rebuilds the frontend (`npm run build`), copies `dist/*` to `wwwroot/`, and restarts the production server if it's running. The server uses `dotnet run` so backend changes are also picked up on restart.
 
 ## Stack
 
@@ -53,8 +68,8 @@ src/
     DashboardTests.fs      — Playwright E2E tests
 docs/spec/
   worktree-monitor.md     — full specification
-start.ps1                 — PowerShell script to start both servers
-vite.config.js            — Vite config with API proxy
+mait.ps1                  — production lifecycle + dev mode + deploy
+vite.config.js            — Vite config with API proxy (ports via env vars)
 mait.slnx                 — .NET 9 solution file (.slnx format)
 ```
 
@@ -101,7 +116,7 @@ All features should include Playwright E2E verification tasks. The dashboard is 
 dotnet test src/Tests/Tests.fsproj    # starts server + Vite automatically via ServerFixture
 ```
 
-- `ServerFixture.fs` starts the server against `Q:\code\AITestAgent` (port 5000) and Vite (port 5173)
+- `ServerFixture.fs` starts the server against `Q:\code\AITestAgent` (port 5001) and Vite (port 5174)
 - Tests use real AzDo data — PRs, threads, builds are all live
 - Tests should assert on CSS classes and DOM structure, not specific data values (data changes over time)
 - Every feature plan should include a `verify`-labeled beads task with Playwright tests
