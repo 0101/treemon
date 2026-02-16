@@ -19,6 +19,11 @@ src/Client/output/
 .idea/
 *.swp
 
+# Production deployment
+wwwroot/
+.mait.pid
+.mait.config
+
 # bv (beads viewer) local config and caches
 .bv/
 *.beads*.db

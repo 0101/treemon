@@ -1,0 +1,197 @@
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet("start", "stop", "restart", "status", "log")]
+    [string]$Command,
+
+    [Parameter(Position = 1)]
+    [string]$WorktreeRoot
+)
+
+$ErrorActionPreference = "Stop"
+$ScriptDir = $PSScriptRoot
+$PidFile = Join-Path $ScriptDir ".mait.pid"
+$ConfigFile = Join-Path $ScriptDir ".mait.config"
+$LogDir = Join-Path $ScriptDir "logs"
+$LogFile = Join-Path $LogDir "mait-prod.log"
+$WwwRoot = Join-Path $ScriptDir "wwwroot"
+$DefaultPort = 5000
+
+if (-not $Command) {
+    Write-Host "Usage: .\mait.ps1 <command> [worktree-root]" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Commands:" -ForegroundColor White
+    Write-Host "  start <path>   Start production server (auto-builds if wwwroot/ is empty)"
+    Write-Host "  stop           Stop the production server"
+    Write-Host "  restart        Stop + start (reuses previously configured worktree root)"
+    Write-Host "  status         Show production server status"
+    Write-Host "  log            Tail the production server log"
+    exit 0
+}
+
+function Get-SavedConfig {
+    if (Test-Path $ConfigFile) {
+        $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+        return $config
+    }
+    return $null
+}
+
+function Save-Config([string]$Root) {
+    @{ WorktreeRoot = $Root } | ConvertTo-Json | Set-Content $ConfigFile
+}
+
+function Get-RunningPid {
+    if (-not (Test-Path $PidFile)) { return $null }
+    $savedPid = (Get-Content $PidFile -Raw).Trim()
+    if (-not $savedPid) { return $null }
+    $process = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+    if ($process -and -not $process.HasExited) { return [int]$savedPid }
+    return $null
+}
+
+function Ensure-WwwRoot {
+    $hasContent = (Test-Path $WwwRoot) -and @(Get-ChildItem $WwwRoot -File -Recurse).Count -gt 0
+    if ($hasContent) { return }
+
+    Write-Host "wwwroot/ is empty, building frontend..." -ForegroundColor Yellow
+    Push-Location $ScriptDir
+    try {
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+
+        $distDir = Join-Path $ScriptDir "dist"
+        if (-not (Test-Path $distDir)) { throw "dist/ not found after build" }
+
+        if (-not (Test-Path $WwwRoot)) { New-Item -ItemType Directory -Path $WwwRoot | Out-Null }
+        Copy-Item -Path (Join-Path $distDir "*") -Destination $WwwRoot -Recurse -Force
+        Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
+    } finally {
+        Pop-Location
+    }
+}
+
+function Start-ProductionServer([string]$Root) {
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
+        Write-Host "Use '.\mait.ps1 stop' first or '.\mait.ps1 restart'" -ForegroundColor Gray
+        return
+    }
+
+    Ensure-WwwRoot
+
+    if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+    "" | Set-Content $LogFile
+
+    Save-Config $Root
+
+    Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
+    $process = Start-Process -FilePath "dotnet" `
+        -ArgumentList "run", "--project", (Join-Path $ScriptDir "src/Server"), "--", $Root, "--port", $DefaultPort `
+        -WorkingDirectory $ScriptDir `
+        -RedirectStandardOutput $LogFile `
+        -RedirectStandardError (Join-Path $LogDir "mait-prod-stderr.log") `
+        -NoNewWindow:$false `
+        -WindowStyle Hidden `
+        -PassThru
+
+    $process.Id | Set-Content $PidFile
+    Write-Host "Production server started (PID: $($process.Id))" -ForegroundColor Green
+    Write-Host "Monitoring: $Root" -ForegroundColor Gray
+    Write-Host "URL: http://localhost:$DefaultPort" -ForegroundColor Gray
+    Write-Host "Log: $LogFile" -ForegroundColor Gray
+}
+
+function Stop-ProductionServer {
+    $runningPid = Get-RunningPid
+    if (-not $runningPid) {
+        Write-Host "Production server is not running" -ForegroundColor Yellow
+        if (Test-Path $PidFile) { Remove-Item $PidFile }
+        return
+    }
+
+    Write-Host "Stopping production server (PID: $runningPid)..." -ForegroundColor Yellow
+    Stop-Process -Id $runningPid -Force -ErrorAction SilentlyContinue
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+    Write-Host "Production server stopped" -ForegroundColor Green
+}
+
+function Show-Status {
+    $runningPid = Get-RunningPid
+    if (-not $runningPid) {
+        Write-Host "Production server is not running" -ForegroundColor Yellow
+        return
+    }
+
+    $process = Get-Process -Id $runningPid -ErrorAction SilentlyContinue
+    $uptime = (Get-Date) - $process.StartTime
+    $uptimeStr = if ($uptime.Days -gt 0) { "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m" }
+                 elseif ($uptime.Hours -gt 0) { "$($uptime.Hours)h $($uptime.Minutes)m" }
+                 else { "$($uptime.Minutes)m $($uptime.Seconds)s" }
+
+    $config = Get-SavedConfig
+
+    Write-Host "Production server is running" -ForegroundColor Green
+    Write-Host "  PID:     $runningPid"
+    Write-Host "  Port:    $DefaultPort"
+    Write-Host "  Uptime:  $uptimeStr"
+    Write-Host "  URL:     http://localhost:$DefaultPort"
+    if ($config) {
+        Write-Host "  Monitor: $($config.WorktreeRoot)"
+    }
+    Write-Host "  Log:     $LogFile"
+}
+
+function Show-Log {
+    if (-not (Test-Path $LogFile)) {
+        Write-Host "No log file found at $LogFile" -ForegroundColor Yellow
+        return
+    }
+    Write-Host "Tailing $LogFile (Ctrl+C to stop)..." -ForegroundColor Gray
+    Get-Content $LogFile -Tail 50 -Wait
+}
+
+switch ($Command) {
+    "start" {
+        if (-not $WorktreeRoot) {
+            $config = Get-SavedConfig
+            if ($config) {
+                $WorktreeRoot = $config.WorktreeRoot
+                Write-Host "Using previously configured worktree root: $WorktreeRoot" -ForegroundColor Gray
+            } else {
+                Write-Host "Error: worktree root path is required for first start" -ForegroundColor Red
+                Write-Host "Usage: .\mait.ps1 start <worktree-root-path>" -ForegroundColor Gray
+                exit 1
+            }
+        }
+        if (-not (Test-Path $WorktreeRoot)) {
+            Write-Host "Error: worktree root path does not exist: $WorktreeRoot" -ForegroundColor Red
+            exit 1
+        }
+        Start-ProductionServer $WorktreeRoot
+    }
+    "stop" {
+        Stop-ProductionServer
+    }
+    "restart" {
+        $config = Get-SavedConfig
+        $root = if ($WorktreeRoot) { $WorktreeRoot }
+                elseif ($config) { $config.WorktreeRoot }
+                else { $null }
+
+        if (-not $root) {
+            Write-Host "Error: no worktree root configured. Run 'start' first." -ForegroundColor Red
+            exit 1
+        }
+
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer $root
+    }
+    "status" {
+        Show-Status
+    }
+    "log" {
+        Show-Log
+    }
+}
