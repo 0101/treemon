@@ -2,44 +2,14 @@ module Server.BeadsStatus
 
 open System
 open System.Collections.Concurrent
-open System.Diagnostics
 open System.IO
 open System.Text.Json
+open Fli
 open Shared
 
 let private runBd (dbPath: string) =
-    async {
-        let args = $"count --by-status --json --db \"{dbPath}\""
-
-        try
-            let psi =
-                ProcessStartInfo(
-                    "bd",
-                    args,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                )
-
-            use proc = Process.Start(psi)
-            let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
-            let! stderr = proc.StandardError.ReadToEndAsync() |> Async.AwaitTask
-            do! proc.WaitForExitAsync() |> Async.AwaitTask
-
-            match proc.ExitCode with
-            | 0 ->
-                let trimmed = output.TrimEnd()
-                Log.log "Beads" $"bd {args} -> exit 0, stdout: {trimmed}"
-                return Some trimmed
-            | code ->
-                Log.log "Beads" $"bd {args} -> exit {code}, stderr: {stderr.TrimEnd()}"
-                return None
-        with
-        | :? System.ComponentModel.Win32Exception as ex ->
-            Log.log "Beads" $"bd {args} -> failed to start: {ex.Message}"
-            return None
-    }
+    cli { Exec "bd"; Arguments [| "count"; "--by-status"; "--json"; "--db"; dbPath |] }
+    |> ProcessRunner.runExec "Beads"
 
 let private parseCountResponse (json: string) =
     try

@@ -2,8 +2,8 @@ module Server.PrStatus
 
 open System
 open System.Collections.Concurrent
-open System.Diagnostics
 open System.Text.Json
+open Fli
 open Shared
 
 type AzDoRemote =
@@ -39,47 +39,13 @@ let parseAzureDevOpsUrl (url: string) =
         Log.log "PR" $"Failed to parse Azure DevOps URL '{url}': {ex.Message}"
         None
 
-let private runProcess (fileName: string) (arguments: string) =
-    async {
-        try
-            let file, args =
-                match Runtime.InteropServices.RuntimeInformation.IsOSPlatform(Runtime.InteropServices.OSPlatform.Windows) with
-                | true -> "cmd", $"/c {fileName} {arguments}"
-                | false -> fileName, arguments
-
-            Log.log "PR" $"Running: {fileName} {arguments}"
-
-            let psi =
-                ProcessStartInfo(
-                    file,
-                    args,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                )
-
-            use proc = Process.Start(psi)
-            let! output = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
-            let! stderr = proc.StandardError.ReadToEndAsync() |> Async.AwaitTask
-            do! proc.WaitForExitAsync() |> Async.AwaitTask
-
-            match proc.ExitCode with
-            | 0 ->
-                let truncated = if output.Length > 200 then output.Substring(0, 200) + "..." else output.TrimEnd()
-                Log.log "PR" $"Exit 0: {truncated}"
-                return Some(output.TrimEnd())
-            | code ->
-                Log.log "PR" $"Exit {code}: {stderr.TrimEnd()}"
-                return None
-        with
-        | :? System.ComponentModel.Win32Exception as ex ->
-            Log.log "PR" $"Process failed: {ex.Message}"
-            return None
-    }
+let private runAz (arguments: string) =
+    cli { Shell CMD; Command $"az {arguments}" }
+    |> ProcessRunner.runShell "PR"
 
 let getRemoteUrl (repoRoot: string) =
-    runProcess "git" $"-C \"{repoRoot}\" remote get-url origin"
+    cli { Exec "git"; Arguments $"""-C "{repoRoot}" remote get-url origin""" }
+    |> ProcessRunner.runExec "PR"
 
 type private ParsedPr =
     { BranchName: string
@@ -315,7 +281,7 @@ let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
         let timelineArgs =
             $"devops invoke --area build --resource timeline --route-parameters project={remote.Project} buildId={buildId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
 
-        let! timelineOutput = runProcess "az" timelineArgs
+        let! timelineOutput = runAz timelineArgs
 
         match timelineOutput |> Option.bind parseFailedStep with
         | None -> return None
@@ -323,7 +289,7 @@ let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
             let logArgs =
                 $"devops invoke --area build --resource logs --route-parameters project={remote.Project} buildId={buildId} logId={logId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
 
-            let! logOutput = runProcess "az" logArgs
+            let! logOutput = runAz logArgs
 
             let logText =
                 logOutput
@@ -341,7 +307,7 @@ let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
         let args =
             $"devops invoke --area git --resource pullRequestThreads --route-parameters project={remote.Project} repositoryId={remote.Repo} pullRequestId={prId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
 
-        let! output = runProcess "az" args
+        let! output = runAz args
 
         return
             output
@@ -354,7 +320,7 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
         let args =
             $"devops invoke --area build --resource builds --route-parameters project={remote.Project} --query-parameters \"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&$top=10\" --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
 
-        let! output = runProcess "az" args
+        let! output = runAz args
 
         let builds =
             output
@@ -389,7 +355,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
         let args =
             $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status all -o json"
 
-        let! output = runProcess "az" args
+        let! output = runAz args
 
         match output with
         | None -> return Map.empty

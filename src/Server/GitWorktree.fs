@@ -1,8 +1,8 @@
 module Server.GitWorktree
 
 open System
-open System.Diagnostics
 open System.IO
+open Fli
 open Shared
 
 type WorktreeInfo =
@@ -16,39 +16,8 @@ type CommitInfo =
       Time: DateTimeOffset }
 
 let private runGit (workingDir: string) (arguments: string) =
-    async {
-        try
-            let psi =
-                ProcessStartInfo(
-                    "git",
-                    arguments,
-                    WorkingDirectory = workingDir,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                )
-
-            use proc = Process.Start(psi)
-            let! stdout = proc.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
-            let! stderr = proc.StandardError.ReadToEndAsync() |> Async.AwaitTask
-            do! proc.WaitForExitAsync() |> Async.AwaitTask
-            let exitCode = proc.ExitCode
-
-            match exitCode with
-            | 0 ->
-                let trimmed = stdout.TrimEnd()
-                let preview = if trimmed.Length > 200 then trimmed.Substring(0, 200) + "..." else trimmed
-                Log.log "Git" (sprintf "git %s (in %s) -> exit 0, stdout: %s" arguments workingDir preview)
-                return Some trimmed
-            | _ ->
-                Log.log "Git" (sprintf "git %s (in %s) -> exit %d, stderr: %s" arguments workingDir exitCode (stderr.TrimEnd()))
-                return None
-        with
-        | :? System.ComponentModel.Win32Exception as ex ->
-            Log.log "Git" (sprintf "git %s (in %s) -> failed to start: %s" arguments workingDir ex.Message)
-            return None
-    }
+    cli { Exec "git"; Arguments arguments; WorkingDirectory workingDir }
+    |> ProcessRunner.runExec "Git"
 
 let private parseWorktreeList (porcelainOutput: string) =
     porcelainOutput.Split(
