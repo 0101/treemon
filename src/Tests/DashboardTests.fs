@@ -406,3 +406,244 @@ type DashboardTests() =
                 Assert.That(href, Is.Not.Null.And.Not.Empty)
                 Assert.That(href, Does.Contain("pullrequest"))
         }
+
+    [<Test>]
+    member this.``Dark theme: body has dark background color``() =
+        task {
+            let! bgColor = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
+            Assert.That(bgColor, Is.EqualTo("rgb(30, 30, 46)"), "Body background should be #1e1e2e (Catppuccin Mocha base)")
+        }
+
+    [<Test>]
+    member this.``Dark theme: cards have dark background``() =
+        task {
+            let card = this.Page.Locator(".wt-card").First
+            let! cardBg = card.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(cardBg, Is.EqualTo("rgb(42, 42, 60)"), "Card background should be #2a2a3c")
+        }
+
+    [<Test>]
+    member this.``Dark theme: body text is light colored``() =
+        task {
+            let! textColor = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).color")
+            Assert.That(textColor, Is.EqualTo("rgb(205, 214, 244)"), "Body text should be #cdd6f4 (light on dark)")
+        }
+
+    [<Test>]
+    member this.``Header contains folder name with accent styling``() =
+        task {
+            let folderAccent = this.Page.Locator("h1 .folder-accent")
+            let! count = folderAccent.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Header should contain a .folder-accent span")
+
+            let! text = folderAccent.TextContentAsync()
+            Assert.That(text, Is.Not.Empty, "Folder accent text should not be empty")
+            Assert.That(text, Does.StartWith(":"), "Folder accent should start with colon separator")
+
+            let! accentColor = folderAccent.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(accentColor, Is.EqualTo("rgb(137, 180, 250)"), "Folder accent color should be #89b4fa (blue)")
+        }
+
+    [<Test>]
+    member this.``Beads counts use colored numbers not O/P/D prefix``() =
+        task {
+            let beadsCounts = this.Page.Locator(".wt-card .beads-counts").First
+
+            let openSpan = beadsCounts.Locator(".beads-open")
+            let! openText = openSpan.TextContentAsync()
+            Assert.That(openText, Does.Match(@"^\d+$"), "Open count should be a plain number (no 'O:' prefix)")
+
+            let! openColor = openSpan.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(openColor, Is.EqualTo("rgb(249, 226, 175)"), "Open count should be amber (#f9e2af)")
+
+            let inprogressSpan = beadsCounts.Locator(".beads-inprogress")
+            let! inprogressText = inprogressSpan.TextContentAsync()
+            Assert.That(inprogressText, Does.Match(@"^\d+$"), "InProgress count should be a plain number (no 'P:' prefix)")
+
+            let! inprogressColor = inprogressSpan.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(inprogressColor, Is.EqualTo("rgb(137, 180, 250)"), "InProgress count should be blue (#89b4fa)")
+
+            let closedSpan = beadsCounts.Locator(".beads-closed")
+            let! closedText = closedSpan.TextContentAsync()
+            Assert.That(closedText, Does.Match(@"^\d+$"), "Closed count should be a plain number (no 'D:' prefix)")
+
+            let! closedColor = closedSpan.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(closedColor, Is.EqualTo("rgb(166, 227, 161)"), "Closed count should be green (#a6e3a1)")
+        }
+
+    [<Test>]
+    member this.``Progress bar has three colored segments``() =
+        task {
+            let progressBar = this.Page.Locator(".wt-card .progress-bar").First
+
+            let segOpen = progressBar.Locator(".progress-segment.seg-open")
+            let! openCount = segOpen.CountAsync()
+            Assert.That(openCount, Is.EqualTo(1), "Progress bar should have a seg-open segment")
+
+            let segInprogress = progressBar.Locator(".progress-segment.seg-inprogress")
+            let! ipCount = segInprogress.CountAsync()
+            Assert.That(ipCount, Is.EqualTo(1), "Progress bar should have a seg-inprogress segment")
+
+            let segClosed = progressBar.Locator(".progress-segment.seg-closed")
+            let! closedCount = segClosed.CountAsync()
+            Assert.That(closedCount, Is.EqualTo(1), "Progress bar should have a seg-closed segment")
+
+            let! openBg = segOpen.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(openBg, Is.EqualTo("rgb(249, 226, 175)"), "seg-open background should be amber")
+
+            let! ipBg = segInprogress.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(ipBg, Is.EqualTo("rgb(137, 180, 250)"), "seg-inprogress background should be blue")
+
+            let! closedBg = segClosed.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(closedBg, Is.EqualTo("rgb(166, 227, 161)"), "seg-closed background should be green")
+        }
+
+    [<Test>]
+    member this.``Main-behind indicator present on cards``() =
+        task {
+            let mainBehindElements = this.Page.Locator(".wt-card .main-behind")
+            let! count = mainBehindElements.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "At least one card should have a main-behind indicator")
+
+            let! text = mainBehindElements.First.TextContentAsync()
+            Assert.That(
+                text,
+                Does.Contain("behind main").Or.EqualTo("up to date"),
+                "Main-behind indicator should show 'N behind main' or 'up to date'"
+            )
+        }
+
+    [<Test>]
+    member this.``Main-behind up-to-date has correct CSS class``() =
+        task {
+            let upToDate = this.Page.Locator(".wt-card .main-behind.up-to-date")
+            let! count = upToDate.CountAsync()
+
+            if count > 0 then
+                let! text = upToDate.First.TextContentAsync()
+                Assert.That(text, Is.EqualTo("up to date"))
+
+                let! color = upToDate.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
+                Assert.That(color, Is.EqualTo("rgb(127, 132, 156)"), "up-to-date should be muted gray (#7f849c)")
+        }
+
+    [<Test>]
+    member this.``Main-behind warning style for high behind count``() =
+        task {
+            let behindWarning = this.Page.Locator(".wt-card .main-behind.behind-warning")
+            let! count = behindWarning.CountAsync()
+
+            if count > 0 then
+                let! text = behindWarning.First.TextContentAsync()
+                Assert.That(text, Does.Contain("behind main"))
+
+                let! color = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
+                Assert.That(color, Is.EqualTo("rgb(243, 139, 168)"), "behind-warning should be red (#f38ba8)")
+
+                let! fontWeight = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).fontWeight")
+                Assert.That(fontWeight, Is.EqualTo("600").Or.EqualTo("bold"), "behind-warning should have bold font weight")
+        }
+
+    [<Test>]
+    member this.``Compact mode shows main-behind indicator``() =
+        task {
+            let compactBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+            do! compactBtn.ClickAsync()
+
+            let mainBehind = this.Page.Locator(".wt-card.compact .main-behind")
+            let! count = mainBehind.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Compact cards should also show main-behind indicator")
+        }
+
+    [<Test>]
+    member this.``Last commit message does not show merge commits``() =
+        task {
+            let commitLines = this.Page.Locator(".wt-card .commit-line")
+            let! count = commitLines.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1))
+
+            let mutable allNonMerge = true
+            let mutable idx = 0
+            let maxIdx = count - 1
+
+            while idx <= maxIdx do
+                let! text = commitLines.Nth(idx).TextContentAsync()
+                if text.StartsWith("Merge branch") || text.StartsWith("Merge pull request") then
+                    allNonMerge <- false
+                idx <- idx + 1
+
+            Assert.That(allNonMerge, Is.True, "Commit messages should not show merge commits (using --first-parent --no-merges)")
+        }
+
+    [<Test>]
+    member this.``Beads separator uses muted color``() =
+        task {
+            let sep = this.Page.Locator(".wt-card .beads-counts .beads-sep").First
+            let! color = sep.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(color, Is.EqualTo("rgb(88, 91, 112)"), "Separator should be muted (#585b70)")
+        }
+
+    [<Test>]
+    member this.``Multiple build badges can appear on a single PR card``() =
+        task {
+            let prCards = this.Page.Locator(".wt-card:has(.pr-badge:not(.merged))")
+            let! prCardCount = prCards.CountAsync()
+
+            if prCardCount > 0 then
+                let allBadges = prCards.First.Locator(".build-badge")
+                let! badgeCount = allBadges.CountAsync()
+                Assert.That(badgeCount, Is.GreaterThanOrEqualTo(1), "PR card should have at least one build badge")
+        }
+
+    [<Test>]
+    member this.``All build badges are links to Azure DevOps build results``() =
+        task {
+            let buildLinks = this.Page.Locator(".wt-card a.build-badge")
+            let! count = buildLinks.CountAsync()
+
+            if count > 0 then
+                let! allValid =
+                    task {
+                        let mutable valid = true
+                        let mutable idx = 0
+
+                        while idx < count do
+                            let! href = buildLinks.Nth(idx).GetAttributeAsync("href")
+                            if href = null || not (href.Contains("dev.azure.com")) || not (href.Contains("_build/results")) then
+                                valid <- false
+                            let! target = buildLinks.Nth(idx).GetAttributeAsync("target")
+                            if target <> "_blank" then
+                                valid <- false
+                            idx <- idx + 1
+
+                        return valid
+                    }
+
+                Assert.That(allValid, Is.True, "Every build badge link should point to dev.azure.com with _build/results path and target=_blank")
+        }
+
+    [<Test>]
+    member this.``Build badges contain pipeline name text``() =
+        task {
+            let buildBadges = this.Page.Locator(".wt-card .build-badge")
+            let! count = buildBadges.CountAsync()
+
+            if count > 0 then
+                let! allHaveText =
+                    task {
+                        let mutable valid = true
+                        let mutable idx = 0
+
+                        while idx < count do
+                            let! text = buildBadges.Nth(idx).TextContentAsync()
+                            if System.String.IsNullOrWhiteSpace(text) then
+                                valid <- false
+                            idx <- idx + 1
+
+                        return valid
+                    }
+
+                Assert.That(allHaveText, Is.True, "Every build badge should have non-empty text content")
+        }
