@@ -21,8 +21,8 @@ src/Client/output/
 
 # Production deployment
 wwwroot/
-.mait.pid
-.mait.config
+.treemon.pid
+.treemon.config
 
 # bv (beads viewer) local config and caches
 .bv/

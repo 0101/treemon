@@ -386,7 +386,7 @@ let view model dispatch =
                         prop.children [
                             Html.h1 [
                                 prop.children [
-                                    Html.text "Worktree Monitor"
+                                    Html.text "Treemon"
                                     match model.RootFolderName with
                                     | "" -> Html.none
                                     | name ->

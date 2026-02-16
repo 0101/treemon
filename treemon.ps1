@@ -9,15 +9,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
-$PidFile = Join-Path $ScriptDir ".mait.pid"
-$ConfigFile = Join-Path $ScriptDir ".mait.config"
+$PidFile = Join-Path $ScriptDir ".treemon.pid"
+$ConfigFile = Join-Path $ScriptDir ".treemon.config"
 $LogDir = Join-Path $ScriptDir "logs"
-$LogFile = Join-Path $LogDir "mait-prod.log"
+$LogFile = Join-Path $LogDir "treemon-prod.log"
 $WwwRoot = Join-Path $ScriptDir "wwwroot"
 $DefaultPort = 5000
 
 if (-not $Command) {
-    Write-Host "Usage: .\mait.ps1 <command> [worktree-root]" -ForegroundColor Cyan
+    Write-Host "Usage: .\treemon.ps1 <command> [worktree-root]" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Commands:" -ForegroundColor White
     Write-Host "  start <path>   Start production server (auto-builds if wwwroot/ is empty)"
@@ -77,7 +77,7 @@ function Start-ProductionServer([string]$Root) {
     if ($runningPid) {
         Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
         Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
-        Write-Host "Use '.\mait.ps1 stop' first or '.\mait.ps1 restart'" -ForegroundColor Gray
+        Write-Host "Use '.\treemon.ps1 stop' first or '.\treemon.ps1 restart'" -ForegroundColor Gray
         return
     }
 
@@ -90,10 +90,10 @@ function Start-ProductionServer([string]$Root) {
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath "dotnet" `
-        -ArgumentList "run", "--project", (Join-Path $ScriptDir "src/Server"), "--", $Root, "--port", $DefaultPort `
+        -ArgumentList "run", "-c", "Release", "--project", (Join-Path $ScriptDir "src/Server"), "--", $Root, "--port", $DefaultPort `
         -WorkingDirectory $ScriptDir `
         -RedirectStandardOutput $LogFile `
-        -RedirectStandardError (Join-Path $LogDir "mait-prod-stderr.log") `
+        -RedirectStandardError (Join-Path $LogDir "treemon-prod-stderr.log") `
         -NoNewWindow:$false `
         -WindowStyle Hidden `
         -PassThru
@@ -253,7 +253,7 @@ switch ($Command) {
                 Write-Host "Using previously configured worktree root: $WorktreeRoot" -ForegroundColor Gray
             } else {
                 Write-Host "Error: worktree root path is required for first start" -ForegroundColor Red
-                Write-Host "Usage: .\mait.ps1 start <worktree-root-path>" -ForegroundColor Gray
+                Write-Host "Usage: .\treemon.ps1 start <worktree-root-path>" -ForegroundColor Gray
                 exit 1
             }
         }
@@ -295,7 +295,7 @@ switch ($Command) {
                 Write-Host "Using previously configured worktree root: $WorktreeRoot" -ForegroundColor Gray
             } else {
                 Write-Host "Error: worktree root path is required for first dev start" -ForegroundColor Red
-                Write-Host "Usage: .\mait.ps1 dev <worktree-root-path>" -ForegroundColor Gray
+                Write-Host "Usage: .\treemon.ps1 dev <worktree-root-path>" -ForegroundColor Gray
                 exit 1
             }
         }

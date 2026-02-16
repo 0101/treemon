@@ -1,4 +1,4 @@
-# mait — Git Worktree Monitor Dashboard
+# mait — Treemon Dashboard
 
 ## Goals
 
@@ -12,13 +12,13 @@ For detailed requirements, expected behavior, and design decisions see `docs/spe
 ## Quick Reference
 
 ```
-.\mait.ps1 start "Q:\code\AITestAgent"   # production server (port 5000, serves wwwroot/)
-.\mait.ps1 stop                          # stop production
-.\mait.ps1 restart                       # restart production
-.\mait.ps1 status                        # show PID, port, uptime
-.\mait.ps1 log                           # tail production log
-.\mait.ps1 dev "Q:\code\AITestAgent"     # dev mode (server :5001 + Vite :5174)
-.\mait.ps1 deploy                        # build frontend → wwwroot/, restart prod if running
+.\treemon.ps1 start "Q:\code\AITestAgent"   # production server (port 5000, serves wwwroot/)
+.\treemon.ps1 stop                          # stop production
+.\treemon.ps1 restart                       # restart production
+.\treemon.ps1 status                        # show PID, port, uptime
+.\treemon.ps1 log                           # tail production log
+.\treemon.ps1 dev "Q:\code\AITestAgent"     # dev mode (server :5001 + Vite :5174)
+.\treemon.ps1 deploy                        # build frontend → wwwroot/, restart prod if running
 dotnet test src/Tests/Tests.fsproj        # E2E tests (Playwright, auto-starts dev servers)
 ```
 
@@ -31,7 +31,7 @@ Only deploy after all Playwright E2E tests pass (`dotnet test src/Tests/Tests.fs
 
 ```
 dotnet test src/Tests/Tests.fsproj    # must pass first
-.\mait.ps1 deploy                    # builds frontend, copies to wwwroot/, restarts prod
+.\treemon.ps1 deploy                    # builds frontend, copies to wwwroot/, restarts prod
 ```
 
 `deploy` rebuilds the frontend (`npm run build`), copies `dist/*` to `wwwroot/`, and restarts the production server if it's running. The server uses `dotnet run` so backend changes are also picked up on restart.
@@ -68,7 +68,7 @@ src/
     DashboardTests.fs      — Playwright E2E tests
 docs/spec/
   worktree-monitor.md     — full specification
-mait.ps1                  — production lifecycle + dev mode + deploy
+treemon.ps1                  — production lifecycle + dev mode + deploy
 vite.config.js            — Vite config with API proxy (ports via env vars)
 mait.slnx                 — .NET 9 solution file (.slnx format)
 ```
