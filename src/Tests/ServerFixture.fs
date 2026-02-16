@@ -13,6 +13,9 @@ let private repoRoot =
 let private serverProjectPath =
     Path.Combine(repoRoot, "src", "Server")
 
+let private fixturesPath =
+    Path.Combine(repoRoot, "src", "Tests", "fixtures", "worktrees.json")
+
 let private worktreeRoot = @"Q:\code\AITestAgent"
 
 let private serverProcess: Process option ref = ref None
@@ -90,7 +93,7 @@ let startServer () =
         let proc =
             startProcess
                 "dotnet"
-                (sprintf "run --project \"%s\" -- \"%s\" --port 5001" serverProjectPath worktreeRoot)
+                (sprintf "run --project \"%s\" -- \"%s\" --port 5001 --test-fixtures \"%s\"" serverProjectPath worktreeRoot fixturesPath)
                 repoRoot
                 []
 

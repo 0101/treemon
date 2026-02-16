@@ -2,7 +2,18 @@ module Server.WorktreeApi
 
 open System
 open System.Diagnostics
+open System.IO
 open Shared
+open Newtonsoft.Json
+
+type FixtureData =
+    { Worktrees: WorktreeResponse
+      SyncStatus: Map<string, CardEvent list> }
+
+let private loadFixtures (path: string) =
+    let json = File.ReadAllText(path)
+    let converter = Fable.Remoting.Json.FableJsonConverter()
+    JsonConvert.DeserializeObject<FixtureData>(json, converter)
 
 let private isStale (status: WorktreeStatus) =
     let twentyFourHoursAgo = DateTimeOffset.UtcNow.AddHours(-24.0)
@@ -107,71 +118,81 @@ let private openTerminal (worktreeRoot: string) (path: string) =
             Process.Start(startInfo) |> ignore
     }
 
-let worktreeApi (worktreeRoot: string) : IWorktreeApi =
-    { getWorktrees = fun () -> getWorktrees worktreeRoot
-      openTerminal = openTerminal worktreeRoot
-      startSync = fun branch ->
-          async {
-              let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktreeApi =
+    let fixtures = testFixtures |> Option.map loadFixtures
 
-              let worktreePath =
-                  worktrees
-                  |> List.tryFind (fun wt -> wt.Branch = Some branch)
-                  |> Option.map (fun wt -> wt.Path)
+    match fixtures with
+    | Some f ->
+        { getWorktrees = fun () -> async { return f.Worktrees }
+          openTerminal = fun _ -> async { return () }
+          startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
+          cancelSync = fun _ -> async { return () }
+          getSyncStatus = fun () -> async { return f.SyncStatus } }
+    | None ->
+        { getWorktrees = fun () -> getWorktrees worktreeRoot
+          openTerminal = openTerminal worktreeRoot
+          startSync = fun branch ->
+              async {
+                  let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
 
-              match worktreePath with
-              | None -> return Error (sprintf "No worktree found for branch '%s'" branch)
-              | Some path ->
-                  match SyncEngine.beginSync branch with
-                  | Error msg -> return Error msg
-                  | Ok ct ->
-                      Async.Start(SyncEngine.executeSyncPipeline branch path ct, ct)
-                      return Ok ()
-          }
-      cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
-      getSyncStatus = fun () ->
-          async {
-              let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+                  let worktreePath =
+                      worktrees
+                      |> List.tryFind (fun wt -> wt.Branch = Some branch)
+                      |> Option.map (fun wt -> wt.Path)
 
-              let branchToPath =
-                  worktrees
-                  |> List.choose (fun wt ->
-                      wt.Branch |> Option.map (fun b -> b, wt.Path))
-                  |> Map.ofList
+                  match worktreePath with
+                  | None -> return Error (sprintf "No worktree found for branch '%s'" branch)
+                  | Some path ->
+                      match SyncEngine.beginSync branch with
+                      | Error msg -> return Error msg
+                      | Ok ct ->
+                          Async.Start(SyncEngine.executeSyncPipeline branch path ct, ct)
+                          return Ok ()
+              }
+          cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
+          getSyncStatus = fun () ->
+              async {
+                  let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
 
-              let syncEvents = SyncEngine.getAllEvents ()
+                  let branchToPath =
+                      worktrees
+                      |> List.choose (fun wt ->
+                          wt.Branch |> Option.map (fun b -> b, wt.Path))
+                      |> Map.ofList
 
-              let allBranches =
-                  [ yield! syncEvents |> Map.keys
-                    yield! branchToPath |> Map.keys ]
-                  |> List.distinct
+                  let syncEvents = SyncEngine.getAllEvents ()
 
-              return
-                  allBranches
-                  |> List.choose (fun branch ->
-                      let syncEvts =
-                          syncEvents
-                          |> Map.tryFind branch
-                          |> Option.defaultValue []
+                  let allBranches =
+                      [ yield! syncEvents |> Map.keys
+                        yield! branchToPath |> Map.keys ]
+                      |> List.distinct
 
-                      let claudeEvt =
-                          branchToPath
-                          |> Map.tryFind branch
-                          |> Option.bind ClaudeStatus.Cache.getCachedLastMessage
+                  return
+                      allBranches
+                      |> List.choose (fun branch ->
+                          let syncEvts =
+                              syncEvents
+                              |> Map.tryFind branch
+                              |> Option.defaultValue []
 
-                      let merged =
-                          match claudeEvt with
-                          | Some evt -> evt :: syncEvts
-                          | None -> syncEvts
+                          let claudeEvt =
+                              branchToPath
+                              |> Map.tryFind branch
+                              |> Option.bind ClaudeStatus.Cache.getCachedLastMessage
 
-                      match merged with
-                      | [] -> None
-                      | events ->
-                          let top3 =
-                              events
-                              |> List.sortByDescending (fun e -> e.Timestamp)
-                              |> List.truncate 3
+                          let merged =
+                              match claudeEvt with
+                              | Some evt -> evt :: syncEvts
+                              | None -> syncEvts
 
-                          Some(branch, top3))
-                  |> Map.ofList
-          } }
+                          match merged with
+                          | [] -> None
+                          | events ->
+                              let top3 =
+                                  events
+                                  |> List.sortByDescending (fun e -> e.Timestamp)
+                                  |> List.truncate 3
+
+                              Some(branch, top3))
+                      |> Map.ofList
+              } }

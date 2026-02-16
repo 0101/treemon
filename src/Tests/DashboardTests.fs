@@ -828,3 +828,335 @@ type DashboardTests() =
 
                 Assert.That(allHaveText, Is.True, "Every build badge should have non-empty text content")
         }
+
+    [<Test>]
+    member this.``Sync button appears when MainBehindCount is greater than zero``() =
+        task {
+            let behindCards = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
+            let! behindCount = behindCards.CountAsync()
+
+            if behindCount > 0 then
+                let syncBtns = behindCards.First.Locator(".sync-btn, .sync-cancel-btn")
+                let! btnCount = syncBtns.CountAsync()
+                Assert.That(btnCount, Is.EqualTo(1), "Cards with MainBehindCount > 0 should show a sync button or cancel button")
+            else
+                Assert.Pass("No cards currently behind main; skipping sync button visibility test")
+        }
+
+    [<Test>]
+    member this.``Sync button hidden when MainBehindCount is zero``() =
+        task {
+            let upToDateRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind.up-to-date)")
+            let! count = upToDateRows.CountAsync()
+
+            if count > 0 then
+                let syncBtns = upToDateRows.First.Locator(".sync-btn, .sync-cancel-btn")
+                let! btnCount = syncBtns.CountAsync()
+                Assert.That(btnCount, Is.EqualTo(0), "Cards with MainBehindCount = 0 should not show a sync button")
+            else
+                Assert.Pass("No up-to-date cards currently; skipping sync button hidden test")
+        }
+
+    [<Test>]
+    member this.``Sync button disabled when Claude is Active``() =
+        task {
+            let activeCards = this.Page.Locator(".wt-card.cc-active:not(.compact)")
+            let! activeCount = activeCards.CountAsync()
+
+            if activeCount > 0 then
+                let behindRow = activeCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+                let! behindCount = behindRow.CountAsync()
+
+                if behindCount > 0 then
+                    let syncBtn = behindRow.Locator(".sync-btn")
+                    let! btnCount = syncBtn.CountAsync()
+
+                    if btnCount > 0 then
+                        let! cssClass = syncBtn.GetAttributeAsync("class")
+                        Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Active")
+
+                        let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
+                        Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Active")
+
+                        let! title = syncBtn.GetAttributeAsync("title")
+                        Assert.That(title, Is.EqualTo("Claude is active"), "Disabled sync button should show 'Claude is active' tooltip")
+                    else
+                        Assert.Pass("Active Claude card is syncing (cancel button shown); skipping disabled check")
+                else
+                    Assert.Pass("Active Claude card is up-to-date; skipping disabled button check")
+            else
+                Assert.Pass("No cards with Active Claude status; skipping disabled button test")
+        }
+
+    [<Test>]
+    member this.``Sync button disabled when Claude is Recent``() =
+        task {
+            let recentCards = this.Page.Locator(".wt-card.cc-recent:not(.compact)")
+            let! recentCount = recentCards.CountAsync()
+
+            if recentCount > 0 then
+                let behindRow = recentCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+                let! behindCount = behindRow.CountAsync()
+
+                if behindCount > 0 then
+                    let syncBtn = behindRow.Locator(".sync-btn")
+                    let! btnCount = syncBtn.CountAsync()
+
+                    if btnCount > 0 then
+                        let! cssClass = syncBtn.GetAttributeAsync("class")
+                        Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Recent")
+
+                        let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
+                        Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Recent")
+                    else
+                        Assert.Pass("Recent Claude card is syncing; skipping disabled check")
+                else
+                    Assert.Pass("Recent Claude card is up-to-date; skipping disabled button check")
+            else
+                Assert.Pass("No cards with Recent Claude status; skipping disabled button test")
+        }
+
+    [<Test>]
+    member this.``Sync button has correct CSS classes and styling``() =
+        task {
+            let syncBtns = this.Page.Locator(".wt-card:not(.compact) .sync-btn")
+            let! count = syncBtns.CountAsync()
+
+            if count > 0 then
+                let btn = syncBtns.First
+                let! text = btn.TextContentAsync()
+                Assert.That(text, Is.EqualTo("Sync"), "Sync button text should be 'Sync'")
+
+                let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
+                let! cssClass = btn.GetAttributeAsync("class")
+                let isDisabled = cssClass.Contains("disabled")
+                match isDisabled with
+                | true ->
+                    Assert.That(cursor, Is.EqualTo("not-allowed"), "Disabled sync button should have not-allowed cursor")
+                | false ->
+                    Assert.That(cursor, Is.EqualTo("pointer"), "Enabled sync button should have pointer cursor")
+            else
+                Assert.Pass("No sync buttons visible; skipping styling test")
+        }
+
+    [<Test>]
+    member this.``Event log renders on full cards when events exist``() =
+        task {
+            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            let! count = eventLogs.CountAsync()
+
+            if count > 0 then
+                let entries = eventLogs.First.Locator(".event-entry")
+                let! entryCount = entries.CountAsync()
+                Assert.That(entryCount, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
+                    "Event log should show between 1 and 3 entries")
+
+                let firstEntry = entries.First
+                let source = firstEntry.Locator(".event-source")
+                let! sourceCount = source.CountAsync()
+                Assert.That(sourceCount, Is.EqualTo(1), "Each event entry should have an event-source")
+
+                let message = firstEntry.Locator(".event-message")
+                let! messageCount = message.CountAsync()
+                Assert.That(messageCount, Is.EqualTo(1), "Each event entry should have an event-message")
+            else
+                Assert.Pass("No event logs currently visible; this is expected when no sync has run and no Claude messages exist")
+        }
+
+    [<Test>]
+    member this.``Event log has correct DOM structure``() =
+        task {
+            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            let! count = eventLogs.CountAsync()
+
+            if count > 0 then
+                let log = eventLogs.First
+
+                let! borderTop = log.EvaluateAsync<string>("el => getComputedStyle(el).borderTopStyle")
+                Assert.That(borderTop, Is.EqualTo("solid"), "Event log should have a top border separator")
+
+                let entries = log.Locator(".event-entry")
+                let! entryCount = entries.CountAsync()
+                Assert.That(entryCount, Is.LessThanOrEqualTo(3), "Event log should show at most 3 entries")
+
+                let! display = log.EvaluateAsync<string>("el => getComputedStyle(el).display")
+                Assert.That(display, Is.EqualTo("flex"), "Event log should use flex layout")
+
+                let! flexDir = log.EvaluateAsync<string>("el => getComputedStyle(el).flexDirection")
+                Assert.That(flexDir, Is.EqualTo("column"), "Event log should use column flex direction")
+            else
+                Assert.Pass("No event logs visible; skipping DOM structure test")
+        }
+
+    [<Test>]
+    member this.``Event status badges have correct CSS classes when present``() =
+        task {
+            let statusBadges = this.Page.Locator(".wt-card .event-status")
+            let! count = statusBadges.CountAsync()
+
+            if count > 0 then
+                let! cssClass = statusBadges.First.GetAttributeAsync("class")
+                Assert.That(
+                    cssClass,
+                    Does.Contain("running")
+                        .Or.Contain("success")
+                        .Or.Contain("failed")
+                        .Or.Contain("cancelled"),
+                    "Event status badge should have a status CSS class"
+                )
+            else
+                Assert.Pass("No event status badges visible; skipping CSS class test")
+        }
+
+    [<Test>]
+    member this.``Sync button hidden in compact mode``() =
+        task {
+            let compactBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+            do! compactBtn.ClickAsync()
+
+            let syncBtns = this.Page.Locator(".wt-card.compact .sync-btn")
+            let! syncCount = syncBtns.CountAsync()
+            Assert.That(syncCount, Is.EqualTo(0), "Sync buttons should not appear in compact mode")
+
+            let cancelBtns = this.Page.Locator(".wt-card.compact .sync-cancel-btn")
+            let! cancelCount = cancelBtns.CountAsync()
+            Assert.That(cancelCount, Is.EqualTo(0), "Cancel buttons should not appear in compact mode")
+        }
+
+    [<Test>]
+    member this.``Event log hidden in compact mode``() =
+        task {
+            let compactBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+            do! compactBtn.ClickAsync()
+
+            let eventLogs = this.Page.Locator(".wt-card.compact .event-log")
+            let! count = eventLogs.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Event logs should not appear in compact mode")
+        }
+
+    [<Test>]
+    member this.``Main-behind-row contains sync button next to behind text``() =
+        task {
+            let behindRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
+            let! count = behindRows.CountAsync()
+
+            if count > 0 then
+                let btns = behindRows.First.Locator(".sync-btn, .sync-cancel-btn")
+                let! btnCount = btns.CountAsync()
+                Assert.That(btnCount, Is.EqualTo(1), "Behind-main row should contain exactly one sync/cancel button")
+            else
+                Assert.Pass("No cards currently behind main; skipping sync button layout test")
+        }
+
+    [<Test>]
+    member this.``Cancel button appears with correct CSS class``() =
+        task {
+            let cancelBtns = this.Page.Locator(".wt-card .sync-cancel-btn")
+            let! count = cancelBtns.CountAsync()
+
+            if count > 0 then
+                let! text = cancelBtns.First.TextContentAsync()
+                Assert.That(text, Is.EqualTo("Cancel"), "Cancel button text should be 'Cancel'")
+
+                let! borderColor = cancelBtns.First.EvaluateAsync<string>("el => getComputedStyle(el).borderColor")
+                Assert.That(borderColor, Does.Contain("rgb(243, 139, 168)"), "Cancel button border should be red (#f38ba8)")
+            else
+                Assert.Pass("No cancel buttons visible (no sync in progress); skipping cancel button test")
+        }
+
+    [<Test>]
+    member this.``Compact mode uses mainBehindIndicator without sync button``() =
+        task {
+            let compactBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+            do! compactBtn.ClickAsync()
+
+            let mainBehind = this.Page.Locator(".wt-card.compact .main-behind")
+            let! count = mainBehind.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Compact cards should show main-behind indicator")
+
+            let mainBehindRow = this.Page.Locator(".wt-card.compact .main-behind-row")
+            let! rowCount = mainBehindRow.CountAsync()
+            Assert.That(rowCount, Is.EqualTo(0), "Compact cards should not use main-behind-row (no sync button row)")
+        }
+
+    [<Test>]
+    member this.``PWA manifest link exists in DOM``() =
+        task {
+            let manifestLink = this.Page.Locator("link[rel='manifest']")
+            let! count = manifestLink.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Page should have exactly one <link rel='manifest'> element")
+
+            let! href = manifestLink.GetAttributeAsync("href")
+            Assert.That(href, Is.EqualTo("/manifest.webmanifest"), "Manifest link href should be '/manifest.webmanifest'")
+        }
+
+    [<Test>]
+    member this.``PWA manifest endpoint returns 200 with correct content``() =
+        task {
+            use client = new System.Net.Http.HttpClient()
+            let! response = client.GetAsync(sprintf "%s/manifest.webmanifest" baseUrl)
+            Assert.That(int response.StatusCode, Is.EqualTo(200), "GET /manifest.webmanifest should return 200")
+
+            let! body = response.Content.ReadAsStringAsync()
+            Assert.That(body, Does.Contain("\"name\": \"mait\""), "Manifest should contain app name 'mait'")
+            Assert.That(body, Does.Contain("\"short_name\": \"mait\""), "Manifest should contain short_name 'mait'")
+            Assert.That(body, Does.Contain("\"display\": \"standalone\""), "Manifest should specify standalone display mode")
+            Assert.That(body, Does.Contain("\"start_url\": \"/\""), "Manifest should have start_url '/'")
+            Assert.That(body, Does.Contain("\"theme_color\": \"#1e1e2e\""), "Manifest theme_color should match Catppuccin Mocha base")
+            Assert.That(body, Does.Contain("\"background_color\": \"#1e1e2e\""), "Manifest background_color should match body background")
+            Assert.That(body, Does.Contain("icon-192.png"), "Manifest should reference 192x192 icon")
+            Assert.That(body, Does.Contain("icon-512.png"), "Manifest should reference 512x512 icon")
+        }
+
+    [<Test>]
+    member this.``PWA theme-color meta tag exists``() =
+        task {
+            let themeColor = this.Page.Locator("meta[name='theme-color']")
+            let! count = themeColor.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Page should have exactly one <meta name='theme-color'> element")
+
+            let! content = themeColor.GetAttributeAsync("content")
+            Assert.That(content, Is.EqualTo("#1e1e2e"), "Theme-color meta should be '#1e1e2e'")
+        }
+
+    [<Test>]
+    member this.``PWA service worker registration script exists``() =
+        task {
+            let! swRegistered =
+                this.Page.EvaluateAsync<bool>("() => 'serviceWorker' in navigator")
+            Assert.That(swRegistered, Is.True, "Browser should support serviceWorker API")
+
+            let! registrations =
+                this.Page.EvaluateAsync<int>("async () => { const regs = await navigator.serviceWorker.getRegistrations(); return regs.length; }")
+            Assert.That(registrations, Is.GreaterThanOrEqualTo(1), "At least one service worker should be registered")
+        }
+
+    [<Test>]
+    member this.``PWA service worker endpoint returns 200``() =
+        task {
+            use client = new System.Net.Http.HttpClient()
+            let! response = client.GetAsync(sprintf "%s/sw.js" baseUrl)
+            Assert.That(int response.StatusCode, Is.EqualTo(200), "GET /sw.js should return 200")
+
+            let! body = response.Content.ReadAsStringAsync()
+            Assert.That(body, Does.Contain("install"), "Service worker should have install handler")
+            Assert.That(body, Does.Contain("activate"), "Service worker should have activate handler")
+        }
+
+    [<Test>]
+    member this.``PWA icon files are accessible``() =
+        task {
+            use client = new System.Net.Http.HttpClient()
+
+            let! response192 = client.GetAsync(sprintf "%s/icon-192.png" baseUrl)
+            Assert.That(int response192.StatusCode, Is.EqualTo(200), "GET /icon-192.png should return 200")
+
+            let! response512 = client.GetAsync(sprintf "%s/icon-512.png" baseUrl)
+            Assert.That(int response512.StatusCode, Is.EqualTo(200), "GET /icon-512.png should return 200")
+        }

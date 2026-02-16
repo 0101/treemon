@@ -1,0 +1,239 @@
+{
+  "Worktrees": {
+    "RootFolderName": "TestProject",
+    "Worktrees": [
+      {
+        "Path": "Q:/code/TestProject/feature-active",
+        "Branch": "feature-active",
+        "Head": "a1b2c3d",
+        "LastCommitMessage": "Add comprehensive input validation",
+        "LastCommitTime": "2026-02-16T22:30:00+00:00",
+        "UpstreamBranch": "refs/heads/feature-active",
+        "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
+        "Claude": "Active",
+        "Pr": {
+          "HasPr": {
+            "Id": 101,
+            "Title": "Add input validation layer",
+            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/101",
+            "IsDraft": false,
+            "ThreadCounts": { "Unresolved": 2, "Total": 7 },
+            "Builds": [
+              {
+                "Name": "CI Pipeline",
+                "Status": "Succeeded",
+                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5001",
+                "Failure": null
+              },
+              {
+                "Name": "Integration Tests",
+                "Status": "Failed",
+                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5002",
+                "Failure": {
+                  "StepName": "Run tests",
+                  "Log": "3 tests failed: TestA, TestB, TestC"
+                }
+              }
+            ],
+            "IsMerged": false
+          }
+        },
+        "IsStale": false,
+        "MainBehindCount": 25
+      },
+      {
+        "Path": "Q:/code/TestProject/feature-recent",
+        "Branch": "feature-recent",
+        "Head": "d4e5f6a",
+        "LastCommitMessage": "Refactor data access layer for clarity",
+        "LastCommitTime": "2026-02-16T22:00:00+00:00",
+        "UpstreamBranch": "refs/heads/feature-recent",
+        "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
+        "Claude": "Recent",
+        "Pr": {
+          "HasPr": {
+            "Id": 102,
+            "Title": "Refactor data access layer",
+            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/102",
+            "IsDraft": false,
+            "ThreadCounts": { "Unresolved": 0, "Total": 3 },
+            "Builds": [
+              {
+                "Name": "CI Pipeline",
+                "Status": "Building",
+                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5003",
+                "Failure": null
+              }
+            ],
+            "IsMerged": false
+          }
+        },
+        "IsStale": false,
+        "MainBehindCount": 5
+      },
+      {
+        "Path": "Q:/code/TestProject/feature-idle",
+        "Branch": "feature-idle",
+        "Head": "b7c8d9e",
+        "LastCommitMessage": "Complete logging improvements",
+        "LastCommitTime": "2026-02-16T20:00:00+00:00",
+        "UpstreamBranch": "refs/heads/feature-idle",
+        "Beads": { "Open": 0, "InProgress": 0, "Closed": 3 },
+        "Claude": "Idle",
+        "Pr": "NoPr",
+        "IsStale": false,
+        "MainBehindCount": 0
+      },
+      {
+        "Path": "Q:/code/TestProject/feature-stale",
+        "Branch": "feature-stale",
+        "Head": "e0f1a2b",
+        "LastCommitMessage": "Initial experiment with caching",
+        "LastCommitTime": "2026-02-10T08:00:00+00:00",
+        "UpstreamBranch": null,
+        "Beads": { "Open": 1, "InProgress": 0, "Closed": 0 },
+        "Claude": "Idle",
+        "Pr": "NoPr",
+        "IsStale": true,
+        "MainBehindCount": 42
+      },
+      {
+        "Path": "Q:/code/TestProject/feature-merged",
+        "Branch": "feature-merged",
+        "Head": "c3d4e5f",
+        "LastCommitMessage": "Final cleanup before merge",
+        "LastCommitTime": "2026-02-15T16:00:00+00:00",
+        "UpstreamBranch": "refs/heads/feature-merged",
+        "Beads": { "Open": 0, "InProgress": 0, "Closed": 8 },
+        "Claude": "Unknown",
+        "Pr": {
+          "HasPr": {
+            "Id": 99,
+            "Title": "Implement caching layer",
+            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/99",
+            "IsDraft": false,
+            "ThreadCounts": { "Unresolved": 0, "Total": 12 },
+            "Builds": [
+              {
+                "Name": "CI Pipeline",
+                "Status": "Succeeded",
+                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=4999",
+                "Failure": null
+              }
+            ],
+            "IsMerged": true
+          }
+        },
+        "IsStale": false,
+        "MainBehindCount": 0
+      },
+      {
+        "Path": "Q:/code/TestProject/feature-draft",
+        "Branch": "feature-draft",
+        "Head": "f6a7b8c",
+        "LastCommitMessage": "Wire up API endpoints for new feature",
+        "LastCommitTime": "2026-02-16T21:00:00+00:00",
+        "UpstreamBranch": "refs/heads/feature-draft",
+        "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
+        "Claude": "Active",
+        "Pr": {
+          "HasPr": {
+            "Id": 103,
+            "Title": "WIP: New reporting module",
+            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/103",
+            "IsDraft": true,
+            "ThreadCounts": { "Unresolved": 1, "Total": 1 },
+            "Builds": [
+              {
+                "Name": "CI Pipeline",
+                "Status": "PartiallySucceeded",
+                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5004",
+                "Failure": null
+              },
+              {
+                "Name": "Deploy Preview",
+                "Status": "Canceled",
+                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5005",
+                "Failure": null
+              }
+            ],
+            "IsMerged": false
+          }
+        },
+        "IsStale": false,
+        "MainBehindCount": 2
+      },
+      {
+        "Path": "Q:/code/TestProject/feature-unknown",
+        "Branch": "feature-unknown",
+        "Head": "d9e0f1a",
+        "LastCommitMessage": "Update configuration defaults",
+        "LastCommitTime": "2026-02-16T18:00:00+00:00",
+        "UpstreamBranch": null,
+        "Beads": { "Open": 2, "InProgress": 0, "Closed": 0 },
+        "Claude": "Unknown",
+        "Pr": "NoPr",
+        "IsStale": false,
+        "MainBehindCount": 10
+      }
+    ],
+    "SyncTimes": {
+      "Git": "2026-02-16T22:55:00+00:00",
+      "Beads": "2026-02-16T22:54:00+00:00",
+      "Claude": "2026-02-16T22:53:00+00:00",
+      "Pr": "2026-02-16T22:50:00+00:00"
+    }
+  },
+  "SyncStatus": {
+    "feature-active": [
+      {
+        "Source": "claude",
+        "Message": "Implementing input validation for user forms",
+        "Timestamp": "2026-02-16T22:30:00+00:00",
+        "Status": null
+      },
+      {
+        "Source": "sync",
+        "Message": "Merge main",
+        "Timestamp": "2026-02-16T20:00:00+00:00",
+        "Status": "Succeeded"
+      }
+    ],
+    "feature-recent": [
+      {
+        "Source": "claude",
+        "Message": "Refactoring complete, running tests",
+        "Timestamp": "2026-02-16T22:00:00+00:00",
+        "Status": null
+      },
+      {
+        "Source": "sync",
+        "Message": "Pull",
+        "Timestamp": "2026-02-16T21:30:00+00:00",
+        "Status": "Running"
+      },
+      {
+        "Source": "sync",
+        "Message": "Check clean",
+        "Timestamp": "2026-02-16T21:29:00+00:00",
+        "Status": "Succeeded"
+      }
+    ],
+    "feature-draft": [
+      {
+        "Source": "sync",
+        "Message": "Merge main",
+        "Timestamp": "2026-02-16T19:00:00+00:00",
+        "Status": {
+          "Failed": "Merge conflict in src/Api/Routes.fs"
+        }
+      },
+      {
+        "Source": "claude",
+        "Message": "Setting up API route handlers",
+        "Timestamp": "2026-02-16T18:30:00+00:00",
+        "Status": null
+      }
+    ]
+  }
+}
