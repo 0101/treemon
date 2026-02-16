@@ -184,9 +184,12 @@ let buildBadge (repoName: string) (build: BuildInfo) =
     | Some status ->
         let abbreviated = abbreviatePipelineName repoName build.Name
         let text =
-            match abbreviated with
-            | "" -> status
-            | name -> sprintf "%s: %s" name status
+            match build.Failure with
+            | Some f -> sprintf "%s: %s" f.StepName status
+            | None ->
+                match abbreviated with
+                | "" -> status
+                | name -> sprintf "%s: %s" name status
         let className =
             match build.Status with
             | Building -> "build-badge building"
@@ -195,6 +198,10 @@ let buildBadge (repoName: string) (build: BuildInfo) =
             | PartiallySucceeded -> "build-badge partial"
             | Canceled -> "build-badge canceled"
             | NoBuild -> "build-badge"
+        let tooltip =
+            match build.Failure with
+            | Some f when f.Log.Length > 0 -> Some f.Log
+            | _ -> None
         match build.Url with
         | Some url ->
             Interop.createElement "a" [
@@ -202,9 +209,18 @@ let buildBadge (repoName: string) (build: BuildInfo) =
                 prop.text text
                 prop.href url
                 prop.target "_blank"
+                match tooltip with
+                | Some t -> prop.title t
+                | None -> ()
             ]
         | None ->
-            Html.span [ prop.className className; prop.text text ]
+            Html.span [
+                prop.className className
+                prop.text text
+                match tooltip with
+                | Some t -> prop.title t
+                | None -> ()
+            ]
 
 let buildBadges (repoName: string) (builds: BuildInfo list) =
     React.fragment (builds |> List.map (buildBadge repoName))

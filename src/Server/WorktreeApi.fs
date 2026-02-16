@@ -62,6 +62,7 @@ let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =
 
         let! statuses =
             worktrees
+            |> List.filter (fun w -> w.Branch <> Some "main")
             |> List.map (assembleWorktreeStatus worktreeRoot prMap)
             |> Async.Parallel
 

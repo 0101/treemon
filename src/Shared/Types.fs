@@ -25,10 +25,15 @@ type ThreadCounts =
     { Unresolved: int
       Total: int }
 
+type BuildFailure =
+    { StepName: string
+      Log: string }
+
 type BuildInfo =
     { Name: string
       Status: BuildStatus
-      Url: string option }
+      Url: string option
+      Failure: BuildFailure option }
 
 type PrStatus =
     | NoPr

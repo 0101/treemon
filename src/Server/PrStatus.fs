@@ -227,10 +227,13 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
         |> Option.map (fun id ->
             sprintf "https://dev.azure.com/%s/%s/_build/results?buildId=%d" remote.Org remote.Project id)
 
-    { Name = name
-      Status = parseBuildRun run
-      Url = url },
-    definitionId
+    let info =
+        { Name = name
+          Status = parseBuildRun run
+          Url = url
+          Failure = None }
+
+    info, definitionId, buildId
 
 let private parseBuilds (remote: AzDoRemote) (json: string) =
     try
@@ -239,13 +242,99 @@ let private parseBuilds (remote: AzDoRemote) (json: string) =
 
         runs
         |> List.map (parseBuildInfo remote)
-        |> List.choose (fun (info, defId) ->
-            defId |> Option.map (fun id -> id, info))
+        |> List.choose (fun (info, defId, buildId) ->
+            defId |> Option.map (fun defId -> defId, (info, buildId)))
         |> List.distinctBy fst
         |> List.map snd
     with ex ->
         Log.log "PR" $"Failed to parse build status JSON: {ex.Message}"
         []
+
+let private parseFailedStep (json: string) =
+    try
+        let doc = JsonDocument.Parse(json)
+        let records = doc.RootElement.GetProperty("records").EnumerateArray() |> Seq.toList
+
+        records
+        |> List.tryFind (fun r ->
+            let isTask =
+                match r.TryGetProperty("type") with
+                | true, v -> v.GetString() = "Task"
+                | _ -> false
+            let isFailed =
+                match r.TryGetProperty("result") with
+                | true, v -> v.GetString() = "failed"
+                | _ -> false
+            isTask && isFailed)
+        |> Option.bind (fun r ->
+            let name =
+                match r.TryGetProperty("name") with
+                | true, v -> v.GetString()
+                | _ -> "Unknown step"
+            let logId =
+                match r.TryGetProperty("log") with
+                | true, log ->
+                    match log.TryGetProperty("id") with
+                    | true, id -> Some(id.GetInt32())
+                    | _ -> None
+                | _ -> None
+            logId |> Option.map (fun id -> name, id))
+    with ex ->
+        Log.log "PR" $"Failed to parse build timeline: {ex.Message}"
+        None
+
+let private parseBuildLog (json: string) =
+    try
+        let doc = JsonDocument.Parse(json)
+
+        let lines =
+            doc.RootElement.GetProperty("value").EnumerateArray()
+            |> Seq.map (fun el -> el.GetString())
+            |> Seq.toList
+
+        let trimmedLines =
+            lines
+            |> List.map (fun line ->
+                match line.IndexOf(" ") with
+                | i when i > 20 -> line.Substring(i + 1)
+                | _ -> line)
+
+        let tail =
+            trimmedLines
+            |> List.rev
+            |> List.truncate 50
+            |> List.rev
+
+        Some(String.concat Environment.NewLine tail)
+    with ex ->
+        Log.log "PR" $"Failed to parse build log: {ex.Message}"
+        None
+
+let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
+    async {
+        let timelineArgs =
+            $"devops invoke --area build --resource timeline --route-parameters project={remote.Project} buildId={buildId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+
+        let! timelineOutput = runProcess "az" timelineArgs
+
+        match timelineOutput |> Option.bind parseFailedStep with
+        | None -> return None
+        | Some(stepName, logId) ->
+            let logArgs =
+                $"devops invoke --area build --resource logs --route-parameters project={remote.Project} buildId={buildId} logId={logId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+
+            let! logOutput = runProcess "az" logArgs
+
+            let logText =
+                logOutput
+                |> Option.bind parseBuildLog
+                |> Option.defaultValue ""
+
+            return
+                Some
+                    { StepName = stepName
+                      Log = logText }
+    }
 
 let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
     async {
@@ -267,10 +356,24 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
 
         let! output = runProcess "az" args
 
-        return
+        let builds =
             output
             |> Option.map (parseBuilds remote)
             |> Option.defaultValue []
+
+        let! enriched =
+            builds
+            |> List.map (fun (build, buildId) ->
+                async {
+                    match build.Status, buildId with
+                    | BuildStatus.Failed, Some id ->
+                        let! failure = fetchBuildFailure remote id
+                        return { build with Failure = failure }
+                    | _ -> return build
+                })
+            |> Async.Parallel
+
+        return enriched |> Array.toList
     }
 
 let private firstPerBranch (prs: ParsedPr list) =
