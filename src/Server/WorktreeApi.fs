@@ -112,7 +112,21 @@ let worktreeApi (worktreeRoot: string) : IWorktreeApi =
       openTerminal = openTerminal worktreeRoot
       startSync = fun branch ->
           async {
-              return SyncEngine.beginSync branch |> Result.map ignore
+              let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+
+              let worktreePath =
+                  worktrees
+                  |> List.tryFind (fun wt -> wt.Branch = Some branch)
+                  |> Option.map (fun wt -> wt.Path)
+
+              match worktreePath with
+              | None -> return Error (sprintf "No worktree found for branch '%s'" branch)
+              | Some path ->
+                  match SyncEngine.beginSync branch with
+                  | Error msg -> return Error msg
+                  | Ok ct ->
+                      Async.Start(SyncEngine.executeSyncPipeline branch path ct, ct)
+                      return Ok ()
           }
       cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
       getSyncStatus = fun () -> async { return SyncEngine.getAllEvents () } }

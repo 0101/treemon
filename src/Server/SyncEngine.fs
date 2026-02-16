@@ -3,6 +3,7 @@ module Server.SyncEngine
 open System
 open System.Collections.Concurrent
 open System.Diagnostics
+open System.IO
 open System.Threading
 open Shared
 
@@ -181,3 +182,142 @@ let cancelSync (branch: string) =
             completeSync branch StepStatus.Cancelled
         | _ -> ()
     | false, _ -> ()
+
+let private readTreemonConfig (worktreePath: string) : string option =
+    let configPath = Path.Combine(worktreePath, ".treemon.json")
+
+    match File.Exists(configPath) with
+    | false -> None
+    | true ->
+        try
+            let json = File.ReadAllText(configPath)
+            let doc = System.Text.Json.JsonDocument.Parse(json)
+
+            match doc.RootElement.TryGetProperty("testSolution") with
+            | true, elem -> Some(elem.GetString())
+            | false, _ -> None
+        with ex ->
+            Log.log "SyncEngine" (sprintf "Failed to read .treemon.json: %s" ex.Message)
+            None
+
+let private runStep
+    (branch: string)
+    (step: SyncStep)
+    (worktreePath: string)
+    (fileName: string)
+    (arguments: string)
+    (ct: CancellationToken)
+    : Async<Result<ProcessResult, StepStatus>> =
+    async {
+        updateState branch (SyncState.Running step)
+        addStepEvent branch step StepStatus.Running (sprintf "%s %s" fileName arguments)
+
+        let! result = runProcess worktreePath fileName arguments ct
+
+        match result with
+        | Error msg ->
+            let status = StepStatus.Failed msg
+            addStepEvent branch step status msg
+            return Error status
+        | Ok proc when proc.ExitCode <> 0 ->
+            let msg =
+                match proc.Stderr with
+                | "" -> sprintf "exit %d" proc.ExitCode
+                | stderr -> sprintf "exit %d: %s" proc.ExitCode (stderr.Substring(0, min 200 stderr.Length))
+
+            let status = StepStatus.Failed msg
+            addStepEvent branch step status msg
+            return Error status
+        | Ok proc ->
+            addStepEvent branch step StepStatus.Succeeded "success"
+            return Ok proc
+    }
+
+let executeSyncPipeline (branch: string) (worktreePath: string) (ct: CancellationToken) : Async<unit> =
+    async {
+        try
+            Log.log "SyncEngine" (sprintf "Starting sync pipeline for %s at %s" branch worktreePath)
+
+            // Step 1: Check clean
+            let! checkResult = runStep branch SyncStep.CheckClean worktreePath "git" "status --porcelain" ct
+
+            match checkResult with
+            | Error status ->
+                completeSync branch status
+                return ()
+            | Ok proc when proc.Stdout <> "" ->
+                let status = StepStatus.Failed "Working tree is dirty"
+                addStepEvent branch SyncStep.CheckClean status "Working tree is dirty"
+                completeSync branch status
+                return ()
+            | Ok _ ->
+
+            // Step 2: Pull
+            let! pullResult = runStep branch SyncStep.Pull worktreePath "git" "pull --ff-only" ct
+
+            match pullResult with
+            | Error status ->
+                completeSync branch status
+                return ()
+            | Ok _ ->
+
+            // Step 3: Merge
+            updateState branch (SyncState.Running SyncStep.Merge)
+            addStepEvent branch SyncStep.Merge StepStatus.Running "git merge origin/main"
+
+            let! mergeResult = runProcess worktreePath "git" "merge origin/main" ct
+
+            match mergeResult with
+            | Error msg ->
+                let status = StepStatus.Failed msg
+                addStepEvent branch SyncStep.Merge status msg
+                completeSync branch status
+                return ()
+            | Ok mergeProc ->
+
+            match mergeProc.ExitCode with
+            | 0 ->
+                addStepEvent branch SyncStep.Merge StepStatus.Succeeded "success"
+            | _ ->
+                // Step 4: Conflict resolution
+                let mergeMsg =
+                    match mergeProc.Stderr with
+                    | "" -> sprintf "exit %d" mergeProc.ExitCode
+                    | stderr -> sprintf "exit %d: %s" mergeProc.ExitCode (stderr.Substring(0, min 200 stderr.Length))
+
+                addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) mergeMsg
+
+                let! conflictResult =
+                    runStep
+                        branch
+                        SyncStep.ResolveConflicts
+                        worktreePath
+                        "claude"
+                        "-p \"/conflict\" --dangerously-skip-permissions"
+                        ct
+
+                match conflictResult with
+                | Error status ->
+                    completeSync branch status
+                    return ()
+                | Ok _ -> ()
+
+            // Step 5: Test (optional, from .treemon.json)
+            match readTreemonConfig worktreePath with
+            | None ->
+                Log.log "SyncEngine" (sprintf "No .treemon.json found, skipping test step for %s" branch)
+            | Some solutionPath ->
+                let! testResult =
+                    runStep branch SyncStep.Test worktreePath "dotnet" (sprintf "test %s" solutionPath) ct
+
+                match testResult with
+                | Error status ->
+                    completeSync branch status
+                    return ()
+                | Ok _ -> ()
+
+            completeSync branch StepStatus.Succeeded
+            Log.log "SyncEngine" (sprintf "Sync pipeline completed successfully for %s" branch)
+        with :? OperationCanceledException ->
+            Log.log "SyncEngine" (sprintf "Sync pipeline cancelled for %s" branch)
+    }
