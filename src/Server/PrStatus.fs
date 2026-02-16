@@ -2,8 +2,8 @@ module Server.PrStatus
 
 open System
 open System.Collections.Concurrent
+open System.IO
 open System.Text.Json
-open Fli
 open Shared
 
 type AzDoRemote =
@@ -39,13 +39,29 @@ let parseAzureDevOpsUrl (url: string) =
         Log.log "PR" $"Failed to parse Azure DevOps URL '{url}': {ex.Message}"
         None
 
+let private azPythonExe =
+    lazy
+        let azCmd =
+            (Environment.GetEnvironmentVariable("PATH") |> Option.ofObj |> Option.defaultValue "").Split(Path.PathSeparator)
+            |> Array.tryPick (fun dir ->
+                let candidate = Path.Combine(dir, "az.cmd")
+                if File.Exists(candidate) then Some candidate else None)
+
+        azCmd
+        |> Option.bind (fun cmd ->
+            let python = Path.Combine(Path.GetDirectoryName(cmd), "..", "python.exe") |> Path.GetFullPath
+            if File.Exists(python) then Some python else None)
+
 let private runAz (arguments: string) =
-    cli { Exec "az.cmd"; Arguments arguments }
-    |> ProcessRunner.runExec "PR"
+    match azPythonExe.Value with
+    | Some python ->
+        ProcessRunner.run "PR" python $"-IBm azure.cli {arguments}"
+    | None ->
+        Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
+        async { return None }
 
 let getRemoteUrl (repoRoot: string) =
-    cli { Exec "git"; Arguments $"""-C "{repoRoot}" remote get-url origin""" }
-    |> ProcessRunner.runExec "PR"
+    ProcessRunner.run "PR" "git" $"""-C "{repoRoot}" remote get-url origin"""
 
 type private ParsedPr =
     { BranchName: string

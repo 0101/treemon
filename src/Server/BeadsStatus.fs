@@ -4,12 +4,10 @@ open System
 open System.Collections.Concurrent
 open System.IO
 open System.Text.Json
-open Fli
 open Shared
 
 let private runBd (dbPath: string) =
-    cli { Exec "bd"; Arguments [| "count"; "--by-status"; "--json"; "--db"; dbPath |] }
-    |> ProcessRunner.runExec "Beads"
+    ProcessRunner.run "Beads" "bd" $"count --by-status --json --db \"{dbPath}\""
 
 let private parseCountResponse (json: string) =
     try

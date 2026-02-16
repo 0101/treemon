@@ -17,7 +17,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Fli" Version="1.111.11" />
     <PackageReference Include="Saturn" Version="0.17.0" />
     <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
   </ItemGroup>

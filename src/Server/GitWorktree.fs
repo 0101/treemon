@@ -2,7 +2,6 @@ module Server.GitWorktree
 
 open System
 open System.IO
-open Fli
 open Shared
 
 type WorktreeInfo =
@@ -16,8 +15,7 @@ type CommitInfo =
       Time: DateTimeOffset }
 
 let private runGit (workingDir: string) (arguments: string) =
-    cli { Exec "git"; Arguments arguments; WorkingDirectory workingDir }
-    |> ProcessRunner.runExec "Git"
+    ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
 
 let private parseWorktreeList (porcelainOutput: string) =
     porcelainOutput.Split(
