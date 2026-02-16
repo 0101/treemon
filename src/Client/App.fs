@@ -15,7 +15,8 @@ type Model =
       IsLoading: bool
       HasError: bool
       SortMode: SortMode
-      IsCompact: bool }
+      IsCompact: bool
+      SyncTimes: SyncTimes option }
 
 type Msg =
     | DataLoaded of WorktreeResponse
@@ -38,7 +39,8 @@ let init () =
       IsLoading = true
       HasError = false
       SortMode = ByName
-      IsCompact = false },
+      IsCompact = false
+      SyncTimes = None },
     fetchWorktrees ()
 
 let sortWorktrees sortMode worktrees =
@@ -55,7 +57,8 @@ let update msg model =
             Worktrees = sortWorktrees model.SortMode response.Worktrees
             RootFolderName = response.RootFolderName
             IsLoading = false
-            HasError = false },
+            HasError = false
+            SyncTimes = Some response.SyncTimes },
         Cmd.none
 
     | DataFailed _ ->
@@ -99,6 +102,32 @@ let relativeTime (dt: System.DateTimeOffset) =
     | d when d.TotalMinutes < 60.0 -> sprintf "%dm ago" (int d.TotalMinutes)
     | d when d.TotalHours < 24.0 -> sprintf "%dh ago" (int d.TotalHours)
     | d -> sprintf "%dd ago" (int d.TotalDays)
+
+let syncAgeText (label: string) (time: System.DateTimeOffset option) =
+    match time with
+    | Some dt ->
+        let diff = System.DateTimeOffset.Now - dt
+        let age =
+            match diff with
+            | d when d.TotalSeconds < 60.0 -> sprintf "%ds ago" (int d.TotalSeconds |> max 0)
+            | d when d.TotalMinutes < 60.0 -> sprintf "%dm ago" (int d.TotalMinutes)
+            | d -> sprintf "%dh ago" (int d.TotalHours)
+        sprintf "%s %s" label age
+    | None -> sprintf "%s --" label
+
+let syncFooter (syncTimes: SyncTimes) =
+    Html.div [
+        prop.className "sync-footer"
+        prop.children [
+            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "Git" syncTimes.Git) ]
+            Html.span [ prop.className "sync-sep"; prop.text "\u00b7" ]
+            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "PR" syncTimes.Pr) ]
+            Html.span [ prop.className "sync-sep"; prop.text "\u00b7" ]
+            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "Claude" syncTimes.Claude) ]
+            Html.span [ prop.className "sync-sep"; prop.text "\u00b7" ]
+            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "Beads" syncTimes.Beads) ]
+        ]
+    ]
 
 let ccClassName =
     function
@@ -434,6 +463,10 @@ let view model dispatch =
                 prop.className "card-grid"
                 prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName))
             ]
+
+            match model.SyncTimes with
+            | Some st -> syncFooter st
+            | None -> Html.none
         ]
     ]
 
