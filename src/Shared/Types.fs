@@ -72,6 +72,38 @@ type WorktreeResponse =
       Worktrees: WorktreeStatus list
       SyncTimes: SyncTimes }
 
+[<RequireQualifiedAccess>]
+type SyncStep =
+    | CheckClean
+    | Pull
+    | Merge
+    | ResolveConflicts
+    | Test
+
+[<RequireQualifiedAccess>]
+type StepStatus =
+    | Pending
+    | Running
+    | Succeeded
+    | Failed of message: string
+    | Cancelled
+
+type CardEvent =
+    { Source: string
+      Message: string
+      Timestamp: DateTimeOffset
+      Status: StepStatus option }
+
+[<RequireQualifiedAccess>]
+type SyncState =
+    | Idle
+    | Running of currentStep: SyncStep
+    | Completed of lastResult: StepStatus
+    | Cancelled
+
 type IWorktreeApi =
     { getWorktrees: unit -> Async<WorktreeResponse>
-      openTerminal: string -> Async<unit> }
+      openTerminal: string -> Async<unit>
+      startSync: string -> Async<Result<unit, string>>
+      cancelSync: string -> Async<unit>
+      getSyncStatus: unit -> Async<Map<string, CardEvent list>> }
