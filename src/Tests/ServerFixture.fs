@@ -18,8 +18,8 @@ let private worktreeRoot = @"Q:\code\AITestAgent"
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
 
-let serverUrl = "http://localhost:5000"
-let viteUrl = "http://localhost:5173"
+let serverUrl = "http://localhost:5001"
+let viteUrl = "http://localhost:5174"
 
 let private tryGet (client: HttpClient) (url: string) =
     async {
@@ -52,7 +52,7 @@ let private waitForUrl (url: string) (timeoutMs: int) : Task =
 
     work |> Async.StartAsTask :> Task
 
-let private startProcess (fileName: string) (args: string) (workingDir: string) =
+let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) =
     let isWindows =
         System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
             System.Runtime.InteropServices.OSPlatform.Windows
@@ -74,6 +74,7 @@ let private startProcess (fileName: string) (args: string) (workingDir: string) 
             CreateNoWindow = true
         )
 
+    envVars |> List.iter (fun (k, v) -> psi.Environment.[k] <- v)
     Process.Start(psi)
 
 let startServer () =
@@ -81,8 +82,9 @@ let startServer () =
         let proc =
             startProcess
                 "dotnet"
-                (sprintf "run --project \"%s\" -- \"%s\"" serverProjectPath worktreeRoot)
+                (sprintf "run --project \"%s\" -- \"%s\" --port 5001" serverProjectPath worktreeRoot)
                 repoRoot
+                []
 
         serverProcess.Value <- Some proc
         do! waitForUrl serverUrl 30000
@@ -90,7 +92,9 @@ let startServer () =
 
 let startVite () =
     task {
-        let proc = startProcess "npx" "vite --host" repoRoot
+        let proc =
+            startProcess "npx" "vite --host" repoRoot [ "VITE_PORT", "5174"; "API_PORT", "5001" ]
+
         viteProcess.Value <- Some proc
         do! waitForUrl viteUrl 15000
     }
