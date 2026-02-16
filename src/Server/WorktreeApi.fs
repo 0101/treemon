@@ -129,4 +129,49 @@ let worktreeApi (worktreeRoot: string) : IWorktreeApi =
                       return Ok ()
           }
       cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
-      getSyncStatus = fun () -> async { return SyncEngine.getAllEvents () } }
+      getSyncStatus = fun () ->
+          async {
+              let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+
+              let branchToPath =
+                  worktrees
+                  |> List.choose (fun wt ->
+                      wt.Branch |> Option.map (fun b -> b, wt.Path))
+                  |> Map.ofList
+
+              let syncEvents = SyncEngine.getAllEvents ()
+
+              let allBranches =
+                  [ yield! syncEvents |> Map.keys
+                    yield! branchToPath |> Map.keys ]
+                  |> List.distinct
+
+              return
+                  allBranches
+                  |> List.choose (fun branch ->
+                      let syncEvts =
+                          syncEvents
+                          |> Map.tryFind branch
+                          |> Option.defaultValue []
+
+                      let claudeEvt =
+                          branchToPath
+                          |> Map.tryFind branch
+                          |> Option.bind ClaudeStatus.Cache.getCachedLastMessage
+
+                      let merged =
+                          match claudeEvt with
+                          | Some evt -> evt :: syncEvts
+                          | None -> syncEvts
+
+                      match merged with
+                      | [] -> None
+                      | events ->
+                          let top3 =
+                              events
+                              |> List.sortByDescending (fun e -> e.Timestamp)
+                              |> List.truncate 3
+
+                          Some(branch, top3))
+                  |> Map.ofList
+          } }
