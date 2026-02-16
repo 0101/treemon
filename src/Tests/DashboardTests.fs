@@ -27,8 +27,108 @@ type DashboardTests() =
     member this.``Dashboard loads with title``() =
         task {
             let! heading = this.Page.Locator("h1").TextContentAsync()
-            Assert.That(heading, Does.StartWith("Worktree Monitor"))
+            Assert.That(heading, Does.StartWith("Treemon"))
             Assert.That(heading, Does.Contain(":"))
+        }
+
+    [<Test>]
+    member this.``Page title is Treemon``() =
+        task {
+            let! title = this.Page.TitleAsync()
+            Assert.That(title, Is.EqualTo("Treemon"), "Browser tab title should be 'Treemon'")
+        }
+
+    [<Test>]
+    member this.``Heading text starts with Treemon``() =
+        task {
+            let h1 = this.Page.Locator("h1")
+            let! text = h1.TextContentAsync()
+            Assert.That(text, Does.StartWith("Treemon"), "h1 should start with 'Treemon'")
+            Assert.That(text, Does.Not.Contain("Worktree Monitor"), "h1 should not contain old name 'Worktree Monitor'")
+        }
+
+    [<Test>]
+    member this.``Sync footer is present with per-source ages``() =
+        task {
+            let syncFooter = this.Page.Locator(".sync-footer")
+            let! count = syncFooter.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Sync footer should be present")
+
+            let syncSources = syncFooter.Locator(".sync-source")
+            let! sourceCount = syncSources.CountAsync()
+            Assert.That(sourceCount, Is.EqualTo(4), "Sync footer should show 4 sources (Git, PR, Claude, Beads)")
+
+            let! gitText = syncSources.Nth(0).TextContentAsync()
+            Assert.That(gitText, Does.StartWith("Git"), "First source should be Git")
+            Assert.That(gitText, Does.Contain("ago").Or.Contain("--"), "Git source should show age or '--'")
+
+            let! prText = syncSources.Nth(1).TextContentAsync()
+            Assert.That(prText, Does.StartWith("PR"), "Second source should be PR")
+
+            let! claudeText = syncSources.Nth(2).TextContentAsync()
+            Assert.That(claudeText, Does.StartWith("Claude"), "Third source should be Claude")
+
+            let! beadsText = syncSources.Nth(3).TextContentAsync()
+            Assert.That(beadsText, Does.StartWith("Beads"), "Fourth source should be Beads")
+
+            let syncSeps = syncFooter.Locator(".sync-sep")
+            let! sepCount = syncSeps.CountAsync()
+            Assert.That(sepCount, Is.EqualTo(3), "Sync footer should have 3 separators between 4 sources")
+        }
+
+    [<Test>]
+    member this.``Claude active dot is red``() =
+        task {
+            let activeDots = this.Page.Locator(".cc-dot.active")
+            let! count = activeDots.CountAsync()
+
+            if count > 0 then
+                let! bg = activeDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+                Assert.That(bg, Is.EqualTo("rgb(243, 139, 168)"), "Active CC dot should be red (#f38ba8)")
+
+            let activeCards = this.Page.Locator(".wt-card.cc-active")
+            let! activeCardCount = activeCards.CountAsync()
+
+            if activeCardCount > 0 then
+                let! borderColor = activeCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
+                Assert.That(borderColor, Is.EqualTo("rgb(243, 139, 168)"), "Active card border-left should be red (#f38ba8)")
+        }
+
+    [<Test>]
+    member this.``Claude idle dot is blue``() =
+        task {
+            let idleDots = this.Page.Locator(".cc-dot.idle")
+            let! count = idleDots.CountAsync()
+
+            if count > 0 then
+                let! bg = idleDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+                Assert.That(bg, Is.EqualTo("rgb(137, 180, 250)"), "Idle CC dot should be blue (#89b4fa)")
+
+            let idleCards = this.Page.Locator(".wt-card.cc-idle")
+            let! idleCardCount = idleCards.CountAsync()
+
+            if idleCardCount > 0 then
+                let! borderColor = idleCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
+                Assert.That(borderColor, Is.EqualTo("rgb(137, 180, 250)"), "Idle card border-left should be blue (#89b4fa)")
+        }
+
+    [<Test>]
+    member this.``Claude recent dot remains yellow``() =
+        task {
+            let recentDots = this.Page.Locator(".cc-dot.recent")
+            let! count = recentDots.CountAsync()
+
+            if count > 0 then
+                let! bg = recentDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+                Assert.That(bg, Is.EqualTo("rgb(249, 226, 175)"), "Recent CC dot should remain yellow (#f9e2af)")
+        }
+
+    [<Test>]
+    member this.``Card min-width is 0 for grid truncation``() =
+        task {
+            let card = this.Page.Locator(".wt-card").First
+            let! minWidth = card.EvaluateAsync<string>("el => getComputedStyle(el).minWidth")
+            Assert.That(minWidth, Is.EqualTo("0px"), "Card min-width should be 0 to allow text-overflow ellipsis in grid")
         }
 
     [<Test>]

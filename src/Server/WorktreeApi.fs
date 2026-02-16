@@ -110,6 +110,9 @@ let private openTerminal (worktreeRoot: string) (path: string) =
 let worktreeApi (worktreeRoot: string) : IWorktreeApi =
     { getWorktrees = fun () -> getWorktrees worktreeRoot
       openTerminal = openTerminal worktreeRoot
-      startSync = fun _branch -> async { return Error "Sync not implemented" }
-      cancelSync = fun _branch -> async { return () }
-      getSyncStatus = fun () -> async { return Map.empty } }
+      startSync = fun branch ->
+          async {
+              return SyncEngine.beginSync branch |> Result.map ignore
+          }
+      cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
+      getSyncStatus = fun () -> async { return SyncEngine.getAllEvents () } }
