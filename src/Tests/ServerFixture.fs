@@ -52,21 +52,29 @@ let private waitForUrl (url: string) (timeoutMs: int) : Task =
 
     work |> Async.StartAsTask :> Task
 
-let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) =
-    let isWindows =
-        System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-            System.Runtime.InteropServices.OSPlatform.Windows
-        )
+let private resolveCmdShim (fileName: string) =
+    match Path.GetExtension(fileName) with
+    | "" ->
+        let cmdPath = sprintf "%s.cmd" fileName
 
-    let actualFileName, actualArgs =
-        match isWindows with
-        | true -> "cmd.exe", sprintf "/c %s %s" fileName args
-        | false -> fileName, args
+        match
+            (Environment.GetEnvironmentVariable("PATH") |> Option.ofObj)
+            |> Option.map (fun p -> p.Split(Path.PathSeparator))
+            |> Option.defaultValue [||]
+            |> Array.tryFind (fun dir ->
+                File.Exists(Path.Combine(dir, cmdPath)))
+        with
+        | Some dir -> Path.Combine(dir, cmdPath)
+        | None -> fileName
+    | _ -> fileName
+
+let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) =
+    let resolved = resolveCmdShim fileName
 
     let psi =
         ProcessStartInfo(
-            FileName = actualFileName,
-            Arguments = actualArgs,
+            FileName = resolved,
+            Arguments = args,
             WorkingDirectory = workingDir,
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -105,11 +113,16 @@ let private killProc (procOpt: Process option) =
         try
             if not p.HasExited then
                 p.Kill(entireProcessTree = true)
-                p.WaitForExit(5000) |> ignore
+
+                match p.WaitForExit(10000) with
+                | true -> ()
+                | false ->
+                    TestContext.Error.WriteLine(
+                        sprintf "Process %d did not exit within 10s after Kill" p.Id)
 
             p.Dispose()
-        with
-        | _ -> ())
+        with ex ->
+            TestContext.Error.WriteLine(sprintf "Failed to kill process: %s" ex.Message))
 
 let stopAll () =
     killProc serverProcess.Value
