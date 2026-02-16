@@ -16,7 +16,8 @@ type Model =
       HasError: bool
       SortMode: SortMode
       IsCompact: bool
-      SyncTimes: SyncTimes option }
+      SyncTimes: SyncTimes option
+      BranchEvents: Map<string, CardEvent list> }
 
 type Msg =
     | DataLoaded of WorktreeResponse
@@ -25,6 +26,11 @@ type Msg =
     | ToggleCompact
     | Tick
     | OpenTerminal of string
+    | StartSync of string
+    | SyncStarted of Result<unit, string>
+    | SyncStatusUpdate of Map<string, CardEvent list>
+    | CancelSync of string
+    | SyncTick
 
 let worktreeApi =
     Remoting.createApi ()
@@ -33,6 +39,16 @@ let worktreeApi =
 let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.getWorktrees () DataLoaded DataFailed
 
+let fetchSyncStatus () =
+    Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
+
+let hasSyncRunning (events: Map<string, CardEvent list>) =
+    events
+    |> Map.exists (fun _ evts ->
+        evts
+        |> List.exists (fun e ->
+            e.Status = Some StepStatus.Running))
+
 let init () =
     { Worktrees = []
       RootFolderName = ""
@@ -40,7 +56,8 @@ let init () =
       HasError = false
       SortMode = ByName
       IsCompact = false
-      SyncTimes = None },
+      SyncTimes = None
+      BranchEvents = Map.empty },
     fetchWorktrees ()
 
 let sortWorktrees sortMode worktrees =
@@ -86,13 +103,40 @@ let update msg model =
     | Tick ->
         model, fetchWorktrees ()
 
-let pollingSubscription _model : Sub<Msg> =
-    let pollingEffect (dispatch: Dispatch<Msg>) =
+    | StartSync branch ->
+        model, Cmd.OfAsync.perform worktreeApi.startSync branch SyncStarted
+
+    | SyncStarted _ ->
+        model, fetchSyncStatus ()
+
+    | SyncStatusUpdate events ->
+        { model with BranchEvents = events }, Cmd.none
+
+    | CancelSync branch ->
+        model, Cmd.OfAsync.attempt worktreeApi.cancelSync branch (fun _ -> Tick)
+
+    | SyncTick ->
+        model, fetchSyncStatus ()
+
+let pollingSubscription (model: Model) : Sub<Msg> =
+    let worktreePolling (dispatch: Dispatch<Msg>) =
         let intervalId =
             Fable.Core.JS.setInterval (fun () -> dispatch Tick) 15000
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
-    [ [ "polling" ], pollingEffect ]
+
+    let syncPolling (dispatch: Dispatch<Msg>) =
+        let intervalId =
+            Fable.Core.JS.setInterval (fun () -> dispatch SyncTick) 2000
+        { new System.IDisposable with
+            member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
+
+    match hasSyncRunning model.BranchEvents with
+    | true ->
+        [ [ "polling" ], worktreePolling
+          [ "sync-polling" ], syncPolling ]
+    | false ->
+        [ [ "polling" ], worktreePolling ]
 
 let relativeTime (dt: System.DateTimeOffset) =
     let now = System.DateTimeOffset.Now
@@ -192,6 +236,95 @@ let mainBehindIndicator (count: int) =
         Html.span [
             prop.className (match n > 20 with true -> "main-behind behind-warning" | false -> "main-behind")
             prop.text (sprintf "%d behind main" n)
+        ]
+
+let isBranchSyncing (events: CardEvent list) =
+    events |> List.exists (fun e -> e.Status = Some StepStatus.Running)
+
+let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
+    let syncing = isBranchSyncing branchEvents
+    let claudeBlocked = wt.Claude = Active || wt.Claude = Recent
+    let disabled = syncing || claudeBlocked
+    match syncing with
+    | true ->
+        Html.button [
+            prop.className "sync-cancel-btn"
+            prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
+            prop.text "Cancel"
+        ]
+    | false ->
+        Html.button [
+            prop.className (match disabled with true -> "sync-btn disabled" | false -> "sync-btn")
+            prop.disabled disabled
+            prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync wt.Branch))
+            prop.title (match claudeBlocked with true -> "Claude is active" | false -> "Sync with main")
+            prop.text "Sync"
+        ]
+
+let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
+    match wt.MainBehindCount with
+    | 0 ->
+        Html.div [
+            prop.className "main-behind-row"
+            prop.children [
+                Html.span [
+                    prop.className "main-behind up-to-date"
+                    prop.text "up to date"
+                ]
+            ]
+        ]
+    | n ->
+        Html.div [
+            prop.className "main-behind-row"
+            prop.children [
+                Html.span [
+                    prop.className (match n > 20 with true -> "main-behind behind-warning" | false -> "main-behind")
+                    prop.text (sprintf "%d behind main" n)
+                ]
+                syncButton dispatch wt branchEvents
+            ]
+        ]
+
+let stepStatusClassName (status: StepStatus option) =
+    match status with
+    | Some StepStatus.Running -> "event-status running"
+    | Some StepStatus.Succeeded -> "event-status success"
+    | Some (StepStatus.Failed _) -> "event-status failed"
+    | Some StepStatus.Cancelled -> "event-status cancelled"
+    | Some StepStatus.Pending -> "event-status"
+    | None -> "event-status"
+
+let stepStatusText (status: StepStatus option) =
+    match status with
+    | Some StepStatus.Running -> "running"
+    | Some StepStatus.Succeeded -> "success"
+    | Some (StepStatus.Failed msg) -> match msg with "" -> "failed" | _ -> sprintf "failed: %s" msg
+    | Some StepStatus.Cancelled -> "cancelled"
+    | _ -> ""
+
+let eventLogEntry (evt: CardEvent) =
+    Html.div [
+        prop.className "event-entry"
+        prop.children [
+            Html.span [ prop.className "event-source"; prop.text evt.Source ]
+            Html.span [ prop.className "event-message"; prop.text evt.Message ]
+            match evt.Status with
+            | Some _ ->
+                Html.span [
+                    prop.className (stepStatusClassName evt.Status)
+                    prop.text (stepStatusText evt.Status)
+                ]
+            | None -> Html.none
+        ]
+    ]
+
+let eventLog (events: CardEvent list) =
+    match events with
+    | [] -> Html.none
+    | evts ->
+        Html.div [
+            prop.className "event-log"
+            prop.children (evts |> List.map eventLogEntry)
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
@@ -326,7 +459,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
         ]
     ]
 
-let worktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
+let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt)
         prop.children [
@@ -355,7 +488,7 @@ let worktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
                 ]
             ]
 
-            mainBehindIndicator wt.MainBehindCount
+            mainBehindWithSync dispatch wt branchEvents
 
             match wt.Pr with
             | NoPr -> Html.none
@@ -390,13 +523,16 @@ let worktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
                             buildBadges repoName pr.Builds
                     ]
                 ]
+
+            eventLog branchEvents
         ]
     ]
 
-let renderCard dispatch isCompact repoName =
+let renderCard dispatch isCompact repoName (branchEvents: Map<string, CardEvent list>) (wt: WorktreeStatus) =
+    let events = branchEvents |> Map.tryFind wt.Branch |> Option.defaultValue []
     match isCompact with
-    | true -> compactWorktreeCard dispatch repoName
-    | false -> worktreeCard dispatch repoName
+    | true -> compactWorktreeCard dispatch repoName wt
+    | false -> worktreeCard dispatch repoName events wt
 
 let sortLabel =
     function
@@ -461,7 +597,7 @@ let view model dispatch =
 
             Html.div [
                 prop.className "card-grid"
-                prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName))
+                prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
             ]
 
             match model.SyncTimes with

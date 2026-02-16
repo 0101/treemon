@@ -110,6 +110,37 @@
         .sync-footer { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 0 4px; font-size: 0.78em; color: #585b70; }
         .sync-source { white-space: nowrap; }
         .sync-sep { color: #45475a; }
+
+        .main-behind-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        .main-behind-row .main-behind { margin-bottom: 0; }
+
+        .sync-btn {
+            background: #313244; border: 1px solid #89b4fa; border-radius: 4px;
+            color: #89b4fa; cursor: pointer; font-family: inherit; font-size: 0.78em;
+            padding: 1px 8px; line-height: 1.3; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+        }
+        .sync-btn:hover { background: #2e3452; }
+        .sync-btn.disabled { opacity: 0.4; cursor: not-allowed; border-color: #585b70; color: #585b70; }
+
+        .sync-cancel-btn {
+            background: #3b2030; border: 1px solid #f38ba8; border-radius: 4px;
+            color: #f38ba8; cursor: pointer; font-family: inherit; font-size: 0.78em;
+            padding: 1px 8px; line-height: 1.3; transition: background 0.15s;
+        }
+        .sync-cancel-btn:hover { background: #4a2540; }
+
+        .event-log {
+            margin-top: 8px; padding-top: 6px; border-top: 1px solid #313244;
+            display: flex; flex-direction: column; gap: 3px; font-size: 0.78em;
+        }
+        .event-entry { display: flex; align-items: center; gap: 6px; overflow: hidden; }
+        .event-source { color: #7f849c; white-space: nowrap; flex-shrink: 0; }
+        .event-message { color: #a6adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+        .event-status { padding: 0 4px; border-radius: 3px; font-size: 0.9em; white-space: nowrap; flex-shrink: 0; }
+        .event-status.running { background: #2e3452; color: #89b4fa; }
+        .event-status.success { background: #1e3a2f; color: #a6e3a1; }
+        .event-status.failed { background: #3b2030; color: #f38ba8; }
+        .event-status.cancelled { background: #3a3020; color: #f9e2af; }
     </style>
 </head>
 <body>
