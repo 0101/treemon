@@ -76,6 +76,7 @@ function Start-ProductionServer([string]$Root) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
         Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
+        Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
         Write-Host "Use '.\mait.ps1 stop' first or '.\mait.ps1 restart'" -ForegroundColor Gray
         return
     }
