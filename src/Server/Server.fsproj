@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="ProcessRunner.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeStatus.fs" />
@@ -16,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Fli" Version="1.111.11" />
     <PackageReference Include="Saturn" Version="0.17.0" />
     <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
   </ItemGroup>
