@@ -148,7 +148,7 @@ module Cache =
 
 let isDirty (worktreePath: string) =
     async {
-        let! output = runGit worktreePath "status --porcelain"
+        let! output = runGit worktreePath "status --porcelain -uno"
 
         return
             output
