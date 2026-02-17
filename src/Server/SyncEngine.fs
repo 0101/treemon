@@ -234,15 +234,16 @@ let private runStep
     (ct: CancellationToken)
     : Async<Result<ProcessResult, StepStatus>> =
     async {
+        let cmdString = $"{fileName} {arguments}"
         updateState branch (SyncState.Running step)
-        addStepEvent branch step StepStatus.Running $"{fileName} {arguments}"
+        addStepEvent branch step StepStatus.Running cmdString
 
         let! result = runProcess worktreePath fileName arguments ct
 
         match result with
         | Error msg ->
             let status = StepStatus.Failed msg
-            addStepEvent branch step status msg
+            addStepEvent branch step status cmdString
             return Error status
         | Ok proc when proc.ExitCode <> 0 ->
             let msg =
@@ -251,10 +252,10 @@ let private runStep
                 | stderr -> $"exit {proc.ExitCode}: {stderr.[..min 199 (stderr.Length - 1)]}"
 
             let status = StepStatus.Failed msg
-            addStepEvent branch step status msg
+            addStepEvent branch step status cmdString
             return Error status
         | Ok proc ->
-            addStepEvent branch step StepStatus.Succeeded "success"
+            addStepEvent branch step StepStatus.Succeeded cmdString
             return Ok proc
     }
 
@@ -272,7 +273,7 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                 return ()
             | Ok proc when proc.Stdout <> "" ->
                 let status = StepStatus.Failed "Working tree is dirty"
-                addStepEvent branch SyncStep.CheckClean status "Working tree is dirty"
+                addStepEvent branch SyncStep.CheckClean status "git status --porcelain --untracked-files=no"
                 completeSync branch status
                 return ()
             | Ok _ ->
@@ -295,14 +296,14 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
             match mergeResult with
             | Error msg ->
                 let status = StepStatus.Failed msg
-                addStepEvent branch SyncStep.Merge status msg
+                addStepEvent branch SyncStep.Merge status "git merge origin/main"
                 completeSync branch status
                 return ()
             | Ok mergeProc ->
 
             match mergeProc.ExitCode with
             | 0 ->
-                addStepEvent branch SyncStep.Merge StepStatus.Succeeded "success"
+                addStepEvent branch SyncStep.Merge StepStatus.Succeeded "git merge origin/main"
             | _ ->
                 // Step 4: Conflict resolution
                 let mergeMsg =
@@ -310,7 +311,7 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                     | "" -> $"exit {mergeProc.ExitCode}"
                     | stderr -> $"exit {mergeProc.ExitCode}: {stderr.[..min 199 (stderr.Length - 1)]}"
 
-                addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) mergeMsg
+                addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) "git merge origin/main"
 
                 let! conflictResult =
                     runStep
