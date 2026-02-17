@@ -18,7 +18,8 @@ type Model =
       SortMode: SortMode
       IsCompact: bool
       SyncTimes: SyncTimes option
-      BranchEvents: Map<string, CardEvent list> }
+      BranchEvents: Map<string, CardEvent list>
+      AppVersion: string option }
 
 type Msg =
     | DataLoaded of WorktreeResponse
@@ -60,7 +61,8 @@ let init () =
       SortMode = ByName
       IsCompact = false
       SyncTimes = None
-      BranchEvents = Map.empty },
+      BranchEvents = Map.empty
+      AppVersion = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let sortWorktrees sortMode worktrees =
@@ -73,13 +75,19 @@ let sortWorktrees sortMode worktrees =
 let update msg model =
     match msg with
     | DataLoaded response ->
-        { model with
-            Worktrees = sortWorktrees model.SortMode response.Worktrees
-            RootFolderName = response.RootFolderName
-            IsLoading = false
-            HasError = false
-            SyncTimes = Some response.SyncTimes },
-        Cmd.none
+        match model.AppVersion with
+        | Some v when v <> response.AppVersion ->
+            Dom.window.location.reload ()
+            model, Cmd.none
+        | _ ->
+            { model with
+                Worktrees = sortWorktrees model.SortMode response.Worktrees
+                RootFolderName = response.RootFolderName
+                IsLoading = false
+                HasError = false
+                SyncTimes = Some response.SyncTimes
+                AppVersion = Some response.AppVersion },
+            Cmd.none
 
     | DataFailed _ ->
         { model with
