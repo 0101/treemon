@@ -147,6 +147,15 @@ let updateState (branch: string) (state: SyncState) =
     | true, _ -> updateProcess branch (fun sp -> { sp with State = state })
     | false, _ -> ()
 
+let private clearRunningEvents (branch: string) =
+    branchEvents.AddOrUpdate(
+        branch,
+        [],
+        fun _ existing ->
+            existing
+            |> List.filter (fun evt -> evt.Status <> Some StepStatus.Running))
+    |> ignore
+
 let completeSync (branch: string) (result: StepStatus) =
     match syncProcesses.TryGetValue(branch) with
     | true, sp ->
@@ -154,6 +163,8 @@ let completeSync (branch: string) (result: StepStatus) =
             match result with
             | StepStatus.Cancelled -> SyncState.Cancelled
             | _ -> SyncState.Completed result
+
+        clearRunningEvents branch
 
         updateProcess branch (fun s ->
             { s with
