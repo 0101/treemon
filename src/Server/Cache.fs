@@ -43,5 +43,23 @@ type TtlCache<'T>(ttl: TimeSpan) =
         |> Seq.sortBy id
         |> Seq.tryHead
 
+    member _.TryGetOrRefreshInBackground key (defaultValue: 'T) (compute: string -> Async<'T>) =
+        let now = DateTimeOffset.UtcNow
+
+        match store.TryGetValue(key) with
+        | true, entry when now - entry.CachedAt < ttl -> entry.Value
+        | true, entry ->
+            Async.Start(async {
+                let! value = compute key
+                store.[key] <- { Value = value; CachedAt = DateTimeOffset.UtcNow }
+            })
+            entry.Value
+        | false, _ ->
+            Async.Start(async {
+                let! value = compute key
+                store.[key] <- { Value = value; CachedAt = DateTimeOffset.UtcNow }
+            })
+            defaultValue
+
     member _.Invalidate (key: string) =
         store.TryRemove(key) |> ignore

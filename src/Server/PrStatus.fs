@@ -405,18 +405,23 @@ let fetchPrStatuses (remote: AzDoRemote) =
 module Cache =
     let private cache = Cache.TtlCache<Map<string, PrStatus>>(TimeSpan.FromSeconds(120.0))
 
+    let private computePrStatuses (key: string) =
+        async {
+            let! remoteUrl = getRemoteUrl key
+
+            let remote =
+                remoteUrl |> Option.bind parseAzureDevOpsUrl
+
+            match remote with
+            | None -> return Map.empty
+            | Some r -> return! fetchPrStatuses r
+        }
+
     let getCachedPrStatuses (repoRoot: string) =
-        cache.GetOrRefreshAsync repoRoot (fun key ->
-            async {
-                let! remoteUrl = getRemoteUrl key
+        cache.GetOrRefreshAsync repoRoot computePrStatuses
 
-                let remote =
-                    remoteUrl |> Option.bind parseAzureDevOpsUrl
-
-                match remote with
-                | None -> return Map.empty
-                | Some r -> return! fetchPrStatuses r
-            })
+    let tryGetCachedPrStatuses (repoRoot: string) =
+        cache.TryGetOrRefreshInBackground repoRoot Map.empty computePrStatuses
 
     let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
 
