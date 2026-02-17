@@ -51,11 +51,21 @@ function Get-RunningPid {
     return $null
 }
 
-function Ensure-WwwRoot {
-    $hasContent = (Test-Path $WwwRoot) -and @(Get-ChildItem $WwwRoot -File -Recurse).Count -gt 0
-    if ($hasContent) { return }
+function Resolve-WorktreeRoot([string]$Cmd) {
+    if ($WorktreeRoot) { return $WorktreeRoot }
 
-    Write-Host "wwwroot/ is empty, building frontend..." -ForegroundColor Yellow
+    $config = Get-SavedConfig
+    if ($config) {
+        Write-Host "Using previously configured worktree root: $($config.WorktreeRoot)" -ForegroundColor Gray
+        return $config.WorktreeRoot
+    }
+
+    Write-Host "Error: worktree root path is required for first $Cmd" -ForegroundColor Red
+    Write-Host "Usage: .\treemon.ps1 $Cmd <worktree-root-path>" -ForegroundColor Gray
+    exit 1
+}
+
+function Build-Frontend {
     Push-Location $ScriptDir
     try {
         npm run build
@@ -65,11 +75,20 @@ function Ensure-WwwRoot {
         if (-not (Test-Path $distDir)) { throw "dist/ not found after build" }
 
         if (-not (Test-Path $WwwRoot)) { New-Item -ItemType Directory -Path $WwwRoot | Out-Null }
+        Get-ChildItem $WwwRoot -Recurse | Remove-Item -Recurse -Force
         Copy-Item -Path (Join-Path $distDir "*") -Destination $WwwRoot -Recurse -Force
-        Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
     } finally {
         Pop-Location
     }
+}
+
+function Ensure-WwwRoot {
+    $hasContent = (Test-Path $WwwRoot) -and @(Get-ChildItem $WwwRoot -File -Recurse).Count -gt 0
+    if ($hasContent) { return }
+
+    Write-Host "wwwroot/ is empty, building frontend..." -ForegroundColor Yellow
+    Build-Frontend
+    Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
 }
 
 function Start-ProductionServer([string]$Root) {
@@ -208,22 +227,8 @@ function Start-DevMode([string]$Root) {
 
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
-    Push-Location $ScriptDir
-    try {
-        npm run build
-        if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
-
-        $distDir = Join-Path $ScriptDir "dist"
-        if (-not (Test-Path $distDir)) { throw "dist/ not found after build" }
-
-        if (-not (Test-Path $WwwRoot)) { New-Item -ItemType Directory -Path $WwwRoot | Out-Null }
-
-        Get-ChildItem $WwwRoot -Recurse | Remove-Item -Recurse -Force
-        Copy-Item -Path (Join-Path $distDir "*") -Destination $WwwRoot -Recurse -Force
-        Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
-    } finally {
-        Pop-Location
-    }
+    Build-Frontend
+    Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
 
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -246,22 +251,12 @@ function Deploy-Frontend {
 
 switch ($Command) {
     "start" {
-        if (-not $WorktreeRoot) {
-            $config = Get-SavedConfig
-            if ($config) {
-                $WorktreeRoot = $config.WorktreeRoot
-                Write-Host "Using previously configured worktree root: $WorktreeRoot" -ForegroundColor Gray
-            } else {
-                Write-Host "Error: worktree root path is required for first start" -ForegroundColor Red
-                Write-Host "Usage: .\treemon.ps1 start <worktree-root-path>" -ForegroundColor Gray
-                exit 1
-            }
-        }
-        if (-not (Test-Path $WorktreeRoot)) {
-            Write-Host "Error: worktree root path does not exist: $WorktreeRoot" -ForegroundColor Red
+        $root = Resolve-WorktreeRoot "start"
+        if (-not (Test-Path $root)) {
+            Write-Host "Error: worktree root path does not exist: $root" -ForegroundColor Red
             exit 1
         }
-        Start-ProductionServer $WorktreeRoot
+        Start-ProductionServer $root
     }
     "stop" {
         Stop-ProductionServer
@@ -288,22 +283,12 @@ switch ($Command) {
         Show-Log
     }
     "dev" {
-        if (-not $WorktreeRoot) {
-            $config = Get-SavedConfig
-            if ($config) {
-                $WorktreeRoot = $config.WorktreeRoot
-                Write-Host "Using previously configured worktree root: $WorktreeRoot" -ForegroundColor Gray
-            } else {
-                Write-Host "Error: worktree root path is required for first dev start" -ForegroundColor Red
-                Write-Host "Usage: .\treemon.ps1 dev <worktree-root-path>" -ForegroundColor Gray
-                exit 1
-            }
-        }
-        if (-not (Test-Path $WorktreeRoot)) {
-            Write-Host "Error: worktree root path does not exist: $WorktreeRoot" -ForegroundColor Red
+        $root = Resolve-WorktreeRoot "dev"
+        if (-not (Test-Path $root)) {
+            Write-Host "Error: worktree root path does not exist: $root" -ForegroundColor Red
             exit 1
         }
-        Start-DevMode $WorktreeRoot
+        Start-DevMode $root
     }
     "deploy" {
         Deploy-Frontend
