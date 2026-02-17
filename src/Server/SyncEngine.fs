@@ -327,19 +327,24 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                     return ()
                 | Ok _ -> ()
 
-            // Step 5: Test (optional, from .treemon.json)
-            match readTreemonConfig worktreePath with
-            | None ->
-                Log.log "SyncEngine" $"No .treemon.json found, skipping test step for {branch}"
-            | Some solutionPath ->
-                let! testResult =
-                    runStep branch SyncStep.Test worktreePath "dotnet" $"test {solutionPath}" ct
+            // Step 5: Test (config from .treemon.json in repo root, default to 'dotnet test')
+            let testArgs =
+                match readTreemonConfig repoRoot with
+                | Some solutionPath ->
+                    Log.log "SyncEngine" $"Using testSolution from .treemon.json: {solutionPath}"
+                    $"test {solutionPath}"
+                | None ->
+                    Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
+                    "test"
 
-                match testResult with
-                | Error status ->
-                    completeSync branch status
-                    return ()
-                | Ok _ -> ()
+            let! testResult =
+                runStep branch SyncStep.Test worktreePath "dotnet" testArgs ct
+
+            match testResult with
+            | Error status ->
+                completeSync branch status
+                return ()
+            | Ok _ -> ()
 
             GitWorktree.Cache.invalidate repoRoot
             completeSync branch StepStatus.Succeeded
