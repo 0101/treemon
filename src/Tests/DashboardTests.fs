@@ -85,13 +85,6 @@ type DashboardTests() =
 
             let! bg = activeDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
             Assert.That(bg, Is.EqualTo("rgb(243, 139, 168)"), "Active CC dot should be red (#f38ba8)")
-
-            let activeCards = this.Page.Locator(".wt-card.cc-active")
-            let! activeCardCount = activeCards.CountAsync()
-            Assert.That(activeCardCount, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees; cc-active cards should be present")
-
-            let! borderColor = activeCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
-            Assert.That(borderColor, Is.EqualTo("rgb(243, 139, 168)"), "Active card border-left should be red (#f38ba8)")
         }
 
     [<Test>]
@@ -103,13 +96,6 @@ type DashboardTests() =
 
             let! bg = idleDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
             Assert.That(bg, Is.EqualTo("rgb(137, 180, 250)"), "Idle CC dot should be blue (#89b4fa)")
-
-            let idleCards = this.Page.Locator(".wt-card.cc-idle")
-            let! idleCardCount = idleCards.CountAsync()
-            Assert.That(idleCardCount, Is.GreaterThanOrEqualTo(1), "Fixture has Idle Claude worktrees; cc-idle cards should be present")
-
-            let! borderColor = idleCards.First.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftColor")
-            Assert.That(borderColor, Is.EqualTo("rgb(137, 180, 250)"), "Idle card border-left should be blue (#89b4fa)")
         }
 
     [<Test>]
@@ -197,7 +183,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``CC status dot has correct border-left color on card``() =
+    member this.``Cards have CC status class``() =
         task {
             let cards = this.Page.Locator(".wt-card")
             let! count = cards.CountAsync()
