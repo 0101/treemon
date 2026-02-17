@@ -135,12 +135,13 @@
         .sync-cancel-btn:hover { background: #4a2540; }
 
         .event-log {
-            margin-top: 8px; padding-top: 6px; border-top: 1px solid #313244;
+            margin-top: 8px; background: #11111b; font-family: 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
+            padding: 8px 10px; border-radius: 6px;
             display: flex; flex-direction: column; gap: 3px; font-size: 0.78em;
         }
         .event-entry { display: flex; align-items: center; gap: 6px; overflow: hidden; }
-        .event-source { color: #7f849c; white-space: nowrap; flex-shrink: 0; }
-        .event-message { color: #a6adc8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+        .event-source { color: #6c7086; white-space: nowrap; flex-shrink: 0; }
+        .event-message { color: #9399b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
         .event-status { padding: 0 4px; border-radius: 3px; font-size: 0.9em; white-space: nowrap; flex-shrink: 0; }
         .event-status.running { background: #2e3452; color: #89b4fa; }
         .event-status.success { background: #1e3a2f; color: #a6e3a1; }
