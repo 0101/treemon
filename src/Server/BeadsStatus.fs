@@ -1,7 +1,6 @@
 module Server.BeadsStatus
 
 open System
-open System.Collections.Concurrent
 open System.IO
 open System.Text.Json
 open Shared
@@ -54,27 +53,9 @@ let getBeadsSummary (worktreePath: string) =
     }
 
 module Cache =
-    type CacheEntry<'T> =
-        { Value: 'T
-          CachedAt: DateTimeOffset }
-
-    let private cache = ConcurrentDictionary<string, CacheEntry<BeadsSummary>>()
-    let private ttl = TimeSpan.FromSeconds(15.0)
+    let private cache = Cache.TtlCache<BeadsSummary>(TimeSpan.FromSeconds(15.0))
 
     let getCachedBeadsSummary (worktreePath: string) =
-        async {
-            let now = DateTimeOffset.UtcNow
+        cache.GetOrRefreshAsync worktreePath (fun key -> getBeadsSummary key)
 
-            match cache.TryGetValue(worktreePath) with
-            | true, entry when now - entry.CachedAt < ttl -> return entry.Value
-            | _ ->
-                let! summary = getBeadsSummary worktreePath
-                cache.[worktreePath] <- { Value = summary; CachedAt = now }
-                return summary
-        }
-
-    let getOldestCachedAt () =
-        cache.Values
-        |> Seq.map (fun entry -> entry.CachedAt)
-        |> Seq.sortBy id
-        |> Seq.tryHead
+    let getOldestCachedAt () = cache.GetOldestCachedAt()

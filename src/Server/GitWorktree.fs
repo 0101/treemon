@@ -120,38 +120,13 @@ let getUpstreamBranch (worktreePath: string) =
     }
 
 module Cache =
-    type CacheEntry<'T> =
-        { Value: 'T
-          CachedAt: DateTimeOffset }
-
-    let private worktreeListCache =
-        System.Collections.Concurrent.ConcurrentDictionary<string, CacheEntry<WorktreeInfo list>>()
-
-    let private ttl = TimeSpan.FromSeconds(60.0)
+    let private cache = Cache.TtlCache<WorktreeInfo list>(TimeSpan.FromSeconds(60.0))
 
     let getCachedWorktrees (repoRoot: string) =
-        async {
-            let now = DateTimeOffset.UtcNow
+        cache.GetOrRefreshAsync repoRoot (fun key -> listWorktrees key)
 
-            match worktreeListCache.TryGetValue(repoRoot) with
-            | true, entry when now - entry.CachedAt < ttl -> return entry.Value
-            | _ ->
-                let! worktrees = listWorktrees repoRoot
-
-                worktreeListCache.[repoRoot] <-
-                    { Value = worktrees
-                      CachedAt = now }
-
-                return worktrees
-        }
-
-    let getCachedAt (repoRoot: string) =
-        match worktreeListCache.TryGetValue(repoRoot) with
-        | true, entry -> Some entry.CachedAt
-        | _ -> None
-
-    let invalidate (repoRoot: string) =
-        worktreeListCache.TryRemove(repoRoot) |> ignore
+    let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
+    let invalidate (repoRoot: string) = cache.Invalidate repoRoot
 
 let collectWorktreeGitData (worktreePath: string) (branch: string option) =
     async {

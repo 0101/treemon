@@ -1,7 +1,6 @@
 module Server.PrStatus
 
 open System
-open System.Collections.Concurrent
 open System.IO
 open System.Text.Json
 open Shared
@@ -446,37 +445,22 @@ let fetchPrStatuses (remote: AzDoRemote) =
     }
 
 module Cache =
-    type CacheEntry<'T> =
-        { Value: 'T
-          CachedAt: DateTimeOffset }
-
-    let private cache = ConcurrentDictionary<string, CacheEntry<Map<string, PrStatus>>>()
-    let private ttl = TimeSpan.FromSeconds(120.0)
+    let private cache = Cache.TtlCache<Map<string, PrStatus>>(TimeSpan.FromSeconds(120.0))
 
     let getCachedPrStatuses (repoRoot: string) =
-        async {
-            let now = DateTimeOffset.UtcNow
-
-            match cache.TryGetValue(repoRoot) with
-            | true, entry when now - entry.CachedAt < ttl -> return entry.Value
-            | _ ->
-                let! remoteUrl = getRemoteUrl repoRoot
+        cache.GetOrRefreshAsync repoRoot (fun key ->
+            async {
+                let! remoteUrl = getRemoteUrl key
 
                 let remote =
                     remoteUrl |> Option.bind parseAzureDevOpsUrl
 
                 match remote with
                 | None -> return Map.empty
-                | Some r ->
-                    let! statuses = fetchPrStatuses r
-                    cache.[repoRoot] <- { Value = statuses; CachedAt = now }
-                    return statuses
-        }
+                | Some r -> return! fetchPrStatuses r
+            })
 
-    let getCachedAt (repoRoot: string) =
-        match cache.TryGetValue(repoRoot) with
-        | true, entry -> Some entry.CachedAt
-        | _ -> None
+    let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
 
     let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
         branchName

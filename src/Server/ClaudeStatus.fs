@@ -1,7 +1,6 @@
 module Server.ClaudeStatus
 
 open System
-open System.Collections.Concurrent
 open System.IO
 open System.Text.Json
 open Shared
@@ -124,32 +123,13 @@ let getLastClaudeMessage (worktreePath: string) =
           Status = None })
 
 module Cache =
-    type CacheEntry<'T> =
-        { Value: 'T
-          CachedAt: DateTimeOffset }
-
-    let private statusCache = ConcurrentDictionary<string, CacheEntry<ClaudeCodeStatus>>()
-    let private messageCache = ConcurrentDictionary<string, CacheEntry<CardEvent option>>()
-    let private ttl = TimeSpan.FromSeconds(15.0)
-
-    let private getOrRefresh (cache: ConcurrentDictionary<string, CacheEntry<'T>>) key (compute: unit -> 'T) =
-        let now = DateTimeOffset.UtcNow
-
-        match cache.TryGetValue(key) with
-        | true, entry when now - entry.CachedAt < ttl -> entry.Value
-        | _ ->
-            let value = compute ()
-            cache.[key] <- { Value = value; CachedAt = now }
-            value
+    let private statusCache = Cache.TtlCache<ClaudeCodeStatus>(TimeSpan.FromSeconds(15.0))
+    let private messageCache = Cache.TtlCache<CardEvent option>(TimeSpan.FromSeconds(15.0))
 
     let getCachedClaudeStatus (worktreePath: string) =
-        getOrRefresh statusCache worktreePath (fun () -> getClaudeStatus worktreePath)
+        statusCache.GetOrRefresh worktreePath (fun key -> getClaudeStatus key)
 
     let getCachedLastMessage (worktreePath: string) =
-        getOrRefresh messageCache worktreePath (fun () -> getLastClaudeMessage worktreePath)
+        messageCache.GetOrRefresh worktreePath (fun key -> getLastClaudeMessage key)
 
-    let getOldestCachedAt () =
-        statusCache.Values
-        |> Seq.map (fun entry -> entry.CachedAt)
-        |> Seq.sortBy id
-        |> Seq.tryHead
+    let getOldestCachedAt () = statusCache.GetOldestCachedAt()

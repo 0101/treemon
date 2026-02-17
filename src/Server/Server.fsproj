@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="Log.fs" />
     <Compile Include="ProcessRunner.fs" />
+    <Compile Include="Cache.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeStatus.fs" />
