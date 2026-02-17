@@ -321,10 +321,19 @@ let stepStatusText (status: StepStatus option) =
     | Some StepStatus.Cancelled -> "cancelled"
     | _ -> ""
 
+let relativeEventTime (dt: System.DateTimeOffset) =
+    let diff = System.DateTimeOffset.Now - dt
+    match diff with
+    | d when d.TotalSeconds < 60.0 -> $"{int d.TotalSeconds |> max 0}s ago"
+    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
+    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
+    | d -> $"{int d.TotalDays}d ago"
+
 let eventLogEntry (evt: CardEvent) =
     Html.div [
         prop.className "event-entry"
         prop.children [
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
             Html.span [ prop.className "event-source"; prop.text evt.Source ]
             Html.span [ prop.className "event-message"; prop.text evt.Message ]
             match evt.Status with
