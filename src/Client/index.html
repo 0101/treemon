@@ -45,7 +45,7 @@
         .wt-card.compact .card-header { margin-bottom: 2px; }
         .wt-card.compact .branch-name { font-size: 0.88em; }
         .compact-detail { display: flex; align-items: center; gap: 6px; font-size: 0.8em; flex-wrap: wrap; }
-        .beads-inline { color: #a6adc8; }
+        .beads-inline { display: flex; gap: 4px; align-items: center; color: #a6adc8; }
 
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
@@ -81,7 +81,6 @@
         .beads-inprogress { color: #89b4fa; font-weight: 600; }
         .beads-closed { color: #a6e3a1; font-weight: 600; }
         .beads-sep { color: #585b70; }
-        .beads-inline { display: flex; gap: 4px; align-items: center; }
 
         .main-behind { font-size: 0.82em; color: #a6adc8; margin-bottom: 8px; display: block; }
         .main-behind.up-to-date { color: #7f849c; }
@@ -98,9 +97,8 @@
         .pr-badge:hover { background: #3b4068; }
         .pr-badge.draft { background: #313244; color: #7f849c; }
         .pr-badge.merged { background: #2e3245; color: #cba6f7; }
-        .vote-summary { color: #a6adc8; white-space: nowrap; }
         .thread-badge { background: #3b2030; color: #f38ba8; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
-        .thread-badge.none, .thread-badge.dimmed { background: #313244; color: #7f849c; font-weight: 400; }
+        .thread-badge.dimmed { background: #313244; color: #7f849c; font-weight: 400; }
 
         .build-badge { padding: 1px 6px; border-radius: 4px; font-size: 0.82em; font-weight: 500; white-space: nowrap; }
         .build-badge.succeeded { background: #1e3a2f; color: #a6e3a1; }

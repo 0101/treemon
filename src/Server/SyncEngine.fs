@@ -64,7 +64,7 @@ let getAllEvents () : Map<string, CardEvent list> =
 
 let addStepEvent (branch: string) (step: SyncStep) (status: StepStatus) (message: string) =
     let event =
-        { Source = sprintf "%A" step
+        { Source = $"{step}"
           Message = message
           Timestamp = DateTimeOffset.Now
           Status = Some status }
@@ -78,8 +78,7 @@ let runProcess
     (cancellationToken: CancellationToken)
     : Async<Result<ProcessResult, string>> =
     async {
-        let cmdString = sprintf "%s %s" fileName arguments
-
+        let cmdString = $"{fileName} {arguments}"
         try
             let psi =
                 ProcessStartInfo(
@@ -98,10 +97,10 @@ let runProcess
                 cancellationToken.Register(fun () ->
                     try
                         if not proc.HasExited then
-                            Log.log "SyncEngine" (sprintf "Killing process: %s (PID %d)" cmdString proc.Id)
+                            Log.log "SyncEngine" $"Killing process: {cmdString} (PID {proc.Id})"
                             proc.Kill(entireProcessTree = true)
                     with ex ->
-                        Log.log "SyncEngine" (sprintf "Failed to kill process %d: %s" proc.Id ex.Message))
+                        Log.log "SyncEngine" $"Failed to kill process {proc.Id}: {ex.Message}")
 
             try
                 let stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken)
@@ -116,17 +115,17 @@ let runProcess
                       Stdout = stdout.TrimEnd()
                       Stderr = stderr.TrimEnd() }
 
-                Log.log "SyncEngine" (sprintf "%s -> exit %d" cmdString result.ExitCode)
+                Log.log "SyncEngine" $"{cmdString} -> exit {result.ExitCode}"
                 return Ok result
             finally
                 registration.Dispose()
         with
         | :? OperationCanceledException ->
-            Log.log "SyncEngine" (sprintf "%s -> cancelled" cmdString)
+            Log.log "SyncEngine" $"{cmdString} -> cancelled"
             return Error "Cancelled"
         | :? System.ComponentModel.Win32Exception as ex ->
-            Log.log "SyncEngine" (sprintf "%s -> failed to start: %s" cmdString ex.Message)
-            return Error (sprintf "Failed to start process: %s" ex.Message)
+            Log.log "SyncEngine" $"{cmdString} -> failed to start: {ex.Message}"
+            return Error $"Failed to start process: {ex.Message}"
     }
 
 let isRunning (branch: string) : bool =
@@ -194,7 +193,7 @@ let cancelSync (branch: string) =
     | true, sp ->
         match sp.State with
         | SyncState.Running _ ->
-            Log.log "SyncEngine" (sprintf "Cancelling sync for branch: %s" branch)
+            Log.log "SyncEngine" $"Cancelling sync for branch: {branch}"
             sp.CancellationTokenSource.Cancel()
 
             let cancelEvent =
@@ -223,7 +222,7 @@ let private readTreemonConfig (worktreePath: string) : string option =
             | true, elem -> Some(elem.GetString())
             | false, _ -> None
         with ex ->
-            Log.log "SyncEngine" (sprintf "Failed to read .treemon.json: %s" ex.Message)
+            Log.log "SyncEngine" $"Failed to read .treemon.json: {ex.Message}"
             None
 
 let private runStep
@@ -236,7 +235,7 @@ let private runStep
     : Async<Result<ProcessResult, StepStatus>> =
     async {
         updateState branch (SyncState.Running step)
-        addStepEvent branch step StepStatus.Running (sprintf "%s %s" fileName arguments)
+        addStepEvent branch step StepStatus.Running $"{fileName} {arguments}"
 
         let! result = runProcess worktreePath fileName arguments ct
 
@@ -248,8 +247,8 @@ let private runStep
         | Ok proc when proc.ExitCode <> 0 ->
             let msg =
                 match proc.Stderr with
-                | "" -> sprintf "exit %d" proc.ExitCode
-                | stderr -> sprintf "exit %d: %s" proc.ExitCode (stderr.Substring(0, min 200 stderr.Length))
+                | "" -> $"exit {proc.ExitCode}"
+                | stderr -> $"exit {proc.ExitCode}: {stderr.[..min 199 (stderr.Length - 1)]}"
 
             let status = StepStatus.Failed msg
             addStepEvent branch step status msg
@@ -262,7 +261,7 @@ let private runStep
 let executeSyncPipeline (branch: string) (worktreePath: string) (ct: CancellationToken) : Async<unit> =
     async {
         try
-            Log.log "SyncEngine" (sprintf "Starting sync pipeline for %s at %s" branch worktreePath)
+            Log.log "SyncEngine" $"Starting sync pipeline for {branch} at {worktreePath}"
 
             // Step 1: Check clean
             let! checkResult = runStep branch SyncStep.CheckClean worktreePath "git" "status --porcelain --untracked-files=no" ct
@@ -308,8 +307,8 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
                 // Step 4: Conflict resolution
                 let mergeMsg =
                     match mergeProc.Stderr with
-                    | "" -> sprintf "exit %d" mergeProc.ExitCode
-                    | stderr -> sprintf "exit %d: %s" mergeProc.ExitCode (stderr.Substring(0, min 200 stderr.Length))
+                    | "" -> $"exit {mergeProc.ExitCode}"
+                    | stderr -> $"exit {mergeProc.ExitCode}: {stderr.[..min 199 (stderr.Length - 1)]}"
 
                 addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) mergeMsg
 
@@ -331,10 +330,10 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
             // Step 5: Test (optional, from .treemon.json)
             match readTreemonConfig worktreePath with
             | None ->
-                Log.log "SyncEngine" (sprintf "No .treemon.json found, skipping test step for %s" branch)
+                Log.log "SyncEngine" $"No .treemon.json found, skipping test step for {branch}"
             | Some solutionPath ->
                 let! testResult =
-                    runStep branch SyncStep.Test worktreePath "dotnet" (sprintf "test %s" solutionPath) ct
+                    runStep branch SyncStep.Test worktreePath "dotnet" $"test {solutionPath}" ct
 
                 match testResult with
                 | Error status ->
@@ -343,8 +342,8 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
                 | Ok _ -> ()
 
             completeSync branch StepStatus.Succeeded
-            Log.log "SyncEngine" (sprintf "Sync pipeline completed successfully for %s" branch)
+            Log.log "SyncEngine" $"Sync pipeline completed successfully for {branch}"
         with :? OperationCanceledException ->
-            Log.log "SyncEngine" (sprintf "Sync pipeline cancelled for %s" branch)
+            Log.log "SyncEngine" $"Sync pipeline cancelled for {branch}"
             completeSync branch StepStatus.Cancelled
     }

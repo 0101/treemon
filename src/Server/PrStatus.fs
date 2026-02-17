@@ -99,7 +99,7 @@ let private parsePrList (json: string) =
 
                     let branchName =
                         if sourceRef.StartsWith("refs/heads/") then
-                            sourceRef.Substring("refs/heads/".Length)
+                            sourceRef.["refs/heads/".Length..]
                         else
                             sourceRef
 
@@ -197,7 +197,7 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
     let url =
         buildId
         |> Option.map (fun id ->
-            sprintf "https://dev.azure.com/%s/%s/_build/results?buildId=%d" remote.Org remote.Project id)
+            $"https://dev.azure.com/{remote.Org}/{remote.Project}/_build/results?buildId={id}")
 
     parseBuildRun run
     |> Option.map (fun buildStatus ->
@@ -259,7 +259,7 @@ let private parseBuildLog (json: string) =
             lines
             |> List.map (fun line ->
                 match line.IndexOf(" ") with
-                | i when i > 20 -> line.Substring(i + 1)
+                | i when i > 20 -> line.[i + 1..]
                 | _ -> line)
 
         let tail =
@@ -384,7 +384,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
                                 }
 
                         let url =
-                            sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo pr.PrId
+                            $"https://dev.azure.com/{remote.Org}/{remote.Project}/_git/{remote.Repo}/pullrequest/{pr.PrId}"
 
                         return
                             pr.BranchName,

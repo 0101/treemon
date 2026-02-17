@@ -58,7 +58,7 @@ let private waitForUrl (url: string) (timeoutMs: int) : Task =
 let private resolveCmdShim (fileName: string) =
     match Path.GetExtension(fileName) with
     | "" ->
-        let cmdPath = sprintf "%s.cmd" fileName
+        let cmdPath = $"{fileName}.cmd"
 
         match
             (Environment.GetEnvironmentVariable("PATH") |> Option.ofObj)
@@ -93,7 +93,7 @@ let startServer () =
         let proc =
             startProcess
                 "dotnet"
-                (sprintf "run --project \"%s\" -- \"%s\" --port 5001 --test-fixtures \"%s\"" serverProjectPath worktreeRoot fixturesPath)
+                $"""run --project "{serverProjectPath}" -- "{worktreeRoot}" --port 5001 --test-fixtures "{fixturesPath}" """
                 repoRoot
                 []
 
@@ -121,11 +121,11 @@ let private killProc (procOpt: Process option) =
                 | true -> ()
                 | false ->
                     TestContext.Error.WriteLine(
-                        sprintf "Process %d did not exit within 10s after Kill" p.Id)
+                        $"Process {p.Id} did not exit within 10s after Kill")
 
             p.Dispose()
         with ex ->
-            TestContext.Error.WriteLine(sprintf "Failed to kill process: %s" ex.Message))
+            TestContext.Error.WriteLine($"Failed to kill process: {ex.Message}"))
 
 let stopAll () =
     killProc serverProcess.Value

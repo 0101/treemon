@@ -39,7 +39,7 @@ let private parseWorktreeList (porcelainOutput: string) =
         let findValue (prefix: string) =
             lines
             |> Array.tryFind (fun l -> l.StartsWith(prefix))
-            |> Option.map (fun l -> l.Substring(prefix.Length))
+            |> Option.map (fun l -> l.[prefix.Length..])
 
         match findValue "worktree ", findValue "HEAD " with
         | Some path, Some head ->
@@ -81,10 +81,10 @@ let private parseCommitOutput (worktreePath: string) (output: string option) =
                           Message = message
                           Time = time }
                 | _ ->
-                    Log.log "Git" (sprintf "getLastCommit(%s): failed to parse time '%s'" worktreePath timeStr)
+                    Log.log "Git" $"getLastCommit({worktreePath}): failed to parse time '{timeStr}'"
                     None
             | _ ->
-                Log.log "Git" (sprintf "getLastCommit(%s): expected 3 lines (hash/message/time), got %d" worktreePath lines.Length)
+                Log.log "Git" $"getLastCommit({worktreePath}): expected 3 lines (hash/message/time), got {lines.Length}"
                 None)
 
 let getLastCommit (worktreePath: string) =
@@ -149,7 +149,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
             upstream
             |> Option.map (fun (u: string) ->
                 if u.StartsWith("origin/") then
-                    u.Substring("origin/".Length)
+                    u.["origin/".Length..]
                 else
                     u)
 
@@ -164,14 +164,14 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
     async {
-        let! removeResult = runGitResult repoRoot (sprintf "worktree remove --force \"%s\"" worktreePath)
+        let! removeResult = runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
 
         match removeResult with
-        | Error msg -> return Error (sprintf "git worktree remove failed: %s" msg)
+        | Error msg -> return Error $"git worktree remove failed: {msg}"
         | Ok _ ->
-            let! branchResult = runGitResult repoRoot (sprintf "branch -D %s" branch)
+            let! branchResult = runGitResult repoRoot $"branch -D {branch}"
 
             match branchResult with
-            | Error msg -> return Error (sprintf "Worktree removed but git branch -D failed: %s" msg)
+            | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
             | Ok _ -> return Ok ()
     }

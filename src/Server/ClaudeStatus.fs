@@ -25,7 +25,7 @@ let private findLatestJsonl (projectDir: string) =
         else
             None
     with ex ->
-        Log.log "Claude" (sprintf "Failed to list directory %s: %s" projectDir ex.Message)
+        Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
         None
 
 let private statusFromAge (age: TimeSpan) =
@@ -44,7 +44,7 @@ let getClaudeStatus (worktreePath: string) =
             let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
             statusFromAge age
         with ex ->
-            Log.log "Claude" (sprintf "Failed to read mtime for %s: %s" fi.FullName ex.Message)
+            Log.log "Claude" $"Failed to read mtime for {fi.FullName}: {ex.Message}"
             Unknown
     | None -> Unknown
 
@@ -53,7 +53,7 @@ let private truncateMessage (maxLen: int) (text: string) =
 
     match singleLine.Length <= maxLen with
     | true -> singleLine
-    | false -> singleLine.Substring(0, maxLen).TrimEnd() + "..."
+    | false -> singleLine.[..maxLen-1].TrimEnd() + "..."
 
 let private readLinesReverse (filePath: string) =
     try

@@ -42,14 +42,14 @@ let parseArgs (args: string array) =
 let main args =
     let config = parseArgs args
 
-    let serverUrl = sprintf "http://0.0.0.0:%d" config.Port
+    let serverUrl = $"http://0.0.0.0:{config.Port}"
 
     Log.init ()
-    Log.log "Startup" (sprintf "Worktree root: %s" config.WorktreeRoot)
-    Log.log "Startup" (sprintf "Server URL: %s" serverUrl)
+    Log.log "Startup" $"Worktree root: {config.WorktreeRoot}"
+    Log.log "Startup" $"Server URL: {serverUrl}"
 
     match config.TestFixtures with
-    | Some path -> Log.log "Startup" (sprintf "Test fixtures: %s" path)
+    | Some path -> Log.log "Startup" $"Test fixtures: {path}"
     | None -> ()
 
     printfn "Monitoring worktrees under: %s" config.WorktreeRoot
@@ -58,7 +58,7 @@ let main args =
         Remoting.createApi ()
         |> Remoting.fromValue (WorktreeApi.worktreeApi config.WorktreeRoot config.TestFixtures)
         |> Remoting.withErrorHandler (fun ex routeInfo ->
-            Log.log "API" (sprintf "Error in %s: %s" routeInfo.methodName (ex.ToString()))
+            Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
             Propagate ex.Message)
         |> Remoting.buildHttpHandler
 

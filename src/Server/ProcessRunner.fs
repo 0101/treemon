@@ -3,11 +3,11 @@ module Server.ProcessRunner
 open System.Diagnostics
 
 let private truncate (s: string) =
-    if s.Length > 200 then s.Substring(0, 200) + "..." else s
+    if s.Length > 200 then s.[..199] + "..." else s
 
 let private startAndCapture (context: string) (fileName: string) (arguments: string) =
     async {
-        let cmdString = sprintf "%s %s" fileName arguments
+        let cmdString = $"{fileName} {arguments}"
 
         try
             let psi =
@@ -27,10 +27,10 @@ let private startAndCapture (context: string) (fileName: string) (arguments: str
             let! stdout = stdoutTask |> Async.AwaitTask
             let! stderr = stderrTask |> Async.AwaitTask
 
-            Log.log context (sprintf "%s -> exit %d, stdout: %s, stderr: %s" cmdString proc.ExitCode (truncate (stdout.TrimEnd())) (truncate (stderr.TrimEnd())))
+            Log.log context $"{cmdString} -> exit {proc.ExitCode}, stdout: {truncate (stdout.TrimEnd())}, stderr: {truncate (stderr.TrimEnd())}"
             return Ok(proc.ExitCode, stdout.TrimEnd(), stderr.TrimEnd())
         with :? System.ComponentModel.Win32Exception as ex ->
-            Log.log context (sprintf "%s -> failed to start: %s" cmdString ex.Message)
+            Log.log context $"{cmdString} -> failed to start: {ex.Message}"
             return Error ex.Message
     }
 

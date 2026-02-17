@@ -38,7 +38,8 @@ let private assembleWorktreeStatus
                   Pr = pr
                   MainBehindCount = gitData.MainBehindCount }
         with ex ->
-            Log.log "API" (sprintf "Failed to assemble status for worktree %s (%s): %s" wt.Path (wt.Branch |> Option.defaultValue "(detached)") ex.Message)
+            let branch = wt.Branch |> Option.defaultValue "(detached)"
+            Log.log "API" $"Failed to assemble status for worktree {wt.Path} ({branch}): {ex.Message}"
 
             return
                 { Path = wt.Path
@@ -87,17 +88,17 @@ let private openTerminal (worktreeRoot: string) (path: string) =
 
         match isKnownWorktree with
         | false ->
-            Log.log "API" (sprintf "openTerminal: rejected unknown path '%s'" path)
+            Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         | true ->
             let startInfo =
                 ProcessStartInfo(
                     FileName = "wt.exe",
-                    Arguments = sprintf "-w 0 new-tab pwsh -NoExit -Command \"Set-Location '%s'\"" path,
+                    Arguments = $"""-w 0 new-tab pwsh -NoExit -Command "Set-Location '{path}'" """,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 )
 
-            Log.log "API" (sprintf "openTerminal: launching terminal for '%s'" path)
+            Log.log "API" $"openTerminal: launching terminal for '{path}'"
             Process.Start(startInfo) |> ignore
     }
 
@@ -110,7 +111,7 @@ let private deleteWorktree (worktreeRoot: string) (branch: string) =
             |> List.tryFind (fun wt -> wt.Branch = Some branch)
 
         match worktree with
-        | None -> return Error (sprintf "No worktree found for branch '%s'" branch)
+        | None -> return Error $"No worktree found for branch '{branch}'"
         | Some wt ->
             let mainWorktree =
                 worktrees
@@ -150,7 +151,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktree
                       |> Option.map (fun wt -> wt.Path)
 
                   match worktreePath with
-                  | None -> return Error (sprintf "No worktree found for branch '%s'" branch)
+                  | None -> return Error $"No worktree found for branch '{branch}'"
                   | Some path ->
                       match SyncEngine.beginSync branch with
                       | Error msg -> return Error msg

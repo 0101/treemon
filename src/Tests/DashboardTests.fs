@@ -951,7 +951,7 @@ type DashboardTests() =
     member this.``PWA manifest endpoint returns 200 with correct content``() =
         task {
             use client = new System.Net.Http.HttpClient()
-            let! response = client.GetAsync(sprintf "%s/manifest.webmanifest" baseUrl)
+            let! response = client.GetAsync($"{baseUrl}/manifest.webmanifest")
             Assert.That(int response.StatusCode, Is.EqualTo(200), "GET /manifest.webmanifest should return 200")
 
             let! body = response.Content.ReadAsStringAsync()
@@ -992,7 +992,7 @@ type DashboardTests() =
     member this.``PWA service worker endpoint returns 200``() =
         task {
             use client = new System.Net.Http.HttpClient()
-            let! response = client.GetAsync(sprintf "%s/sw.js" baseUrl)
+            let! response = client.GetAsync($"{baseUrl}/sw.js")
             Assert.That(int response.StatusCode, Is.EqualTo(200), "GET /sw.js should return 200")
 
             let! body = response.Content.ReadAsStringAsync()
@@ -1005,10 +1005,10 @@ type DashboardTests() =
         task {
             use client = new System.Net.Http.HttpClient()
 
-            let! response192 = client.GetAsync(sprintf "%s/icon-192.png" baseUrl)
+            let! response192 = client.GetAsync($"{baseUrl}/icon-192.png")
             Assert.That(int response192.StatusCode, Is.EqualTo(200), "GET /icon-192.png should return 200")
 
-            let! response512 = client.GetAsync(sprintf "%s/icon-512.png" baseUrl)
+            let! response512 = client.GetAsync($"{baseUrl}/icon-512.png")
             Assert.That(int response512.StatusCode, Is.EqualTo(200), "GET /icon-512.png should return 200")
         }
 
