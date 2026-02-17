@@ -36,24 +36,21 @@ let private parseCountResponse (json: string) =
           Closed = findCount "closed" }
     with ex ->
         Log.log "Beads" $"Failed to parse bd JSON: {ex.Message}, raw input: {json}"
-        { Open = 0; InProgress = 0; Closed = 0 }
-
-let private zeroCounts =
-    { Open = 0; InProgress = 0; Closed = 0 }
+        BeadsSummary.zero
 
 let getBeadsSummary (worktreePath: string) =
     async {
         let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
 
         if not (File.Exists(dbPath)) then
-            return zeroCounts
+            return BeadsSummary.zero
         else
             let! output = runBd dbPath
 
             return
                 output
                 |> Option.map parseCountResponse
-                |> Option.defaultValue zeroCounts
+                |> Option.defaultValue BeadsSummary.zero
     }
 
 module Cache =

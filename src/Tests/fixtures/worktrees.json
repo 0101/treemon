@@ -5,10 +5,8 @@
       {
         "Path": "Q:/code/TestProject/feature-active",
         "Branch": "feature-active",
-        "Head": "a1b2c3d",
         "LastCommitMessage": "Add comprehensive input validation",
         "LastCommitTime": "2026-02-16T22:30:00+00:00",
-        "UpstreamBranch": "refs/heads/feature-active",
         "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
         "Claude": "Active",
         "Pr": {
@@ -38,16 +36,13 @@
             "IsMerged": false
           }
         },
-        "IsStale": false,
         "MainBehindCount": 25
       },
       {
         "Path": "Q:/code/TestProject/feature-recent",
         "Branch": "feature-recent",
-        "Head": "d4e5f6a",
         "LastCommitMessage": "Refactor data access layer for clarity",
         "LastCommitTime": "2026-02-16T22:00:00+00:00",
-        "UpstreamBranch": "refs/heads/feature-recent",
         "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
         "Claude": "Recent",
         "Pr": {
@@ -68,42 +63,33 @@
             "IsMerged": false
           }
         },
-        "IsStale": false,
         "MainBehindCount": 5
       },
       {
         "Path": "Q:/code/TestProject/feature-idle",
         "Branch": "feature-idle",
-        "Head": "b7c8d9e",
         "LastCommitMessage": "Complete logging improvements",
         "LastCommitTime": "2026-02-16T20:00:00+00:00",
-        "UpstreamBranch": "refs/heads/feature-idle",
         "Beads": { "Open": 0, "InProgress": 0, "Closed": 3 },
         "Claude": "Idle",
         "Pr": "NoPr",
-        "IsStale": false,
         "MainBehindCount": 0
       },
       {
         "Path": "Q:/code/TestProject/feature-stale",
         "Branch": "feature-stale",
-        "Head": "e0f1a2b",
         "LastCommitMessage": "Initial experiment with caching",
         "LastCommitTime": "2026-02-10T08:00:00+00:00",
-        "UpstreamBranch": null,
         "Beads": { "Open": 1, "InProgress": 0, "Closed": 0 },
         "Claude": "Idle",
         "Pr": "NoPr",
-        "IsStale": true,
         "MainBehindCount": 42
       },
       {
         "Path": "Q:/code/TestProject/feature-merged",
         "Branch": "feature-merged",
-        "Head": "c3d4e5f",
         "LastCommitMessage": "Final cleanup before merge",
         "LastCommitTime": "2026-02-15T16:00:00+00:00",
-        "UpstreamBranch": "refs/heads/feature-merged",
         "Beads": { "Open": 0, "InProgress": 0, "Closed": 8 },
         "Claude": "Unknown",
         "Pr": {
@@ -124,16 +110,13 @@
             "IsMerged": true
           }
         },
-        "IsStale": false,
         "MainBehindCount": 0
       },
       {
         "Path": "Q:/code/TestProject/feature-draft",
         "Branch": "feature-draft",
-        "Head": "f6a7b8c",
         "LastCommitMessage": "Wire up API endpoints for new feature",
         "LastCommitTime": "2026-02-16T21:00:00+00:00",
-        "UpstreamBranch": "refs/heads/feature-draft",
         "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
         "Claude": "Active",
         "Pr": {
@@ -160,20 +143,16 @@
             "IsMerged": false
           }
         },
-        "IsStale": false,
         "MainBehindCount": 2
       },
       {
         "Path": "Q:/code/TestProject/feature-unknown",
         "Branch": "feature-unknown",
-        "Head": "d9e0f1a",
         "LastCommitMessage": "Update configuration defaults",
         "LastCommitTime": "2026-02-16T18:00:00+00:00",
-        "UpstreamBranch": null,
         "Beads": { "Open": 2, "InProgress": 0, "Closed": 0 },
         "Claude": "Unknown",
         "Pr": "NoPr",
-        "IsStale": false,
         "MainBehindCount": 10
       }
     ],

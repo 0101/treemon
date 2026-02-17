@@ -192,9 +192,22 @@ let ccClassName =
     | Idle    -> "idle"
     | Unknown -> "unknown"
 
+let isStale (wt: WorktreeStatus) =
+    let twentyFourHoursAgo = System.DateTimeOffset.UtcNow.AddHours(-24.0)
+    let commitOld = wt.LastCommitTime < twentyFourHoursAgo
+    let ccInactive = wt.Claude = Idle || wt.Claude = Unknown
+    let noBeadsInProgress = wt.Beads.InProgress = 0
+
+    let prInactive =
+        match wt.Pr with
+        | NoPr -> true
+        | HasPr _ -> false
+
+    commitOld && ccInactive && noBeadsInProgress && prInactive
+
 let cardClassName (wt: WorktreeStatus) =
     let cc = ccClassName wt.Claude
-    match wt.IsStale with
+    match isStale wt with
     | true  -> sprintf "wt-card cc-%s stale" cc
     | false -> sprintf "wt-card cc-%s" cc
 
@@ -351,54 +364,49 @@ let abbreviatePipelineName (repoName: string) (name: string) =
 let buildBadge (repoName: string) (build: BuildInfo) =
     let statusText =
         match build.Status with
-        | NoBuild -> None
-        | Building -> Some "Building"
-        | Succeeded -> Some "Passed"
-        | Failed -> Some "Failed"
-        | PartiallySucceeded -> Some "Partial"
-        | Canceled -> Some "Canceled"
-    match statusText with
-    | None -> Html.none
-    | Some status ->
-        let abbreviated = abbreviatePipelineName repoName build.Name
-        let text =
-            match build.Failure with
-            | Some f -> sprintf "%s: %s" f.StepName status
-            | None ->
-                match abbreviated with
-                | "" -> status
-                | name -> sprintf "%s: %s" name status
-        let className =
-            match build.Status with
-            | Building -> "build-badge building"
-            | Succeeded -> "build-badge succeeded"
-            | Failed -> "build-badge failed"
-            | PartiallySucceeded -> "build-badge partial"
-            | Canceled -> "build-badge canceled"
-            | NoBuild -> "build-badge"
-        let tooltip =
-            match build.Failure with
-            | Some f when f.Log.Length > 0 -> Some f.Log
-            | _ -> None
-        match build.Url with
-        | Some url ->
-            Interop.createElement "a" [
-                prop.className className
-                prop.text text
-                prop.href url
-                prop.target "_blank"
-                match tooltip with
-                | Some t -> prop.title t
-                | None -> ()
-            ]
+        | Building -> "Building"
+        | Succeeded -> "Passed"
+        | Failed -> "Failed"
+        | PartiallySucceeded -> "Partial"
+        | Canceled -> "Canceled"
+    let abbreviated = abbreviatePipelineName repoName build.Name
+    let text =
+        match build.Failure with
+        | Some f -> sprintf "%s: %s" f.StepName statusText
         | None ->
-            Html.span [
-                prop.className className
-                prop.text text
-                match tooltip with
-                | Some t -> prop.title t
-                | None -> ()
-            ]
+            match abbreviated with
+            | "" -> statusText
+            | name -> sprintf "%s: %s" name statusText
+    let className =
+        match build.Status with
+        | Building -> "build-badge building"
+        | Succeeded -> "build-badge succeeded"
+        | Failed -> "build-badge failed"
+        | PartiallySucceeded -> "build-badge partial"
+        | Canceled -> "build-badge canceled"
+    let tooltip =
+        match build.Failure with
+        | Some f when f.Log.Length > 0 -> Some f.Log
+        | _ -> None
+    match build.Url with
+    | Some url ->
+        Interop.createElement "a" [
+            prop.className className
+            prop.text text
+            prop.href url
+            prop.target "_blank"
+            match tooltip with
+            | Some t -> prop.title t
+            | None -> ()
+        ]
+    | None ->
+        Html.span [
+            prop.className className
+            prop.text text
+            match tooltip with
+            | Some t -> prop.title t
+            | None -> ()
+        ]
 
 let buildBadges (repoName: string) (builds: BuildInfo list) =
     React.fragment (builds |> List.map (buildBadge repoName))

@@ -169,18 +169,18 @@ let private parseBuildRun (run: JsonElement) =
     let status = run.GetProperty("status").GetString()
 
     match status with
-    | "inProgress" -> BuildStatus.Building
+    | "inProgress" -> Some BuildStatus.Building
     | "completed" ->
         match run.TryGetProperty("result") with
         | true, result ->
             match result.GetString() with
-            | "succeeded" -> BuildStatus.Succeeded
-            | "failed" -> BuildStatus.Failed
-            | "partiallySucceeded" -> BuildStatus.PartiallySucceeded
-            | "canceled" -> BuildStatus.Canceled
-            | _ -> BuildStatus.NoBuild
-        | _ -> BuildStatus.NoBuild
-    | _ -> BuildStatus.NoBuild
+            | "succeeded" -> Some BuildStatus.Succeeded
+            | "failed" -> Some BuildStatus.Failed
+            | "partiallySucceeded" -> Some BuildStatus.PartiallySucceeded
+            | "canceled" -> Some BuildStatus.Canceled
+            | _ -> None
+        | _ -> None
+    | _ -> None
 
 let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
     let name =
@@ -209,13 +209,15 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
         |> Option.map (fun id ->
             sprintf "https://dev.azure.com/%s/%s/_build/results?buildId=%d" remote.Org remote.Project id)
 
-    let info =
-        { Name = name
-          Status = parseBuildRun run
-          Url = url
-          Failure = None }
+    parseBuildRun run
+    |> Option.map (fun buildStatus ->
+        let info =
+            { Name = name
+              Status = buildStatus
+              Url = url
+              Failure = None }
 
-    info, definitionId, buildId
+        info, definitionId, buildId)
 
 let private parseBuilds (remote: AzDoRemote) (json: string) =
     try
@@ -223,7 +225,7 @@ let private parseBuilds (remote: AzDoRemote) (json: string) =
         let runs = doc.RootElement.GetProperty("value").EnumerateArray() |> Seq.toList
 
         runs
-        |> List.map (parseBuildInfo remote)
+        |> List.choose (parseBuildInfo remote)
         |> List.choose (fun (info, defId, buildId) ->
             defId |> Option.map (fun defId -> defId, (info, buildId)))
         |> List.distinctBy fst
@@ -381,7 +383,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
 
             match repoGuid with
             | None ->
-                Log.log "PR" "No repository GUID found in PR list, build status will be NoBuild"
+                Log.log "PR" "No repository GUID found in PR list, builds will be empty"
                 let! entries =
                     prsFiltered
                     |> List.map (fun pr ->

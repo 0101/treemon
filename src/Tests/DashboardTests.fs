@@ -733,17 +733,17 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Terminal button is aligned to the right in card header``() =
+    member this.``Terminal and delete buttons are right-aligned in card header``() =
         task {
             let header = this.Page.Locator(".wt-card .card-header").First
-            let btn = header.Locator(".terminal-btn")
-            do! Assertions.Expect(btn).ToBeVisibleAsync()
+            let deleteBtn = header.Locator(".delete-btn")
+            do! Assertions.Expect(deleteBtn).ToBeVisibleAsync()
 
             let! isRightAligned =
-                btn.EvaluateAsync<bool>(
+                deleteBtn.EvaluateAsync<bool>(
                     "el => { const hr = el.parentElement.getBoundingClientRect(); const br = el.getBoundingClientRect(); return (hr.right - br.right) < 20; }"
                 )
-            Assert.That(isRightAligned, Is.True, "Terminal button should be positioned near the right edge of card header")
+            Assert.That(isRightAligned, Is.True, "Delete button should be positioned near the right edge of card header")
         }
 
     [<Test>]
@@ -912,7 +912,7 @@ type DashboardTests() =
             let log = eventLogs.First
 
             let! borderTop = log.EvaluateAsync<string>("el => getComputedStyle(el).borderTopStyle")
-            Assert.That(borderTop, Is.EqualTo("solid"), "Event log should have a top border separator")
+            Assert.That(borderTop, Is.EqualTo("none"), "Event log should have no top border (replaced by background contrast)")
 
             let entries = log.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
@@ -1092,4 +1092,143 @@ type DashboardTests() =
 
             let! response512 = client.GetAsync(sprintf "%s/icon-512.png" baseUrl)
             Assert.That(int response512.StatusCode, Is.EqualTo(200), "GET /icon-512.png should return 200")
+        }
+
+    [<Test>]
+    member this.``Event log has console styling with dark background``() =
+        task {
+            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let log = eventLogs.First
+            let! bg = log.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(bg, Is.EqualTo("rgb(17, 17, 27)"), "Event log background should be #11111b (dark console)")
+
+            let! fontFamily = log.EvaluateAsync<string>("el => getComputedStyle(el).fontFamily")
+            Assert.That(fontFamily, Does.Contain("monospace").IgnoreCase, "Event log should use monospace font family")
+        }
+
+    [<Test>]
+    member this.``Event log source and message have muted colors``() =
+        task {
+            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let source = eventLogs.First.Locator(".event-source").First
+            let! sourceColor = source.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(sourceColor, Is.EqualTo("rgb(108, 112, 134)"), "Event source color should be #6c7086")
+
+            let message = eventLogs.First.Locator(".event-message").First
+            let! messageColor = message.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            Assert.That(messageColor, Is.EqualTo("rgb(147, 153, 178)"), "Event message color should be #9399b2")
+        }
+
+    [<Test>]
+    member this.``Cards have no left border``() =
+        task {
+            let card = this.Page.Locator(".wt-card").First
+            let! borderLeft = card.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftStyle")
+            Assert.That(borderLeft, Is.EqualTo("none"), "Cards should have no left border (border removed per spec)")
+
+            let! borderLeftWidth = card.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftWidth")
+            Assert.That(borderLeftWidth, Is.EqualTo("0px"), "Cards should have no left border width")
+        }
+
+    [<Test>]
+    member this.``Delete button present on every full-view card``() =
+        task {
+            let cards = this.Page.Locator(".wt-card:not(.compact)")
+            let! cardCount = cards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one full-view card")
+
+            let deleteBtns = this.Page.Locator(".wt-card:not(.compact) .delete-btn")
+            let! btnCount = deleteBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), "Every full-view card should have a delete button")
+        }
+
+    [<Test>]
+    member this.``Delete button present on every compact card``() =
+        task {
+            let compactBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+            do! compactBtn.ClickAsync()
+
+            let compactCards = this.Page.Locator(".wt-card.compact")
+            let! cardCount = compactCards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one compact card")
+
+            let deleteBtns = this.Page.Locator(".wt-card.compact .delete-btn")
+            let! btnCount = deleteBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), "Every compact card should have a delete button")
+        }
+
+    [<Test>]
+    member this.``Delete button is inside card header``() =
+        task {
+            let headerBtns = this.Page.Locator(".wt-card .card-header .delete-btn")
+            let! count = headerBtns.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Delete button should be inside .card-header")
+
+            let allBtns = this.Page.Locator(".wt-card .delete-btn")
+            let! allCount = allBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(allCount), "All delete buttons should be inside card headers")
+        }
+
+    [<Test>]
+    member this.``Delete button has correct text and title``() =
+        task {
+            let btn = this.Page.Locator(".wt-card .delete-btn").First
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! text = btn.TextContentAsync()
+            Assert.That(text, Is.EqualTo("\u2715"), "Delete button text should be cross mark")
+
+            let! title = btn.GetAttributeAsync("title")
+            Assert.That(title, Is.EqualTo("Remove worktree"), "Delete button title should be 'Remove worktree'")
+        }
+
+    [<Test>]
+    member this.``Delete button has correct styling``() =
+        task {
+            let btn = this.Page.Locator(".wt-card .delete-btn").First
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
+            Assert.That(cursor, Is.EqualTo("pointer"), "Delete button should have pointer cursor")
+
+            let! bg = btn.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            Assert.That(bg, Does.Contain("0, 0, 0, 0").Or.EqualTo("rgba(0, 0, 0, 0)"), "Delete button should have transparent background")
+        }
+
+    [<Test>]
+    member this.``Event log visible on initial page load without sync trigger``() =
+        task {
+            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = eventLogs.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1),
+                "Event logs should be visible on initial load (getSyncStatus fetched on Tick, not just during sync)")
+        }
+
+    [<Test>]
+    member this.``Event log has rounded corners``() =
+        task {
+            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let log = eventLogs.First
+            let! borderRadius = log.EvaluateAsync<string>("el => getComputedStyle(el).borderRadius")
+            Assert.That(borderRadius, Is.EqualTo("6px"), "Event log should have 6px border-radius")
+        }
+
+    [<Test>]
+    member this.``Terminal button comes before delete button in card header``() =
+        task {
+            let header = this.Page.Locator(".wt-card .card-header").First
+            let! order =
+                header.EvaluateAsync<bool>(
+                    "el => { const children = Array.from(el.children); const termIdx = children.findIndex(c => c.classList.contains('terminal-btn')); const delIdx = children.findIndex(c => c.classList.contains('delete-btn')); return termIdx < delIdx; }"
+                )
+            Assert.That(order, Is.True, "Terminal button should appear before delete button in card header DOM order")
         }

@@ -159,7 +159,6 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
         let! upstream = getUpstreamBranch worktreePath
         let! mainBehind = getMainBehindCount worktreePath
 
-        let commitHash = commit |> Option.map (fun c -> c.Hash) |> Option.defaultValue ""
         let commitMessage = commit |> Option.map (fun c -> c.Message) |> Option.defaultValue ""
 
         let commitTime =
@@ -175,18 +174,17 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
                 else
                     u)
 
-        return
+        let status =
             { Path = worktreePath
               Branch = branch |> Option.defaultValue "(detached)"
-              Head = commitHash
               LastCommitMessage = commitMessage
               LastCommitTime = commitTime
-              UpstreamBranch = upstreamBranch
-              Beads = { Open = 0; InProgress = 0; Closed = 0 }
+              Beads = BeadsSummary.zero
               Claude = ClaudeCodeStatus.Unknown
               Pr = NoPr
-              IsStale = false
               MainBehindCount = mainBehind }
+
+        return status, upstreamBranch
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =

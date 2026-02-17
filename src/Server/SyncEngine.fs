@@ -7,6 +7,21 @@ open System.IO
 open System.Threading
 open Shared
 
+[<RequireQualifiedAccess>]
+type SyncStep =
+    | CheckClean
+    | Pull
+    | Merge
+    | ResolveConflicts
+    | Test
+
+[<RequireQualifiedAccess>]
+type SyncState =
+    | Idle
+    | Running of currentStep: SyncStep
+    | Completed of lastResult: StepStatus
+    | Cancelled
+
 type ProcessResult =
     { ExitCode: int
       Stdout: string

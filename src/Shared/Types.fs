@@ -7,6 +7,9 @@ type BeadsSummary =
       InProgress: int
       Closed: int }
 
+module BeadsSummary =
+    let zero = { Open = 0; InProgress = 0; Closed = 0 }
+
 type ClaudeCodeStatus =
     | Active
     | Recent
@@ -14,7 +17,6 @@ type ClaudeCodeStatus =
     | Unknown
 
 type BuildStatus =
-    | NoBuild
     | Building
     | Succeeded
     | Failed
@@ -51,14 +53,11 @@ and PrInfo =
 type WorktreeStatus =
     { Path: string
       Branch: string
-      Head: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
-      UpstreamBranch: string option
       Beads: BeadsSummary
       Claude: ClaudeCodeStatus
       Pr: PrStatus
-      IsStale: bool
       MainBehindCount: int }
 
 type SyncTimes =
@@ -73,14 +72,6 @@ type WorktreeResponse =
       SyncTimes: SyncTimes }
 
 [<RequireQualifiedAccess>]
-type SyncStep =
-    | CheckClean
-    | Pull
-    | Merge
-    | ResolveConflicts
-    | Test
-
-[<RequireQualifiedAccess>]
 type StepStatus =
     | Pending
     | Running
@@ -93,13 +84,6 @@ type CardEvent =
       Message: string
       Timestamp: DateTimeOffset
       Status: StepStatus option }
-
-[<RequireQualifiedAccess>]
-type SyncState =
-    | Idle
-    | Running of currentStep: SyncStep
-    | Completed of lastResult: StepStatus
-    | Cancelled
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<WorktreeResponse>
