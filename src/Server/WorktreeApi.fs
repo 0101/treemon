@@ -59,7 +59,7 @@ let private assembleWorktreeStatus
 let getWorktrees (worktreeRoot: string) (appVersion: string) : Async<WorktreeResponse> =
     async {
         let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
-        let! prMap = PrStatus.Cache.getCachedPrStatuses worktreeRoot
+        let prMap = PrStatus.Cache.tryGetCachedPrStatuses worktreeRoot
 
         let! statuses =
             worktrees

@@ -1298,3 +1298,17 @@ type DashboardTests() =
             let! count = metricsInHeader.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside compact card header")
         }
+
+    [<Test>]
+    member this.``API response includes non-empty AppVersion``() =
+        task {
+            use client = new System.Net.Http.HttpClient()
+            let content = new System.Net.Http.StringContent("[]", System.Text.Encoding.UTF8, "application/json")
+            let! response = client.PostAsync($"{baseUrl}/IWorktreeApi/getWorktrees", content)
+            Assert.That(int response.StatusCode, Is.EqualTo(200), "POST /IWorktreeApi/getWorktrees should return 200")
+
+            let! body = response.Content.ReadAsStringAsync()
+            NUnit.Framework.TestContext.Out.WriteLine($"API response body: {body.Substring(0, System.Math.Min(2000, body.Length))}")
+            Assert.That(body, Does.Contain("AppVersion"), "Response body should contain AppVersion field")
+            Assert.That(body, Does.Not.Contain("\"AppVersion\":\"\""), "AppVersion should not be an empty string")
+        }
