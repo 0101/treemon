@@ -331,4 +331,5 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
             Log.log "SyncEngine" (sprintf "Sync pipeline completed successfully for %s" branch)
         with :? OperationCanceledException ->
             Log.log "SyncEngine" (sprintf "Sync pipeline cancelled for %s" branch)
+            completeSync branch StepStatus.Cancelled
     }
