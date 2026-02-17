@@ -258,7 +258,7 @@ let private runStep
             return Ok proc
     }
 
-let executeSyncPipeline (branch: string) (worktreePath: string) (ct: CancellationToken) : Async<unit> =
+let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: string) (ct: CancellationToken) : Async<unit> =
     async {
         try
             Log.log "SyncEngine" $"Starting sync pipeline for {branch} at {worktreePath}"
@@ -341,6 +341,7 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
                     return ()
                 | Ok _ -> ()
 
+            GitWorktree.Cache.invalidate repoRoot
             completeSync branch StepStatus.Succeeded
             Log.log "SyncEngine" $"Sync pipeline completed successfully for {branch}"
         with :? OperationCanceledException ->

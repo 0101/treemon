@@ -156,7 +156,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktree
                       match SyncEngine.beginSync branch with
                       | Error msg -> return Error msg
                       | Ok ct ->
-                          Async.Start(SyncEngine.executeSyncPipeline branch path ct, ct)
+                          Async.Start(SyncEngine.executeSyncPipeline branch path worktreeRoot ct, ct)
                           return Ok ()
               }
           cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
