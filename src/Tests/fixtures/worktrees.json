@@ -210,7 +210,7 @@
         "Source": "sync",
         "Message": "Pull",
         "Timestamp": "2026-02-16T21:30:00+00:00",
-        "Status": "Running"
+        "Status": "Succeeded"
       },
       {
         "Source": "sync",
@@ -233,6 +233,20 @@
         "Message": "Setting up API route handlers",
         "Timestamp": "2026-02-16T18:30:00+00:00",
         "Status": null
+      }
+    ],
+    "feature-unknown": [
+      {
+        "Source": "sync",
+        "Message": "Pull",
+        "Timestamp": "2026-02-16T17:30:00+00:00",
+        "Status": "Running"
+      },
+      {
+        "Source": "sync",
+        "Message": "Check clean",
+        "Timestamp": "2026-02-16T17:29:00+00:00",
+        "Status": "Succeeded"
       }
     ]
   }

@@ -896,6 +896,7 @@ type DashboardTests() =
     member this.``Event log renders on full cards when events exist``() =
         task {
             let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = eventLogs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
 
@@ -918,6 +919,7 @@ type DashboardTests() =
     member this.``Event log has correct DOM structure``() =
         task {
             let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
+            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = eventLogs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
 
@@ -941,6 +943,7 @@ type DashboardTests() =
     member this.``Event status badges have correct CSS classes when present``() =
         task {
             let statusBadges = this.Page.Locator(".wt-card .event-status")
+            do! statusBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = statusBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has sync events with statuses; event-status badges should be present")
 
@@ -1001,6 +1004,7 @@ type DashboardTests() =
     member this.``Cancel button appears with correct CSS class``() =
         task {
             let cancelBtns = this.Page.Locator(".wt-card .sync-cancel-btn")
+            do! cancelBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = cancelBtns.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a branch with Running sync event; cancel button should be present")
 

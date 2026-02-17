@@ -239,7 +239,7 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
             Log.log "SyncEngine" (sprintf "Starting sync pipeline for %s at %s" branch worktreePath)
 
             // Step 1: Check clean
-            let! checkResult = runStep branch SyncStep.CheckClean worktreePath "git" "status --porcelain" ct
+            let! checkResult = runStep branch SyncStep.CheckClean worktreePath "git" "status --porcelain --untracked-files=no" ct
 
             match checkResult with
             | Error status ->
@@ -253,7 +253,7 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (ct: Cancellatio
             | Ok _ ->
 
             // Step 2: Pull
-            let! pullResult = runStep branch SyncStep.Pull worktreePath "git" "pull --ff-only" ct
+            let! pullResult = runStep branch SyncStep.Pull worktreePath "git" "fetch origin" ct
 
             match pullResult with
             | Error status ->

@@ -58,7 +58,7 @@ let init () =
       IsCompact = false
       SyncTimes = None
       BranchEvents = Map.empty },
-    fetchWorktrees ()
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let sortWorktrees sortMode worktrees =
     match sortMode with
