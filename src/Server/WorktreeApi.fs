@@ -22,7 +22,7 @@ let private assembleWorktreeStatus
     =
     async {
         try
-            let! gitData = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
+            let! gitData = GitWorktree.collectWorktreeGitData repoRoot wt.Path wt.Branch
             let! beads = BeadsStatus.Cache.getCachedBeadsSummary wt.Path
             let claude = ClaudeStatus.Cache.getCachedClaudeStatus wt.Path
 

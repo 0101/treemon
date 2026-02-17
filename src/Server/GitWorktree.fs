@@ -98,6 +98,15 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
+let private fetchCache = Cache.TtlCache<unit>(TimeSpan.FromSeconds(120.0))
+
+let fetchFromOrigin (repoRoot: string) =
+    fetchCache.GetOrRefreshAsync repoRoot (fun root ->
+        async {
+            let! _ = runGit root "fetch origin main"
+            return ()
+        })
+
 let getMainBehindCount (worktreePath: string) =
     async {
         let! output = runGit worktreePath "rev-list --count HEAD..origin/main"
@@ -135,10 +144,11 @@ module Cache =
     let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
     let invalidate (repoRoot: string) = cache.Invalidate repoRoot
 
-let collectWorktreeGitData (worktreePath: string) (branch: string option) =
+let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: string option) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
+        do! fetchFromOrigin repoRoot
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath)
 
         let! commit = commitChild
