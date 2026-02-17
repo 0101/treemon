@@ -2,7 +2,6 @@ module Server.GitWorktree
 
 open System
 open System.IO
-open Shared
 
 type WorktreeInfo =
     { Path: string
@@ -13,6 +12,14 @@ type CommitInfo =
     { Hash: string
       Message: string
       Time: DateTimeOffset }
+
+type GitData =
+    { Path: string
+      Branch: string
+      LastCommitMessage: string
+      LastCommitTime: DateTimeOffset
+      UpstreamBranch: string option
+      MainBehindCount: int }
 
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
@@ -130,36 +137,29 @@ module Cache =
 
 let collectWorktreeGitData (worktreePath: string) (branch: string option) =
     async {
-        let! commit = getLastCommit worktreePath
-        let! upstream = getUpstreamBranch worktreePath
-        let! mainBehind = getMainBehindCount worktreePath
+        let! commitChild = Async.StartChild(getLastCommit worktreePath)
+        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
+        let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath)
 
-        let commitMessage = commit |> Option.map (fun c -> c.Message) |> Option.defaultValue ""
-
-        let commitTime =
-            commit
-            |> Option.map (fun c -> c.Time)
-            |> Option.defaultValue DateTimeOffset.MinValue
+        let! commit = commitChild
+        let! upstream = upstreamChild
+        let! mainBehind = mainBehindChild
 
         let upstreamBranch =
             upstream
-            |> Option.map (fun u ->
+            |> Option.map (fun (u: string) ->
                 if u.StartsWith("origin/") then
                     u.Substring("origin/".Length)
                 else
                     u)
 
-        let status =
+        return
             { Path = worktreePath
               Branch = branch |> Option.defaultValue "(detached)"
-              LastCommitMessage = commitMessage
-              LastCommitTime = commitTime
-              Beads = BeadsSummary.zero
-              Claude = ClaudeCodeStatus.Unknown
-              Pr = NoPr
+              LastCommitMessage = commit |> Option.map (fun c -> c.Message) |> Option.defaultValue ""
+              LastCommitTime = commit |> Option.map (fun c -> c.Time) |> Option.defaultValue DateTimeOffset.MinValue
+              UpstreamBranch = upstreamBranch
               MainBehindCount = mainBehind }
-
-        return status, upstreamBranch
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =

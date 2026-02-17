@@ -22,17 +22,21 @@ let private assembleWorktreeStatus
     =
     async {
         try
-            let! gitData, upstreamBranch = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
+            let! gitData = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
             let! beads = BeadsStatus.Cache.getCachedBeadsSummary wt.Path
             let claude = ClaudeStatus.Cache.getCachedClaudeStatus wt.Path
 
-            let pr = PrStatus.Cache.lookupPrStatus prMap upstreamBranch
+            let pr = PrStatus.Cache.lookupPrStatus prMap gitData.UpstreamBranch
 
             return
-                { gitData with
-                    Beads = beads
-                    Claude = claude
-                    Pr = pr }
+                { Path = gitData.Path
+                  Branch = gitData.Branch
+                  LastCommitMessage = gitData.LastCommitMessage
+                  LastCommitTime = gitData.LastCommitTime
+                  Beads = beads
+                  Claude = claude
+                  Pr = pr
+                  MainBehindCount = gitData.MainBehindCount }
         with ex ->
             Log.log "API" (sprintf "Failed to assemble status for worktree %s (%s): %s" wt.Path (wt.Branch |> Option.defaultValue "(detached)") ex.Message)
 
