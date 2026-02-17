@@ -85,7 +85,8 @@
         "Beads": { "Open": 1, "InProgress": 0, "Closed": 0 },
         "Claude": "Idle",
         "Pr": "NoPr",
-        "MainBehindCount": 42
+        "MainBehindCount": 42,
+        "IsDirty": true
       },
       {
         "Path": "Q:/code/TestProject/feature-merged",

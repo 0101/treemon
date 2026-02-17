@@ -99,10 +99,10 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Dashboard shows worktree count in status bar``() =
+    member this.``Status bar does not show worktree count``() =
         task {
             let! statusText = this.Page.Locator(".status-bar").TextContentAsync()
-            Assert.That(statusText, Does.Contain("worktrees"))
+            Assert.That(statusText, Does.Not.Contain("worktrees"), "Worktree count was removed from status bar")
         }
 
     [<Test>]
@@ -955,8 +955,8 @@ type DashboardTests() =
             Assert.That(int response.StatusCode, Is.EqualTo(200), "GET /manifest.webmanifest should return 200")
 
             let! body = response.Content.ReadAsStringAsync()
-            Assert.That(body, Does.Contain("\"name\": \"mait\""), "Manifest should contain app name 'mait'")
-            Assert.That(body, Does.Contain("\"short_name\": \"mait\""), "Manifest should contain short_name 'mait'")
+            Assert.That(body, Does.Contain("\"name\": \"Treemon\""), "Manifest should contain app name 'Treemon'")
+            Assert.That(body, Does.Contain("\"short_name\": \"Treemon\""), "Manifest should contain short_name 'Treemon'")
             Assert.That(body, Does.Contain("\"display\": \"standalone\""), "Manifest should specify standalone display mode")
             Assert.That(body, Does.Contain("\"start_url\": \"/\""), "Manifest should have start_url '/'")
             Assert.That(body, Does.Contain("\"theme_color\": \"#1e1e2e\""), "Manifest theme_color should match Catppuccin Mocha base")
@@ -1081,4 +1081,220 @@ type DashboardTests() =
                     "el => { const children = Array.from(el.children); const termIdx = children.findIndex(c => c.classList.contains('terminal-btn')); const delIdx = children.findIndex(c => c.classList.contains('delete-btn')); return termIdx < delIdx; }"
                 )
             Assert.That(order, Is.True, "Terminal button should appear before delete button in card header DOM order")
+        }
+
+    [<Test>]
+    member this.``Merged card is dimmed with reduced opacity``() =
+        task {
+            let mergedCards = this.Page.Locator(".wt-card.merged")
+            let! count = mergedCards.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a merged worktree; merged card should be present")
+
+            let! opacity = mergedCards.First |> computedStyle "opacity"
+            Assert.That(opacity, Is.EqualTo("0.5"), "Merged card should have opacity 0.5")
+        }
+
+    [<Test>]
+    member this.``Merged card delete button has red accent color``() =
+        task {
+            let mergedDeleteBtn = this.Page.Locator(".wt-card.merged .delete-btn")
+            let! count = mergedDeleteBtn.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Merged card should have a delete button")
+
+            let! color = mergedDeleteBtn.First |> computedStyle "color"
+            Assert.That(color, Is.EqualTo("rgb(243, 139, 168)"), "Delete button on merged card should be red (#f38ba8)")
+
+            let! borderColor = mergedDeleteBtn.First |> computedStyle "borderColor"
+            Assert.That(borderColor, Is.EqualTo("rgb(243, 139, 168)"), "Delete button border on merged card should be red (#f38ba8)")
+        }
+
+    [<Test>]
+    member this.``Non-merged cards do not have merged CSS class``() =
+        task {
+            let allCards = this.Page.Locator(".wt-card")
+            let mergedCards = this.Page.Locator(".wt-card.merged")
+            let! allCount = allCards.CountAsync()
+            let! mergedCount = mergedCards.CountAsync()
+            Assert.That(mergedCount, Is.LessThan(allCount), "Not all cards should have merged class")
+        }
+
+    [<Test>]
+    member this.``Dirty worktree shows warning instead of sync button``() =
+        task {
+            let dirtyWarnings = this.Page.Locator(".wt-card .dirty-warning")
+            let! count = dirtyWarnings.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has dirty worktree behind main; dirty warning should be present")
+
+            let! text = dirtyWarnings.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("uncommitted changes"), "Dirty warning text should be 'uncommitted changes'")
+
+            let! color = dirtyWarnings.First |> computedStyle "color"
+            Assert.That(color, Is.EqualTo("rgb(249, 226, 175)"), "Dirty warning should be yellow/amber (#f9e2af)")
+
+            let! fontStyle = dirtyWarnings.First |> computedStyle "fontStyle"
+            Assert.That(fontStyle, Is.EqualTo("italic"), "Dirty warning should be italic")
+        }
+
+    [<Test>]
+    member this.``Dirty worktree row has no sync button``() =
+        task {
+            let dirtyRow = this.Page.Locator(".wt-card .main-behind-row:has(.dirty-warning)")
+            let! count = dirtyRow.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has dirty worktree behind main; row with dirty warning should exist")
+
+            let syncBtns = dirtyRow.First.Locator(".sync-btn")
+            let! btnCount = syncBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(0), "Row with dirty warning should not have a sync button")
+        }
+
+    [<Test>]
+    member this.``Commit grid renders on branches with commits``() =
+        task {
+            let grids = this.Page.Locator(".wt-card .commit-grid")
+            let! count = grids.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branches with CommitCount > 0; commit grids should be present")
+
+            let squares = grids.First.Locator(".commit-square")
+            let! squareCount = squares.CountAsync()
+            Assert.That(squareCount, Is.GreaterThanOrEqualTo(1), "Commit grid should contain commit squares")
+        }
+
+    [<Test>]
+    member this.``Commit squares have correct size and color``() =
+        task {
+            let square = this.Page.Locator(".wt-card .commit-square").First
+            do! Assertions.Expect(square).ToBeVisibleAsync()
+
+            let! width = square |> computedStyle "width"
+            Assert.That(width, Is.EqualTo("3px"), "Commit square width should be 3px")
+
+            let! height = square |> computedStyle "height"
+            Assert.That(height, Is.EqualTo("3px"), "Commit square height should be 3px")
+
+            let! bg = square |> computedStyle "backgroundColor"
+            Assert.That(bg, Is.EqualTo("rgb(203, 166, 247)"), "Commit square should be Catppuccin mauve (#cba6f7)")
+        }
+
+    [<Test>]
+    member this.``Commit grid uses column-first flow with 3 rows``() =
+        task {
+            let grid = this.Page.Locator(".wt-card .commit-grid").First
+            do! Assertions.Expect(grid).ToBeVisibleAsync()
+
+            let! display = grid |> computedStyle "display"
+            Assert.That(display, Does.Contain("grid"), "Commit grid should use CSS grid layout")
+
+            let! autoFlow = grid |> computedStyle "gridAutoFlow"
+            Assert.That(autoFlow, Is.EqualTo("column"), "Commit grid should fill columns first (grid-auto-flow: column)")
+
+            let! templateRows = grid |> computedStyle "gridTemplateRows"
+            Assert.That(templateRows, Is.EqualTo("3px 3px 3px"), "Commit grid should have 3 rows of 3px")
+        }
+
+    [<Test>]
+    member this.``Commit grid square count matches fixture CommitCount``() =
+        task {
+            let activeCard = this.Page.Locator(".wt-card.cc-active").First
+            let squares = activeCard.Locator(".commit-square")
+            let! squareCount = squares.CountAsync()
+            Assert.That(squareCount, Is.EqualTo(12), "feature-active has CommitCount=12; should render 12 squares")
+        }
+
+    [<Test>]
+    member this.``Commit overflow indicator shown for high commit count``() =
+        task {
+            let overflows = this.Page.Locator(".wt-card .commit-overflow")
+            let! count = overflows.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branch with 95 commits (>90); overflow indicator should be present")
+
+            let! text = overflows.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("+5"), "feature-draft has 95 commits; overflow should show +5 (95 - 90)")
+        }
+
+    [<Test>]
+    member this.``Commit grid capped at 90 squares for high commit count``() =
+        task {
+            let overflowCard = this.Page.Locator(".wt-card:has(.commit-overflow)")
+            let! count = overflowCard.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Should have card with overflow")
+
+            let squares = overflowCard.First.Locator(".commit-square")
+            let! squareCount = squares.CountAsync()
+            Assert.That(squareCount, Is.EqualTo(90), "Grid should be capped at 90 squares")
+        }
+
+    [<Test>]
+    member this.``Diff stats show additions and deletions``() =
+        task {
+            let diffStats = this.Page.Locator(".wt-card .diff-stats")
+            let! count = diffStats.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branches with diff stats; diff-stats elements should be present")
+
+            let added = diffStats.First.Locator(".diff-added")
+            let! addedCount = added.CountAsync()
+            Assert.That(addedCount, Is.EqualTo(1), "Diff stats should have a .diff-added element")
+
+            let! addedText = added.TextContentAsync()
+            Assert.That(addedText, Does.StartWith("+"), "Diff additions should start with '+'")
+
+            let removed = diffStats.First.Locator(".diff-removed")
+            let! removedCount = removed.CountAsync()
+            Assert.That(removedCount, Is.EqualTo(1), "Diff stats should have a .diff-removed element")
+
+            let! removedText = removed.TextContentAsync()
+            Assert.That(removedText, Does.StartWith("-"), "Diff deletions should start with '-'")
+        }
+
+    [<Test>]
+    member this.``Diff stats colors are green for additions and red for deletions``() =
+        task {
+            let added = this.Page.Locator(".wt-card .diff-added").First
+            do! Assertions.Expect(added).ToBeVisibleAsync()
+
+            let! addedColor = added |> computedStyle "color"
+            Assert.That(addedColor, Is.EqualTo("rgb(166, 227, 161)"), "Diff additions should be green (#a6e3a1)")
+
+            let removed = this.Page.Locator(".wt-card .diff-removed").First
+            let! removedColor = removed |> computedStyle "color"
+            Assert.That(removedColor, Is.EqualTo("rgb(243, 139, 168)"), "Diff deletions should be red (#f38ba8)")
+        }
+
+    [<Test>]
+    member this.``Diff stats show correct values from fixture``() =
+        task {
+            let activeCard = this.Page.Locator(".wt-card.cc-active").First
+            let added = activeCard.Locator(".diff-added")
+            let! addedText = added.First.TextContentAsync()
+            Assert.That(addedText, Is.EqualTo("+234"), "feature-active has LinesAdded=234")
+
+            let removed = activeCard.Locator(".diff-removed")
+            let! removedText = removed.First.TextContentAsync()
+            Assert.That(removedText, Is.EqualTo("-89"), "feature-active has LinesRemoved=89")
+        }
+
+    [<Test>]
+    member this.``No commit grid on branches with zero commits``() =
+        task {
+            let idleCard = this.Page.Locator(".wt-card.cc-idle").First
+            let grids = idleCard.Locator(".commit-grid")
+            let! count = grids.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Branches with no WorkMetrics or CommitCount=0 should not show commit grid")
+        }
+
+    [<Test>]
+    member this.``Work metrics appear in card header``() =
+        task {
+            let metricsInHeader = this.Page.Locator(".wt-card .card-header .work-metrics")
+            let! count = metricsInHeader.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside card header")
+        }
+
+    [<Test>]
+    member this.``Work metrics appear in compact card header``() =
+        task {
+            do! (compactBtn this.Page).ClickAsync()
+
+            let metricsInHeader = this.Page.Locator(".wt-card.compact .card-header .work-metrics")
+            let! count = metricsInHeader.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside compact card header")
         }
