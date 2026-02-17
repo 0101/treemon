@@ -101,7 +101,7 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
 
     | Tick ->
-        model, fetchWorktrees ()
+        model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
     | StartSync branch ->
         model, Cmd.OfAsync.perform worktreeApi.startSync branch SyncStarted
