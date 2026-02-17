@@ -463,6 +463,40 @@ let prRow (repoName: string) (wt: WorktreeStatus) =
             prop.children [ prBadgeContent repoName pr ]
         ]
 
+let workMetricsView (metrics: WorkMetrics option) =
+    match metrics with
+    | None -> Html.none
+    | Some m when m.CommitCount = 0 -> Html.none
+    | Some m ->
+        let displayCount = min m.CommitCount 90
+        let overflow = m.CommitCount - displayCount
+        Html.span [
+            prop.className "work-metrics"
+            prop.children [
+                Html.span [
+                    prop.className "commit-grid"
+                    prop.children (
+                        List.init displayCount (fun _ ->
+                            Html.span [ prop.className "commit-square" ])
+                    )
+                ]
+                match overflow with
+                | 0 -> Html.none
+                | n -> Html.span [ prop.className "commit-overflow"; prop.text $"+{n}" ]
+                match m.LinesAdded, m.LinesRemoved with
+                | 0, 0 -> Html.none
+                | added, removed ->
+                    Html.span [
+                        prop.className "diff-stats"
+                        prop.children [
+                            Html.span [ prop.className "diff-added"; prop.text $"+{added}" ]
+                            Html.text " "
+                            Html.span [ prop.className "diff-removed"; prop.text $"-{removed}" ]
+                        ]
+                    ]
+            ]
+        ]
+
 let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt + " compact")
@@ -472,6 +506,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
                 prop.children [
                     Html.span [ prop.className ($"cc-dot {ccClassName wt.Claude}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                    workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     deleteButton dispatch wt
@@ -497,6 +532,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
                 prop.children [
                     Html.span [ prop.className ($"cc-dot {ccClassName wt.Claude}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                    workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
                     deleteButton dispatch wt
                 ]

@@ -148,6 +148,20 @@
         .event-status.success { background: #1e3a2f; color: #a6e3a1; }
         .event-status.failed { background: #3b2030; color: #f38ba8; }
         .event-status.cancelled { background: #3a3020; color: #f9e2af; }
+
+        .commit-grid {
+            display: inline-grid;
+            grid-auto-flow: column;
+            grid-template-rows: repeat(3, 3px);
+            gap: 1px;
+            align-self: center;
+        }
+        .commit-square { width: 3px; height: 3px; background: #cba6f7; border-radius: 0; }
+        .commit-overflow { font-size: 0.7em; color: #7f849c; align-self: center; margin-left: 2px; }
+        .diff-stats { font-size: 0.75em; align-self: center; margin-left: 4px; white-space: nowrap; }
+        .diff-added { color: #a6e3a1; }
+        .diff-removed { color: #f38ba8; }
+        .work-metrics { display: flex; align-items: center; gap: 4px; }
     </style>
 </head>
 <body>
