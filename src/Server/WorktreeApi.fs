@@ -102,8 +102,14 @@ let private openTerminal (worktreeRoot: string) (path: string) =
                     CreateNoWindow = true
                 )
 
-            Log.log "API" $"openTerminal: launching terminal for '{path}'"
-            Process.Start(startInfo) |> ignore
+            try
+                Log.log "API" $"openTerminal: launching terminal for '{path}'"
+                Process.Start(startInfo) |> ignore
+            with
+            | :? System.ComponentModel.Win32Exception as ex ->
+                Log.log "API" $"openTerminal: failed to start wt.exe: {ex.Message}"
+            | ex ->
+                Log.log "API" $"openTerminal: unexpected error starting terminal: {ex.Message}"
     }
 
 let private deleteWorktree (worktreeRoot: string) (branch: string) =
