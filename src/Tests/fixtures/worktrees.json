@@ -36,7 +36,8 @@
             "IsMerged": false
           }
         },
-        "MainBehindCount": 25
+        "MainBehindCount": 25,
+        "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 }
       },
       {
         "Path": "Q:/code/TestProject/feature-recent",
@@ -63,7 +64,8 @@
             "IsMerged": false
           }
         },
-        "MainBehindCount": 5
+        "MainBehindCount": 5,
+        "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 }
       },
       {
         "Path": "Q:/code/TestProject/feature-idle",
@@ -143,7 +145,8 @@
             "IsMerged": false
           }
         },
-        "MainBehindCount": 2
+        "MainBehindCount": 2,
+        "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 }
       },
       {
         "Path": "Q:/code/TestProject/feature-unknown",

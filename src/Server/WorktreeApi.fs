@@ -37,7 +37,8 @@ let private assembleWorktreeStatus
                   Claude = claude
                   Pr = pr
                   MainBehindCount = gitData.MainBehindCount
-                  IsDirty = gitData.IsDirty }
+                  IsDirty = gitData.IsDirty
+                  WorkMetrics = gitData.WorkMetrics }
         with ex ->
             let branch = wt.Branch |> Option.defaultValue "(detached)"
             Log.log "API" $"Failed to assemble status for worktree {wt.Path} ({branch}): {ex.Message}"
@@ -51,7 +52,8 @@ let private assembleWorktreeStatus
                   Claude = Unknown
                   Pr = NoPr
                   MainBehindCount = 0
-                  IsDirty = false }
+                  IsDirty = false
+                  WorkMetrics = None }
     }
 
 let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =

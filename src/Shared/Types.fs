@@ -50,6 +50,11 @@ and PrInfo =
       Builds: BuildInfo list
       IsMerged: bool }
 
+type WorkMetrics =
+    { CommitCount: int
+      LinesAdded: int
+      LinesRemoved: int }
+
 type WorktreeStatus =
     { Path: string
       Branch: string
@@ -59,7 +64,8 @@ type WorktreeStatus =
       Claude: ClaudeCodeStatus
       Pr: PrStatus
       MainBehindCount: int
-      IsDirty: bool }
+      IsDirty: bool
+      WorkMetrics: WorkMetrics option }
 
 type SyncTimes =
     { Git: DateTimeOffset option

@@ -20,7 +20,8 @@ type GitData =
       LastCommitTime: DateTimeOffset
       UpstreamBranch: string option
       MainBehindCount: int
-      IsDirty: bool }
+      IsDirty: bool
+      WorkMetrics: Shared.WorkMetrics option }
 
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
@@ -155,11 +156,57 @@ let isDirty (worktreePath: string) =
             |> Option.defaultValue false
     }
 
+let getCommitCount (worktreePath: string) =
+    async {
+        let! output = runGit worktreePath "rev-list --count --no-merges origin/main..HEAD"
+
+        return
+            output
+            |> Option.bind (fun s ->
+                match Int32.TryParse(s.Trim()) with
+                | true, count -> Some count
+                | _ -> None)
+            |> Option.defaultValue 0
+    }
+
+let private parseDiffStats (output: string option) =
+    output
+    |> Option.bind (fun s ->
+        let trimmed = s.Trim()
+
+        match trimmed with
+        | "" -> None
+        | _ ->
+            let insertions =
+                System.Text.RegularExpressions.Regex.Match(trimmed, @"(\d+) insertion")
+                |> fun m ->
+                    match m.Success with
+                    | true -> Int32.Parse(m.Groups.[1].Value)
+                    | false -> 0
+
+            let deletions =
+                System.Text.RegularExpressions.Regex.Match(trimmed, @"(\d+) deletion")
+                |> fun m ->
+                    match m.Success with
+                    | true -> Int32.Parse(m.Groups.[1].Value)
+                    | false -> 0
+
+            Some(insertions, deletions))
+    |> Option.defaultValue (0, 0)
+
+let getDiffStats (worktreePath: string) =
+    async {
+        let! output = runGit worktreePath "diff --shortstat origin/main...HEAD"
+        return parseDiffStats output
+    }
+
 let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: string option) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
+        let! commitCountChild = Async.StartChild(getCommitCount worktreePath)
+        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath)
         do! fetchFromOrigin repoRoot
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath)
 
@@ -167,6 +214,8 @@ let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: st
         let! upstream = upstreamChild
         let! mainBehind = mainBehindChild
         let! dirty = dirtyChild
+        let! commitCount = commitCountChild
+        let! (linesAdded, linesRemoved) = diffStatsChild
 
         let upstreamBranch =
             upstream
@@ -176,6 +225,15 @@ let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: st
                 else
                     u)
 
+        let workMetrics : Shared.WorkMetrics option =
+            match commitCount with
+            | 0 -> None
+            | _ ->
+                Some
+                    { CommitCount = commitCount
+                      LinesAdded = linesAdded
+                      LinesRemoved = linesRemoved }
+
         return
             { Path = worktreePath
               Branch = branch |> Option.defaultValue "(detached)"
@@ -183,7 +241,8 @@ let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: st
               LastCommitTime = commit |> Option.map (fun c -> c.Time) |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch
               MainBehindCount = mainBehind
-              IsDirty = dirty }
+              IsDirty = dirty
+              WorkMetrics = workMetrics }
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
