@@ -100,13 +100,27 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
+let private tryFastForwardMain (repoRoot: string) =
+    async {
+        let! currentBranch = runGit repoRoot "rev-parse --abbrev-ref HEAD"
+
+        match currentBranch |> Option.map (fun s -> s.Trim()) with
+        | Some "main" ->
+            let! result = runGitResult repoRoot "merge --ff-only origin/main"
+
+            match result with
+            | Ok _ -> Log.log "Git" $"Fast-forwarded main in {repoRoot}"
+            | Error msg -> Log.log "Git" $"Fast-forward skipped in {repoRoot}: {msg}"
+        | _ -> ()
+    }
+
 let private fetchCache = Cache.TtlCache<unit>(TimeSpan.FromSeconds(120.0))
 
 let fetchFromOrigin (repoRoot: string) =
     fetchCache.GetOrRefreshAsync repoRoot (fun root ->
         async {
             let! _ = runGit root "fetch origin main"
-            return ()
+            do! tryFastForwardMain root
         })
 
 let getMainBehindCount (worktreePath: string) =
