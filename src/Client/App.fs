@@ -218,9 +218,9 @@ let segmentPct count total =
     | 0 -> 0
     | _ -> (count * 100) / total
 
-let beadsCounts (b: BeadsSummary) =
-    Html.div [
-        prop.className "beads-counts"
+let beadsCounts (className: string) (b: BeadsSummary) =
+    Html.span [
+        prop.className className
         prop.children [
             Html.span [ prop.className "beads-open"; prop.text (string b.Open) ]
             Html.span [ prop.className "beads-sep"; prop.text "/" ]
@@ -287,28 +287,15 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
         ]
 
 let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
-    match wt.MainBehindCount with
-    | 0 ->
-        Html.div [
-            prop.className "main-behind-row"
-            prop.children [
-                Html.span [
-                    prop.className "main-behind up-to-date"
-                    prop.text "up to date"
-                ]
-            ]
+    Html.div [
+        prop.className "main-behind-row"
+        prop.children [
+            mainBehindIndicator wt.MainBehindCount
+            match wt.MainBehindCount with
+            | 0 -> ()
+            | _ -> syncButton dispatch wt branchEvents
         ]
-    | n ->
-        Html.div [
-            prop.className "main-behind-row"
-            prop.children [
-                Html.span [
-                    prop.className (match n > 20 with true -> "main-behind behind-warning" | false -> "main-behind")
-                    prop.text (sprintf "%d behind main" n)
-                ]
-                syncButton dispatch wt branchEvents
-            ]
-        ]
+    ]
 
 let stepStatusClassName (status: StepStatus option) =
     match status with
@@ -354,10 +341,10 @@ let eventLog (events: CardEvent list) =
 
 let abbreviatePipelineName (repoName: string) (name: string) =
     let stripped =
-        match repoName.Length > 0 && name.Length >= repoName.Length && name.[..repoName.Length-1].ToLowerInvariant() = repoName.ToLowerInvariant() with
+        match name.Length >= repoName.Length && name.StartsWith(repoName, System.StringComparison.OrdinalIgnoreCase) with
         | true -> name.[repoName.Length..].TrimStart()
         | false -> name
-    match stripped.Length >= 5 && stripped.[stripped.Length-5..].ToLowerInvariant() = " - pr" with
+    match stripped.EndsWith(" - pr", System.StringComparison.OrdinalIgnoreCase) with
     | true -> stripped.[..stripped.Length-6].TrimEnd()
     | false -> stripped
 
@@ -434,6 +421,49 @@ let deleteButton dispatch (wt: WorktreeStatus) =
         prop.text "\u2715"
     ]
 
+let prBadgeContent (repoName: string) (pr: PrInfo) =
+    React.fragment [
+        match pr.IsMerged with
+        | true ->
+            Interop.createElement "a" [
+                prop.className "pr-badge merged"
+                prop.title pr.Title
+                prop.href pr.Url
+                prop.target "_blank"
+                prop.text "Merged"
+            ]
+        | false ->
+            Interop.createElement "a" [
+                prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
+                prop.title pr.Title
+                prop.href pr.Url
+                prop.target "_blank"
+                prop.text (sprintf "PR #%d" pr.Id)
+            ]
+            match pr.ThreadCounts.Total with
+            | 0 -> Html.none
+            | total ->
+                Html.span [
+                    prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
+                    prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
+                ]
+            buildBadges repoName pr.Builds
+    ]
+
+let prSection (repoName: string) (wt: WorktreeStatus) =
+    match wt.Pr with
+    | NoPr -> Html.none
+    | HasPr pr -> prBadgeContent repoName pr
+
+let prRow (repoName: string) (wt: WorktreeStatus) =
+    match wt.Pr with
+    | NoPr -> Html.none
+    | HasPr pr ->
+        Html.div [
+            prop.className "pr-row"
+            prop.children [ prBadgeContent repoName pr ]
+        ]
+
 let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt + " compact")
@@ -451,45 +481,9 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
             Html.div [
                 prop.className "compact-detail"
                 prop.children [
-                    Html.span [
-                        prop.className "beads-inline"
-                        prop.children [
-                            Html.span [ prop.className "beads-open"; prop.text (string wt.Beads.Open) ]
-                            Html.span [ prop.className "beads-sep"; prop.text "/" ]
-                            Html.span [ prop.className "beads-inprogress"; prop.text (string wt.Beads.InProgress) ]
-                            Html.span [ prop.className "beads-sep"; prop.text "/" ]
-                            Html.span [ prop.className "beads-closed"; prop.text (string wt.Beads.Closed) ]
-                        ]
-                    ]
+                    beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
-                    match wt.Pr with
-                    | NoPr -> Html.none
-                    | HasPr pr ->
-                        match pr.IsMerged with
-                        | true ->
-                            Interop.createElement "a" [
-                                prop.className "pr-badge merged"
-                                prop.title pr.Title
-                                prop.href pr.Url
-                                prop.target "_blank"
-                                prop.text "Merged"
-                            ]
-                        | false ->
-                            Interop.createElement "a" [
-                                prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
-                                prop.title pr.Title
-                                prop.href pr.Url
-                                prop.target "_blank"
-                                prop.text (sprintf "PR #%d" pr.Id)
-                            ]
-                            match pr.ThreadCounts.Total with
-                            | 0 -> Html.none
-                            | total ->
-                                Html.span [
-                                    prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
-                                    prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
-                                ]
-                            buildBadges repoName pr.Builds
+                    prSection repoName wt
                 ]
             ]
         ]
@@ -520,46 +514,14 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
             Html.div [
                 prop.className "beads-row"
                 prop.children [
-                    beadsCounts wt.Beads
+                    beadsCounts "beads-counts" wt.Beads
                     beadsProgressBar wt.Beads
                 ]
             ]
 
             mainBehindWithSync dispatch wt branchEvents
 
-            match wt.Pr with
-            | NoPr -> Html.none
-            | HasPr pr ->
-                Html.div [
-                    prop.className "pr-row"
-                    prop.children [
-                        match pr.IsMerged with
-                        | true ->
-                            Interop.createElement "a" [
-                                prop.className "pr-badge merged"
-                                prop.title pr.Title
-                                prop.href pr.Url
-                                prop.target "_blank"
-                                prop.text "Merged"
-                            ]
-                        | false ->
-                            Interop.createElement "a" [
-                                prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
-                                prop.title pr.Title
-                                prop.href pr.Url
-                                prop.target "_blank"
-                                prop.text (sprintf "PR #%d" pr.Id)
-                            ]
-                            match pr.ThreadCounts.Total with
-                            | 0 -> Html.none
-                            | total ->
-                                Html.span [
-                                    prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
-                                    prop.text (sprintf "%d/%d threads" pr.ThreadCounts.Unresolved total)
-                                ]
-                            buildBadges repoName pr.Builds
-                    ]
-                ]
+            prRow repoName wt
 
             eventLog branchEvents
         ]
