@@ -5,6 +5,11 @@ open System.IO
 open System.Text.Json
 open Shared
 
+let private tryProp (name: string) (el: JsonElement) =
+    match el.TryGetProperty(name) with
+    | true, v when v.ValueKind <> JsonValueKind.Null && v.ValueKind <> JsonValueKind.Undefined -> Some v
+    | _ -> None
+
 type AzDoRemote =
     { Org: string
       Project: string
@@ -78,13 +83,9 @@ let private parsePrList (json: string) =
         let repoGuid =
             prElements
             |> List.tryHead
-            |> Option.bind (fun el ->
-                match el.TryGetProperty("repository") with
-                | true, repo ->
-                    match repo.TryGetProperty("id") with
-                    | true, id -> Some(id.GetString())
-                    | _ -> None
-                | _ -> None)
+            |> Option.bind (tryProp "repository")
+            |> Option.bind (tryProp "id")
+            |> Option.map (fun v -> v.GetString())
 
         let prs =
             prElements
@@ -106,12 +107,12 @@ let private parsePrList (json: string) =
                     let isMerged = status = "completed"
 
                     let closedDate =
-                        match el.TryGetProperty("closedDate") with
-                        | true, v when v.ValueKind <> JsonValueKind.Null ->
+                        el
+                        |> tryProp "closedDate"
+                        |> Option.bind (fun v ->
                             match DateTimeOffset.TryParse(v.GetString()) with
                             | true, dt -> Some dt
-                            | _ -> None
-                        | _ -> None
+                            | _ -> None)
 
                     Some
                         { BranchName = branchName
@@ -137,14 +138,9 @@ let private parseThreadCounts (json: string) =
             doc.RootElement.GetProperty("value").EnumerateArray()
             |> Seq.filter (fun thread ->
                 let isDeleted =
-                    match thread.TryGetProperty("isDeleted") with
-                    | true, v -> v.GetBoolean()
-                    | _ -> false
+                    thread |> tryProp "isDeleted" |> Option.map (fun v -> v.GetBoolean()) |> Option.defaultValue false
 
-                let hasStatus =
-                    match thread.TryGetProperty("status") with
-                    | true, _ -> true
-                    | _ -> false
+                let hasStatus = (thread |> tryProp "status").IsSome
 
                 not isDeleted && hasStatus)
             |> Seq.toList
@@ -170,38 +166,33 @@ let private parseBuildRun (run: JsonElement) =
     match status with
     | "inProgress" -> Some BuildStatus.Building
     | "completed" ->
-        match run.TryGetProperty("result") with
-        | true, result ->
+        run
+        |> tryProp "result"
+        |> Option.bind (fun result ->
             match result.GetString() with
             | "succeeded" -> Some BuildStatus.Succeeded
             | "failed" -> Some BuildStatus.Failed
             | "partiallySucceeded" -> Some BuildStatus.PartiallySucceeded
             | "canceled" -> Some BuildStatus.Canceled
-            | _ -> None
-        | _ -> None
+            | _ -> None)
     | _ -> None
 
 let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
+    let definition = run |> tryProp "definition"
+
     let name =
-        match run.TryGetProperty("definition") with
-        | true, def ->
-            match def.TryGetProperty("name") with
-            | true, n -> n.GetString()
-            | _ -> "Unknown"
-        | _ -> "Unknown"
+        definition
+        |> Option.bind (tryProp "name")
+        |> Option.map (fun v -> v.GetString())
+        |> Option.defaultValue "Unknown"
 
     let definitionId =
-        match run.TryGetProperty("definition") with
-        | true, def ->
-            match def.TryGetProperty("id") with
-            | true, id -> Some(id.GetInt32())
-            | _ -> None
-        | _ -> None
+        definition
+        |> Option.bind (tryProp "id")
+        |> Option.map (fun v -> v.GetInt32())
 
     let buildId =
-        match run.TryGetProperty("id") with
-        | true, v -> Some(v.GetInt32())
-        | _ -> None
+        run |> tryProp "id" |> Option.map (fun v -> v.GetInt32())
 
     let url =
         buildId
@@ -241,26 +232,15 @@ let private parseFailedStep (json: string) =
         records
         |> List.tryFind (fun r ->
             let isTask =
-                match r.TryGetProperty("type") with
-                | true, v -> v.GetString() = "Task"
-                | _ -> false
+                r |> tryProp "type" |> Option.map (fun v -> v.GetString() = "Task") |> Option.defaultValue false
             let isFailed =
-                match r.TryGetProperty("result") with
-                | true, v -> v.GetString() = "failed"
-                | _ -> false
+                r |> tryProp "result" |> Option.map (fun v -> v.GetString() = "failed") |> Option.defaultValue false
             isTask && isFailed)
         |> Option.bind (fun r ->
             let name =
-                match r.TryGetProperty("name") with
-                | true, v -> v.GetString()
-                | _ -> "Unknown step"
+                r |> tryProp "name" |> Option.map (fun v -> v.GetString()) |> Option.defaultValue "Unknown step"
             let logId =
-                match r.TryGetProperty("log") with
-                | true, log ->
-                    match log.TryGetProperty("id") with
-                    | true, id -> Some(id.GetInt32())
-                    | _ -> None
-                | _ -> None
+                r |> tryProp "log" |> Option.bind (tryProp "id") |> Option.map (fun v -> v.GetInt32())
             logId |> Option.map (fun id -> name, id))
     with ex ->
         Log.log "PR" $"Failed to parse build timeline: {ex.Message}"
@@ -380,68 +360,46 @@ let fetchPrStatuses (remote: AzDoRemote) =
             let repoGuid, prs = parsePrList json
             let prsFiltered = firstPerBranch prs
 
-            match repoGuid with
-            | None ->
+            if repoGuid.IsNone then
                 Log.log "PR" "No repository GUID found in PR list, builds will be empty"
-                let! entries =
-                    prsFiltered
-                    |> List.map (fun pr ->
-                        async {
-                            let! threadCounts =
-                                match pr.IsMerged with
-                                | true -> async { return { Unresolved = 0; Total = 0 } }
-                                | false -> fetchPrThreadCount remote pr.PrId
 
-                            let url =
-                                sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo pr.PrId
+            let! entries =
+                prsFiltered
+                |> List.map (fun pr ->
+                    async {
+                        let! threadCounts, builds =
+                            match pr.IsMerged with
+                            | true ->
+                                async { return { Unresolved = 0; Total = 0 }, [] }
+                            | false ->
+                                async {
+                                    let! tc = fetchPrThreadCount remote pr.PrId
 
-                            return
-                                pr.BranchName,
-                                HasPr
-                                    { Id = pr.PrId
-                                      Title = pr.Title
-                                      Url = url
-                                      IsDraft = pr.IsDraft
-                                      ThreadCounts = threadCounts
-                                      Builds = []
-                                      IsMerged = pr.IsMerged }
-                        })
-                    |> Async.Parallel
+                                    let! bs =
+                                        match repoGuid with
+                                        | Some guid -> fetchBuildStatus remote guid pr.PrId
+                                        | None -> async { return [] }
 
-                return entries |> Map.ofArray
-            | Some guid ->
-                let! entries =
-                    prsFiltered
-                    |> List.map (fun pr ->
-                        async {
-                            let! threadCounts, builds =
-                                match pr.IsMerged with
-                                | true ->
-                                    async { return { Unresolved = 0; Total = 0 }, [] }
-                                | false ->
-                                    async {
-                                        let! tc = fetchPrThreadCount remote pr.PrId
-                                        let! bs = fetchBuildStatus remote guid pr.PrId
-                                        return tc, bs
-                                    }
+                                    return tc, bs
+                                }
 
-                            let url =
-                                sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo pr.PrId
+                        let url =
+                            sprintf "https://dev.azure.com/%s/%s/_git/%s/pullrequest/%d" remote.Org remote.Project remote.Repo pr.PrId
 
-                            return
-                                pr.BranchName,
-                                HasPr
-                                    { Id = pr.PrId
-                                      Title = pr.Title
-                                      Url = url
-                                      IsDraft = pr.IsDraft
-                                      ThreadCounts = threadCounts
-                                      Builds = builds
-                                      IsMerged = pr.IsMerged }
-                        })
-                    |> Async.Parallel
+                        return
+                            pr.BranchName,
+                            HasPr
+                                { Id = pr.PrId
+                                  Title = pr.Title
+                                  Url = url
+                                  IsDraft = pr.IsDraft
+                                  ThreadCounts = threadCounts
+                                  Builds = builds
+                                  IsMerged = pr.IsMerged }
+                    })
+                |> Async.Parallel
 
-                return entries |> Map.ofArray
+            return entries |> Map.ofArray
     }
 
 module Cache =
