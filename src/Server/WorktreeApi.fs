@@ -209,12 +209,13 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion
                           match merged with
                           | [] -> None
                           | events ->
-                              let top3 =
+                              let recent =
                                   events
                                   |> List.sortByDescending (fun e -> e.Timestamp)
-                                  |> List.truncate 3
+                                  |> List.truncate 2
+                                  |> List.rev
 
-                              Some(branch, top3))
+                              Some(branch, recent))
                       |> Map.ofList
               }
           deleteWorktree = deleteWorktree worktreeRoot }
