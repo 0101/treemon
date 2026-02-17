@@ -285,7 +285,14 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
             mainBehindIndicator wt.MainBehindCount
             match wt.MainBehindCount with
             | 0 -> ()
-            | _ -> syncButton dispatch wt branchEvents
+            | _ ->
+                match wt.IsDirty with
+                | true ->
+                    Html.span [
+                        prop.className "dirty-warning"
+                        prop.text "uncommitted changes"
+                    ]
+                | false -> syncButton dispatch wt branchEvents
         ]
     ]
 

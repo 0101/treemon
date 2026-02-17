@@ -19,7 +19,8 @@ type GitData =
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
       UpstreamBranch: string option
-      MainBehindCount: int }
+      MainBehindCount: int
+      IsDirty: bool }
 
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
@@ -144,16 +145,28 @@ module Cache =
     let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
     let invalidate (repoRoot: string) = cache.Invalidate repoRoot
 
+let isDirty (worktreePath: string) =
+    async {
+        let! output = runGit worktreePath "status --porcelain"
+
+        return
+            output
+            |> Option.map (fun s -> s.Trim().Length > 0)
+            |> Option.defaultValue false
+    }
+
 let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: string option) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
+        let! dirtyChild = Async.StartChild(isDirty worktreePath)
         do! fetchFromOrigin repoRoot
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath)
 
         let! commit = commitChild
         let! upstream = upstreamChild
         let! mainBehind = mainBehindChild
+        let! dirty = dirtyChild
 
         let upstreamBranch =
             upstream
@@ -169,7 +182,8 @@ let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: st
               LastCommitMessage = commit |> Option.map (fun c -> c.Message) |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map (fun c -> c.Time) |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch
-              MainBehindCount = mainBehind }
+              MainBehindCount = mainBehind
+              IsDirty = dirty }
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =

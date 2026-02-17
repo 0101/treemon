@@ -58,7 +58,8 @@ type WorktreeStatus =
       Beads: BeadsSummary
       Claude: ClaudeCodeStatus
       Pr: PrStatus
-      MainBehindCount: int }
+      MainBehindCount: int
+      IsDirty: bool }
 
 type SyncTimes =
     { Git: DateTimeOffset option
