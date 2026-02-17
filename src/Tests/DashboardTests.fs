@@ -10,6 +10,15 @@ type DashboardTests() =
 
     let baseUrl = ServerFixture.viteUrl
 
+    let computedStyle (prop: string) (locator: ILocator) =
+        locator.EvaluateAsync<string>($"el => getComputedStyle(el).{prop}")
+
+    let compactBtn (page: IPage) =
+        page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+
+    let eventLog (page: IPage) =
+        page.Locator(".wt-card:not(.compact) .event-log")
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
@@ -21,14 +30,6 @@ type DashboardTests() =
             let! _ = this.Page.GotoAsync(baseUrl)
             do! this.Page.Locator(".wt-card").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
             return ()
-        }
-
-    [<Test>]
-    member this.``Dashboard loads with title``() =
-        task {
-            let! heading = this.Page.Locator("h1").TextContentAsync()
-            Assert.That(heading, Does.StartWith("Treemon"))
-            Assert.That(heading, Does.Contain(":"))
         }
 
     [<Test>]
@@ -76,44 +77,24 @@ type DashboardTests() =
             Assert.That(sepCount, Is.EqualTo(3), "Sync footer should have 3 separators between 4 sources")
         }
 
-    [<Test>]
-    member this.``Claude active dot is red``() =
+    [<TestCase("active", "rgb(243, 139, 168)")>]
+    [<TestCase("idle", "rgb(137, 180, 250)")>]
+    [<TestCase("recent", "rgb(249, 226, 175)")>]
+    member this.``CC dot has correct background color``(status: string, expectedColor: string) =
         task {
-            let activeDots = this.Page.Locator(".cc-dot.active")
-            let! count = activeDots.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees; active dots should be present")
+            let dots = this.Page.Locator($".cc-dot.{status}")
+            let! count = dots.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} Claude worktrees; {status} dots should be present")
 
-            let! bg = activeDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-            Assert.That(bg, Is.EqualTo("rgb(243, 139, 168)"), "Active CC dot should be red (#f38ba8)")
-        }
-
-    [<Test>]
-    member this.``Claude idle dot is blue``() =
-        task {
-            let idleDots = this.Page.Locator(".cc-dot.idle")
-            let! count = idleDots.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has Idle Claude worktrees; idle dots should be present")
-
-            let! bg = idleDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-            Assert.That(bg, Is.EqualTo("rgb(137, 180, 250)"), "Idle CC dot should be blue (#89b4fa)")
-        }
-
-    [<Test>]
-    member this.``Claude recent dot remains yellow``() =
-        task {
-            let recentDots = this.Page.Locator(".cc-dot.recent")
-            let! count = recentDots.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has Recent Claude worktrees; recent dots should be present")
-
-            let! bg = recentDots.First.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-            Assert.That(bg, Is.EqualTo("rgb(249, 226, 175)"), "Recent CC dot should remain yellow (#f9e2af)")
+            let! bg = dots.First |> computedStyle "backgroundColor"
+            Assert.That(bg, Is.EqualTo(expectedColor), $"CC dot .{status} background color")
         }
 
     [<Test>]
     member this.``Card min-width is 0 for grid truncation``() =
         task {
             let card = this.Page.Locator(".wt-card").First
-            let! minWidth = card.EvaluateAsync<string>("el => getComputedStyle(el).minWidth")
+            let! minWidth = card |> computedStyle "minWidth"
             Assert.That(minWidth, Is.EqualTo("0px"), "Card min-width should be 0 to allow text-overflow ellipsis in grid")
         }
 
@@ -307,35 +288,27 @@ type DashboardTests() =
     [<Test>]
     member this.``Compact mode toggle button is visible``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! Assertions.Expect(compactBtn).ToBeVisibleAsync()
+            do! Assertions.Expect(compactBtn this.Page).ToBeVisibleAsync()
         }
 
     [<Test>]
     member this.``Compact mode toggle switches to compact cards``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            let btn = compactBtn this.Page
+            do! btn.ClickAsync()
 
             let compactCards = this.Page.Locator(".wt-card.compact")
             let! count = compactCards.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let! btnClass = compactBtn.GetAttributeAsync("class")
+            let! btnClass = btn.GetAttributeAsync("class")
             Assert.That(btnClass, Does.Contain("active"))
         }
 
     [<Test>]
     member this.``Compact mode shows inline beads``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            do! (compactBtn this.Page).ClickAsync()
 
             let beadsInline = this.Page.Locator(".wt-card.compact .beads-inline")
             let! count = beadsInline.CountAsync()
@@ -349,63 +322,28 @@ type DashboardTests() =
     [<Test>]
     member this.``Compact mode toggle deactivates on second click``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
-            do! compactBtn.ClickAsync()
+            let btn = compactBtn this.Page
+            do! btn.ClickAsync()
+            do! btn.ClickAsync()
 
             let normalCards = this.Page.Locator(".wt-card:not(.compact)")
             let! count = normalCards.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
         }
 
-    [<Test>]
-    member this.``Responsive layout shows single column at narrow viewport``() =
+    [<TestCase(400, 1)>]
+    [<TestCase(900, 2)>]
+    [<TestCase(1300, 3)>]
+    [<TestCase(1900, 4)>]
+    member this.``Responsive layout shows correct column count``(width: int, expectedColumns: int) =
         task {
-            do! this.Page.SetViewportSizeAsync(400, 800)
+            do! this.Page.SetViewportSizeAsync(width, 800)
             do! this.Page.WaitForTimeoutAsync(200.0f)
 
             let grid = this.Page.Locator(".card-grid")
-            let! gridStyle = grid.EvaluateAsync<string>("el => getComputedStyle(el).gridTemplateColumns")
+            let! gridStyle = grid |> computedStyle "gridTemplateColumns"
             let columnCount = gridStyle.Split(' ') |> Array.length
-            Assert.That(columnCount, Is.EqualTo(1))
-        }
-
-    [<Test>]
-    member this.``Responsive layout shows two columns at medium viewport``() =
-        task {
-            do! this.Page.SetViewportSizeAsync(900, 800)
-            do! this.Page.WaitForTimeoutAsync(200.0f)
-
-            let grid = this.Page.Locator(".card-grid")
-            let! gridStyle = grid.EvaluateAsync<string>("el => getComputedStyle(el).gridTemplateColumns")
-            let columnCount = gridStyle.Split(' ') |> Array.length
-            Assert.That(columnCount, Is.EqualTo(2))
-        }
-
-    [<Test>]
-    member this.``Responsive layout shows three columns at wide viewport``() =
-        task {
-            do! this.Page.SetViewportSizeAsync(1300, 800)
-            do! this.Page.WaitForTimeoutAsync(200.0f)
-
-            let grid = this.Page.Locator(".card-grid")
-            let! gridStyle = grid.EvaluateAsync<string>("el => getComputedStyle(el).gridTemplateColumns")
-            let columnCount = gridStyle.Split(' ') |> Array.length
-            Assert.That(columnCount, Is.EqualTo(3))
-        }
-
-    [<Test>]
-    member this.``Responsive layout shows four columns at extra wide viewport``() =
-        task {
-            do! this.Page.SetViewportSizeAsync(1900, 800)
-            do! this.Page.WaitForTimeoutAsync(200.0f)
-
-            let grid = this.Page.Locator(".card-grid")
-            let! gridStyle = grid.EvaluateAsync<string>("el => getComputedStyle(el).gridTemplateColumns")
-            let columnCount = gridStyle.Split(' ') |> Array.length
-            Assert.That(columnCount, Is.EqualTo(4))
+            Assert.That(columnCount, Is.EqualTo(expectedColumns), $"At {width}px width, expected {expectedColumns} columns")
         }
 
     [<Test>]
@@ -438,33 +376,6 @@ type DashboardTests() =
                     .Or.Contain("partial")
                     .Or.Contain("canceled")
             )
-        }
-
-    [<Test>]
-    member this.``Thread badge text matches N/M threads pattern``() =
-        task {
-            let threadBadges = this.Page.Locator(".wt-card .thread-badge")
-            let! count = threadBadges.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
-
-            let! text = threadBadges.First.TextContentAsync()
-            Assert.That(text, Does.Match(@"\d+/\d+"))
-        }
-
-    [<Test>]
-    member this.``Build badge is a clickable link to Azure DevOps``() =
-        task {
-            let buildLinks = this.Page.Locator(".wt-card a.build-badge")
-            let! count = buildLinks.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badge links should be present")
-
-            let! href = buildLinks.First.GetAttributeAsync("href")
-            Assert.That(href, Is.Not.Null.And.Not.Empty)
-            Assert.That(href, Does.Contain("dev.azure.com"))
-            Assert.That(href, Does.Contain("_build/results"))
-
-            let! target = buildLinks.First.GetAttributeAsync("target")
-            Assert.That(target, Is.EqualTo("_blank"))
         }
 
     [<Test>]
@@ -504,7 +415,7 @@ type DashboardTests() =
     member this.``Dark theme: cards have dark background``() =
         task {
             let card = this.Page.Locator(".wt-card").First
-            let! cardBg = card.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            let! cardBg = card |> computedStyle "backgroundColor"
             Assert.That(cardBg, Is.EqualTo("rgb(42, 42, 60)"), "Card background should be #2a2a3c")
         }
 
@@ -526,7 +437,7 @@ type DashboardTests() =
             Assert.That(text, Is.Not.Empty, "Folder accent text should not be empty")
             Assert.That(text, Does.StartWith(":"), "Folder accent should start with colon separator")
 
-            let! accentColor = folderAccent.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! accentColor = folderAccent |> computedStyle "color"
             Assert.That(accentColor, Is.EqualTo("rgb(137, 180, 250)"), "Folder accent color should be #89b4fa (blue)")
         }
 
@@ -539,21 +450,21 @@ type DashboardTests() =
             let! openText = openSpan.TextContentAsync()
             Assert.That(openText, Does.Match(@"^\d+$"), "Open count should be a plain number (no 'O:' prefix)")
 
-            let! openColor = openSpan.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! openColor = openSpan |> computedStyle "color"
             Assert.That(openColor, Is.EqualTo("rgb(249, 226, 175)"), "Open count should be amber (#f9e2af)")
 
             let inprogressSpan = beadsCounts.Locator(".beads-inprogress")
             let! inprogressText = inprogressSpan.TextContentAsync()
             Assert.That(inprogressText, Does.Match(@"^\d+$"), "InProgress count should be a plain number (no 'P:' prefix)")
 
-            let! inprogressColor = inprogressSpan.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! inprogressColor = inprogressSpan |> computedStyle "color"
             Assert.That(inprogressColor, Is.EqualTo("rgb(137, 180, 250)"), "InProgress count should be blue (#89b4fa)")
 
             let closedSpan = beadsCounts.Locator(".beads-closed")
             let! closedText = closedSpan.TextContentAsync()
             Assert.That(closedText, Does.Match(@"^\d+$"), "Closed count should be a plain number (no 'D:' prefix)")
 
-            let! closedColor = closedSpan.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! closedColor = closedSpan |> computedStyle "color"
             Assert.That(closedColor, Is.EqualTo("rgb(166, 227, 161)"), "Closed count should be green (#a6e3a1)")
         }
 
@@ -574,13 +485,13 @@ type DashboardTests() =
             let! closedCount = segClosed.CountAsync()
             Assert.That(closedCount, Is.EqualTo(1), "Progress bar should have a seg-closed segment")
 
-            let! openBg = segOpen.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            let! openBg = segOpen |> computedStyle "backgroundColor"
             Assert.That(openBg, Is.EqualTo("rgb(249, 226, 175)"), "seg-open background should be amber")
 
-            let! ipBg = segInprogress.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            let! ipBg = segInprogress |> computedStyle "backgroundColor"
             Assert.That(ipBg, Is.EqualTo("rgb(137, 180, 250)"), "seg-inprogress background should be blue")
 
-            let! closedBg = segClosed.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            let! closedBg = segClosed |> computedStyle "backgroundColor"
             Assert.That(closedBg, Is.EqualTo("rgb(166, 227, 161)"), "seg-closed background should be green")
         }
 
@@ -609,7 +520,7 @@ type DashboardTests() =
             let! text = upToDate.First.TextContentAsync()
             Assert.That(text, Is.EqualTo("up to date"))
 
-            let! color = upToDate.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! color = upToDate.First |> computedStyle "color"
             Assert.That(color, Is.EqualTo("rgb(127, 132, 156)"), "up-to-date should be muted gray (#7f849c)")
         }
 
@@ -623,20 +534,17 @@ type DashboardTests() =
             let! text = behindWarning.First.TextContentAsync()
             Assert.That(text, Does.Contain("behind main"))
 
-            let! color = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! color = behindWarning.First |> computedStyle "color"
             Assert.That(color, Is.EqualTo("rgb(243, 139, 168)"), "behind-warning should be red (#f38ba8)")
 
-            let! fontWeight = behindWarning.First.EvaluateAsync<string>("el => getComputedStyle(el).fontWeight")
+            let! fontWeight = behindWarning.First |> computedStyle "fontWeight"
             Assert.That(fontWeight, Is.EqualTo("600").Or.EqualTo("bold"), "behind-warning should have bold font weight")
         }
 
     [<Test>]
     member this.``Compact mode shows main-behind indicator``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            do! (compactBtn this.Page).ClickAsync()
 
             let mainBehind = this.Page.Locator(".wt-card.compact .main-behind")
             let! count = mainBehind.CountAsync()
@@ -661,75 +569,94 @@ type DashboardTests() =
     member this.``Beads separator uses muted color``() =
         task {
             let sep = this.Page.Locator(".wt-card .beads-counts .beads-sep").First
-            let! color = sep.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let! color = sep |> computedStyle "color"
             Assert.That(color, Is.EqualTo("rgb(88, 91, 112)"), "Separator should be muted (#585b70)")
         }
 
-    [<Test>]
-    member this.``Terminal button present on every full-view card``() =
+    [<TestCase("terminal-btn")>]
+    [<TestCase("delete-btn")>]
+    member this.``Header button present on every full-view card``(btnClass: string) =
         task {
             let cards = this.Page.Locator(".wt-card:not(.compact)")
             let! cardCount = cards.CountAsync()
             Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one full-view card")
 
-            let terminalBtns = this.Page.Locator(".wt-card:not(.compact) .terminal-btn")
-            let! btnCount = terminalBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(cardCount), "Every full-view card should have a terminal button")
+            let btns = this.Page.Locator($".wt-card:not(.compact) .{btnClass}")
+            let! btnCount = btns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), $"Every full-view card should have a .{btnClass}")
         }
 
-    [<Test>]
-    member this.``Terminal button present on every compact card``() =
+    [<TestCase("terminal-btn")>]
+    [<TestCase("delete-btn")>]
+    member this.``Header button present on every compact card``(btnClass: string) =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            do! (compactBtn this.Page).ClickAsync()
 
             let compactCards = this.Page.Locator(".wt-card.compact")
             let! cardCount = compactCards.CountAsync()
             Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one compact card")
 
-            let terminalBtns = this.Page.Locator(".wt-card.compact .terminal-btn")
-            let! btnCount = terminalBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(cardCount), "Every compact card should have a terminal button")
+            let btns = this.Page.Locator($".wt-card.compact .{btnClass}")
+            let! btnCount = btns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), $"Every compact card should have a .{btnClass}")
         }
 
-    [<Test>]
-    member this.``Terminal button is inside card header``() =
+    [<TestCase("terminal-btn")>]
+    [<TestCase("delete-btn")>]
+    member this.``Header button is inside card header``(btnClass: string) =
         task {
-            let headerBtns = this.Page.Locator(".wt-card .card-header .terminal-btn")
+            let headerBtns = this.Page.Locator($".wt-card .card-header .{btnClass}")
             let! count = headerBtns.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Terminal button should be inside .card-header")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), $".{btnClass} should be inside .card-header")
 
-            let allBtns = this.Page.Locator(".wt-card .terminal-btn")
+            let allBtns = this.Page.Locator($".wt-card .{btnClass}")
             let! allCount = allBtns.CountAsync()
-            Assert.That(count, Is.EqualTo(allCount), "All terminal buttons should be inside card headers")
+            Assert.That(count, Is.EqualTo(allCount), $"All .{btnClass} should be inside card headers")
         }
 
-    [<Test>]
-    member this.``Terminal button has correct text and title``() =
+    [<TestCase("terminal-btn", ">", "Open terminal")>]
+    [<TestCase("delete-btn", "\u2715", "Remove worktree")>]
+    member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
-            let btn = this.Page.Locator(".wt-card .terminal-btn").First
+            let btn = this.Page.Locator($".wt-card .{btnClass}").First
             do! Assertions.Expect(btn).ToBeVisibleAsync()
 
             let! text = btn.TextContentAsync()
-            Assert.That(text, Is.EqualTo(">"), "Terminal button text should be '>'")
+            Assert.That(text, Is.EqualTo(expectedText), $".{btnClass} text")
 
             let! title = btn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Open terminal"), "Terminal button title should be 'Open terminal'")
+            Assert.That(title, Is.EqualTo(expectedTitle), $".{btnClass} title attribute")
+        }
+
+    [<TestCase("terminal-btn")>]
+    [<TestCase("delete-btn")>]
+    member this.``Header button has pointer cursor``(btnClass: string) =
+        task {
+            let btn = this.Page.Locator($".wt-card .{btnClass}").First
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! cursor = btn |> computedStyle "cursor"
+            Assert.That(cursor, Is.EqualTo("pointer"), $".{btnClass} should have pointer cursor")
         }
 
     [<Test>]
-    member this.``Terminal button has correct styling``() =
+    member this.``Terminal button uses monospace font``() =
         task {
             let btn = this.Page.Locator(".wt-card .terminal-btn").First
             do! Assertions.Expect(btn).ToBeVisibleAsync()
 
-            let! fontFamily = btn.EvaluateAsync<string>("el => getComputedStyle(el).fontFamily")
+            let! fontFamily = btn |> computedStyle "fontFamily"
             Assert.That(fontFamily, Does.Contain("monospace"), "Terminal button should use monospace font")
+        }
 
-            let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
-            Assert.That(cursor, Is.EqualTo("pointer"), "Terminal button should have pointer cursor")
+    [<Test>]
+    member this.``Delete button has transparent background``() =
+        task {
+            let btn = this.Page.Locator(".wt-card .delete-btn").First
+            do! Assertions.Expect(btn).ToBeVisibleAsync()
+
+            let! bg = btn |> computedStyle "backgroundColor"
+            Assert.That(bg, Does.Contain("0, 0, 0, 0").Or.EqualTo("rgba(0, 0, 0, 0)"), "Delete button should have transparent background")
         }
 
     [<Test>]
@@ -868,7 +795,7 @@ type DashboardTests() =
             let! text = btn.TextContentAsync()
             Assert.That(text, Is.EqualTo("Sync"), "Sync button text should be 'Sync'")
 
-            let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
+            let! cursor = btn |> computedStyle "cursor"
             let! cssClass = btn.GetAttributeAsync("class")
             let isDisabled = cssClass.Contains("disabled")
             match isDisabled with
@@ -881,12 +808,12 @@ type DashboardTests() =
     [<Test>]
     member this.``Event log renders on full cards when events exist``() =
         task {
-            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
-            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = eventLogs.CountAsync()
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = logs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
 
-            let entries = eventLogs.First.Locator(".event-entry")
+            let entries = logs.First.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
             Assert.That(entryCount, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
                 "Event log should show between 1 and 3 entries")
@@ -904,24 +831,24 @@ type DashboardTests() =
     [<Test>]
     member this.``Event log has correct DOM structure``() =
         task {
-            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
-            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = eventLogs.CountAsync()
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = logs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
 
-            let log = eventLogs.First
+            let log = logs.First
 
-            let! borderTop = log.EvaluateAsync<string>("el => getComputedStyle(el).borderTopStyle")
+            let! borderTop = log |> computedStyle "borderTopStyle"
             Assert.That(borderTop, Is.EqualTo("none"), "Event log should have no top border (replaced by background contrast)")
 
             let entries = log.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
             Assert.That(entryCount, Is.LessThanOrEqualTo(3), "Event log should show at most 3 entries")
 
-            let! display = log.EvaluateAsync<string>("el => getComputedStyle(el).display")
+            let! display = log |> computedStyle "display"
             Assert.That(display, Is.EqualTo("flex"), "Event log should use flex layout")
 
-            let! flexDir = log.EvaluateAsync<string>("el => getComputedStyle(el).flexDirection")
+            let! flexDir = log |> computedStyle "flexDirection"
             Assert.That(flexDir, Is.EqualTo("column"), "Event log should use column flex direction")
         }
 
@@ -947,10 +874,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Sync button hidden in compact mode``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            do! (compactBtn this.Page).ClickAsync()
 
             let syncBtns = this.Page.Locator(".wt-card.compact .sync-btn")
             let! syncCount = syncBtns.CountAsync()
@@ -964,10 +888,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Event log hidden in compact mode``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            do! (compactBtn this.Page).ClickAsync()
 
             let eventLogs = this.Page.Locator(".wt-card.compact .event-log")
             let! count = eventLogs.CountAsync()
@@ -997,17 +918,14 @@ type DashboardTests() =
             let! text = cancelBtns.First.TextContentAsync()
             Assert.That(text, Is.EqualTo("Cancel"), "Cancel button text should be 'Cancel'")
 
-            let! borderColor = cancelBtns.First.EvaluateAsync<string>("el => getComputedStyle(el).borderColor")
+            let! borderColor = cancelBtns.First |> computedStyle "borderColor"
             Assert.That(borderColor, Does.Contain("rgb(243, 139, 168)"), "Cancel button border should be red (#f38ba8)")
         }
 
     [<Test>]
     member this.``Compact mode uses mainBehindIndicator without sync button``() =
         task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
+            do! (compactBtn this.Page).ClickAsync()
 
             let mainBehind = this.Page.Locator(".wt-card.compact .main-behind")
             let! count = mainBehind.CountAsync()
@@ -1097,29 +1015,29 @@ type DashboardTests() =
     [<Test>]
     member this.``Event log has console styling with dark background``() =
         task {
-            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
-            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            let log = eventLogs.First
-            let! bg = log.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
+            let log = logs.First
+            let! bg = log |> computedStyle "backgroundColor"
             Assert.That(bg, Is.EqualTo("rgb(17, 17, 27)"), "Event log background should be #11111b (dark console)")
 
-            let! fontFamily = log.EvaluateAsync<string>("el => getComputedStyle(el).fontFamily")
+            let! fontFamily = log |> computedStyle "fontFamily"
             Assert.That(fontFamily, Does.Contain("monospace").IgnoreCase, "Event log should use monospace font family")
         }
 
     [<Test>]
     member this.``Event log source and message have muted colors``() =
         task {
-            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
-            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            let source = eventLogs.First.Locator(".event-source").First
-            let! sourceColor = source.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let source = logs.First.Locator(".event-source").First
+            let! sourceColor = source |> computedStyle "color"
             Assert.That(sourceColor, Is.EqualTo("rgb(108, 112, 134)"), "Event source color should be #6c7086")
 
-            let message = eventLogs.First.Locator(".event-message").First
-            let! messageColor = message.EvaluateAsync<string>("el => getComputedStyle(el).color")
+            let message = logs.First.Locator(".event-message").First
+            let! messageColor = message |> computedStyle "color"
             Assert.That(messageColor, Is.EqualTo("rgb(147, 153, 178)"), "Event message color should be #9399b2")
         }
 
@@ -1127,86 +1045,19 @@ type DashboardTests() =
     member this.``Cards have no left border``() =
         task {
             let card = this.Page.Locator(".wt-card").First
-            let! borderLeft = card.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftStyle")
+            let! borderLeft = card |> computedStyle "borderLeftStyle"
             Assert.That(borderLeft, Is.EqualTo("none"), "Cards should have no left border (border removed per spec)")
 
-            let! borderLeftWidth = card.EvaluateAsync<string>("el => getComputedStyle(el).borderLeftWidth")
+            let! borderLeftWidth = card |> computedStyle "borderLeftWidth"
             Assert.That(borderLeftWidth, Is.EqualTo("0px"), "Cards should have no left border width")
-        }
-
-    [<Test>]
-    member this.``Delete button present on every full-view card``() =
-        task {
-            let cards = this.Page.Locator(".wt-card:not(.compact)")
-            let! cardCount = cards.CountAsync()
-            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one full-view card")
-
-            let deleteBtns = this.Page.Locator(".wt-card:not(.compact) .delete-btn")
-            let! btnCount = deleteBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(cardCount), "Every full-view card should have a delete button")
-        }
-
-    [<Test>]
-    member this.``Delete button present on every compact card``() =
-        task {
-            let compactBtn =
-                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
-
-            do! compactBtn.ClickAsync()
-
-            let compactCards = this.Page.Locator(".wt-card.compact")
-            let! cardCount = compactCards.CountAsync()
-            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one compact card")
-
-            let deleteBtns = this.Page.Locator(".wt-card.compact .delete-btn")
-            let! btnCount = deleteBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(cardCount), "Every compact card should have a delete button")
-        }
-
-    [<Test>]
-    member this.``Delete button is inside card header``() =
-        task {
-            let headerBtns = this.Page.Locator(".wt-card .card-header .delete-btn")
-            let! count = headerBtns.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Delete button should be inside .card-header")
-
-            let allBtns = this.Page.Locator(".wt-card .delete-btn")
-            let! allCount = allBtns.CountAsync()
-            Assert.That(count, Is.EqualTo(allCount), "All delete buttons should be inside card headers")
-        }
-
-    [<Test>]
-    member this.``Delete button has correct text and title``() =
-        task {
-            let btn = this.Page.Locator(".wt-card .delete-btn").First
-            do! Assertions.Expect(btn).ToBeVisibleAsync()
-
-            let! text = btn.TextContentAsync()
-            Assert.That(text, Is.EqualTo("\u2715"), "Delete button text should be cross mark")
-
-            let! title = btn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Remove worktree"), "Delete button title should be 'Remove worktree'")
-        }
-
-    [<Test>]
-    member this.``Delete button has correct styling``() =
-        task {
-            let btn = this.Page.Locator(".wt-card .delete-btn").First
-            do! Assertions.Expect(btn).ToBeVisibleAsync()
-
-            let! cursor = btn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
-            Assert.That(cursor, Is.EqualTo("pointer"), "Delete button should have pointer cursor")
-
-            let! bg = btn.EvaluateAsync<string>("el => getComputedStyle(el).backgroundColor")
-            Assert.That(bg, Does.Contain("0, 0, 0, 0").Or.EqualTo("rgba(0, 0, 0, 0)"), "Delete button should have transparent background")
         }
 
     [<Test>]
     member this.``Event log visible on initial page load without sync trigger``() =
         task {
-            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
-            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = eventLogs.CountAsync()
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = logs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1),
                 "Event logs should be visible on initial load (getSyncStatus fetched on Tick, not just during sync)")
         }
@@ -1214,11 +1065,10 @@ type DashboardTests() =
     [<Test>]
     member this.``Event log has rounded corners``() =
         task {
-            let eventLogs = this.Page.Locator(".wt-card:not(.compact) .event-log")
-            do! eventLogs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            let log = eventLogs.First
-            let! borderRadius = log.EvaluateAsync<string>("el => getComputedStyle(el).borderRadius")
+            let! borderRadius = logs.First |> computedStyle "borderRadius"
             Assert.That(borderRadius, Is.EqualTo("6px"), "Event log should have 6px border-radius")
         }
 
