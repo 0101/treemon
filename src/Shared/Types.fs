@@ -106,4 +106,5 @@ type IWorktreeApi =
       openTerminal: string -> Async<unit>
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
-      getSyncStatus: unit -> Async<Map<string, CardEvent list>> }
+      getSyncStatus: unit -> Async<Map<string, CardEvent list>>
+      deleteWorktree: string -> Async<Result<unit, string>> }

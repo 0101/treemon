@@ -118,6 +118,31 @@ let private openTerminal (worktreeRoot: string) (path: string) =
             Process.Start(startInfo) |> ignore
     }
 
+let private deleteWorktree (worktreeRoot: string) (branch: string) =
+    async {
+        let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+
+        let worktree =
+            worktrees
+            |> List.tryFind (fun wt -> wt.Branch = Some branch)
+
+        match worktree with
+        | None -> return Error (sprintf "No worktree found for branch '%s'" branch)
+        | Some wt ->
+            let mainWorktree =
+                worktrees
+                |> List.tryFind (fun w -> w.Branch = Some "main")
+
+            let repoRoot =
+                mainWorktree
+                |> Option.map (fun w -> w.Path)
+                |> Option.defaultValue worktreeRoot
+
+            let! result = GitWorktree.removeWorktree repoRoot wt.Path branch
+            GitWorktree.Cache.invalidate worktreeRoot
+            return result
+    }
+
 let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
@@ -127,7 +152,8 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktree
           openTerminal = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
           cancelSync = fun _ -> async { return () }
-          getSyncStatus = fun () -> async { return f.SyncStatus } }
+          getSyncStatus = fun () -> async { return f.SyncStatus }
+          deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees worktreeRoot
           openTerminal = openTerminal worktreeRoot
@@ -195,4 +221,5 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktree
 
                               Some(branch, top3))
                       |> Map.ofList
-              } }
+              }
+          deleteWorktree = deleteWorktree worktreeRoot }

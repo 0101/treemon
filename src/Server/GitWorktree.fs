@@ -17,6 +17,9 @@ type CommitInfo =
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
 
+let private runGitResult (workingDir: string) (arguments: string) =
+    ProcessRunner.runResult "Git" "git" $"-C \"{workingDir}\" {arguments}"
+
 let private parseWorktreeList (porcelainOutput: string) =
     porcelainOutput.Split(
         [| Environment.NewLine + Environment.NewLine; "\n\n" |],
@@ -147,6 +150,9 @@ module Cache =
         | true, entry -> Some entry.CachedAt
         | _ -> None
 
+    let invalidate (repoRoot: string) =
+        worktreeListCache.TryRemove(repoRoot) |> ignore
+
 let collectWorktreeGitData (worktreePath: string) (branch: string option) =
     async {
         let! commit = getLastCommit worktreePath
@@ -181,4 +187,18 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
               Pr = NoPr
               IsStale = false
               MainBehindCount = mainBehind }
+    }
+
+let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
+    async {
+        let! removeResult = runGitResult repoRoot (sprintf "worktree remove --force \"%s\"" worktreePath)
+
+        match removeResult with
+        | Error msg -> return Error (sprintf "git worktree remove failed: %s" msg)
+        | Ok _ ->
+            let! branchResult = runGitResult repoRoot (sprintf "branch -D %s" branch)
+
+            match branchResult with
+            | Error msg -> return Error (sprintf "Worktree removed but git branch -D failed: %s" msg)
+            | Ok _ -> return Ok ()
     }

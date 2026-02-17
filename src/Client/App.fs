@@ -4,6 +4,7 @@ open Shared
 open Elmish
 open Feliz
 open Fable.Remoting.Client
+open Browser
 
 type SortMode =
     | ByName
@@ -31,6 +32,8 @@ type Msg =
     | SyncStatusUpdate of Map<string, CardEvent list>
     | CancelSync of string
     | SyncTick
+    | DeleteWorktree of string
+    | DeleteCompleted of Result<unit, string>
 
 let worktreeApi =
     Remoting.createApi ()
@@ -117,6 +120,15 @@ let update msg model =
 
     | SyncTick ->
         model, fetchSyncStatus ()
+
+    | DeleteWorktree branch ->
+        model, Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+
+    | DeleteCompleted (Ok _) ->
+        model, fetchWorktrees ()
+
+    | DeleteCompleted (Error _) ->
+        model, Cmd.none
 
 let pollingSubscription (model: Model) : Sub<Msg> =
     let worktreePolling (dispatch: Dispatch<Msg>) =
@@ -399,6 +411,21 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let deleteButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "delete-btn"
+        prop.title "Remove worktree"
+        prop.onClick (fun e ->
+            e.stopPropagation()
+            let confirmed =
+                Dom.window.confirm (
+                    sprintf "Remove worktree %s? This will delete the worktree folder and local branch." wt.Branch)
+            match confirmed with
+            | true -> dispatch (DeleteWorktree wt.Branch)
+            | false -> ())
+        prop.text "\u2715"
+    ]
+
 let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className (cardClassName wt + " compact")
@@ -410,6 +437,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
                     terminalButton dispatch wt
+                    deleteButton dispatch wt
                 ]
             ]
             Html.div [
@@ -469,6 +497,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
                     Html.span [ prop.className (sprintf "cc-dot %s" (ccClassName wt.Claude)) ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     terminalButton dispatch wt
+                    deleteButton dispatch wt
                 ]
             ]
 
