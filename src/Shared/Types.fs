@@ -76,7 +76,8 @@ type SyncTimes =
 type WorktreeResponse =
     { RootFolderName: string
       Worktrees: WorktreeStatus list
-      SyncTimes: SyncTimes }
+      SyncTimes: SyncTimes
+      AppVersion: string }
 
 [<RequireQualifiedAccess>]
 type StepStatus =

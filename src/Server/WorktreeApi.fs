@@ -56,7 +56,7 @@ let private assembleWorktreeStatus
                   WorkMetrics = None }
     }
 
-let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =
+let getWorktrees (worktreeRoot: string) (appVersion: string) : Async<WorktreeResponse> =
     async {
         let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
         let! prMap = PrStatus.Cache.getCachedPrStatuses worktreeRoot
@@ -78,7 +78,8 @@ let getWorktrees (worktreeRoot: string) : Async<WorktreeResponse> =
         return
             { RootFolderName = folderName
               Worktrees = statuses |> Array.toList
-              SyncTimes = syncTimes }
+              SyncTimes = syncTimes
+              AppVersion = appVersion }
     }
 
 let private openTerminal (worktreeRoot: string) (path: string) =
@@ -137,7 +138,7 @@ let private deleteWorktree (worktreeRoot: string) (branch: string) =
             return result
     }
 
-let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktreeApi =
+let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion: string) : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
     match fixtures with
@@ -149,7 +150,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) : IWorktree
           getSyncStatus = fun () -> async { return f.SyncStatus }
           deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees worktreeRoot
+        { getWorktrees = fun () -> getWorktrees worktreeRoot appVersion
           openTerminal = openTerminal worktreeRoot
           startSync = fun branch ->
               async {

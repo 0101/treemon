@@ -4,6 +4,21 @@ open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Builder
 open Server
 
+let readAppVersion () =
+    let path = System.IO.Path.Combine("wwwroot", "version.json")
+
+    match System.IO.File.Exists(path) with
+    | false ->
+        Log.log "Startup" "No wwwroot/version.json found, using empty version"
+        ""
+    | true ->
+        let json = System.IO.File.ReadAllText(path)
+        let doc = System.Text.Json.JsonDocument.Parse(json)
+
+        match doc.RootElement.TryGetProperty("buildTime") with
+        | true, elem -> elem.GetString()
+        | false, _ -> ""
+
 type ServerConfig =
     { WorktreeRoot: string
       Port: int
@@ -48,6 +63,9 @@ let main args =
     Log.log "Startup" $"Worktree root: {config.WorktreeRoot}"
     Log.log "Startup" $"Server URL: {serverUrl}"
 
+    let appVersion = readAppVersion ()
+    Log.log "Startup" $"App version: {appVersion}"
+
     match config.TestFixtures with
     | Some path -> Log.log "Startup" $"Test fixtures: {path}"
     | None -> ()
@@ -56,7 +74,7 @@ let main args =
 
     let remotingApi =
         Remoting.createApi ()
-        |> Remoting.fromValue (WorktreeApi.worktreeApi config.WorktreeRoot config.TestFixtures)
+        |> Remoting.fromValue (WorktreeApi.worktreeApi config.WorktreeRoot config.TestFixtures appVersion)
         |> Remoting.withErrorHandler (fun ex routeInfo ->
             Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
             Propagate ex.Message)
