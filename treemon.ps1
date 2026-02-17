@@ -39,7 +39,7 @@ function Get-SavedConfig {
 }
 
 function Save-Config([string]$Root) {
-    @{ WorktreeRoot = $Root } | ConvertTo-Json | Set-Content $ConfigFile
+    @{ WorktreeRoot = $Root.TrimEnd('\', '/') } | ConvertTo-Json | Set-Content $ConfigFile
 }
 
 function Get-RunningPid {

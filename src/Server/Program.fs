@@ -31,7 +31,7 @@ let parseArgs (args: string array) =
 
     match worktreeRoot with
     | Some root ->
-        { WorktreeRoot = root
+        { WorktreeRoot = root.TrimEnd([| '\\'; '/' |])
           Port = port
           TestFixtures = testFixtures }
     | None ->
