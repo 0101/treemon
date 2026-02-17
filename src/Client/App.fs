@@ -580,7 +580,6 @@ let view model dispatch =
                     Html.div [
                         prop.className "status-bar"
                         prop.children [
-                            Html.span ($"{List.length model.Worktrees} worktrees")
                             if model.IsLoading && model.Worktrees.IsEmpty then
                                 Html.span "Loading..."
                         ]
