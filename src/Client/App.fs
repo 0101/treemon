@@ -192,23 +192,15 @@ let ccClassName =
     | Idle    -> "idle"
     | Unknown -> "unknown"
 
-let isStale (wt: WorktreeStatus) =
-    let twentyFourHoursAgo = System.DateTimeOffset.UtcNow.AddHours(-24.0)
-    let commitOld = wt.LastCommitTime < twentyFourHoursAgo
-    let ccInactive = wt.Claude = Idle || wt.Claude = Unknown
-    let noBeadsInProgress = wt.Beads.InProgress = 0
-
-    let prInactive =
-        match wt.Pr with
-        | NoPr -> true
-        | HasPr _ -> false
-
-    commitOld && ccInactive && noBeadsInProgress && prInactive
+let isMerged (wt: WorktreeStatus) =
+    match wt.Pr with
+    | HasPr pr -> pr.IsMerged
+    | NoPr -> false
 
 let cardClassName (wt: WorktreeStatus) =
     let cc = ccClassName wt.Claude
-    match isStale wt with
-    | true  -> $"wt-card cc-{cc} stale"
+    match isMerged wt with
+    | true  -> $"wt-card cc-{cc} merged"
     | false -> $"wt-card cc-{cc}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
