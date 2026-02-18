@@ -15,6 +15,7 @@ type Model =
       RootFolderName: string
       IsLoading: bool
       HasError: bool
+      IsReady: bool
       SortMode: SortMode
       IsCompact: bool
       SchedulerEvents: CardEvent list
@@ -58,6 +59,7 @@ let init () =
       RootFolderName = ""
       IsLoading = true
       HasError = false
+      IsReady = false
       SortMode = ByName
       IsCompact = false
       SchedulerEvents = []
@@ -85,6 +87,7 @@ let update msg model =
                 RootFolderName = response.RootFolderName
                 IsLoading = false
                 HasError = false
+                IsReady = response.IsReady
                 SchedulerEvents = response.SchedulerEvents
                 AppVersion = Some response.AppVersion },
             Cmd.none
@@ -141,7 +144,7 @@ let update msg model =
 let pollingSubscription (model: Model) : Sub<Msg> =
     let worktreePolling (dispatch: Dispatch<Msg>) =
         let intervalId =
-            Fable.Core.JS.setInterval (fun () -> dispatch Tick) 15000
+            Fable.Core.JS.setInterval (fun () -> dispatch Tick) 1000
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
@@ -588,6 +591,28 @@ let renderCard dispatch isCompact repoName (branchEvents: Map<string, CardEvent 
     | true -> compactWorktreeCard dispatch repoName wt
     | false -> worktreeCard dispatch repoName events wt
 
+let skeletonCard () =
+    Html.div [
+        prop.className "wt-card skeleton"
+        prop.children [
+            Html.div [
+                prop.className "card-header"
+                prop.children [
+                    Html.span [ prop.className "skeleton-dot" ]
+                    Html.span [ prop.className "skeleton-bar skeleton-branch" ]
+                ]
+            ]
+            Html.div [ prop.className "skeleton-bar skeleton-commit" ]
+            Html.div [ prop.className "skeleton-bar skeleton-beads" ]
+        ]
+    ]
+
+let skeletonGrid () =
+    Html.div [
+        prop.className "card-grid"
+        prop.children (List.init 6 (fun _ -> skeletonCard ()))
+    ]
+
 let sortLabel =
     function
     | ByName -> "A-Z"
@@ -635,8 +660,9 @@ let view model dispatch =
                     Html.div [
                         prop.className "status-bar"
                         prop.children [
-                            if model.IsLoading && model.Worktrees.IsEmpty then
-                                Html.span "Loading..."
+                            match model.IsReady, model.Worktrees with
+                            | false, [] -> Html.span "Waiting for first refresh..."
+                            | _ -> ()
                         ]
                     ]
                 ]
@@ -648,10 +674,13 @@ let view model dispatch =
                     prop.text "Failed to fetch data. Showing last known state."
                 ]
 
-            Html.div [
-                prop.className "card-grid"
-                prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
-            ]
+            match model.IsReady, model.Worktrees with
+            | false, [] -> skeletonGrid ()
+            | _ ->
+                Html.div [
+                    prop.className "card-grid"
+                    prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
+                ]
 
             match model.SchedulerEvents with
             | [] -> Html.none

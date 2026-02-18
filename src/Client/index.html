@@ -163,6 +163,16 @@
         .diff-added { color: #a6e3a1; }
         .diff-removed { color: #f38ba8; }
         .work-metrics { display: flex; align-items: center; gap: 4px; }
+
+        .wt-card.skeleton { pointer-events: none; }
+        .skeleton-dot { width: 10px; height: 10px; border-radius: 50%; background: #313244; flex-shrink: 0; }
+        .skeleton-bar { background: #313244; border-radius: 4px; animation: skeleton-pulse 1.5s ease-in-out infinite; }
+        .skeleton-branch { width: 40%; height: 14px; }
+        .skeleton-commit { width: 70%; height: 12px; margin-bottom: 8px; }
+        .skeleton-beads { width: 50%; height: 12px; }
+        @keyframes skeleton-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+        .event-duration { color: #6c7086; white-space: nowrap; flex-shrink: 0; }
     </style>
 </head>
 <body>
