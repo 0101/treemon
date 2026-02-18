@@ -10,6 +10,7 @@
     <Compile Include="DashboardTests.fs" />
     <Compile Include="GitParsingTests.fs" />
     <Compile Include="SchedulerTests.fs" />
+    <Compile Include="EventProcessingTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
