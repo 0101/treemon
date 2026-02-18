@@ -226,13 +226,13 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
     | Error msg ->
         Log.log "Scheduler" $"{source} {target} failed: {msg}"
 
-let private pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.filter (fun task -> deadlineOf lastRuns task <= now)
     |> List.sortBy (deadlineOf lastRuns)
     |> List.tryHead
 
-let private computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.map (fun task ->
         let deadline = deadlineOf lastRuns task

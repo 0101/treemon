@@ -29,7 +29,7 @@ let private runGit (workingDir: string) (arguments: string) =
 let private runGitResult (workingDir: string) (arguments: string) =
     ProcessRunner.runResult "Git" "git" $"-C \"{workingDir}\" {arguments}"
 
-let private parseWorktreeList (porcelainOutput: string) =
+let parseWorktreeList (porcelainOutput: string) =
     porcelainOutput.Split(
         [| Environment.NewLine + Environment.NewLine; "\n\n" |],
         StringSplitOptions.RemoveEmptyEntries
@@ -66,7 +66,7 @@ let listWorktrees (repoRoot: string) =
             |> List.filter (fun wt -> Directory.Exists(wt.Path))
     }
 
-let private parseCommitOutput (worktreePath: string) (output: string option) =
+let parseCommitOutput (worktreePath: string) (output: string option) =
     output
     |> Option.bind (fun raw ->
         match raw with
@@ -171,7 +171,7 @@ let getCommitCount (worktreePath: string) =
             |> Option.defaultValue 0
     }
 
-let private parseDiffStats (output: string option) =
+let parseDiffStats (output: string option) =
     output
     |> Option.bind (fun s ->
         let trimmed = s.Trim()

@@ -5,7 +5,7 @@ open System.IO
 open System.Text.Json
 open Shared
 
-let private asyncMapSequential (f: 'a -> Async<'b>) (items: 'a list) : Async<'b list> =
+let asyncMapSequential (f: 'a -> Async<'b>) (items: 'a list) : Async<'b list> =
     async {
         let! reversed =
             (async { return [] }, items)
