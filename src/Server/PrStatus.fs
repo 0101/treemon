@@ -5,6 +5,20 @@ open System.IO
 open System.Text.Json
 open Shared
 
+let private asyncMapSequential (f: 'a -> Async<'b>) (items: 'a list) : Async<'b list> =
+    async {
+        let! reversed =
+            (async { return [] }, items)
+            ||> List.fold (fun acc item ->
+                async {
+                    let! soFar = acc
+                    let! result = f item
+                    return result :: soFar
+                })
+
+        return reversed |> List.rev
+    }
+
 let private tryProp (name: string) (el: JsonElement) =
     match el.TryGetProperty(name) with
     | true, v when v.ValueKind <> JsonValueKind.Null && v.ValueKind <> JsonValueKind.Undefined -> Some v
@@ -326,17 +340,16 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
 
         let! enriched =
             builds
-            |> List.map (fun (build, buildId) ->
-                async {
-                    match build.Status, buildId with
-                    | BuildStatus.Failed, Some id ->
+            |> asyncMapSequential (fun (build, buildId) ->
+                match build.Status, buildId with
+                | BuildStatus.Failed, Some id ->
+                    async {
                         let! failure = fetchBuildFailure remote id
                         return { build with Failure = failure }
-                    | _ -> return build
-                })
-            |> Async.Parallel
+                    }
+                | _ -> async { return build })
 
-        return enriched |> Array.toList
+        return enriched
     }
 
 let private firstPerBranch (prs: ParsedPr list) =
@@ -365,7 +378,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
 
             let! entries =
                 prsFiltered
-                |> List.map (fun pr ->
+                |> asyncMapSequential (fun pr ->
                     async {
                         let! threadCounts, builds =
                             match pr.IsMerged with
@@ -397,35 +410,23 @@ let fetchPrStatuses (remote: AzDoRemote) =
                                   Builds = builds
                                   IsMerged = pr.IsMerged }
                     })
-                |> Async.Parallel
 
-            return entries |> Map.ofArray
+            return entries |> Map.ofList
     }
 
-module Cache =
-    let private cache = Cache.TtlCache<Map<string, PrStatus>>(TimeSpan.FromSeconds(120.0))
+let fetchPrStatusesByRepoRoot (repoRoot: string) =
+    async {
+        let! remoteUrl = getRemoteUrl repoRoot
 
-    let private computePrStatuses (key: string) =
-        async {
-            let! remoteUrl = getRemoteUrl key
+        let remote =
+            remoteUrl |> Option.bind parseAzureDevOpsUrl
 
-            let remote =
-                remoteUrl |> Option.bind parseAzureDevOpsUrl
+        match remote with
+        | None -> return Map.empty
+        | Some r -> return! fetchPrStatuses r
+    }
 
-            match remote with
-            | None -> return Map.empty
-            | Some r -> return! fetchPrStatuses r
-        }
-
-    let getCachedPrStatuses (repoRoot: string) =
-        cache.GetOrRefreshAsync repoRoot computePrStatuses
-
-    let tryGetCachedPrStatuses (repoRoot: string) =
-        cache.TryGetOrRefreshInBackground repoRoot Map.empty computePrStatuses
-
-    let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
-
-    let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
-        branchName
-        |> Option.bind (fun b -> prMap |> Map.tryFind b)
-        |> Option.defaultValue NoPr
+let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
+    branchName
+    |> Option.bind (fun b -> prMap |> Map.tryFind b)
+    |> Option.defaultValue NoPr

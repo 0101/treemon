@@ -26,7 +26,7 @@ let private assembleWorktreeStatus
             let! beads = BeadsStatus.getBeadsSummary wt.Path
             let claude = ClaudeStatus.getClaudeStatus wt.Path
 
-            let pr = PrStatus.Cache.lookupPrStatus prMap gitData.UpstreamBranch
+            let pr = PrStatus.lookupPrStatus prMap gitData.UpstreamBranch
 
             return
                 { Path = gitData.Path
@@ -59,7 +59,7 @@ let private assembleWorktreeStatus
 let getWorktrees (worktreeRoot: string) (appVersion: string) : Async<WorktreeResponse> =
     async {
         let! worktrees = GitWorktree.listWorktrees worktreeRoot
-        let prMap = PrStatus.Cache.tryGetCachedPrStatuses worktreeRoot
+        let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot
 
         let! statuses =
             worktrees
