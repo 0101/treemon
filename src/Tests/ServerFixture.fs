@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Net.Http
+open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
 
@@ -111,6 +112,40 @@ let private startProcess (fileName: string) (args: string) (workingDir: string) 
     envVars |> List.iter (fun (k, v) -> psi.Environment.[k] <- v)
     Process.Start(psi)
 
+let private killOrphansOnPort (port: int) =
+    try
+        let psi =
+            ProcessStartInfo(
+                FileName = "netstat",
+                Arguments = "-ano",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            )
+
+        use proc = Process.Start(psi)
+        let output = proc.StandardOutput.ReadToEnd()
+        proc.WaitForExit(5000) |> ignore
+
+        let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
+
+        pattern.Matches(output)
+        |> Seq.cast<Match>
+        |> Seq.map (fun m -> int m.Groups.[1].Value)
+        |> Seq.distinct
+        |> Seq.iter (fun pid ->
+            try
+                use orphan = Process.GetProcessById(pid)
+
+                if not orphan.HasExited then
+                    TestContext.Out.WriteLine($"[Cleanup] Killing orphaned process PID {pid} on port {port}")
+                    orphan.Kill(entireProcessTree = true)
+                    orphan.WaitForExit(5000) |> ignore
+            with :? ArgumentException ->
+                ())
+    with ex ->
+        TestContext.Error.WriteLine($"[Cleanup] Failed to scan port {port}: {ex.Message}")
+
 let startServer () =
     task {
         let proc =
@@ -149,7 +184,13 @@ let compileFable () =
 let startVite () =
     task {
         let proc =
-            startProcess "npx" "vite --host" repoRoot [ "VITE_PORT", "5174"; "API_PORT", "5001" ]
+            startProcess
+                "npx"
+                "vite --host"
+                repoRoot
+                [ "VITE_PORT", "5174"
+                  "API_PORT", "5001"
+                  "NODE_OPTIONS", "--max-old-space-size=512" ]
 
         viteProcess.Value <- Some proc
         do! waitForUrl viteUrl 15000
@@ -195,6 +236,8 @@ type GlobalSetup() =
     [<OneTimeSetUp>]
     member _.Setup() =
         task {
+            killOrphansOnPort 5001
+            killOrphansOnPort 5174
             do! startServer ()
             do! compileFable ()
             do! startVite ()
