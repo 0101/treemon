@@ -214,9 +214,7 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
         | Ok elapsed ->
             Some StepStatus.Succeeded,
             Some elapsed,
-            (match target with
-             | "" -> $"{elapsed.TotalMilliseconds:F0}ms"
-             | t -> $"{t} ({elapsed.TotalMilliseconds:F0}ms)")
+            target
         | Error msg ->
             Some(StepStatus.Failed msg),
             None,

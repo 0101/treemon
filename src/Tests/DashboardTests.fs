@@ -1485,16 +1485,16 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Scheduler footer event entries have message text``() =
+    member this.``Scheduler footer event entries with targets have message text``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer .recent-activity")
-            let entries = footer.Locator(".event-entry")
-            do! entries.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries")
+            let entriesWithMessage = footer.Locator(".event-entry:has(.event-message)")
+            do! entriesWithMessage.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = entriesWithMessage.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries with messages")
 
-            let! messageText = entries.First.Locator(".event-message").TextContentAsync()
-            Assert.That(messageText, Is.Not.Empty, "Scheduler event entry should have a non-empty message")
+            let! messageText = entriesWithMessage.First.Locator(".event-message").TextContentAsync()
+            Assert.That(messageText, Is.Not.Empty, "Scheduler event entry with target should have a non-empty message")
         }
 
     [<Test>]
