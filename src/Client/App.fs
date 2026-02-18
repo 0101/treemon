@@ -17,7 +17,7 @@ type Model =
       HasError: bool
       SortMode: SortMode
       IsCompact: bool
-      SyncTimes: SyncTimes option
+      SchedulerEvents: CardEvent list
       BranchEvents: Map<string, CardEvent list>
       AppVersion: string option }
 
@@ -60,7 +60,7 @@ let init () =
       HasError = false
       SortMode = ByName
       IsCompact = false
-      SyncTimes = None
+      SchedulerEvents = []
       BranchEvents = Map.empty
       AppVersion = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -85,7 +85,7 @@ let update msg model =
                 RootFolderName = response.RootFolderName
                 IsLoading = false
                 HasError = false
-                SyncTimes = Some response.SyncTimes
+                SchedulerEvents = response.SchedulerEvents
                 AppVersion = Some response.AppVersion },
             Cmd.none
 
@@ -166,32 +166,6 @@ let relativeTime (dt: System.DateTimeOffset) =
     | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
-
-let syncAgeText (label: string) (time: System.DateTimeOffset option) =
-    match time with
-    | Some dt ->
-        let diff = System.DateTimeOffset.Now - dt
-        let age =
-            match diff with
-            | d when d.TotalSeconds < 60.0 -> $"{int d.TotalSeconds |> max 0}s ago"
-            | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
-            | d -> $"{int d.TotalHours}h ago"
-        $"{label} {age}"
-    | None -> $"{label} --"
-
-let syncFooter (syncTimes: SyncTimes) =
-    Html.div [
-        prop.className "sync-footer"
-        prop.children [
-            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "Git" syncTimes.Git) ]
-            Html.span [ prop.className "sync-sep"; prop.text "\u00b7" ]
-            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "PR" syncTimes.Pr) ]
-            Html.span [ prop.className "sync-sep"; prop.text "\u00b7" ]
-            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "Claude" syncTimes.Claude) ]
-            Html.span [ prop.className "sync-sep"; prop.text "\u00b7" ]
-            Html.span [ prop.className "sync-source"; prop.text (syncAgeText "Beads" syncTimes.Beads) ]
-        ]
-    ]
 
 let ccClassName =
     function
@@ -353,6 +327,35 @@ let eventLog (events: CardEvent list) =
         Html.div [
             prop.className "event-log"
             prop.children (evts |> List.map eventLogEntry)
+        ]
+
+let schedulerEventEntry (evt: CardEvent) =
+    Html.div [
+        prop.className "event-entry"
+        prop.children [
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
+            Html.span [ prop.className "event-source"; prop.text evt.Source ]
+            Html.span [ prop.className "event-message"; prop.text evt.Message ]
+            match evt.Duration with
+            | Some d -> Html.span [ prop.className "event-duration"; prop.text $"{d.TotalSeconds:F1}s" ]
+            | None -> Html.none
+            match evt.Status with
+            | Some _ ->
+                Html.span [
+                    prop.className (stepStatusClassName evt.Status)
+                    prop.text (stepStatusText evt.Status)
+                ]
+            | None -> Html.none
+        ]
+    ]
+
+let schedulerFooter (events: CardEvent list) =
+    match events with
+    | [] -> Html.none
+    | evts ->
+        Html.div [
+            prop.className "sync-footer"
+            prop.children (evts |> List.map schedulerEventEntry)
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
@@ -650,9 +653,9 @@ let view model dispatch =
                 prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
             ]
 
-            match model.SyncTimes with
-            | Some st -> syncFooter st
-            | None -> Html.none
+            match model.SchedulerEvents with
+            | [] -> Html.none
+            | events -> schedulerFooter events
         ]
     ]
 

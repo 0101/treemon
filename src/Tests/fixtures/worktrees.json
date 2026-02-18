@@ -160,12 +160,23 @@
         "MainBehindCount": 10
       }
     ],
-    "SyncTimes": {
-      "Git": "2026-02-16T22:55:00+00:00",
-      "Beads": "2026-02-16T22:54:00+00:00",
-      "Claude": "2026-02-16T22:53:00+00:00",
-      "Pr": "2026-02-16T22:50:00+00:00"
-    },
+    "IsReady": true,
+    "SchedulerEvents": [
+      {
+        "Source": "git",
+        "Message": "Refreshed feature-active",
+        "Timestamp": "2026-02-16T22:55:00+00:00",
+        "Status": null,
+        "Duration": "00:00:00.5200000"
+      },
+      {
+        "Source": "pr",
+        "Message": "Refreshed PR statuses",
+        "Timestamp": "2026-02-16T22:54:00+00:00",
+        "Status": null,
+        "Duration": "00:00:01.2000000"
+      }
+    ],
     "AppVersion": "2026-02-16T22:50:00.000Z"
   },
   "SyncStatus": {
@@ -174,13 +185,15 @@
         "Source": "sync",
         "Message": "Merge main",
         "Timestamp": "2026-02-16T20:00:00+00:00",
-        "Status": "Succeeded"
+        "Status": "Succeeded",
+        "Duration": null
       },
       {
         "Source": "claude",
         "Message": "Implementing input validation for user forms",
         "Timestamp": "2026-02-16T22:30:00+00:00",
-        "Status": null
+        "Status": null,
+        "Duration": null
       }
     ],
     "feature-recent": [
@@ -188,13 +201,15 @@
         "Source": "sync",
         "Message": "Pull",
         "Timestamp": "2026-02-16T21:30:00+00:00",
-        "Status": "Succeeded"
+        "Status": "Succeeded",
+        "Duration": null
       },
       {
         "Source": "claude",
         "Message": "Refactoring complete, running tests",
         "Timestamp": "2026-02-16T22:00:00+00:00",
-        "Status": null
+        "Status": null,
+        "Duration": null
       }
     ],
     "feature-draft": [
@@ -202,7 +217,8 @@
         "Source": "claude",
         "Message": "Setting up API route handlers",
         "Timestamp": "2026-02-16T18:30:00+00:00",
-        "Status": null
+        "Status": null,
+        "Duration": null
       },
       {
         "Source": "sync",
@@ -210,7 +226,8 @@
         "Timestamp": "2026-02-16T19:00:00+00:00",
         "Status": {
           "Failed": "Merge conflict in src/Api/Routes.fs"
-        }
+        },
+        "Duration": null
       }
     ],
     "feature-unknown": [
@@ -218,13 +235,15 @@
         "Source": "sync",
         "Message": "Check clean",
         "Timestamp": "2026-02-16T17:29:00+00:00",
-        "Status": "Succeeded"
+        "Status": "Succeeded",
+        "Duration": null
       },
       {
         "Source": "sync",
         "Message": "Pull",
         "Timestamp": "2026-02-16T17:30:00+00:00",
-        "Status": "Running"
+        "Status": "Running",
+        "Duration": null
       }
     ]
   }

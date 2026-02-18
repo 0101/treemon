@@ -67,18 +67,6 @@ type WorktreeStatus =
       IsDirty: bool
       WorkMetrics: WorkMetrics option }
 
-type SyncTimes =
-    { Git: DateTimeOffset option
-      Beads: DateTimeOffset option
-      Claude: DateTimeOffset option
-      Pr: DateTimeOffset option }
-
-type WorktreeResponse =
-    { RootFolderName: string
-      Worktrees: WorktreeStatus list
-      SyncTimes: SyncTimes
-      AppVersion: string }
-
 [<RequireQualifiedAccess>]
 type StepStatus =
     | Pending
@@ -91,7 +79,15 @@ type CardEvent =
     { Source: string
       Message: string
       Timestamp: DateTimeOffset
-      Status: StepStatus option }
+      Status: StepStatus option
+      Duration: TimeSpan option }
+
+type WorktreeResponse =
+    { RootFolderName: string
+      Worktrees: WorktreeStatus list
+      IsReady: bool
+      SchedulerEvents: CardEvent list
+      AppVersion: string }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<WorktreeResponse>

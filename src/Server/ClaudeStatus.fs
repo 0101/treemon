@@ -120,7 +120,8 @@ let getLastClaudeMessage (worktreePath: string) =
         { Source = "claude"
           Message = truncateMessage 80 text
           Timestamp = timestamp
-          Status = None })
+          Status = None
+          Duration = None })
 
 module Cache =
     let private statusCache = Cache.TtlCache<ClaudeCodeStatus>(TimeSpan.FromSeconds(15.0))

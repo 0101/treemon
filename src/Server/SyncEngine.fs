@@ -67,7 +67,8 @@ let addStepEvent (branch: string) (step: SyncStep) (status: StepStatus) (message
         { Source = $"{step}"
           Message = message
           Timestamp = DateTimeOffset.Now
-          Status = Some status }
+          Status = Some status
+          Duration = None }
 
     pushEvent branch event
 
@@ -200,7 +201,8 @@ let cancelSync (branch: string) =
                 { Source = "sync"
                   Message = "Sync cancelled"
                   Timestamp = DateTimeOffset.Now
-                  Status = Some StepStatus.Cancelled }
+                  Status = Some StepStatus.Cancelled
+                  Duration = None }
 
             pushEvent branch cancelEvent
 

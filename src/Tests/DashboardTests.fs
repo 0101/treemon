@@ -49,32 +49,21 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync footer is present with per-source ages``() =
+    member this.``Sync footer shows scheduler events``() =
         task {
             let syncFooter = this.Page.Locator(".sync-footer")
             let! count = syncFooter.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Sync footer should be present")
+            Assert.That(count, Is.EqualTo(1), "Sync footer should be present when scheduler events exist")
 
-            let syncSources = syncFooter.Locator(".sync-source")
-            let! sourceCount = syncSources.CountAsync()
-            Assert.That(sourceCount, Is.EqualTo(4), "Sync footer should show 4 sources (Git, PR, Claude, Beads)")
+            let entries = syncFooter.Locator(".event-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.EqualTo(2), "Sync footer should show 2 scheduler events from fixture")
 
-            let! gitText = syncSources.Nth(0).TextContentAsync()
-            Assert.That(gitText, Does.StartWith("Git"), "First source should be Git")
-            Assert.That(gitText, Does.Contain("ago").Or.Contain("--"), "Git source should show age or '--'")
+            let! firstSource = entries.Nth(0).Locator(".event-source").TextContentAsync()
+            Assert.That(firstSource, Is.EqualTo("git"), "First scheduler event source should be 'git'")
 
-            let! prText = syncSources.Nth(1).TextContentAsync()
-            Assert.That(prText, Does.StartWith("PR"), "Second source should be PR")
-
-            let! claudeText = syncSources.Nth(2).TextContentAsync()
-            Assert.That(claudeText, Does.StartWith("Claude"), "Third source should be Claude")
-
-            let! beadsText = syncSources.Nth(3).TextContentAsync()
-            Assert.That(beadsText, Does.StartWith("Beads"), "Fourth source should be Beads")
-
-            let syncSeps = syncFooter.Locator(".sync-sep")
-            let! sepCount = syncSeps.CountAsync()
-            Assert.That(sepCount, Is.EqualTo(3), "Sync footer should have 3 separators between 4 sources")
+            let! secondSource = entries.Nth(1).Locator(".event-source").TextContentAsync()
+            Assert.That(secondSource, Is.EqualTo("pr"), "Second scheduler event source should be 'pr'")
         }
 
     [<TestCase("active", "rgb(243, 139, 168)")>]
