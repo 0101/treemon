@@ -29,7 +29,7 @@ type DashboardTests() =
     member this.NavigateToDashboard() =
         task {
             let! _ = this.Page.GotoAsync(baseUrl)
-            do! this.Page.Locator(".wt-card").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
+            do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
             return ()
         }
 
@@ -57,11 +57,13 @@ type DashboardTests() =
             let! count = footer.CountAsync()
             Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present when scheduler events exist")
 
+            let entries = footer.Locator(".recent-activity .event-entry")
+            do! entries.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
             let recentActivity = footer.Locator(".recent-activity")
             let! raCount = recentActivity.CountAsync()
             Assert.That(raCount, Is.EqualTo(1), "Scheduler footer should have a .recent-activity section")
 
-            let entries = recentActivity.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
             Assert.That(entryCount, Is.EqualTo(2), "Scheduler footer should show 2 scheduler events from fixture")
 
@@ -78,6 +80,7 @@ type DashboardTests() =
     member this.``CC dot has correct background color``(status: string, expectedColor: string) =
         task {
             let dots = this.Page.Locator($".cc-dot.{status}")
+            do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = dots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} Claude worktrees; {status} dots should be present")
 
@@ -215,6 +218,7 @@ type DashboardTests() =
     member this.``PR badge shows when PR data is present``() =
         task {
             let prBadges = this.Page.Locator(".wt-card .pr-badge")
+            do! prBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = prBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PRs; PR badges should be present")
 
@@ -226,6 +230,7 @@ type DashboardTests() =
     member this.``PR badge is a clickable link with href``() =
         task {
             let prLinks = this.Page.Locator(".wt-card a.pr-badge")
+            do! prLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = prLinks.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PRs; PR badge links should be present")
 
@@ -241,6 +246,7 @@ type DashboardTests() =
     member this.``Thread badge shows on PR cards``() =
         task {
             let threadBadges = this.Page.Locator(".wt-card .thread-badge")
+            do! threadBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = threadBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
@@ -359,6 +365,7 @@ type DashboardTests() =
     member this.``Build badge renders when build data is present``() =
         task {
             let buildBadges = this.Page.Locator(".wt-card .build-badge")
+            do! buildBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = buildBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badges should be present")
 
@@ -385,6 +392,7 @@ type DashboardTests() =
     member this.``Merged PR badge has correct class when present``() =
         task {
             let mergedBadges = this.Page.Locator(".wt-card .pr-badge.merged")
+            do! mergedBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = mergedBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a worktree with merged PR; merged badge should be present")
 
@@ -494,6 +502,7 @@ type DashboardTests() =
     member this.``Main-behind indicator present on cards``() =
         task {
             let mainBehindElements = this.Page.Locator(".wt-card .main-behind")
+            do! mainBehindElements.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = mainBehindElements.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "At least one card should have a main-behind indicator")
 
@@ -509,6 +518,7 @@ type DashboardTests() =
     member this.``Main-behind up-to-date has correct CSS class``() =
         task {
             let upToDate = this.Page.Locator(".wt-card .main-behind.up-to-date")
+            do! upToDate.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = upToDate.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with MainBehindCount=0; up-to-date indicators should be present")
 
@@ -523,6 +533,7 @@ type DashboardTests() =
     member this.``Main-behind warning style for high behind count``() =
         task {
             let behindWarning = this.Page.Locator(".wt-card .main-behind.behind-warning")
+            do! behindWarning.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = behindWarning.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with high MainBehindCount; behind-warning indicators should be present")
 
@@ -672,6 +683,7 @@ type DashboardTests() =
     member this.``Multiple build badges can appear on a single PR card``() =
         task {
             let prCards = this.Page.Locator(".wt-card:has(.pr-badge:not(.merged))")
+            do! prCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! prCardCount = prCards.CountAsync()
             Assert.That(prCardCount, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with non-merged PRs")
 
@@ -684,6 +696,7 @@ type DashboardTests() =
     member this.``All build badges are links to Azure DevOps build results``() =
         task {
             let buildLinks = this.Page.Locator(".wt-card a.build-badge")
+            do! buildLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = buildLinks.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badge links should be present")
 
@@ -698,6 +711,7 @@ type DashboardTests() =
     member this.``Build badges contain pipeline name text``() =
         task {
             let buildBadges = this.Page.Locator(".wt-card .build-badge")
+            do! buildBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = buildBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badges should be present")
 
@@ -712,6 +726,7 @@ type DashboardTests() =
     member this.``Sync button appears when MainBehindCount is greater than zero``() =
         task {
             let behindCards = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
+            do! behindCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! behindCount = behindCards.CountAsync()
             Assert.That(behindCount, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind-main rows should be present")
 
@@ -724,6 +739,7 @@ type DashboardTests() =
     member this.``Sync button hidden when MainBehindCount is zero``() =
         task {
             let upToDateRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind.up-to-date)")
+            do! upToDateRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = upToDateRows.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with MainBehindCount=0; up-to-date rows should be present")
 
@@ -736,6 +752,7 @@ type DashboardTests() =
     member this.``Sync button disabled when Claude is Active``() =
         task {
             let activeCards = this.Page.Locator(".wt-card.cc-active:not(.compact)")
+            do! activeCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! activeCount = activeCards.CountAsync()
             Assert.That(activeCount, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees")
 
@@ -761,6 +778,7 @@ type DashboardTests() =
     member this.``Sync button disabled when Claude is Recent``() =
         task {
             let recentCards = this.Page.Locator(".wt-card.cc-recent:not(.compact)")
+            do! recentCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! recentCount = recentCards.CountAsync()
             Assert.That(recentCount, Is.GreaterThanOrEqualTo(1), "Fixture has Recent Claude worktrees")
 
@@ -783,6 +801,7 @@ type DashboardTests() =
     member this.``Sync button has correct CSS classes and styling``() =
         task {
             let syncBtns = this.Page.Locator(".wt-card:not(.compact) .sync-btn")
+            do! syncBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = syncBtns.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; sync buttons should be present")
 
@@ -894,6 +913,7 @@ type DashboardTests() =
     member this.``Main-behind-row contains sync button next to behind text``() =
         task {
             let behindRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
+            do! behindRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = behindRows.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind rows should be present")
 
@@ -1072,16 +1092,10 @@ type DashboardTests() =
         task {
             let logs = eventLog this.Page
             do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! logCount = logs.CountAsync()
 
-            let mutable allWithin2 = true
-            let mutable i = 0
-            while i < logCount do
-                let entries = logs.Nth(i).Locator(".event-entry")
-                let! entryCount = entries.CountAsync()
-                if entryCount > 2 then allWithin2 <- false
-                i <- i + 1
-
+            let! allWithin2 =
+                logs.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.querySelectorAll('.event-entry').length <= 2)")
             Assert.That(allWithin2, Is.True, "Every event log should show at most 2 entries (truncated from 3)")
         }
 
@@ -1137,34 +1151,26 @@ type DashboardTests() =
         task {
             let logs = eventLog this.Page
             do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! logCount = logs.CountAsync()
 
-            let mutable found2EntryLog = false
-            let mutable i = 0
-            while i < logCount && not found2EntryLog do
-                let entries = logs.Nth(i).Locator(".event-entry")
-                let! entryCount = entries.CountAsync()
-                if entryCount = 2 then
-                    found2EntryLog <- true
-                    let! topTime = entries.Nth(0).Locator(".event-time").TextContentAsync()
-                    let! bottomTime = entries.Nth(1).Locator(".event-time").TextContentAsync()
-
-                    let parseMinutes (s: string) =
-                        let trimmed = s.Trim()
-                        match trimmed with
-                        | t when t.EndsWith("s ago") -> 0
-                        | t when t.EndsWith("m ago") -> int (t.Replace("m ago", ""))
-                        | t when t.EndsWith("h ago") -> int (t.Replace("h ago", "")) * 60
-                        | t when t.EndsWith("d ago") -> int (t.Replace("d ago", "")) * 1440
-                        | _ -> 0
-
-                    let topMinutes = parseMinutes topTime
-                    let bottomMinutes = parseMinutes bottomTime
-                    Assert.That(topMinutes, Is.GreaterThanOrEqualTo(bottomMinutes),
-                        $"Top entry ({topTime}) should be older than or same age as bottom entry ({bottomTime}) - chronological order with newest at bottom")
-                i <- i + 1
-
-            Assert.That(found2EntryLog, Is.True, "Should find at least one event log with exactly 2 entries to verify ordering")
+            let! result =
+                logs.EvaluateAllAsync<bool>("""els => {
+                    const parseMinutes = s => {
+                        const t = s.trim();
+                        if (t.endsWith('s ago')) return 0;
+                        if (t.endsWith('m ago')) return parseInt(t);
+                        if (t.endsWith('h ago')) return parseInt(t) * 60;
+                        if (t.endsWith('d ago')) return parseInt(t) * 1440;
+                        return 0;
+                    };
+                    const log = els.find(el => el.querySelectorAll('.event-entry').length === 2);
+                    if (!log) return false;
+                    const entries = log.querySelectorAll('.event-entry');
+                    const topTime = entries[0].querySelector('.event-time').textContent;
+                    const bottomTime = entries[1].querySelector('.event-time').textContent;
+                    return parseMinutes(topTime) >= parseMinutes(bottomTime);
+                }""")
+            Assert.That(result, Is.True,
+                "Should find a 2-entry event log where top entry is older than or same age as bottom entry (chronological, newest at bottom)")
         }
 
     [<Test>]
@@ -1198,6 +1204,7 @@ type DashboardTests() =
     member this.``Merged card is dimmed with reduced opacity``() =
         task {
             let mergedCards = this.Page.Locator(".wt-card.merged")
+            do! mergedCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = mergedCards.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a merged worktree; merged card should be present")
 
@@ -1209,6 +1216,7 @@ type DashboardTests() =
     member this.``Merged card delete button has red accent color``() =
         task {
             let mergedDeleteBtn = this.Page.Locator(".wt-card.merged .delete-btn")
+            do! mergedDeleteBtn.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = mergedDeleteBtn.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Merged card should have a delete button")
 
@@ -1233,6 +1241,7 @@ type DashboardTests() =
     member this.``Dirty worktree shows warning instead of sync button``() =
         task {
             let dirtyWarnings = this.Page.Locator(".wt-card .dirty-warning")
+            do! dirtyWarnings.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = dirtyWarnings.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has dirty worktree behind main; dirty warning should be present")
 
@@ -1250,6 +1259,7 @@ type DashboardTests() =
     member this.``Dirty worktree row has no sync button``() =
         task {
             let dirtyRow = this.Page.Locator(".wt-card .main-behind-row:has(.dirty-warning)")
+            do! dirtyRow.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = dirtyRow.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has dirty worktree behind main; row with dirty warning should exist")
 
@@ -1262,6 +1272,7 @@ type DashboardTests() =
     member this.``Commit grid renders on branches with commits``() =
         task {
             let grids = this.Page.Locator(".wt-card .commit-grid")
+            do! grids.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = grids.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branches with CommitCount > 0; commit grids should be present")
 
@@ -1305,8 +1316,9 @@ type DashboardTests() =
     [<Test>]
     member this.``Commit grid square count matches fixture CommitCount``() =
         task {
-            let activeCard = this.Page.Locator(".wt-card.cc-active").First
-            let squares = activeCard.Locator(".commit-square")
+            let activeCard = this.Page.Locator(".wt-card.cc-active")
+            do! activeCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let squares = activeCard.First.Locator(".commit-square")
             let! squareCount = squares.CountAsync()
             Assert.That(squareCount, Is.EqualTo(12), "feature-active has CommitCount=12; should render 12 squares")
         }
@@ -1315,6 +1327,7 @@ type DashboardTests() =
     member this.``Commit overflow indicator shown for high commit count``() =
         task {
             let overflows = this.Page.Locator(".wt-card .commit-overflow")
+            do! overflows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = overflows.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branch with 95 commits (>90); overflow indicator should be present")
 
@@ -1326,6 +1339,7 @@ type DashboardTests() =
     member this.``Commit grid capped at 90 squares for high commit count``() =
         task {
             let overflowCard = this.Page.Locator(".wt-card:has(.commit-overflow)")
+            do! overflowCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = overflowCard.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Should have card with overflow")
 
@@ -1338,6 +1352,7 @@ type DashboardTests() =
     member this.``Diff stats show additions and deletions``() =
         task {
             let diffStats = this.Page.Locator(".wt-card .diff-stats")
+            do! diffStats.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = diffStats.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branches with diff stats; diff-stats elements should be present")
 
@@ -1373,12 +1388,13 @@ type DashboardTests() =
     [<Test>]
     member this.``Diff stats show correct values from fixture``() =
         task {
-            let activeCard = this.Page.Locator(".wt-card.cc-active").First
-            let added = activeCard.Locator(".diff-added")
+            let activeCard = this.Page.Locator(".wt-card.cc-active")
+            do! activeCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let added = activeCard.First.Locator(".diff-added")
             let! addedText = added.First.TextContentAsync()
             Assert.That(addedText, Is.EqualTo("+234"), "feature-active has LinesAdded=234")
 
-            let removed = activeCard.Locator(".diff-removed")
+            let removed = activeCard.First.Locator(".diff-removed")
             let! removedText = removed.First.TextContentAsync()
             Assert.That(removedText, Is.EqualTo("-89"), "feature-active has LinesRemoved=89")
         }
@@ -1386,8 +1402,9 @@ type DashboardTests() =
     [<Test>]
     member this.``No commit grid on branches with zero commits``() =
         task {
-            let idleCard = this.Page.Locator(".wt-card.cc-idle").First
-            let grids = idleCard.Locator(".commit-grid")
+            let idleCard = this.Page.Locator(".wt-card.cc-idle")
+            do! idleCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let grids = idleCard.First.Locator(".commit-grid")
             let! count = grids.CountAsync()
             Assert.That(count, Is.EqualTo(0), "Branches with no WorkMetrics or CommitCount=0 should not show commit grid")
         }
@@ -1396,6 +1413,7 @@ type DashboardTests() =
     member this.``Work metrics appear in card header``() =
         task {
             let metricsInHeader = this.Page.Locator(".wt-card .card-header .work-metrics")
+            do! metricsInHeader.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! count = metricsInHeader.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside card header")
         }
@@ -1428,8 +1446,7 @@ type DashboardTests() =
     member this.``Scheduler footer is sticky at bottom``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer")
-            let! count = footer.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present")
+            do! footer.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
             let! position = footer |> computedStyle "position"
             Assert.That(position, Is.EqualTo("sticky"), "Scheduler footer should be sticky")
@@ -1442,10 +1459,10 @@ type DashboardTests() =
     member this.``Scheduler footer events show duration``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer")
-            let! count = footer.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present")
+            do! footer.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
             let durations = footer.Locator(".event-duration")
+            do! durations.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! durCount = durations.CountAsync()
             Assert.That(durCount, Is.GreaterThanOrEqualTo(1), "Fixture scheduler events have durations; .event-duration elements should be present")
 
@@ -1458,6 +1475,7 @@ type DashboardTests() =
         task {
             let footer = this.Page.Locator(".scheduler-footer .recent-activity")
             let entries = footer.Locator(".event-entry")
+            do! entries.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! entryCount = entries.CountAsync()
             Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries")
 
@@ -1471,6 +1489,7 @@ type DashboardTests() =
         task {
             let footer = this.Page.Locator(".scheduler-footer .recent-activity")
             let entries = footer.Locator(".event-entry")
+            do! entries.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
             let! entryCount = entries.CountAsync()
             Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries")
 
@@ -1611,7 +1630,7 @@ type DashboardTests() =
                 route.ContinueAsync() |> ignore)
 
             let! _ = page.GotoAsync(baseUrl)
-            do! page.Locator(".wt-card").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
+            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
 
             apiCallCount <- 0
             do! page.WaitForTimeoutAsync(5000.0f)
