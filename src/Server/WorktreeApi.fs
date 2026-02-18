@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open System.IO
 open Shared
+open Shared.EventUtils
 open Newtonsoft.Json
 
 type FixtureData =
@@ -56,7 +57,7 @@ let getWorktrees
             { RootFolderName = folderName
               Worktrees = statuses
               IsReady = state.IsReady
-              SchedulerEvents = state.SchedulerEvents
+              SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               AppVersion = appVersion }
     }
 

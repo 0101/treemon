@@ -188,6 +188,71 @@ type PinnedErrorsTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+type MergeWithPinnedErrorsTests() =
+
+    let makeEvent source message status timestamp =
+        { Source = source
+          Message = message
+          Timestamp = timestamp
+          Status = Some status
+          Duration = None }
+
+    let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)
+
+    [<Test>]
+    member _.``Empty pinned map returns events unchanged``() =
+        let events =
+            [ makeEvent "Git" "main (5s)" StepStatus.Succeeded baseTime ]
+
+        let result = mergeWithPinnedErrors events Map.empty
+        Assert.That(result.Length, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``Missing pinned error is appended``() =
+        let events =
+            [ makeEvent "Git" "main (5s)" StepStatus.Succeeded baseTime ]
+        let pinnedError = makeEvent "PrFetch" "timeout" (StepStatus.Failed "timeout") baseTime
+        let pinnedMap = Map.ofList [ (("PrFetch", ""), pinnedError) ]
+
+        let result = mergeWithPinnedErrors events pinnedMap
+        Assert.That(result.Length, Is.EqualTo(2))
+        Assert.That(result.[1].Source, Is.EqualTo("PrFetch"))
+
+    [<Test>]
+    member _.``Pinned error already in events is not duplicated``() =
+        let error = makeEvent "PrFetch" "timeout" (StepStatus.Failed "timeout") baseTime
+        let events = [ error ]
+        let pinnedMap = Map.ofList [ (("PrFetch", ""), error) ]
+
+        let result = mergeWithPinnedErrors events pinnedMap
+        Assert.That(result.Length, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``Multiple missing pinned errors are all appended``() =
+        let events =
+            [ makeEvent "Git" "main (5s)" StepStatus.Succeeded baseTime ]
+        let err1 = makeEvent "PrFetch" "timeout" (StepStatus.Failed "timeout") baseTime
+        let err2 = makeEvent "GitFetch" "network error" (StepStatus.Failed "network") (baseTime.AddSeconds(1.0))
+        let pinnedMap =
+            Map.ofList
+                [ (("PrFetch", ""), err1)
+                  (("GitFetch", ""), err2) ]
+
+        let result = mergeWithPinnedErrors events pinnedMap
+        Assert.That(result.Length, Is.EqualTo(3))
+
+    [<Test>]
+    member _.``Empty events with pinned errors returns only pinned``() =
+        let err = makeEvent "PrFetch" "timeout" (StepStatus.Failed "timeout") baseTime
+        let pinnedMap = Map.ofList [ (("PrFetch", ""), err) ]
+
+        let result = mergeWithPinnedErrors [] pinnedMap
+        Assert.That(result.Length, Is.EqualTo(1))
+        Assert.That(result.[0].Source, Is.EqualTo("PrFetch"))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
 type SortWorktreesTests() =
 
     let makeWorktree branch commitTime =

@@ -33,6 +33,18 @@ let pinnedErrors (events: CardEvent list) =
         | _ -> false)
     |> List.sortByDescending (fun e -> e.Timestamp)
 
+let mergeWithPinnedErrors (events: CardEvent list) (pinnedMap: Map<string * string, CardEvent>) =
+    let existingKeys =
+        events
+        |> List.map eventKey
+        |> Set.ofList
+    let missing =
+        pinnedMap
+        |> Map.toList
+        |> List.map snd
+        |> List.filter (fun evt -> Set.contains (eventKey evt) existingKeys |> not)
+    events @ missing
+
 let sortWorktrees sortMode worktrees =
     match sortMode with
     | ByName ->

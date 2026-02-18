@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open System.Threading
 open Shared
+open Shared.EventUtils
 
 type DashboardState =
     { WorktreeList: GitWorktree.WorktreeInfo list
@@ -11,6 +12,7 @@ type DashboardState =
       BeadsData: Map<string, BeadsSummary>
       PrData: Map<string, PrStatus>
       SchedulerEvents: CardEvent list
+      PinnedErrors: Map<string * string, CardEvent>
       IsReady: bool }
 
 module DashboardState =
@@ -20,6 +22,7 @@ module DashboardState =
           BeadsData = Map.empty
           PrData = Map.empty
           SchedulerEvents = []
+          PinnedErrors = Map.empty
           IsReady = false }
 
 type StateMsg =
@@ -42,6 +45,13 @@ let private trimEvents (events: CardEvent list) =
     events
     |> List.sortByDescending (fun e -> e.Timestamp)
     |> List.truncate maxEvents
+
+let private updatePinnedErrors (errors: Map<string * string, CardEvent>) (event: CardEvent) =
+    let key = eventKey event
+    match event.Status with
+    | Some (StepStatus.Failed _) -> errors |> Map.add key event
+    | Some StepStatus.Succeeded -> errors |> Map.remove key
+    | _ -> errors
 
 let private removeWorktreeData (path: string) (state: DashboardState) =
     { state with
@@ -89,7 +99,9 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         state
 
     | LogSchedulerEvent event ->
-        { state with SchedulerEvents = trimEvents (event :: state.SchedulerEvents) }
+        { state with
+            SchedulerEvents = trimEvents (event :: state.SchedulerEvents)
+            PinnedErrors = updatePinnedErrors state.PinnedErrors event }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->

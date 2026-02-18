@@ -361,7 +361,7 @@ let pinnedErrorEntry (evt: CardEvent) =
 
 let schedulerFooter (events: CardEvent list) =
     let errors = pinnedErrors events
-    let recent = events |> List.sortByDescending (fun e -> e.Timestamp) |> List.truncate 20
+    let recent = events |> List.sortByDescending (fun e -> e.Timestamp) |> List.truncate 5
     match errors, recent with
     | [], [] -> Html.none
     | _ ->
