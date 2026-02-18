@@ -101,6 +101,28 @@ let startServer () =
         do! waitForUrl serverUrl 30000
     }
 
+let compileFable () =
+    task {
+        let clientDir = Path.Combine("src", "Client")
+        let outDir = Path.Combine(clientDir, "output")
+
+        let proc =
+            startProcess "dotnet" $"fable {clientDir} --outDir {outDir}" repoRoot []
+
+        let! stdout = proc.StandardOutput.ReadToEndAsync()
+        let! stderr = proc.StandardError.ReadToEndAsync()
+        let exited = proc.WaitForExit(60_000)
+
+        if not exited then
+            proc.Kill(entireProcessTree = true)
+            failwith "Fable compilation timed out after 60s"
+
+        TestContext.Out.WriteLine($"Fable compilation output:{Environment.NewLine}{stdout}")
+
+        if proc.ExitCode <> 0 then
+            failwithf "Fable compilation failed (exit code %d): %s" proc.ExitCode stderr
+    }
+
 let startVite () =
     task {
         let proc =
@@ -139,8 +161,9 @@ type GlobalSetup() =
     member _.Setup() =
         task {
             do! startServer ()
+            do! compileFable ()
             do! startVite ()
-            TestContext.Out.WriteLine("Server and Vite started successfully")
+            TestContext.Out.WriteLine("Server, Fable, and Vite started successfully")
         }
 
     [<OneTimeTearDown>]
