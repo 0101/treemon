@@ -24,6 +24,29 @@ let private viteProcess: Process option ref = ref None
 let serverUrl = "http://localhost:5001"
 let viteUrl = "http://localhost:5174"
 
+let private memoryThreshold = 2L * 1024L * 1024L * 1024L
+
+type ProcessMemoryStats =
+    { Name: string
+      PeakWorkingSet: int64
+      ExceededThreshold: bool }
+
+let private readMemoryStats (name: string) (procOpt: Process option) =
+    procOpt
+    |> Option.bind (fun p ->
+        try
+            if not p.HasExited then
+                p.Refresh()
+            let peak = p.PeakWorkingSet64
+            Some { Name = name; PeakWorkingSet = peak; ExceededThreshold = peak > memoryThreshold }
+        with _ ->
+            None)
+
+let getMemoryStats () =
+    [ readMemoryStats "Server" serverProcess.Value
+      readMemoryStats "Vite" viteProcess.Value ]
+    |> List.choose id
+
 let private tryGet (client: HttpClient) (url: string) =
     async {
         try
@@ -149,7 +172,19 @@ let private killProc (procOpt: Process option) =
         with ex ->
             TestContext.Error.WriteLine($"Failed to kill process: {ex.Message}"))
 
+let private formatBytes (bytes: int64) =
+    let mb = float bytes / (1024.0 * 1024.0)
+    $"%.1f{mb} MB"
+
 let stopAll () =
+    let stats = getMemoryStats ()
+
+    stats
+    |> List.iter (fun s ->
+        let status = if s.ExceededThreshold then "EXCEEDED THRESHOLD" else "OK"
+        TestContext.Out.WriteLine(
+            $"[Memory] {s.Name}: peak {formatBytes s.PeakWorkingSet} ({status})"))
+
     killProc serverProcess.Value
     killProc viteProcess.Value
     serverProcess.Value <- None

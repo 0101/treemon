@@ -1639,3 +1639,20 @@ type DashboardTests() =
 
             do! page.CloseAsync()
         }
+
+    [<Test>]
+    member _.``Child process memory stays under 2 GB``() =
+        task {
+            let stats = ServerFixture.getMemoryStats ()
+
+            stats
+            |> List.iter (fun s ->
+                let mb = float s.PeakWorkingSet / (1024.0 * 1024.0)
+                NUnit.Framework.TestContext.Out.WriteLine($"[Memory] {s.Name}: peak {mb:F1} MB")
+                Assert.That(
+                    s.ExceededThreshold,
+                    Is.False,
+                    $"{s.Name} peak memory ({mb:F1} MB) exceeded 2 GB threshold"))
+
+            Assert.That(stats, Is.Not.Empty, "Should have memory stats for at least one child process")
+        }
