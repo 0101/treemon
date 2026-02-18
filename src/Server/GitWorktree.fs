@@ -114,14 +114,11 @@ let private tryFastForwardMain (repoRoot: string) =
         | _ -> ()
     }
 
-let private fetchCache = Cache.TtlCache<unit>(TimeSpan.FromSeconds(120.0))
-
 let fetchFromOrigin (repoRoot: string) =
-    fetchCache.GetOrRefreshAsync repoRoot (fun root ->
-        async {
-            let! _ = runGit root "fetch origin main"
-            do! tryFastForwardMain root
-        })
+    async {
+        let! _ = runGit repoRoot "fetch origin main"
+        do! tryFastForwardMain repoRoot
+    }
 
 let getMainBehindCount (worktreePath: string) =
     async {
@@ -150,15 +147,6 @@ let getUpstreamBranch (worktreePath: string) =
                 else
                     Some trimmed)
     }
-
-module Cache =
-    let private cache = Cache.TtlCache<WorktreeInfo list>(TimeSpan.FromSeconds(60.0))
-
-    let getCachedWorktrees (repoRoot: string) =
-        cache.GetOrRefreshAsync repoRoot (fun key -> listWorktrees key)
-
-    let getCachedAt (repoRoot: string) = cache.GetCachedAt repoRoot
-    let invalidate (repoRoot: string) = cache.Invalidate repoRoot
 
 let isDirty (worktreePath: string) =
     async {
@@ -214,14 +202,13 @@ let getDiffStats (worktreePath: string) =
         return parseDiffStats output
     }
 
-let collectWorktreeGitData (repoRoot: string) (worktreePath: string) (branch: string option) =
+let collectWorktreeGitData (worktreePath: string) (branch: string option) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
         let! commitCountChild = Async.StartChild(getCommitCount worktreePath)
         let! diffStatsChild = Async.StartChild(getDiffStats worktreePath)
-        do! fetchFromOrigin repoRoot
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath)
 
         let! commit = commitChild

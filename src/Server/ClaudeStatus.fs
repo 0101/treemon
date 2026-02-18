@@ -122,15 +122,3 @@ let getLastClaudeMessage (worktreePath: string) =
           Timestamp = timestamp
           Status = None
           Duration = None })
-
-module Cache =
-    let private statusCache = Cache.TtlCache<ClaudeCodeStatus>(TimeSpan.FromSeconds(15.0))
-    let private messageCache = Cache.TtlCache<CardEvent option>(TimeSpan.FromSeconds(15.0))
-
-    let getCachedClaudeStatus (worktreePath: string) =
-        statusCache.GetOrRefresh worktreePath (fun key -> getClaudeStatus key)
-
-    let getCachedLastMessage (worktreePath: string) =
-        messageCache.GetOrRefresh worktreePath (fun key -> getLastClaudeMessage key)
-
-    let getOldestCachedAt () = statusCache.GetOldestCachedAt()

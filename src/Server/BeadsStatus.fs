@@ -51,11 +51,3 @@ let getBeadsSummary (worktreePath: string) =
                 |> Option.map parseCountResponse
                 |> Option.defaultValue BeadsSummary.zero
     }
-
-module Cache =
-    let private cache = Cache.TtlCache<BeadsSummary>(TimeSpan.FromSeconds(15.0))
-
-    let getCachedBeadsSummary (worktreePath: string) =
-        cache.GetOrRefreshAsync worktreePath (fun key -> getBeadsSummary key)
-
-    let getOldestCachedAt () = cache.GetOldestCachedAt()

@@ -22,9 +22,9 @@ let private assembleWorktreeStatus
     =
     async {
         try
-            let! gitData = GitWorktree.collectWorktreeGitData repoRoot wt.Path wt.Branch
-            let! beads = BeadsStatus.Cache.getCachedBeadsSummary wt.Path
-            let claude = ClaudeStatus.Cache.getCachedClaudeStatus wt.Path
+            let! gitData = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
+            let! beads = BeadsStatus.getBeadsSummary wt.Path
+            let claude = ClaudeStatus.getClaudeStatus wt.Path
 
             let pr = PrStatus.Cache.lookupPrStatus prMap gitData.UpstreamBranch
 
@@ -58,7 +58,7 @@ let private assembleWorktreeStatus
 
 let getWorktrees (worktreeRoot: string) (appVersion: string) : Async<WorktreeResponse> =
     async {
-        let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+        let! worktrees = GitWorktree.listWorktrees worktreeRoot
         let prMap = PrStatus.Cache.tryGetCachedPrStatuses worktreeRoot
 
         let! statuses =
@@ -79,7 +79,7 @@ let getWorktrees (worktreeRoot: string) (appVersion: string) : Async<WorktreeRes
 
 let private openTerminal (worktreeRoot: string) (path: string) =
     async {
-        let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+        let! worktrees = GitWorktree.listWorktrees worktreeRoot
 
         let isKnownWorktree =
             worktrees
@@ -110,7 +110,7 @@ let private openTerminal (worktreeRoot: string) (path: string) =
 
 let private deleteWorktree (worktreeRoot: string) (branch: string) =
     async {
-        let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+        let! worktrees = GitWorktree.listWorktrees worktreeRoot
 
         let worktree =
             worktrees
@@ -129,7 +129,6 @@ let private deleteWorktree (worktreeRoot: string) (branch: string) =
                 |> Option.defaultValue worktreeRoot
 
             let! result = GitWorktree.removeWorktree repoRoot wt.Path branch
-            GitWorktree.Cache.invalidate worktreeRoot
             return result
     }
 
@@ -149,7 +148,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion
           openTerminal = openTerminal worktreeRoot
           startSync = fun branch ->
               async {
-                  let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+                  let! worktrees = GitWorktree.listWorktrees worktreeRoot
 
                   let worktreePath =
                       worktrees
@@ -168,7 +167,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion
           cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
           getSyncStatus = fun () ->
               async {
-                  let! worktrees = GitWorktree.Cache.getCachedWorktrees worktreeRoot
+                  let! worktrees = GitWorktree.listWorktrees worktreeRoot
 
                   let branchToPath =
                       worktrees
@@ -194,7 +193,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion
                           let claudeEvt =
                               branchToPath
                               |> Map.tryFind branch
-                              |> Option.bind ClaudeStatus.Cache.getCachedLastMessage
+                              |> Option.bind ClaudeStatus.getLastClaudeMessage
 
                           let merged =
                               match claudeEvt with

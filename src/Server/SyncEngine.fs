@@ -349,7 +349,6 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                 return ()
             | Ok _ -> ()
 
-            GitWorktree.Cache.invalidate repoRoot
             completeSync branch StepStatus.Succeeded
             Log.log "SyncEngine" $"Sync pipeline completed successfully for {branch}"
         with :? OperationCanceledException ->
