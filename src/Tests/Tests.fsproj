@@ -9,6 +9,7 @@
     <Compile Include="ServerFixture.fs" />
     <Compile Include="DashboardTests.fs" />
     <Compile Include="GitParsingTests.fs" />
+    <Compile Include="SchedulerTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
