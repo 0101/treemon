@@ -49,15 +49,20 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync footer shows scheduler events``() =
+    member this.``Scheduler footer shows scheduler events``() =
         task {
-            let syncFooter = this.Page.Locator(".sync-footer")
-            let! count = syncFooter.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Sync footer should be present when scheduler events exist")
+            let footer = this.Page.Locator(".scheduler-footer")
+            do! footer.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = footer.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present when scheduler events exist")
 
-            let entries = syncFooter.Locator(".event-entry")
+            let recentActivity = footer.Locator(".recent-activity")
+            let! raCount = recentActivity.CountAsync()
+            Assert.That(raCount, Is.EqualTo(1), "Scheduler footer should have a .recent-activity section")
+
+            let entries = recentActivity.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.EqualTo(2), "Sync footer should show 2 scheduler events from fixture")
+            Assert.That(entryCount, Is.EqualTo(2), "Scheduler footer should show 2 scheduler events from fixture")
 
             let! firstSource = entries.Nth(0).Locator(".event-source").TextContentAsync()
             Assert.That(firstSource, Is.EqualTo("git"), "First scheduler event source should be 'git'")
@@ -1416,4 +1421,201 @@ type DashboardTests() =
             NUnit.Framework.TestContext.Out.WriteLine($"API response body: {body.Substring(0, System.Math.Min(2000, body.Length))}")
             Assert.That(body, Does.Contain("AppVersion"), "Response body should contain AppVersion field")
             Assert.That(body, Does.Not.Contain("\"AppVersion\":\"\""), "AppVersion should not be an empty string")
+        }
+
+    [<Test>]
+    member this.``Scheduler footer is sticky at bottom``() =
+        task {
+            let footer = this.Page.Locator(".scheduler-footer")
+            let! count = footer.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present")
+
+            let! position = footer |> computedStyle "position"
+            Assert.That(position, Is.EqualTo("sticky"), "Scheduler footer should be sticky")
+
+            let! fontFamily = footer |> computedStyle "fontFamily"
+            Assert.That(fontFamily, Does.Contain("monospace").IgnoreCase, "Scheduler footer should use monospace font")
+        }
+
+    [<Test>]
+    member this.``Scheduler footer events show duration``() =
+        task {
+            let footer = this.Page.Locator(".scheduler-footer")
+            let! count = footer.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present")
+
+            let durations = footer.Locator(".event-duration")
+            let! durCount = durations.CountAsync()
+            Assert.That(durCount, Is.GreaterThanOrEqualTo(1), "Fixture scheduler events have durations; .event-duration elements should be present")
+
+            let! firstDuration = durations.First.TextContentAsync()
+            Assert.That(firstDuration, Does.Match(@"\d+\.\d+s"), "Duration should match format like '0.5s'")
+        }
+
+    [<Test>]
+    member this.``Scheduler footer event entries have timestamps``() =
+        task {
+            let footer = this.Page.Locator(".scheduler-footer .recent-activity")
+            let entries = footer.Locator(".event-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries")
+
+            let timeSpans = entries.First.Locator(".event-time")
+            let! timeCount = timeSpans.CountAsync()
+            Assert.That(timeCount, Is.EqualTo(1), "Each scheduler footer entry should have an .event-time")
+        }
+
+    [<Test>]
+    member this.``Scheduler footer event entries have message text``() =
+        task {
+            let footer = this.Page.Locator(".scheduler-footer .recent-activity")
+            let entries = footer.Locator(".event-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries")
+
+            let! messageText = entries.First.Locator(".event-message").TextContentAsync()
+            Assert.That(messageText, Is.Not.Empty, "Scheduler event entry should have a non-empty message")
+        }
+
+    [<Test>]
+    member this.``Cold start skeleton renders when IsReady is false``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
+            )
+
+            let! _ = page.GotoAsync(baseUrl)
+
+            let skeletons = page.Locator(".wt-card.skeleton")
+            do! skeletons.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = skeletons.CountAsync()
+            Assert.That(count, Is.EqualTo(6), "Cold start should show 6 skeleton cards when IsReady=false")
+
+            let skeletonDots = skeletons.First.Locator(".skeleton-dot")
+            let! dotCount = skeletonDots.CountAsync()
+            Assert.That(dotCount, Is.EqualTo(1), "Skeleton card should have a skeleton-dot")
+
+            let skeletonBranch = skeletons.First.Locator(".skeleton-branch")
+            let! branchCount = skeletonBranch.CountAsync()
+            Assert.That(branchCount, Is.EqualTo(1), "Skeleton card should have a skeleton-branch bar")
+
+            let statusBar = page.Locator(".status-bar")
+            let! statusText = statusBar.TextContentAsync()
+            Assert.That(statusText, Does.Contain("Waiting for first refresh"), "Status bar should show waiting message during cold start")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Skeleton cards have pulse animation``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
+            )
+
+            let! _ = page.GotoAsync(baseUrl)
+
+            let skeletonBar = page.Locator(".wt-card.skeleton .skeleton-bar").First
+            do! skeletonBar.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let! animationName = skeletonBar.EvaluateAsync<string>("el => getComputedStyle(el).animationName")
+            Assert.That(animationName, Is.EqualTo("skeleton-pulse"), "Skeleton bars should have skeleton-pulse animation")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Cold start skeleton has correct DOM structure``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
+            )
+
+            let! _ = page.GotoAsync(baseUrl)
+
+            let skeletons = page.Locator(".wt-card.skeleton")
+            do! skeletons.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let skeleton = skeletons.First
+            let! headerCount = skeleton.Locator(".card-header").CountAsync()
+            Assert.That(headerCount, Is.EqualTo(1), "Skeleton card should have a card-header")
+
+            let! commitCount = skeleton.Locator(".skeleton-commit").CountAsync()
+            Assert.That(commitCount, Is.EqualTo(1), "Skeleton card should have a skeleton-commit bar")
+
+            let! beadsCount = skeleton.Locator(".skeleton-beads").CountAsync()
+            Assert.That(beadsCount, Is.EqualTo(1), "Skeleton card should have a skeleton-beads bar")
+
+            let cardGrid = page.Locator(".card-grid")
+            let! display = cardGrid.EvaluateAsync<string>("el => getComputedStyle(el).display")
+            Assert.That(display, Does.Contain("grid"), "Skeleton cards should be in a grid layout")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Delete button triggers confirm dialog``() =
+        task {
+            let mutable dialogShown = false
+            this.Page.Dialog.Add(fun dialog ->
+                dialogShown <- true
+                dialog.DismissAsync() |> ignore)
+
+            let deleteBtn = this.Page.Locator(".wt-card .delete-btn").First
+            do! Assertions.Expect(deleteBtn).ToBeVisibleAsync()
+            do! deleteBtn.ClickAsync()
+
+            do! this.Page.WaitForTimeoutAsync(500.0f)
+            Assert.That(dialogShown, Is.True, "Clicking delete button should trigger a confirm dialog")
+        }
+
+    [<Test>]
+    member this.``API response includes IsReady field``() =
+        task {
+            use client = new System.Net.Http.HttpClient()
+            let content = new System.Net.Http.StringContent("[]", System.Text.Encoding.UTF8, "application/json")
+            let! response = client.PostAsync($"{baseUrl}/IWorktreeApi/getWorktrees", content)
+            Assert.That(int response.StatusCode, Is.EqualTo(200), "POST /IWorktreeApi/getWorktrees should return 200")
+
+            let! body = response.Content.ReadAsStringAsync()
+            Assert.That(body, Does.Contain("IsReady"), "Response body should contain IsReady field")
+            Assert.That(body, Does.Contain("\"IsReady\":true"), "IsReady should be true in fixture mode (populated on startup)")
+        }
+
+    [<Test>]
+    member this.``API response includes SchedulerEvents field``() =
+        task {
+            use client = new System.Net.Http.HttpClient()
+            let content = new System.Net.Http.StringContent("[]", System.Text.Encoding.UTF8, "application/json")
+            let! response = client.PostAsync($"{baseUrl}/IWorktreeApi/getWorktrees", content)
+            Assert.That(int response.StatusCode, Is.EqualTo(200), "POST /IWorktreeApi/getWorktrees should return 200")
+
+            let! body = response.Content.ReadAsStringAsync()
+            Assert.That(body, Does.Contain("SchedulerEvents"), "Response body should contain SchedulerEvents field")
+        }
+
+    [<Test>]
+    member this.``1s poll interval causes multiple API calls within 5s``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let mutable apiCallCount = 0
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                apiCallCount <- apiCallCount + 1
+                route.ContinueAsync() |> ignore)
+
+            let! _ = page.GotoAsync(baseUrl)
+            do! page.Locator(".wt-card").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
+
+            apiCallCount <- 0
+            do! page.WaitForTimeoutAsync(5000.0f)
+            NUnit.Framework.TestContext.Out.WriteLine($"API calls in 5s window: {apiCallCount}")
+            Assert.That(apiCallCount, Is.GreaterThanOrEqualTo(3), "With 1s poll interval, should see at least 3 API calls in 5s")
+
+            do! page.CloseAsync()
         }
