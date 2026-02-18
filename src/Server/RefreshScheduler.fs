@@ -1,6 +1,8 @@
 module Server.RefreshScheduler
 
 open System
+open System.Diagnostics
+open System.Threading
 open Shared
 
 type DashboardState =
@@ -99,3 +101,162 @@ let createAgent () =
             }
 
         loop DashboardState.empty)
+
+type RefreshTask =
+    | RefreshWorktreeList
+    | RefreshGit of path: string
+    | RefreshBeads of path: string
+    | RefreshPr
+    | RefreshFetch
+
+let private taskLabel = function
+    | RefreshWorktreeList -> "WorktreeList", ""
+    | RefreshGit path -> "GitRefresh", System.IO.Path.GetFileName(path)
+    | RefreshBeads path -> "BeadsRefresh", System.IO.Path.GetFileName(path)
+    | RefreshPr -> "PrFetch", ""
+    | RefreshFetch -> "GitFetch", ""
+
+let private intervalOf = function
+    | RefreshWorktreeList -> TimeSpan.FromSeconds(60.0)
+    | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
+    | RefreshBeads _ -> TimeSpan.FromSeconds(15.0)
+    | RefreshPr -> TimeSpan.FromSeconds(120.0)
+    | RefreshFetch -> TimeSpan.FromSeconds(120.0)
+
+let private buildTaskList (worktrees: GitWorktree.WorktreeInfo list) =
+    [ RefreshWorktreeList
+      RefreshPr
+      RefreshFetch
+      yield! worktrees |> List.map (fun wt -> RefreshGit wt.Path)
+      yield! worktrees |> List.map (fun wt -> RefreshBeads wt.Path) ]
+
+let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
+    lastRuns
+    |> Map.tryFind task
+    |> Option.map (fun t -> t + intervalOf task)
+    |> Option.defaultValue DateTimeOffset.MinValue
+
+let private executeTask
+    (agent: MailboxProcessor<StateMsg>)
+    (worktreeRoot: string)
+    (task: RefreshTask)
+    =
+    async {
+        match task with
+        | RefreshWorktreeList ->
+            let! worktrees = GitWorktree.listWorktrees worktreeRoot
+            agent.Post(UpdateWorktreeList worktrees)
+
+        | RefreshGit path ->
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            let branch =
+                state.WorktreeList
+                |> List.tryFind (fun wt -> wt.Path = path)
+                |> Option.bind (fun wt -> wt.Branch)
+
+            let! gitData = GitWorktree.collectWorktreeGitData path branch
+            agent.Post(UpdateGit(path, gitData))
+
+        | RefreshBeads path ->
+            let! beads = BeadsStatus.getBeadsSummary path
+            agent.Post(UpdateBeads(path, beads))
+
+        | RefreshPr ->
+            let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot
+            agent.Post(UpdatePr prMap)
+
+        | RefreshFetch ->
+            do! GitWorktree.fetchFromOrigin worktreeRoot
+    }
+
+let private timeoutMs = 30_000
+
+let private executeWithTimeout
+    (agent: MailboxProcessor<StateMsg>)
+    (worktreeRoot: string)
+    (task: RefreshTask)
+    =
+    async {
+        let sw = Stopwatch.StartNew()
+
+        try
+            let! child = Async.StartChild(executeTask agent worktreeRoot task, timeoutMs)
+            do! child
+            sw.Stop()
+            return Ok sw.Elapsed
+        with
+        | :? TimeoutException ->
+            sw.Stop()
+            return Error $"Timed out after {timeoutMs}ms"
+        | ex ->
+            sw.Stop()
+            return Error ex.Message
+    }
+
+let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask) (result: Result<TimeSpan, string>) =
+    let source, target = taskLabel task
+
+    let status, duration, message =
+        match result with
+        | Ok elapsed ->
+            Some StepStatus.Succeeded,
+            Some elapsed,
+            (match target with
+             | "" -> $"{elapsed.TotalMilliseconds:F0}ms"
+             | t -> $"{t} ({elapsed.TotalMilliseconds:F0}ms)")
+        | Error msg ->
+            Some(StepStatus.Failed msg),
+            None,
+            (match target with
+             | "" -> msg
+             | t -> $"{t}: {msg}")
+
+    agent.Post(
+        LogSchedulerEvent
+            { Source = source
+              Message = message
+              Timestamp = DateTimeOffset.Now
+              Status = status
+              Duration = duration })
+
+    match result with
+    | Ok elapsed ->
+        Log.log "Scheduler" $"{source} {target} completed in {elapsed.TotalMilliseconds:F0}ms"
+    | Error msg ->
+        Log.log "Scheduler" $"{source} {target} failed: {msg}"
+
+let private pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+    tasks
+    |> List.filter (fun task -> deadlineOf lastRuns task <= now)
+    |> List.sortBy (deadlineOf lastRuns)
+    |> List.tryHead
+
+let private computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+    tasks
+    |> List.map (fun task ->
+        let deadline = deadlineOf lastRuns task
+        (deadline - now).TotalMilliseconds |> int)
+    |> List.fold min Int32.MaxValue
+    |> max 100
+
+let start (agent: MailboxProcessor<StateMsg>) (worktreeRoot: string) (ct: CancellationToken) =
+    let rec loop (lastRuns: Map<RefreshTask, DateTimeOffset>) =
+        async {
+            let! state = agent.PostAndAsyncReply(GetState)
+            let tasks = buildTaskList state.WorktreeList
+            let now = DateTimeOffset.UtcNow
+
+            match pickMostOverdue now lastRuns tasks with
+            | Some task ->
+                let! result = executeWithTimeout agent worktreeRoot task
+                logTaskResult agent task result
+                let updatedRuns = lastRuns |> Map.add task now
+                return! loop updatedRuns
+            | None ->
+                let sleepMs = computeSleepMs now lastRuns tasks
+                do! Async.Sleep sleepMs
+                return! loop lastRuns
+        }
+
+    Async.Start(loop Map.empty, ct)
