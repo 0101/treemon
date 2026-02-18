@@ -5,20 +5,6 @@ open System.IO
 open System.Text.Json
 open Shared
 
-let asyncMapSequential (f: 'a -> Async<'b>) (items: 'a list) : Async<'b list> =
-    async {
-        let! reversed =
-            (async { return [] }, items)
-            ||> List.fold (fun acc item ->
-                async {
-                    let! soFar = acc
-                    let! result = f item
-                    return result :: soFar
-                })
-
-        return reversed |> List.rev
-    }
-
 let private tryProp (name: string) (el: JsonElement) =
     match el.TryGetProperty(name) with
     | true, v when v.ValueKind <> JsonValueKind.Null && v.ValueKind <> JsonValueKind.Undefined -> Some v
@@ -340,7 +326,7 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
 
         let! enriched =
             builds
-            |> asyncMapSequential (fun (build, buildId) ->
+            |> List.map (fun (build, buildId) ->
                 match build.Status, buildId with
                 | BuildStatus.Failed, Some id ->
                     async {
@@ -348,8 +334,9 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
                         return { build with Failure = failure }
                     }
                 | _ -> async { return build })
+            |> Async.Parallel
 
-        return enriched
+        return enriched |> Array.toList
     }
 
 let private firstPerBranch (prs: ParsedPr list) =
@@ -378,7 +365,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
 
             let! entries =
                 prsFiltered
-                |> asyncMapSequential (fun pr ->
+                |> List.map (fun pr ->
                     async {
                         let! threadCounts, builds =
                             match pr.IsMerged with
@@ -386,13 +373,16 @@ let fetchPrStatuses (remote: AzDoRemote) =
                                 async { return { Unresolved = 0; Total = 0 }, [] }
                             | false ->
                                 async {
-                                    let! tc = fetchPrThreadCount remote pr.PrId
+                                    let! tcChild = Async.StartChild(fetchPrThreadCount remote pr.PrId)
 
-                                    let! bs =
-                                        match repoGuid with
-                                        | Some guid -> fetchBuildStatus remote guid pr.PrId
-                                        | None -> async { return [] }
+                                    let! bsChild =
+                                        Async.StartChild(
+                                            match repoGuid with
+                                            | Some guid -> fetchBuildStatus remote guid pr.PrId
+                                            | None -> async { return [] })
 
+                                    let! tc = tcChild
+                                    let! bs = bsChild
                                     return tc, bs
                                 }
 
@@ -410,8 +400,9 @@ let fetchPrStatuses (remote: AzDoRemote) =
                                   Builds = builds
                                   IsMerged = pr.IsMerged }
                     })
+                |> Async.Parallel
 
-            return entries |> Map.ofList
+            return entries |> Array.toList |> Map.ofList
     }
 
 let fetchPrStatusesByRepoRoot (repoRoot: string) =

@@ -170,7 +170,7 @@ let private executeTask
             do! GitWorktree.fetchFromOrigin worktreeRoot
     }
 
-let private timeoutMs = 30_000
+let private timeoutMs = 60_000
 
 let private executeWithTimeout
     (agent: MailboxProcessor<StateMsg>)
