@@ -332,6 +332,35 @@ let eventLog (events: CardEvent list) =
             prop.children (evts |> List.map eventLogEntry)
         ]
 
+let extractBranchName (message: string) =
+    match message.IndexOf(" (") with
+    | i when i > 0 -> Some message.[..i-1]
+    | _ ->
+        match message.IndexOf(": ") with
+        | i when i > 0 -> Some message.[..i-1]
+        | _ -> None
+
+let eventKey (evt: CardEvent) =
+    evt.Source, extractBranchName evt.Message |> Option.defaultValue ""
+
+let pinnedErrors (events: CardEvent list) =
+    let sorted = events |> List.sortByDescending (fun e -> e.Timestamp)
+    let latestByKey =
+        sorted
+        |> List.fold (fun acc evt ->
+            let key = eventKey evt
+            match Map.containsKey key acc with
+            | true -> acc
+            | false -> Map.add key evt acc) Map.empty
+    latestByKey
+    |> Map.toList
+    |> List.map snd
+    |> List.filter (fun evt ->
+        match evt.Status with
+        | Some (StepStatus.Failed _) -> true
+        | _ -> false)
+    |> List.sortByDescending (fun e -> e.Timestamp)
+
 let schedulerEventEntry (evt: CardEvent) =
     Html.div [
         prop.className "event-entry"
@@ -352,13 +381,47 @@ let schedulerEventEntry (evt: CardEvent) =
         ]
     ]
 
+let pinnedErrorEntry (evt: CardEvent) =
+    Html.div [
+        prop.className "event-entry pinned-error"
+        prop.children [
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
+            Html.span [ prop.className "event-source"; prop.text evt.Source ]
+            Html.span [ prop.className "event-message"; prop.text evt.Message ]
+            match evt.Status with
+            | Some _ ->
+                Html.span [
+                    prop.className (stepStatusClassName evt.Status)
+                    prop.text (stepStatusText evt.Status)
+                ]
+            | None -> Html.none
+        ]
+    ]
+
 let schedulerFooter (events: CardEvent list) =
-    match events with
-    | [] -> Html.none
-    | evts ->
+    let errors = pinnedErrors events
+    let recent = events |> List.sortByDescending (fun e -> e.Timestamp) |> List.truncate 20
+    match errors, recent with
+    | [], [] -> Html.none
+    | _ ->
         Html.div [
-            prop.className "sync-footer"
-            prop.children (evts |> List.map schedulerEventEntry)
+            prop.className "scheduler-footer"
+            prop.children [
+                match errors with
+                | [] -> Html.none
+                | errs ->
+                    Html.div [
+                        prop.className "pinned-errors"
+                        prop.children (errs |> List.map pinnedErrorEntry)
+                    ]
+                match recent with
+                | [] -> Html.none
+                | _ ->
+                    Html.div [
+                        prop.className "recent-activity"
+                        prop.children (recent |> List.map schedulerEventEntry)
+                    ]
+            ]
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
