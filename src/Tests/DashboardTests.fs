@@ -218,12 +218,12 @@ type DashboardTests() =
     member this.``PR badge shows when PR data is present``() =
         task {
             let prBadges = this.Page.Locator(".wt-card .pr-badge")
-            do! prBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            do! Assertions.Expect(prBadges.First).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 10000.0f))
+
             let! count = prBadges.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PRs; PR badges should be present")
 
-            let! prText = prBadges.First.TextContentAsync()
-            Assert.That(prText, Does.StartWith("PR #").Or.EqualTo("Merged"))
+            do! Assertions.Expect(prBadges.First).ToHaveTextAsync(System.Text.RegularExpressions.Regex(@"^(PR #\d+|Merged)$"), LocatorAssertionsToHaveTextOptions(Timeout = 10000.0f))
         }
 
     [<Test>]
@@ -1413,7 +1413,7 @@ type DashboardTests() =
     member this.``Work metrics appear in card header``() =
         task {
             let metricsInHeader = this.Page.Locator(".wt-card .card-header .work-metrics")
-            do! metricsInHeader.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            do! Assertions.Expect(metricsInHeader.First).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 10000.0f))
             let! count = metricsInHeader.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside card header")
         }
