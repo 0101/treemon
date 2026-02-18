@@ -171,25 +171,19 @@
   "SyncStatus": {
     "feature-active": [
       {
-        "Source": "claude",
-        "Message": "Implementing input validation for user forms",
-        "Timestamp": "2026-02-16T22:30:00+00:00",
-        "Status": null
-      },
-      {
         "Source": "sync",
         "Message": "Merge main",
         "Timestamp": "2026-02-16T20:00:00+00:00",
         "Status": "Succeeded"
+      },
+      {
+        "Source": "claude",
+        "Message": "Implementing input validation for user forms",
+        "Timestamp": "2026-02-16T22:30:00+00:00",
+        "Status": null
       }
     ],
     "feature-recent": [
-      {
-        "Source": "claude",
-        "Message": "Refactoring complete, running tests",
-        "Timestamp": "2026-02-16T22:00:00+00:00",
-        "Status": null
-      },
       {
         "Source": "sync",
         "Message": "Pull",
@@ -197,13 +191,19 @@
         "Status": "Succeeded"
       },
       {
-        "Source": "sync",
-        "Message": "Check clean",
-        "Timestamp": "2026-02-16T21:29:00+00:00",
-        "Status": "Succeeded"
+        "Source": "claude",
+        "Message": "Refactoring complete, running tests",
+        "Timestamp": "2026-02-16T22:00:00+00:00",
+        "Status": null
       }
     ],
     "feature-draft": [
+      {
+        "Source": "claude",
+        "Message": "Setting up API route handlers",
+        "Timestamp": "2026-02-16T18:30:00+00:00",
+        "Status": null
+      },
       {
         "Source": "sync",
         "Message": "Merge main",
@@ -211,26 +211,20 @@
         "Status": {
           "Failed": "Merge conflict in src/Api/Routes.fs"
         }
-      },
-      {
-        "Source": "claude",
-        "Message": "Setting up API route handlers",
-        "Timestamp": "2026-02-16T18:30:00+00:00",
-        "Status": null
       }
     ],
     "feature-unknown": [
       {
         "Source": "sync",
-        "Message": "Pull",
-        "Timestamp": "2026-02-16T17:30:00+00:00",
-        "Status": "Running"
-      },
-      {
-        "Source": "sync",
         "Message": "Check clean",
         "Timestamp": "2026-02-16T17:29:00+00:00",
         "Status": "Succeeded"
+      },
+      {
+        "Source": "sync",
+        "Message": "Pull",
+        "Timestamp": "2026-02-16T17:30:00+00:00",
+        "Status": "Running"
       }
     ]
   }

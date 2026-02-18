@@ -815,8 +815,8 @@ type DashboardTests() =
 
             let entries = logs.First.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
-                "Event log should show between 1 and 3 entries")
+            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(2),
+                "Event log should show between 1 and 2 entries")
 
             let firstEntry = entries.First
             let source = firstEntry.Locator(".event-source")
@@ -843,7 +843,7 @@ type DashboardTests() =
 
             let entries = log.Locator(".event-entry")
             let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.LessThanOrEqualTo(3), "Event log should show at most 3 entries")
+            Assert.That(entryCount, Is.LessThanOrEqualTo(2), "Event log should show at most 2 entries")
 
             let! display = log |> computedStyle "display"
             Assert.That(display, Is.EqualTo("flex"), "Event log should use flex layout")
@@ -1070,6 +1070,122 @@ type DashboardTests() =
 
             let! borderRadius = logs.First |> computedStyle "borderRadius"
             Assert.That(borderRadius, Is.EqualTo("6px"), "Event log should have 6px border-radius")
+        }
+
+    [<Test>]
+    member this.``Event log shows max 2 entries per card``() =
+        task {
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! logCount = logs.CountAsync()
+
+            let mutable allWithin2 = true
+            let mutable i = 0
+            while i < logCount do
+                let entries = logs.Nth(i).Locator(".event-entry")
+                let! entryCount = entries.CountAsync()
+                if entryCount > 2 then allWithin2 <- false
+                i <- i + 1
+
+            Assert.That(allWithin2, Is.True, "Every event log should show at most 2 entries (truncated from 3)")
+        }
+
+    [<Test>]
+    member this.``Event entries have timestamp prefix``() =
+        task {
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let entries = logs.First.Locator(".event-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Should have at least one event entry")
+
+            let timeSpans = entries.First.Locator(".event-time")
+            let! timeCount = timeSpans.CountAsync()
+            Assert.That(timeCount, Is.EqualTo(1), "Each event entry should have exactly one .event-time span")
+
+            let! timeText = timeSpans.First.TextContentAsync()
+            Assert.That(timeText, Does.Match(@"\d+[smhd] ago"), "Timestamp should match relative time pattern like '3m ago'")
+        }
+
+    [<Test>]
+    member this.``Event time is first child in event entry``() =
+        task {
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let! isFirstChild =
+                logs.First.Locator(".event-entry").First.EvaluateAsync<bool>(
+                    "el => el.children[0].classList.contains('event-time')")
+            Assert.That(isFirstChild, Is.True, "event-time should be the first child of event-entry (timestamp prefix)")
+        }
+
+    [<Test>]
+    member this.``Event time has muted color and fixed width``() =
+        task {
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let timeSpan = logs.First.Locator(".event-time").First
+            let! color = timeSpan |> computedStyle "color"
+            Assert.That(color, Is.EqualTo("rgb(88, 91, 112)"), "event-time color should be #585b70 (muted)")
+
+            let! whiteSpace = timeSpan |> computedStyle "whiteSpace"
+            Assert.That(whiteSpace, Is.EqualTo("nowrap"), "event-time should have white-space: nowrap")
+
+            let! width = timeSpan |> computedStyle "width"
+            Assert.That(width, Is.EqualTo("52px"), "event-time should have fixed width of 52px")
+        }
+
+    [<Test>]
+    member this.``Event entries are in chronological order newest at bottom``() =
+        task {
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! logCount = logs.CountAsync()
+
+            let mutable found2EntryLog = false
+            let mutable i = 0
+            while i < logCount && not found2EntryLog do
+                let entries = logs.Nth(i).Locator(".event-entry")
+                let! entryCount = entries.CountAsync()
+                if entryCount = 2 then
+                    found2EntryLog <- true
+                    let! topTime = entries.Nth(0).Locator(".event-time").TextContentAsync()
+                    let! bottomTime = entries.Nth(1).Locator(".event-time").TextContentAsync()
+
+                    let parseMinutes (s: string) =
+                        let trimmed = s.Trim()
+                        match trimmed with
+                        | t when t.EndsWith("s ago") -> 0
+                        | t when t.EndsWith("m ago") -> int (t.Replace("m ago", ""))
+                        | t when t.EndsWith("h ago") -> int (t.Replace("h ago", "")) * 60
+                        | t when t.EndsWith("d ago") -> int (t.Replace("d ago", "")) * 1440
+                        | _ -> 0
+
+                    let topMinutes = parseMinutes topTime
+                    let bottomMinutes = parseMinutes bottomTime
+                    Assert.That(topMinutes, Is.GreaterThanOrEqualTo(bottomMinutes),
+                        $"Top entry ({topTime}) should be older than or same age as bottom entry ({bottomTime}) - chronological order with newest at bottom")
+                i <- i + 1
+
+            Assert.That(found2EntryLog, Is.True, "Should find at least one event log with exactly 2 entries to verify ordering")
+        }
+
+    [<Test>]
+    member this.``All event entries across all cards have timestamps``() =
+        task {
+            let logs = eventLog this.Page
+            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let allTimeSpans = this.Page.Locator(".wt-card:not(.compact) .event-entry .event-time")
+            let! timeCount = allTimeSpans.CountAsync()
+
+            let allEntries = this.Page.Locator(".wt-card:not(.compact) .event-entry")
+            let! entryCount = allEntries.CountAsync()
+
+            Assert.That(timeCount, Is.EqualTo(entryCount),
+                "Every event entry should have an event-time span (1:1 ratio)")
         }
 
     [<Test>]
