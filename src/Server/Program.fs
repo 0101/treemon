@@ -2,6 +2,7 @@ open Saturn
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Builder
+open System.Threading
 open Server
 
 let readAppVersion () =
@@ -53,6 +54,17 @@ let parseArgs (args: string array) =
         eprintfn "Usage: Server <worktree-root-path> [--port <port>] [--test-fixtures <path>]"
         exit 1
 
+let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: WorktreeApi.FixtureData) =
+    let worktreeInfos =
+        fixtures.Worktrees.Worktrees
+        |> List.map (fun wt ->
+            ({ Path = wt.Path
+               Head = ""
+               Branch = Some wt.Branch }: GitWorktree.WorktreeInfo))
+
+    agent.Post(RefreshScheduler.UpdateWorktreeList worktreeInfos)
+    Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees"
+
 [<EntryPoint>]
 let main args =
     let config = parseArgs args
@@ -72,15 +84,30 @@ let main args =
 
     printfn "Monitoring worktrees under: %s" config.WorktreeRoot
 
-    let remotingApi =
-        let agent = RefreshScheduler.createAgent ()
+    let cts = new CancellationTokenSource()
+    let agent = RefreshScheduler.createAgent ()
 
+    match config.TestFixtures with
+    | Some path ->
+        let fixtures = WorktreeApi.loadFixtures path
+        populateAgentFromFixtures agent fixtures
+        Log.log "Startup" "Fixture mode: scheduler background loop skipped"
+    | None ->
+        RefreshScheduler.start agent config.WorktreeRoot cts.Token
+        Log.log "Startup" "Scheduler background loop started"
+
+    let remotingApi =
         Remoting.createApi ()
         |> Remoting.fromValue (WorktreeApi.worktreeApi agent config.WorktreeRoot config.TestFixtures appVersion)
         |> Remoting.withErrorHandler (fun ex routeInfo ->
             Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
             Propagate ex.Message)
         |> Remoting.buildHttpHandler
+
+    System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
+        Log.log "Shutdown" "Cancelling scheduler"
+        cts.Cancel()
+        cts.Dispose())
 
     let app =
         application {

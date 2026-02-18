@@ -10,7 +10,7 @@ type FixtureData =
     { Worktrees: WorktreeResponse
       SyncStatus: Map<string, CardEvent list> }
 
-let private loadFixtures (path: string) =
+let loadFixtures (path: string) =
     let json = File.ReadAllText(path)
     let converter = Fable.Remoting.Json.FableJsonConverter()
     JsonConvert.DeserializeObject<FixtureData>(json, converter)
