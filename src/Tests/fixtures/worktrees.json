@@ -167,14 +167,14 @@
         "Message": "Refreshed feature-active",
         "Timestamp": "2026-02-16T22:55:00+00:00",
         "Status": null,
-        "Duration": "00:00:00.5200000"
+        "Duration": 520.0
       },
       {
         "Source": "pr",
         "Message": "Refreshed PR statuses",
         "Timestamp": "2026-02-16T22:54:00+00:00",
         "Status": null,
-        "Duration": "00:00:01.2000000"
+        "Duration": 1200.0
       }
     ],
     "AppVersion": "2026-02-16T22:50:00.000Z"

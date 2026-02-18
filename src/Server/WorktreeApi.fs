@@ -15,65 +15,48 @@ let private loadFixtures (path: string) =
     let converter = Fable.Remoting.Json.FableJsonConverter()
     JsonConvert.DeserializeObject<FixtureData>(json, converter)
 
-let private assembleWorktreeStatus
-    (repoRoot: string)
-    (prMap: Map<string, PrStatus>)
+let private assembleFromState
+    (state: RefreshScheduler.DashboardState)
     (wt: GitWorktree.WorktreeInfo)
     =
+    let gitData = state.GitData |> Map.tryFind wt.Path
+    let beads = state.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
+    let claude = ClaudeStatus.getClaudeStatus wt.Path
+
+    let upstreamBranch = gitData |> Option.bind (fun g -> g.UpstreamBranch)
+    let pr = PrStatus.lookupPrStatus state.PrData upstreamBranch
+
+    { Path = wt.Path
+      Branch = wt.Branch |> Option.defaultValue "(detached)"
+      LastCommitMessage = gitData |> Option.map (fun g -> g.LastCommitMessage) |> Option.defaultValue ""
+      LastCommitTime = gitData |> Option.map (fun g -> g.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
+      Beads = beads
+      Claude = claude
+      Pr = pr
+      MainBehindCount = gitData |> Option.map (fun g -> g.MainBehindCount) |> Option.defaultValue 0
+      IsDirty = gitData |> Option.map (fun g -> g.IsDirty) |> Option.defaultValue false
+      WorkMetrics = gitData |> Option.bind (fun g -> g.WorkMetrics) }
+
+let getWorktrees
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreeRoot: string)
+    (appVersion: string)
+    : Async<WorktreeResponse> =
     async {
-        try
-            let! gitData = GitWorktree.collectWorktreeGitData wt.Path wt.Branch
-            let! beads = BeadsStatus.getBeadsSummary wt.Path
-            let claude = ClaudeStatus.getClaudeStatus wt.Path
+        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-            let pr = PrStatus.lookupPrStatus prMap gitData.UpstreamBranch
-
-            return
-                { Path = gitData.Path
-                  Branch = gitData.Branch
-                  LastCommitMessage = gitData.LastCommitMessage
-                  LastCommitTime = gitData.LastCommitTime
-                  Beads = beads
-                  Claude = claude
-                  Pr = pr
-                  MainBehindCount = gitData.MainBehindCount
-                  IsDirty = gitData.IsDirty
-                  WorkMetrics = gitData.WorkMetrics }
-        with ex ->
-            let branch = wt.Branch |> Option.defaultValue "(detached)"
-            Log.log "API" $"Failed to assemble status for worktree {wt.Path} ({branch}): {ex.Message}"
-
-            return
-                { Path = wt.Path
-                  Branch = wt.Branch |> Option.defaultValue "(detached)"
-                  LastCommitMessage = ""
-                  LastCommitTime = DateTimeOffset.MinValue
-                  Beads = BeadsSummary.zero
-                  Claude = Unknown
-                  Pr = NoPr
-                  MainBehindCount = 0
-                  IsDirty = false
-                  WorkMetrics = None }
-    }
-
-let getWorktrees (worktreeRoot: string) (appVersion: string) : Async<WorktreeResponse> =
-    async {
-        let! worktrees = GitWorktree.listWorktrees worktreeRoot
-        let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot
-
-        let! statuses =
-            worktrees
+        let statuses =
+            state.WorktreeList
             |> List.filter (fun w -> w.Branch <> Some "main")
-            |> List.map (assembleWorktreeStatus worktreeRoot prMap)
-            |> Async.Parallel
+            |> List.map (assembleFromState state)
 
-        let folderName = System.IO.Path.GetFileName worktreeRoot
+        let folderName = Path.GetFileName worktreeRoot
 
         return
             { RootFolderName = folderName
-              Worktrees = statuses |> Array.toList
-              IsReady = true
-              SchedulerEvents = []
+              Worktrees = statuses
+              IsReady = state.IsReady
+              SchedulerEvents = state.SchedulerEvents
               AppVersion = appVersion }
     }
 
@@ -108,23 +91,26 @@ let private openTerminal (worktreeRoot: string) (path: string) =
                 Log.log "API" $"openTerminal: unexpected error starting terminal: {ex.Message}"
     }
 
-let private deleteWorktree (worktreeRoot: string) (branch: string) =
+let private deleteWorktree
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreeRoot: string)
+    (branch: string)
+    =
     async {
-        let! worktrees = GitWorktree.listWorktrees worktreeRoot
+        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
         let worktree =
-            worktrees
+            state.WorktreeList
             |> List.tryFind (fun wt -> wt.Branch = Some branch)
 
         match worktree with
         | None -> return Error $"No worktree found for branch '{branch}'"
         | Some wt ->
-            let mainWorktree =
-                worktrees
-                |> List.tryFind (fun w -> w.Branch = Some "main")
+            agent.Post(RefreshScheduler.StateMsg.RemoveWorktree wt.Path)
 
             let repoRoot =
-                mainWorktree
+                state.WorktreeList
+                |> List.tryFind (fun w -> w.Branch = Some "main")
                 |> Option.map (fun w -> w.Path)
                 |> Option.defaultValue worktreeRoot
 
@@ -132,7 +118,12 @@ let private deleteWorktree (worktreeRoot: string) (branch: string) =
             return result
     }
 
-let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion: string) : IWorktreeApi =
+let worktreeApi
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreeRoot: string)
+    (testFixtures: string option)
+    (appVersion: string)
+    : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
     match fixtures with
@@ -144,7 +135,7 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion
           getSyncStatus = fun () -> async { return f.SyncStatus }
           deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees worktreeRoot appVersion
+        { getWorktrees = fun () -> getWorktrees agent worktreeRoot appVersion
           openTerminal = openTerminal worktreeRoot
           startSync = fun branch ->
               async {
@@ -212,4 +203,4 @@ let worktreeApi (worktreeRoot: string) (testFixtures: string option) (appVersion
                               Some(branch, recent))
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree worktreeRoot }
+          deleteWorktree = deleteWorktree agent worktreeRoot }

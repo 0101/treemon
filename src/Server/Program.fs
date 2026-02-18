@@ -73,8 +73,10 @@ let main args =
     printfn "Monitoring worktrees under: %s" config.WorktreeRoot
 
     let remotingApi =
+        let agent = RefreshScheduler.createAgent ()
+
         Remoting.createApi ()
-        |> Remoting.fromValue (WorktreeApi.worktreeApi config.WorktreeRoot config.TestFixtures appVersion)
+        |> Remoting.fromValue (WorktreeApi.worktreeApi agent config.WorktreeRoot config.TestFixtures appVersion)
         |> Remoting.withErrorHandler (fun ex routeInfo ->
             Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
             Propagate ex.Message)
