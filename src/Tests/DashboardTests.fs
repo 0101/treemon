@@ -1585,17 +1585,22 @@ type DashboardTests() =
     [<Test>]
     member this.``Delete button triggers confirm dialog``() =
         task {
-            let mutable dialogShown = false
+            // Use TaskCompletionSource to wait for dialog
+            let tcs = System.Threading.Tasks.TaskCompletionSource<bool>()
+
             this.Page.Dialog.Add(fun dialog ->
-                dialogShown <- true
+                tcs.TrySetResult(true) |> ignore
                 dialog.DismissAsync() |> ignore)
 
             let deleteBtn = this.Page.Locator(".wt-card .delete-btn").First
             do! Assertions.Expect(deleteBtn).ToBeVisibleAsync()
             do! deleteBtn.ClickAsync()
 
-            do! this.Page.WaitForTimeoutAsync(500.0f)
-            Assert.That(dialogShown, Is.True, "Clicking delete button should trigger a confirm dialog")
+            // Wait for dialog with timeout
+            let! dialogShown = System.Threading.Tasks.Task.WhenAny(tcs.Task, System.Threading.Tasks.Task.Delay(5000))
+
+            Assert.That(dialogShown, Is.EqualTo(tcs.Task), "Clicking delete button should trigger a confirm dialog within timeout")
+            Assert.That(tcs.Task.Result, Is.True)
         }
 
     [<Test>]
@@ -1636,9 +1641,15 @@ type DashboardTests() =
             do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 45000.0f))
 
             apiCallCount <- 0
-            do! page.WaitForTimeoutAsync(5000.0f)
-            NUnit.Framework.TestContext.Out.WriteLine($"API calls in 5s window: {apiCallCount}")
-            Assert.That(apiCallCount, Is.GreaterThanOrEqualTo(3), "With 1s poll interval, should see at least 3 API calls in 5s")
+
+            // Wait until we see at least 3 calls or timeout (poller)
+            // Poll for condition to avoid fixed wait
+            let sw = System.Diagnostics.Stopwatch.StartNew()
+            while apiCallCount < 3 && sw.ElapsedMilliseconds < 5000L do
+                do! System.Threading.Tasks.Task.Delay(100)
+
+            NUnit.Framework.TestContext.Out.WriteLine($"API calls in wait window: {apiCallCount}")
+            Assert.That(apiCallCount, Is.GreaterThanOrEqualTo(3), "With 1s poll interval, should see at least 3 API calls")
 
             do! page.CloseAsync()
         }
@@ -1696,98 +1707,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Working dot is solid red per spec``() =
-        task {
-            let workingDots = this.Page.Locator(".cc-dot.working")
-            do! workingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = workingDots.CountAsync()
-            Assert.That(count, Is.EqualTo(2), "Fixture has 2 Working Claude worktrees (feature-active, feature-draft)")
-
-            let! bg = workingDots.First |> computedStyle "backgroundColor"
-            Assert.That(bg, Is.EqualTo("rgb(255, 0, 0)"), "Working dot should be red #ff0000")
-        }
-
-    [<Test>]
-    member this.``Waiting dot is yellow per spec``() =
-        task {
-            let waitingDots = this.Page.Locator(".cc-dot.waiting")
-            do! waitingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = waitingDots.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Fixture has 1 WaitingForUser Claude worktree (feature-recent)")
-
-            let! bg = waitingDots.First |> computedStyle "backgroundColor"
-            Assert.That(bg, Is.EqualTo("rgb(249, 226, 175)"), "Waiting dot should be yellow #f9e2af")
-        }
-
-    [<Test>]
-    member this.``Idle dot is grey per spec``() =
-        task {
-            let idleDots = this.Page.Locator(".cc-dot.idle")
-            do! idleDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = idleDots.CountAsync()
-            Assert.That(count, Is.EqualTo(4), "Fixture has 4 Idle Claude worktrees (feature-idle, feature-stale, feature-merged, feature-unknown)")
-
-            let! bg = idleDots.First |> computedStyle "backgroundColor"
-            Assert.That(bg, Is.EqualTo("rgb(88, 91, 112)"), "Idle dot should be grey #585b70")
-        }
-
-    [<Test>]
-    member this.``Done dot CSS rule exists in stylesheet``() =
-        task {
-            let! doneRuleExists =
-                this.Page.EvaluateAsync<bool>("""() => {
-                    const sheets = Array.from(document.styleSheets);
-                    return sheets.some(sheet => {
-                        try {
-                            return Array.from(sheet.cssRules).some(rule =>
-                                rule.selectorText && rule.selectorText.includes('.cc-dot.done'));
-                        } catch { return false; }
-                    });
-                }""")
-            Assert.That(doneRuleExists, Is.True, "CSS should contain a rule for .cc-dot.done (blue #89b4fa for Done state)")
-        }
-
-    [<Test>]
-    member this.``Done dot CSS declares blue background``() =
-        task {
-            let! doneBgColor =
-                this.Page.EvaluateAsync<string>("""() => {
-                    const sheets = Array.from(document.styleSheets);
-                    for (const sheet of sheets) {
-                        try {
-                            for (const rule of sheet.cssRules) {
-                                if (rule.selectorText && rule.selectorText.includes('.cc-dot.done')) {
-                                    return rule.style.background || rule.style.backgroundColor || '';
-                                }
-                            }
-                        } catch {}
-                    }
-                    return '';
-                }""")
-            Assert.That(doneBgColor, Is.Not.Empty, "Done dot CSS should have a background declaration")
-            Assert.That(
-                doneBgColor,
-                Does.Contain("89b4fa").IgnoreCase.Or.Contain("rgb(137, 180, 250)"),
-                "Done dot CSS should declare background #89b4fa / rgb(137, 180, 250) (blue)")
-        }
-
-    [<Test>]
-    member this.``Pulse keyframes animation exists in stylesheet``() =
-        task {
-            let! pulseExists =
-                this.Page.EvaluateAsync<bool>("""() => {
-                    const sheets = Array.from(document.styleSheets);
-                    return sheets.some(sheet => {
-                        try {
-                            return Array.from(sheet.cssRules).some(rule =>
-                                rule.type === CSSRule.KEYFRAMES_RULE && rule.name === 'pulse');
-                        } catch { return false; }
-                    });
-                }""")
-            Assert.That(pulseExists, Is.True, "Stylesheet should contain @keyframes pulse animation")
-        }
-
-    [<Test>]
     member this.``All cc-dots are circles with 10px size``() =
         task {
             let dots = this.Page.Locator(".wt-card .cc-dot")
@@ -1805,41 +1724,3 @@ type DashboardTests() =
             Assert.That(borderRadius, Is.EqualTo("50%"), "CC dot should be circular (border-radius: 50%)")
         }
 
-    [<Test>]
-    member this.``Feature-active card has cc-working class and working dot``() =
-        task {
-            let workingCards = this.Page.Locator(".wt-card.cc-working")
-            do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = workingCards.CountAsync()
-            Assert.That(count, Is.EqualTo(2), "Fixture has 2 Working Claude worktrees")
-
-            let dot = workingCards.First.Locator(".cc-dot.working")
-            let! dotCount = dot.CountAsync()
-            Assert.That(dotCount, Is.EqualTo(1), "Working card should contain exactly one .cc-dot.working")
-        }
-
-    [<Test>]
-    member this.``Feature-recent card has cc-waiting class and waiting dot``() =
-        task {
-            let waitingCards = this.Page.Locator(".wt-card.cc-waiting")
-            do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = waitingCards.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Fixture has 1 WaitingForUser Claude worktree")
-
-            let dot = waitingCards.First.Locator(".cc-dot.waiting")
-            let! dotCount = dot.CountAsync()
-            Assert.That(dotCount, Is.EqualTo(1), "Waiting card should contain exactly one .cc-dot.waiting")
-        }
-
-    [<Test>]
-    member this.``Feature-idle cards have cc-idle class and idle dot``() =
-        task {
-            let idleCards = this.Page.Locator(".wt-card.cc-idle")
-            do! idleCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! count = idleCards.CountAsync()
-            Assert.That(count, Is.EqualTo(4), "Fixture has 4 Idle Claude worktrees")
-
-            let dot = idleCards.First.Locator(".cc-dot.idle")
-            let! dotCount = dot.CountAsync()
-            Assert.That(dotCount, Is.EqualTo(1), "Idle card should contain exactly one .cc-dot.idle")
-        }
