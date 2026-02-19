@@ -7,6 +7,7 @@ open Server.RefreshScheduler
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type PickMostOverdueTests() =
 
     [<Test>]
@@ -94,6 +95,7 @@ type PickMostOverdueTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type ComputeSleepMsTests() =
 
     [<Test>]
@@ -160,6 +162,7 @@ type ComputeSleepMsTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type StateAgentTests() =
 
     let waitForAgent (agent: MailboxProcessor<StateMsg>) =

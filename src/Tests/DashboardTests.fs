@@ -77,6 +77,7 @@ type DashboardTests() =
     [<TestCase("working", "rgb(255, 0, 0)")>]
     [<TestCase("waiting", "rgb(249, 226, 175)")>]
     [<TestCase("idle", "rgb(88, 91, 112)")>]
+    [<Category("Fast")>]
     member this.``CC dot has correct background color``(status: string, expectedColor: string) =
         task {
             let dots = this.Page.Locator($".cc-dot.{status}")
@@ -104,6 +105,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Dashboard loads with at least one worktree card``() =
         task {
             let cards = this.Page.Locator(".wt-card")
@@ -112,6 +114,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Worktree cards display branch names``() =
         task {
             let branchNames = this.Page.Locator(".wt-card .branch-name")
@@ -134,6 +137,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Worktree cards display commit time``() =
         task {
             let commitTimes = this.Page.Locator(".wt-card .commit-time")
@@ -179,6 +183,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Beads counts appear on cards``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts")
@@ -215,6 +220,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``PR badge shows when PR data is present``() =
         task {
             let prBadges = this.Page.Locator(".wt-card .pr-badge")
@@ -293,6 +299,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Compact mode toggle switches to compact cards``() =
         task {
             let btn = compactBtn this.Page
@@ -365,6 +372,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Build badge renders when build data is present``() =
         task {
             let buildBadges = this.Page.Locator(".wt-card .build-badge")
@@ -502,6 +510,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Main-behind indicator present on cards``() =
         task {
             let mainBehindElements = this.Page.Locator(".wt-card .main-behind")
@@ -1446,6 +1455,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Scheduler footer is sticky at bottom``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer")
@@ -1501,6 +1511,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Cold start skeleton renders when IsReady is false``() =
         task {
             let! page = this.Context.NewPageAsync()
@@ -1672,6 +1683,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Working dot has pulse animation``() =
         task {
             let workingDots = this.Page.Locator(".cc-dot.working")

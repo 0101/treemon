@@ -7,6 +7,7 @@ open Shared.EventUtils
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type ExtractBranchNameTests() =
 
     [<Test>]
@@ -52,6 +53,7 @@ type ExtractBranchNameTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type EventKeyTests() =
 
     let makeEvent source message =
@@ -88,6 +90,7 @@ type EventKeyTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type PinnedErrorsTests() =
 
     let makeEvent source message status timestamp =
@@ -188,6 +191,7 @@ type PinnedErrorsTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type MergeWithPinnedErrorsTests() =
 
     let makeEvent source message status timestamp =
@@ -253,6 +257,7 @@ type MergeWithPinnedErrorsTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type SortWorktreesTests() =
 
     let makeWorktree branch commitTime =

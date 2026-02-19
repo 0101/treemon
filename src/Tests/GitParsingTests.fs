@@ -15,6 +15,7 @@ type LogDirSetup() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type ParseWorktreeListTests() =
 
     [<Test>]
@@ -123,6 +124,7 @@ type ParseWorktreeListTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type ParseCommitOutputTests() =
 
     [<Test>]
@@ -183,6 +185,7 @@ type ParseCommitOutputTests() =
 
 [<TestFixture>]
 [<Category("Unit")>]
+[<Category("Fast")>]
 type ParseDiffStatsTests() =
 
     [<Test>]
