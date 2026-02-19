@@ -67,20 +67,26 @@ let private tryParseEntryKind (line: string) =
                         | true, sr when sr.ValueKind <> JsonValueKind.Null -> Some(sr.GetString())
                         | _ -> None
 
-                    match stopReason with
-                    | Some "tool_use" ->
+                    let toolUseBlocks =
+                        match msg.TryGetProperty("content") with
+                        | true, contentArr ->
+                            contentArr.EnumerateArray()
+                            |> Seq.filter (fun block ->
+                                match block.TryGetProperty("type") with
+                                | true, t -> t.GetString() = "tool_use"
+                                | _ -> false)
+                            |> Seq.toList
+                        | _ -> []
+
+                    match stopReason, toolUseBlocks with
+                    | Some "tool_use", _
+                    | _, _ :: _ ->
                         let hasAskUser =
-                            match msg.TryGetProperty("content") with
-                            | true, contentArr ->
-                                contentArr.EnumerateArray()
-                                |> Seq.exists (fun block ->
-                                    match block.TryGetProperty("type") with
-                                    | true, t when t.GetString() = "tool_use" ->
-                                        match block.TryGetProperty("name") with
-                                        | true, n -> n.GetString() = "AskUserQuestion"
-                                        | _ -> false
-                                    | _ -> false)
-                            | _ -> false
+                            toolUseBlocks
+                            |> List.exists (fun block ->
+                                match block.TryGetProperty("name") with
+                                | true, n -> n.GetString() = "AskUserQuestion"
+                                | _ -> false)
 
                         Some(AssistantToolUse hasAskUser)
                     | _ -> Some AssistantDone
@@ -108,10 +114,15 @@ let getClaudeStatus (worktreePath: string) =
             match age > TimeSpan.FromHours(2.0) with
             | true -> Idle
             | false ->
-                readLinesReverse fi.FullName
-                |> List.tryPick tryParseEntryKind
-                |> Option.map statusFromEntry
-                |> Option.defaultValue Idle
+                let jsonlStatus =
+                    readLinesReverse fi.FullName
+                    |> List.tryPick tryParseEntryKind
+                    |> Option.map statusFromEntry
+                    |> Option.defaultValue Idle
+
+                match jsonlStatus, age < TimeSpan.FromMinutes(1.0) with
+                | Done, true -> Working
+                | status, _ -> status
         with ex ->
             Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
             Idle
