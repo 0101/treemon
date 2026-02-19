@@ -74,9 +74,9 @@ type DashboardTests() =
             Assert.That(secondSource, Is.EqualTo("pr"), "Second scheduler event source should be 'pr'")
         }
 
-    [<TestCase("active", "rgb(243, 139, 168)")>]
-    [<TestCase("idle", "rgb(137, 180, 250)")>]
-    [<TestCase("recent", "rgb(249, 226, 175)")>]
+    [<TestCase("working", "rgb(255, 0, 0)")>]
+    [<TestCase("waiting", "rgb(249, 226, 175)")>]
+    [<TestCase("idle", "rgb(88, 91, 112)")>]
     member this.``CC dot has correct background color``(status: string, expectedColor: string) =
         task {
             let dots = this.Page.Locator($".cc-dot.{status}")
@@ -154,10 +154,10 @@ type DashboardTests() =
             let! cssClass = ccDots.First.GetAttributeAsync("class")
             Assert.That(
                 cssClass,
-                Does.Contain("active")
-                    .Or.Contain("recent")
+                Does.Contain("working")
+                    .Or.Contain("waiting")
+                    .Or.Contain("done")
                     .Or.Contain("idle")
-                    .Or.Contain("unknown")
             )
         }
 
@@ -1655,4 +1655,188 @@ type DashboardTests() =
                     $"{s.Name} peak memory ({mb:F1} MB) exceeded 2 GB threshold"))
 
             Assert.That(stats, Is.Not.Empty, "Should have memory stats for at least one child process")
+        }
+
+    [<Test>]
+    member this.``Working dot has pulse animation``() =
+        task {
+            let workingDots = this.Page.Locator(".cc-dot.working")
+            do! workingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let! animationName = workingDots.First |> computedStyle "animationName"
+            Assert.That(animationName, Is.EqualTo("pulse"), "Working dot should have 'pulse' animation")
+
+            let! animationDuration = workingDots.First |> computedStyle "animationDuration"
+            Assert.That(animationDuration, Is.EqualTo("2s"), "Working dot pulse animation should last 2s")
+
+            let! animationIterationCount = workingDots.First |> computedStyle "animationIterationCount"
+            Assert.That(animationIterationCount, Is.EqualTo("infinite"), "Working dot pulse animation should repeat infinitely")
+
+            let! animationTimingFunction = workingDots.First |> computedStyle "animationTimingFunction"
+            Assert.That(animationTimingFunction, Does.Contain("ease"), "Working dot pulse should use ease-in-out timing")
+        }
+
+    [<Test>]
+    member this.``Non-working dots have no pulse animation``() =
+        task {
+            let waitingDots = this.Page.Locator(".cc-dot.waiting")
+            do! waitingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let! animName = waitingDots.First |> computedStyle "animationName"
+            Assert.That(animName, Is.EqualTo("none"), "Waiting dot should have no animation")
+
+            let idleDots = this.Page.Locator(".cc-dot.idle")
+            do! idleDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let! idleAnimName = idleDots.First |> computedStyle "animationName"
+            Assert.That(idleAnimName, Is.EqualTo("none"), "Idle dot should have no animation")
+        }
+
+    [<Test>]
+    member this.``Working dot is solid red per spec``() =
+        task {
+            let workingDots = this.Page.Locator(".cc-dot.working")
+            do! workingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = workingDots.CountAsync()
+            Assert.That(count, Is.EqualTo(2), "Fixture has 2 Working Claude worktrees (feature-active, feature-draft)")
+
+            let! bg = workingDots.First |> computedStyle "backgroundColor"
+            Assert.That(bg, Is.EqualTo("rgb(255, 0, 0)"), "Working dot should be red #ff0000")
+        }
+
+    [<Test>]
+    member this.``Waiting dot is yellow per spec``() =
+        task {
+            let waitingDots = this.Page.Locator(".cc-dot.waiting")
+            do! waitingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = waitingDots.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Fixture has 1 WaitingForUser Claude worktree (feature-recent)")
+
+            let! bg = waitingDots.First |> computedStyle "backgroundColor"
+            Assert.That(bg, Is.EqualTo("rgb(249, 226, 175)"), "Waiting dot should be yellow #f9e2af")
+        }
+
+    [<Test>]
+    member this.``Idle dot is grey per spec``() =
+        task {
+            let idleDots = this.Page.Locator(".cc-dot.idle")
+            do! idleDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = idleDots.CountAsync()
+            Assert.That(count, Is.EqualTo(4), "Fixture has 4 Idle Claude worktrees (feature-idle, feature-stale, feature-merged, feature-unknown)")
+
+            let! bg = idleDots.First |> computedStyle "backgroundColor"
+            Assert.That(bg, Is.EqualTo("rgb(88, 91, 112)"), "Idle dot should be grey #585b70")
+        }
+
+    [<Test>]
+    member this.``Done dot CSS rule exists in stylesheet``() =
+        task {
+            let! doneRuleExists =
+                this.Page.EvaluateAsync<bool>("""() => {
+                    const sheets = Array.from(document.styleSheets);
+                    return sheets.some(sheet => {
+                        try {
+                            return Array.from(sheet.cssRules).some(rule =>
+                                rule.selectorText && rule.selectorText.includes('.cc-dot.done'));
+                        } catch { return false; }
+                    });
+                }""")
+            Assert.That(doneRuleExists, Is.True, "CSS should contain a rule for .cc-dot.done (blue #89b4fa for Done state)")
+        }
+
+    [<Test>]
+    member this.``Done dot CSS declares blue background``() =
+        task {
+            let! doneBgColor =
+                this.Page.EvaluateAsync<string>("""() => {
+                    const sheets = Array.from(document.styleSheets);
+                    for (const sheet of sheets) {
+                        try {
+                            for (const rule of sheet.cssRules) {
+                                if (rule.selectorText && rule.selectorText.includes('.cc-dot.done')) {
+                                    return rule.style.background || rule.style.backgroundColor || '';
+                                }
+                            }
+                        } catch {}
+                    }
+                    return '';
+                }""")
+            Assert.That(doneBgColor, Is.Not.Empty, "Done dot CSS should have a background declaration")
+            Assert.That(
+                doneBgColor,
+                Does.Contain("89b4fa").IgnoreCase.Or.Contain("rgb(137, 180, 250)"),
+                "Done dot CSS should declare background #89b4fa / rgb(137, 180, 250) (blue)")
+        }
+
+    [<Test>]
+    member this.``Pulse keyframes animation exists in stylesheet``() =
+        task {
+            let! pulseExists =
+                this.Page.EvaluateAsync<bool>("""() => {
+                    const sheets = Array.from(document.styleSheets);
+                    return sheets.some(sheet => {
+                        try {
+                            return Array.from(sheet.cssRules).some(rule =>
+                                rule.type === CSSRule.KEYFRAMES_RULE && rule.name === 'pulse');
+                        } catch { return false; }
+                    });
+                }""")
+            Assert.That(pulseExists, Is.True, "Stylesheet should contain @keyframes pulse animation")
+        }
+
+    [<Test>]
+    member this.``All cc-dots are circles with 10px size``() =
+        task {
+            let dots = this.Page.Locator(".wt-card .cc-dot")
+            do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = dots.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1))
+
+            let! width = dots.First |> computedStyle "width"
+            Assert.That(width, Is.EqualTo("10px"), "CC dot width should be 10px")
+
+            let! height = dots.First |> computedStyle "height"
+            Assert.That(height, Is.EqualTo("10px"), "CC dot height should be 10px")
+
+            let! borderRadius = dots.First |> computedStyle "borderRadius"
+            Assert.That(borderRadius, Is.EqualTo("50%"), "CC dot should be circular (border-radius: 50%)")
+        }
+
+    [<Test>]
+    member this.``Feature-active card has cc-working class and working dot``() =
+        task {
+            let workingCards = this.Page.Locator(".wt-card.cc-working")
+            do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = workingCards.CountAsync()
+            Assert.That(count, Is.EqualTo(2), "Fixture has 2 Working Claude worktrees")
+
+            let dot = workingCards.First.Locator(".cc-dot.working")
+            let! dotCount = dot.CountAsync()
+            Assert.That(dotCount, Is.EqualTo(1), "Working card should contain exactly one .cc-dot.working")
+        }
+
+    [<Test>]
+    member this.``Feature-recent card has cc-waiting class and waiting dot``() =
+        task {
+            let waitingCards = this.Page.Locator(".wt-card.cc-waiting")
+            do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = waitingCards.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Fixture has 1 WaitingForUser Claude worktree")
+
+            let dot = waitingCards.First.Locator(".cc-dot.waiting")
+            let! dotCount = dot.CountAsync()
+            Assert.That(dotCount, Is.EqualTo(1), "Waiting card should contain exactly one .cc-dot.waiting")
+        }
+
+    [<Test>]
+    member this.``Feature-idle cards have cc-idle class and idle dot``() =
+        task {
+            let idleCards = this.Page.Locator(".wt-card.cc-idle")
+            do! idleCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! count = idleCards.CountAsync()
+            Assert.That(count, Is.EqualTo(4), "Fixture has 4 Idle Claude worktrees")
+
+            let dot = idleCards.First.Locator(".cc-dot.idle")
+            let! dotCount = dot.CountAsync()
+            Assert.That(dotCount, Is.EqualTo(1), "Idle card should contain exactly one .cc-dot.idle")
         }
