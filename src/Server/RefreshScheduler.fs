@@ -8,8 +8,10 @@ open Shared.EventUtils
 
 type DashboardState =
     { WorktreeList: GitWorktree.WorktreeInfo list
+      KnownPaths: Set<string>
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
+      ClaudeData: Map<string, ClaudeCodeStatus>
       PrData: Map<string, PrStatus>
       SchedulerEvents: CardEvent list
       PinnedErrors: Map<string * string, CardEvent>
@@ -18,8 +20,10 @@ type DashboardState =
 module DashboardState =
     let empty =
         { WorktreeList = []
+          KnownPaths = Set.empty
           GitData = Map.empty
           BeadsData = Map.empty
+          ClaudeData = Map.empty
           PrData = Map.empty
           SchedulerEvents = []
           PinnedErrors = Map.empty
@@ -29,17 +33,13 @@ type StateMsg =
     | UpdateWorktreeList of GitWorktree.WorktreeInfo list
     | UpdateGit of path: string * GitWorktree.GitData
     | UpdateBeads of path: string * BeadsSummary
+    | UpdateClaude of path: string * ClaudeCodeStatus
     | UpdatePr of Map<string, PrStatus>
     | RemoveWorktree of path: string
     | GetState of AsyncReplyChannel<DashboardState>
     | LogSchedulerEvent of CardEvent
 
 let private maxEvents = 50
-
-let private knownPaths (state: DashboardState) =
-    state.WorktreeList
-    |> List.choose (fun wt -> Some wt.Path)
-    |> Set.ofList
 
 let private trimEvents (events: CardEvent list) =
     events
@@ -57,13 +57,14 @@ let private removeWorktreeData (path: string) (state: DashboardState) =
     { state with
         WorktreeList = state.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
         GitData = state.GitData |> Map.remove path
-        BeadsData = state.BeadsData |> Map.remove path }
+        BeadsData = state.BeadsData |> Map.remove path
+        ClaudeData = state.ClaudeData |> Map.remove path }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList worktrees ->
-        let newPaths = worktrees |> List.choose (fun wt -> Some wt.Path) |> Set.ofList
-        let oldPaths = knownPaths state
+        let newPaths = worktrees |> List.map (fun wt -> wt.Path) |> Set.ofList
+        let oldPaths = state.KnownPaths
         let removedPaths = Set.difference oldPaths newPaths
 
         let cleaned =
@@ -72,20 +73,22 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
         { cleaned with
             WorktreeList = worktrees
+            KnownPaths = newPaths
             IsReady = true }
 
     | UpdateGit(path, gitData) ->
-        let paths = knownPaths state
-
-        match Set.contains path paths with
+        match Set.contains path state.KnownPaths with
         | true -> { state with GitData = state.GitData |> Map.add path gitData }
         | false -> state
 
     | UpdateBeads(path, beads) ->
-        let paths = knownPaths state
-
-        match Set.contains path paths with
+        match Set.contains path state.KnownPaths with
         | true -> { state with BeadsData = state.BeadsData |> Map.add path beads }
+        | false -> state
+
+    | UpdateClaude(path, status) ->
+        match Set.contains path state.KnownPaths with
+        | true -> { state with ClaudeData = state.ClaudeData |> Map.add path status }
         | false -> state
 
     | UpdatePr prMap ->
@@ -118,6 +121,7 @@ type RefreshTask =
     | RefreshWorktreeList
     | RefreshGit of path: string
     | RefreshBeads of path: string
+    | RefreshClaude of path: string
     | RefreshPr
     | RefreshFetch
 
@@ -125,6 +129,7 @@ let private taskLabel = function
     | RefreshWorktreeList -> "WorktreeList", ""
     | RefreshGit path -> "GitRefresh", System.IO.Path.GetFileName(path)
     | RefreshBeads path -> "BeadsRefresh", System.IO.Path.GetFileName(path)
+    | RefreshClaude path -> "ClaudeRefresh", System.IO.Path.GetFileName(path)
     | RefreshPr -> "PrFetch", ""
     | RefreshFetch -> "GitFetch", ""
 
@@ -132,6 +137,7 @@ let private intervalOf = function
     | RefreshWorktreeList -> TimeSpan.FromSeconds(60.0)
     | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
     | RefreshBeads _ -> TimeSpan.FromSeconds(15.0)
+    | RefreshClaude _ -> TimeSpan.FromSeconds(15.0)
     | RefreshPr -> TimeSpan.FromSeconds(120.0)
     | RefreshFetch -> TimeSpan.FromSeconds(120.0)
 
@@ -140,7 +146,8 @@ let private buildTaskList (worktrees: GitWorktree.WorktreeInfo list) =
       RefreshPr
       RefreshFetch
       yield! worktrees |> List.map (fun wt -> RefreshGit wt.Path)
-      yield! worktrees |> List.map (fun wt -> RefreshBeads wt.Path) ]
+      yield! worktrees |> List.map (fun wt -> RefreshBeads wt.Path)
+      yield! worktrees |> List.map (fun wt -> RefreshClaude wt.Path) ]
 
 let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
@@ -173,6 +180,10 @@ let private executeTask
         | RefreshBeads path ->
             let! beads = BeadsStatus.getBeadsSummary path
             agent.Post(UpdateBeads(path, beads))
+
+        | RefreshClaude path ->
+            let! status = async { return ClaudeStatus.getClaudeStatus path }
+            agent.Post(UpdateClaude(path, status))
 
         | RefreshPr ->
             let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot
@@ -239,8 +250,7 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
 let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.filter (fun task -> deadlineOf lastRuns task <= now)
-    |> List.sortBy (deadlineOf lastRuns)
-    |> List.tryHead
+    |> List.tryFind (fun _ -> true)
 
 let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks

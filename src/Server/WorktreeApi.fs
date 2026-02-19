@@ -22,7 +22,7 @@ let private assembleFromState
     =
     let gitData = state.GitData |> Map.tryFind wt.Path
     let beads = state.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let claude = ClaudeStatus.getClaudeStatus wt.Path
+    let claude = state.ClaudeData |> Map.tryFind wt.Path |> Option.defaultValue ClaudeCodeStatus.Idle
 
     let upstreamBranch = gitData |> Option.bind (fun g -> g.UpstreamBranch)
     let pr = PrStatus.lookupPrStatus state.PrData upstreamBranch
@@ -61,16 +61,15 @@ let getWorktrees
               AppVersion = appVersion }
     }
 
-let private openTerminal (worktreeRoot: string) (path: string) =
+let private openTerminal
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreeRoot: string)
+    (path: string)
+    =
     async {
-        let! worktrees = GitWorktree.listWorktrees worktreeRoot
+        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-        let isKnownWorktree =
-            worktrees
-            |> List.exists (fun wt ->
-                String.Equals(wt.Path, path, StringComparison.OrdinalIgnoreCase))
-
-        match isKnownWorktree with
+        match Set.contains path state.KnownPaths with
         | false ->
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         | true ->
@@ -137,13 +136,13 @@ let worktreeApi
           deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent worktreeRoot appVersion
-          openTerminal = openTerminal worktreeRoot
+          openTerminal = openTerminal agent worktreeRoot
           startSync = fun branch ->
               async {
-                  let! worktrees = GitWorktree.listWorktrees worktreeRoot
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
                   let worktreePath =
-                      worktrees
+                      state.WorktreeList
                       |> List.tryFind (fun wt -> wt.Branch = Some branch)
                       |> Option.map (fun wt -> wt.Path)
 
@@ -159,10 +158,10 @@ let worktreeApi
           cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
           getSyncStatus = fun () ->
               async {
-                  let! worktrees = GitWorktree.listWorktrees worktreeRoot
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
                   let branchToPath =
-                      worktrees
+                      state.WorktreeList
                       |> List.choose (fun wt ->
                           wt.Branch |> Option.map (fun b -> b, wt.Path))
                       |> Map.ofList
