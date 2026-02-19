@@ -339,7 +339,10 @@ type DashboardTests() =
     member this.``Responsive layout shows correct column count``(width: int, expectedColumns: int) =
         task {
             do! this.Page.SetViewportSizeAsync(width, 800)
-            do! this.Page.WaitForTimeoutAsync(200.0f)
+            let! _ = this.Page.WaitForFunctionAsync(
+                $"() => {{ const cols = getComputedStyle(document.querySelector('.card-grid')).gridTemplateColumns; return cols.split(' ').length === {expectedColumns}; }}",
+                null,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
 
             let grid = this.Page.Locator(".card-grid")
             let! gridStyle = grid |> computedStyle "gridTemplateColumns"
