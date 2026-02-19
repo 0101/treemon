@@ -162,10 +162,10 @@ let relativeTime (dt: System.DateTimeOffset) =
 
 let ccClassName =
     function
-    | Active  -> "active"
-    | Recent  -> "recent"
-    | Idle    -> "idle"
-    | Unknown -> "unknown"
+    | Working        -> "working"
+    | WaitingForUser -> "waiting"
+    | Done           -> "done"
+    | Idle           -> "idle"
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
@@ -235,7 +235,7 @@ let isBranchSyncing (events: CardEvent list) =
 
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
     let syncing = isBranchSyncing branchEvents
-    let claudeBlocked = wt.Claude = Active || wt.Claude = Recent
+    let claudeBlocked = wt.Claude = Working || wt.Claude = WaitingForUser
     let disabled = syncing || claudeBlocked
     match syncing with
     | true ->

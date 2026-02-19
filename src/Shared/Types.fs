@@ -11,10 +11,10 @@ module BeadsSummary =
     let zero = { Open = 0; InProgress = 0; Closed = 0 }
 
 type ClaudeCodeStatus =
-    | Active
-    | Recent
+    | Working
+    | WaitingForUser
+    | Done
     | Idle
-    | Unknown
 
 type BuildStatus =
     | Building

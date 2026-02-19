@@ -8,7 +8,7 @@
         "LastCommitMessage": "Add comprehensive input validation",
         "LastCommitTime": "2026-02-16T22:30:00+00:00",
         "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
-        "Claude": "Active",
+        "Claude": "Working",
         "Pr": {
           "HasPr": {
             "Id": 101,
@@ -45,7 +45,7 @@
         "LastCommitMessage": "Refactor data access layer for clarity",
         "LastCommitTime": "2026-02-16T22:00:00+00:00",
         "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
-        "Claude": "Recent",
+        "Claude": "WaitingForUser",
         "Pr": {
           "HasPr": {
             "Id": 102,
@@ -94,7 +94,7 @@
         "LastCommitMessage": "Final cleanup before merge",
         "LastCommitTime": "2026-02-15T16:00:00+00:00",
         "Beads": { "Open": 0, "InProgress": 0, "Closed": 8 },
-        "Claude": "Unknown",
+        "Claude": "Idle",
         "Pr": {
           "HasPr": {
             "Id": 99,
@@ -121,7 +121,7 @@
         "LastCommitMessage": "Wire up API endpoints for new feature",
         "LastCommitTime": "2026-02-16T21:00:00+00:00",
         "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
-        "Claude": "Active",
+        "Claude": "Working",
         "Pr": {
           "HasPr": {
             "Id": 103,
@@ -155,7 +155,7 @@
         "LastCommitMessage": "Update configuration defaults",
         "LastCommitTime": "2026-02-16T18:00:00+00:00",
         "Beads": { "Open": 2, "InProgress": 0, "Closed": 0 },
-        "Claude": "Unknown",
+        "Claude": "Idle",
         "Pr": "NoPr",
         "MainBehindCount": 10
       }

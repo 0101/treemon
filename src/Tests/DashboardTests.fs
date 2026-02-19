@@ -171,10 +171,10 @@ type DashboardTests() =
             let! cardClass = cards.First.GetAttributeAsync("class")
             Assert.That(
                 cardClass,
-                Does.Contain("cc-active")
-                    .Or.Contain("cc-recent")
+                Does.Contain("cc-working")
+                    .Or.Contain("cc-waiting")
+                    .Or.Contain("cc-done")
                     .Or.Contain("cc-idle")
-                    .Or.Contain("cc-unknown")
             )
         }
 
@@ -749,52 +749,52 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync button disabled when Claude is Active``() =
+    member this.``Sync button disabled when Claude is Working``() =
         task {
-            let activeCards = this.Page.Locator(".wt-card.cc-active:not(.compact)")
-            do! activeCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! activeCount = activeCards.CountAsync()
-            Assert.That(activeCount, Is.GreaterThanOrEqualTo(1), "Fixture has Active Claude worktrees")
+            let workingCards = this.Page.Locator(".wt-card.cc-working:not(.compact)")
+            do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! workingCount = workingCards.CountAsync()
+            Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Claude worktrees")
 
-            let behindRow = activeCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+            let behindRow = workingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture Active Claude worktree is behind main")
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture Working Claude worktree is behind main")
 
             let syncBtn = behindRow.Locator(".sync-btn")
             let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Active Claude card behind main")
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Working Claude card behind main")
 
             let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Active")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Working")
 
             let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Active")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Working")
 
             let! title = syncBtn.GetAttributeAsync("title")
             Assert.That(title, Is.EqualTo("Claude is active"), "Disabled sync button should show 'Claude is active' tooltip")
         }
 
     [<Test>]
-    member this.``Sync button disabled when Claude is Recent``() =
+    member this.``Sync button disabled when Claude is WaitingForUser``() =
         task {
-            let recentCards = this.Page.Locator(".wt-card.cc-recent:not(.compact)")
-            do! recentCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let! recentCount = recentCards.CountAsync()
-            Assert.That(recentCount, Is.GreaterThanOrEqualTo(1), "Fixture has Recent Claude worktrees")
+            let waitingCards = this.Page.Locator(".wt-card.cc-waiting:not(.compact)")
+            do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! waitingCount = waitingCards.CountAsync()
+            Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Claude worktrees")
 
-            let behindRow = recentCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+            let behindRow = waitingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture Recent Claude worktree is behind main")
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture WaitingForUser Claude worktree is behind main")
 
             let syncBtn = behindRow.Locator(".sync-btn")
             let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Recent Claude card behind main")
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on WaitingForUser Claude card behind main")
 
             let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Recent")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is WaitingForUser")
 
             let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Recent")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is WaitingForUser")
         }
 
     [<Test>]
@@ -1316,9 +1316,9 @@ type DashboardTests() =
     [<Test>]
     member this.``Commit grid square count matches fixture CommitCount``() =
         task {
-            let activeCard = this.Page.Locator(".wt-card.cc-active")
-            do! activeCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let squares = activeCard.First.Locator(".commit-square")
+            let workingCard = this.Page.Locator(".wt-card.cc-working")
+            do! workingCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let squares = workingCard.First.Locator(".commit-square")
             let! squareCount = squares.CountAsync()
             Assert.That(squareCount, Is.EqualTo(12), "feature-active has CommitCount=12; should render 12 squares")
         }
@@ -1388,13 +1388,13 @@ type DashboardTests() =
     [<Test>]
     member this.``Diff stats show correct values from fixture``() =
         task {
-            let activeCard = this.Page.Locator(".wt-card.cc-active")
-            do! activeCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
-            let added = activeCard.First.Locator(".diff-added")
+            let workingCard = this.Page.Locator(".wt-card.cc-working")
+            do! workingCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let added = workingCard.First.Locator(".diff-added")
             let! addedText = added.First.TextContentAsync()
             Assert.That(addedText, Is.EqualTo("+234"), "feature-active has LinesAdded=234")
 
-            let removed = activeCard.First.Locator(".diff-removed")
+            let removed = workingCard.First.Locator(".diff-removed")
             let! removedText = removed.First.TextContentAsync()
             Assert.That(removedText, Is.EqualTo("-89"), "feature-active has LinesRemoved=89")
         }

@@ -28,33 +28,6 @@ let private findLatestJsonl (projectDir: string) =
         Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
         None
 
-let private statusFromAge (age: TimeSpan) =
-    match age with
-    | a when a < TimeSpan.FromMinutes(2.0) -> Active
-    | a when a < TimeSpan.FromMinutes(30.0) -> Recent
-    | _ -> Idle
-
-let getClaudeStatus (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
-
-    match findLatestJsonl projectDir with
-    | Some fi ->
-        try
-            let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            statusFromAge age
-        with ex ->
-            Log.log "Claude" $"Failed to read mtime for {fi.FullName}: {ex.Message}"
-            Unknown
-    | None -> Unknown
-
-let private truncateMessage (maxLen: int) (text: string) =
-    let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
-
-    match singleLine.Length <= maxLen with
-    | true -> singleLine
-    | false -> singleLine.[..maxLen-1].TrimEnd() + "..."
-
 let private readLinesReverse (filePath: string) =
     try
         use stream =
@@ -71,6 +44,85 @@ let private readLinesReverse (filePath: string) =
     with ex ->
         Log.log "Claude" $"Failed to read JSONL {filePath}: {ex.Message}"
         []
+
+type private EntryKind =
+    | UserEntry
+    | AssistantToolUse of hasAskUserQuestion: bool
+    | AssistantDone
+
+let private tryParseEntryKind (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp ->
+            match typeProp.GetString() with
+            | "user" -> Some UserEntry
+            | "assistant" ->
+                match root.TryGetProperty("message") with
+                | true, msg ->
+                    let stopReason =
+                        match msg.TryGetProperty("stop_reason") with
+                        | true, sr when sr.ValueKind <> JsonValueKind.Null -> Some(sr.GetString())
+                        | _ -> None
+
+                    match stopReason with
+                    | Some "tool_use" ->
+                        let hasAskUser =
+                            match msg.TryGetProperty("content") with
+                            | true, contentArr ->
+                                contentArr.EnumerateArray()
+                                |> Seq.exists (fun block ->
+                                    match block.TryGetProperty("type") with
+                                    | true, t when t.GetString() = "tool_use" ->
+                                        match block.TryGetProperty("name") with
+                                        | true, n -> n.GetString() = "AskUserQuestion"
+                                        | _ -> false
+                                    | _ -> false)
+                            | _ -> false
+
+                        Some(AssistantToolUse hasAskUser)
+                    | _ -> Some AssistantDone
+                | _ -> Some AssistantDone
+            | _ -> None
+        | _ -> None
+    with _ -> None
+
+let private statusFromEntry entryKind =
+    match entryKind with
+    | UserEntry -> Working
+    | AssistantToolUse true -> WaitingForUser
+    | AssistantToolUse false -> Working
+    | AssistantDone -> Done
+
+let getClaudeStatus (worktreePath: string) =
+    let encoded = encodeWorktreePath worktreePath
+    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+
+    match findLatestJsonl projectDir with
+    | Some fi ->
+        try
+            let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+
+            match age > TimeSpan.FromHours(2.0) with
+            | true -> Idle
+            | false ->
+                readLinesReverse fi.FullName
+                |> List.tryPick tryParseEntryKind
+                |> Option.map statusFromEntry
+                |> Option.defaultValue Idle
+        with ex ->
+            Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
+            Idle
+    | None -> Idle
+
+let private truncateMessage (maxLen: int) (text: string) =
+    let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
+
+    match singleLine.Length <= maxLen with
+    | true -> singleLine
+    | false -> singleLine.[..maxLen-1].TrimEnd() + "..."
 
 let private tryParseAssistantText (line: string) =
     try

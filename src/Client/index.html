@@ -68,10 +68,15 @@
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
 
         .cc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-        .cc-dot.active  { background: #f38ba8; }
-        .cc-dot.recent  { background: #f9e2af; }
-        .cc-dot.idle    { background: #89b4fa; }
-        .cc-dot.unknown { background: #585b70; }
+        .cc-dot.working  { background: #ff0000; animation: pulse 2s ease-in-out infinite; }
+        .cc-dot.waiting  { background: #f9e2af; }
+        .cc-dot.done     { background: #89b4fa; }
+        .cc-dot.idle     { background: #585b70; }
+
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50%      { opacity: 0.3; }
+        }
 
         .commit-line { font-size: 0.85em; color: #a6adc8; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .commit-time { color: #7f849c; margin-left: 6px; }
