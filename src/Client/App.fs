@@ -329,7 +329,7 @@ let schedulerEventEntry (evt: CardEvent) =
             Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
             Html.span [ prop.className "event-source"; prop.text evt.Source ]
             match evt.Message with
-            | "" -> Html.none
+            | "" -> Html.span [ prop.className "event-message" ]
             | msg -> Html.span [ prop.className "event-message"; prop.text msg ]
             match evt.Duration with
             | Some d -> Html.span [ prop.className "event-duration"; prop.text (sprintf "%.1fs" d.TotalSeconds) ]
