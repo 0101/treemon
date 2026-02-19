@@ -19,7 +19,10 @@ For detailed requirements, expected behavior, and design decisions see `docs/spe
 .\treemon.ps1 log                           # tail production log
 .\treemon.ps1 dev "Q:\code\AITestAgent"     # dev mode (server :5001 + Vite :5174)
 .\treemon.ps1 deploy                        # build frontend → wwwroot/, restart prod if running
-dotnet test src/Tests/Tests.fsproj        # E2E tests (Playwright, auto-starts dev servers)
+dotnet test src/Tests/Tests.fsproj                        # all tests
+dotnet test src/Tests/Tests.fsproj --filter "Category=Unit"   # unit tests only
+dotnet test src/Tests/Tests.fsproj --filter "Category=E2E"    # E2E tests (Playwright, fixture data)
+dotnet test src/Tests/Tests.fsproj --filter "Category=Smoke"  # smoke tests (real data, port 5002)
 ```
 
 Open http://localhost:5174 in dev mode (Vite proxies API calls to server on :5001).
