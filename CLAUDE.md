@@ -54,15 +54,19 @@ dotnet test src/Tests/Tests.fsproj    # must pass first
 
 ```
 src/
-  Shared/Types.fs          — domain types shared between client and server
+  Shared/
+    Types.fs               — domain types shared between client and server
+    EventUtils.fs          — event processing: branch extraction, pinning, deduplication
   Server/
     Log.fs                 — diagnostic logging to logs/server.log
-    GitWorktree.fs         — git worktree enumeration, commit data
+    GitWorktree.fs         — git worktree enumeration, commit data, dirty detection, work metrics
     BeadsStatus.fs         — beads task counts via `bd` CLI
-    ClaudeStatus.fs        — Claude Code activity from session file mtimes
-    PrStatus.fs            — Azure DevOps PR, threads, build status via `az` CLI
-    WorktreeApi.fs         — API implementation, caching, parallel data assembly
-    Program.fs             — Saturn app entry point, CLI arg parsing
+    ClaudeStatus.fs        — Claude Code activity + last assistant message parsing
+    PrStatus.fs            — Azure DevOps PR, threads, build status, failure extraction
+    RefreshScheduler.fs    — background refresh loop, MailboxProcessor state agent
+    SyncEngine.fs          — branch sync pipeline orchestration
+    WorktreeApi.fs         — API implementation, state reads, event merging
+    Program.fs             — Saturn app entry point, CLI arg parsing, scheduler wiring
   Client/
     App.fs                 — entire Elmish app (Model, Msg, update, view)
     index.html             — entry point with inline CSS
@@ -70,9 +74,13 @@ src/
   Tests/
     ServerFixture.fs       — starts server + Vite for tests
     DashboardTests.fs      — Playwright E2E tests
+    EventProcessingTests.fs — unit tests for event processing
+    GitParsingTests.fs     — unit tests for git output parsing
+    SchedulerTests.fs      — unit tests for scheduler logic
+    SmokeTests.fs          — smoke tests against live data
 docs/spec/
   worktree-monitor.md     — full specification
-treemon.ps1                  — production lifecycle + dev mode + deploy
+treemon.ps1                — production lifecycle + dev mode + deploy
 vite.config.js            — Vite config with API proxy (ports via env vars)
 treemon.slnx               — .NET 9 solution file (.slnx format)
 ```
@@ -81,26 +89,35 @@ treemon.slnx               — .NET 9 solution file (.slnx format)
 
 ```fsharp
 type WorktreeStatus =
-    { Branch: string; Head: string; LastCommitMessage: string
-      LastCommitTime: DateTimeOffset; UpstreamBranch: string option
-      Beads: BeadsSummary; Claude: ClaudeCodeStatus
-      Pr: PrStatus; IsStale: bool; MainBehindCount: int }
+    { Path: string; Branch: string; LastCommitMessage: string
+      LastCommitTime: DateTimeOffset; Beads: BeadsSummary
+      Claude: ClaudeCodeStatus; Pr: PrStatus
+      MainBehindCount: int; IsDirty: bool; WorkMetrics: WorkMetrics option }
 
 type WorktreeResponse =
-    { RootFolderName: string; Worktrees: WorktreeStatus list }
+    { RootFolderName: string; Worktrees: WorktreeStatus list
+      IsReady: bool; SchedulerEvents: CardEvent list
+      LatestByCategory: Map<string, CardEvent>; AppVersion: string }
 
-type IWorktreeApi = { getWorktrees: unit -> Async<WorktreeResponse> }
+type IWorktreeApi =
+    { getWorktrees: unit -> Async<WorktreeResponse>
+      openTerminal: string -> Async<unit>
+      startSync: string -> Async<Result<unit, string>>
+      cancelSync: string -> Async<unit>
+      getSyncStatus: unit -> Async<Map<string, CardEvent list>>
+      deleteWorktree: string -> Async<Result<unit, string>> }
 ```
 
-Key DUs: `ClaudeCodeStatus` (Active|Recent|Idle|Unknown), `PrStatus` (NoPr|HasPr of PrInfo), `BuildStatus` (NoBuild|Building|Succeeded|Failed|PartiallySucceeded|Canceled). `PrInfo` includes `ThreadCounts`, `IsMerged`, and `Builds: BuildInfo list`.
+Key DUs: `ClaudeCodeStatus` (Working|WaitingForUser|Done|Idle), `PrStatus` (NoPr|HasPr of PrInfo), `BuildStatus` (Building|Succeeded|Failed|PartiallySucceeded|Canceled), `StepStatus` (Pending|Running|Succeeded|Failed|Cancelled). `PrInfo` includes `ThreadCounts`, `IsMerged`, and `Builds: BuildInfo list`. `BuildInfo` includes optional `Failure: BuildFailure`.
 
 ## Architecture
 
-- Client polls `IWorktreeApi.getWorktrees` every 15 seconds
-- Server assembles data in parallel from 4 sources: git, beads CLI, Claude session files, AzDo CLI
-- Server-side caching: worktree list 60s, git/beads/claude 15s, PRs 120s
+- Background `MailboxProcessor` refresh scheduler runs one task at a time, caps concurrent processes at ~6
+- API responses are instant — pure reads from in-memory state, no process spawning
+- Client polls every 1s; data updates stream in as each worktree completes
+- Refresh intervals: worktree list 60s, git/beads/claude 15s, PRs/fetch 120s
 - Client renders responsive card grid (1–4 columns by viewport width)
-- Stale detection: all of (commit >24h, claude Idle/Unknown, no beads in_progress, no active PR)
+- Merged PRs get dimmed cards (actionable: delete the worktree)
 
 ## External Dependencies
 
@@ -133,3 +150,6 @@ dotnet test src/Tests/Tests.fsproj    # starts server + Vite automatically via S
 - Client is a single file (App.fs) with Elmish MVU pattern
 - Server logs diagnostics (process invocations, exit codes, parse failures) to `logs/server.log` — truncated on startup
 - Solution uses .slnx format (new in .NET 9)
+- Branch sync: CheckClean → Pull → Merge → ResolveConflicts (Claude) → Test; configured via `.treemon.json`
+- Scheduler footer: persistent status overview per category via `LatestByCategory` map (never reverts to "pending")
+- Pinned errors keyed by `(Source, Branch)` — only cleared when same combination succeeds
