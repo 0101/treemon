@@ -1803,18 +1803,27 @@ type DashboardTests() =
     [<Test>]
     member this.``Status overview pending rows have pending badge``() =
         task {
-            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let! page = this.Context.NewPageAsync()
+            let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":true,"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)) |> ignore)
+
+            let! _ = page.GotoAsync(baseUrl)
+
+            let overview = page.Locator(".scheduler-footer .status-overview")
             let pendingRows = overview.Locator(".status-row.pending")
             do! pendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! pendingCount = pendingRows.CountAsync()
-            Assert.That(pendingCount, Is.GreaterThanOrEqualTo(1), "Fixture has categories with no events; pending rows should exist")
+            Assert.That(pendingCount, Is.EqualTo(5), "Only GitRefresh provided; 5 other categories should be pending")
 
             let! allHaveBadge =
                 pendingRows.EvaluateAllAsync<bool>(
                     "els => els.every(el => el.querySelector('.status-badge.pending') !== null)")
             Assert.That(allHaveBadge, Is.True,
                 "Each pending status row should have a .status-badge.pending element")
+
+            do! page.CloseAsync()
         }
 
     [<Test>]
@@ -1846,7 +1855,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Fixture scheduler events produce correct non-pending categories``() =
+    member this.``Fixture LatestByCategory provides all 6 non-pending categories``() =
         task {
             let overview = this.Page.Locator(".scheduler-footer .status-overview")
             let nonPendingRows = overview.Locator(".status-row:not(.pending)")
@@ -1856,33 +1865,38 @@ type DashboardTests() =
                 nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
             let sortedCategories = nonPendingCategories |> Array.toList |> List.sort
-            Assert.That(sortedCategories, Is.EqualTo([ "GitRefresh"; "PrFetch" ]),
-                "Fixture has SchedulerEvents for GitRefresh and PrFetch; these should be non-pending")
+            let expected = [ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
+            Assert.That(sortedCategories, Is.EqualTo(expected),
+                "Fixture LatestByCategory has all 6 categories; none should be pending")
         }
 
     [<Test>]
-    member this.``Fixture scheduler events produce correct pending categories``() =
+    member this.``Fixture LatestByCategory prevents pending reversion``() =
         task {
             let overview = this.Page.Locator(".scheduler-footer .status-overview")
             let pendingRows = overview.Locator(".status-row.pending")
-            do! pendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! pendingCategories =
-                pendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
-                    "els => els.map(el => el.textContent.trim())")
-            let sortedPending = pendingCategories |> Array.toList |> List.sort
-            Assert.That(sortedPending, Is.EqualTo([ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "WorktreeList" ]),
-                "Fixture has no events for WorktreeList, BeadsRefresh, ClaudeRefresh, GitFetch; these should be pending")
+            let! pendingCount = pendingRows.CountAsync()
+            Assert.That(pendingCount, Is.EqualTo(0),
+                "LatestByCategory provides all 6 categories so no rows should be pending")
         }
 
     [<Test>]
     member this.``Status overview pending rows are dimmed``() =
         task {
-            let pendingRow = this.Page.Locator(".scheduler-footer .status-overview .status-row.pending").First
+            let! page = this.Context.NewPageAsync()
+            let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":true,"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)) |> ignore)
+
+            let! _ = page.GotoAsync(baseUrl)
+
+            let pendingRow = page.Locator(".scheduler-footer .status-overview .status-row.pending").First
             do! pendingRow.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! opacity = pendingRow |> computedStyle "opacity"
             Assert.That(opacity, Is.EqualTo("0.4"), "Pending status rows should have opacity 0.4")
+
+            do! page.CloseAsync()
         }
 
     [<Test>]

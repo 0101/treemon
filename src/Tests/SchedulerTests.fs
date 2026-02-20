@@ -385,3 +385,126 @@ type StateAgentTests() =
             Assert.That(state.GitData.ContainsKey("/repo/old"), Is.False)
         }
         |> Async.RunSynchronously
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LatestByCategoryTests() =
+
+    let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)
+
+    let makeEvent source message timestamp : Shared.CardEvent =
+        { Source = source
+          Message = message
+          Timestamp = timestamp
+          Status = Some Shared.StepStatus.Succeeded
+          Duration = Some (TimeSpan.FromMilliseconds(100.0)) }
+
+    [<Test>]
+    member _.``Empty map plus first event for category contains that event``() =
+        async {
+            let agent = createAgent ()
+            let event = makeEvent "GitRefresh" "main" baseTime
+
+            agent.Post(LogSchedulerEvent event)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.LatestByCategory.Count, Is.EqualTo(1))
+            Assert.That(state.LatestByCategory.ContainsKey("GitRefresh"), Is.True)
+            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("main"))
+            Assert.That(state.LatestByCategory.["GitRefresh"].Timestamp, Is.EqualTo(baseTime))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Newer event for same category replaces existing entry``() =
+        async {
+            let agent = createAgent ()
+            let older = makeEvent "GitRefresh" "main" baseTime
+            let newer = makeEvent "GitRefresh" "feature" (baseTime.AddSeconds(30.0))
+
+            agent.Post(LogSchedulerEvent older)
+            agent.Post(LogSchedulerEvent newer)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.LatestByCategory.Count, Is.EqualTo(1))
+            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("feature"))
+            Assert.That(state.LatestByCategory.["GitRefresh"].Timestamp, Is.EqualTo(baseTime.AddSeconds(30.0)))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Event for different category adds new entry without removing existing``() =
+        async {
+            let agent = createAgent ()
+            let gitEvent = makeEvent "GitRefresh" "main" baseTime
+            let prEvent = makeEvent "PrFetch" "fetched" (baseTime.AddSeconds(10.0))
+
+            agent.Post(LogSchedulerEvent gitEvent)
+            agent.Post(LogSchedulerEvent prEvent)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.LatestByCategory.Count, Is.EqualTo(2))
+            Assert.That(state.LatestByCategory.ContainsKey("GitRefresh"), Is.True)
+            Assert.That(state.LatestByCategory.ContainsKey("PrFetch"), Is.True)
+            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("main"))
+            Assert.That(state.LatestByCategory.["PrFetch"].Message, Is.EqualTo("fetched"))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Multiple categories updated independently``() =
+        async {
+            let agent = createAgent ()
+
+            let events =
+                [ makeEvent "GitRefresh" "main" baseTime
+                  makeEvent "BeadsRefresh" "feature" (baseTime.AddSeconds(1.0))
+                  makeEvent "ClaudeRefresh" "dev" (baseTime.AddSeconds(2.0))
+                  makeEvent "PrFetch" "all" (baseTime.AddSeconds(3.0))
+                  makeEvent "GitRefresh" "feature" (baseTime.AddSeconds(4.0))
+                  makeEvent "BeadsRefresh" "main" (baseTime.AddSeconds(5.0)) ]
+
+            events |> List.iter (fun e -> agent.Post(LogSchedulerEvent e))
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.LatestByCategory.Count, Is.EqualTo(4))
+            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("feature"),
+                "GitRefresh should have the last posted event (feature, not main)")
+            Assert.That(state.LatestByCategory.["BeadsRefresh"].Message, Is.EqualTo("main"),
+                "BeadsRefresh should have the last posted event (main, not feature)")
+            Assert.That(state.LatestByCategory.["ClaudeRefresh"].Message, Is.EqualTo("dev"))
+            Assert.That(state.LatestByCategory.["PrFetch"].Message, Is.EqualTo("all"))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``LatestByCategory is empty in initial state``() =
+        async {
+            let agent = createAgent ()
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.LatestByCategory, Is.Empty)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``LatestByCategory is never trimmed unlike SchedulerEvents``() =
+        async {
+            let agent = createAgent ()
+
+            [ 1 .. 60 ]
+            |> List.iter (fun i ->
+                agent.Post(
+                    LogSchedulerEvent
+                        (makeEvent $"Category{i}" $"event-{i}" (baseTime.AddSeconds(float i)))))
+
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.SchedulerEvents.Length, Is.EqualTo(50),
+                "SchedulerEvents should be trimmed to 50")
+            Assert.That(state.LatestByCategory.Count, Is.EqualTo(60),
+                "LatestByCategory should never be trimmed, holding all 60 categories")
+        }
+        |> Async.RunSynchronously

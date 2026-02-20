@@ -118,8 +118,8 @@
 
         .scheduler-footer {
             position: sticky; bottom: 0; z-index: 10;
-            background: #11111b; border-top: 1px solid #313244;
-            padding: 8px 10px; margin-top: 12px; border-radius: 6px;
+            border-top: 1px solid #313244;
+            padding: 8px 10px; margin-top: 12px;
             font-family: 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
             font-size: 0.78em; max-height: 40vh; overflow-y: auto;
         }
@@ -134,7 +134,8 @@
         .pinned-errors .event-message { color: #f38ba8; }
         .status-overview {
             display: flex; flex-direction: column; gap: 2px;
-            background: #181825; padding: 6px 10px; border-radius: 6px;
+            max-width: 480px; margin: 0 auto;
+            background: #11111b; padding: 6px 10px; border-radius: 6px;
         }
         .status-row {
             display: grid; grid-template-columns: 110px 1fr 50px 56px auto;

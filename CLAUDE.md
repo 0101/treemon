@@ -1,4 +1,4 @@
-# mait — Treemon Dashboard
+# Treemon Dashboard
 
 ## Goals
 
@@ -74,7 +74,7 @@ docs/spec/
   worktree-monitor.md     — full specification
 treemon.ps1                  — production lifecycle + dev mode + deploy
 vite.config.js            — Vite config with API proxy (ports via env vars)
-mait.slnx                 — .NET 9 solution file (.slnx format)
+treemon.slnx               — .NET 9 solution file (.slnx format)
 ```
 
 ## Domain Types (src/Shared/Types.fs)
