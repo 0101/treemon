@@ -15,6 +15,7 @@ type DashboardState =
       PrData: Map<string, PrStatus>
       SchedulerEvents: CardEvent list
       PinnedErrors: Map<string * string, CardEvent>
+      LatestByCategory: Map<string, CardEvent>
       IsReady: bool }
 
 module DashboardState =
@@ -27,6 +28,7 @@ module DashboardState =
           PrData = Map.empty
           SchedulerEvents = []
           PinnedErrors = Map.empty
+          LatestByCategory = Map.empty
           IsReady = false }
 
 type StateMsg =
@@ -104,7 +106,8 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | LogSchedulerEvent event ->
         { state with
             SchedulerEvents = trimEvents (event :: state.SchedulerEvents)
-            PinnedErrors = updatePinnedErrors state.PinnedErrors event }
+            PinnedErrors = updatePinnedErrors state.PinnedErrors event
+            LatestByCategory = state.LatestByCategory |> Map.add event.Source event }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->

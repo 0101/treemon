@@ -58,6 +58,7 @@ let getWorktrees
               Worktrees = statuses
               IsReady = state.IsReady
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
+              LatestByCategory = state.LatestByCategory
               AppVersion = appVersion }
     }
 

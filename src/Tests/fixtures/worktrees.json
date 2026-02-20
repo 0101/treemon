@@ -177,6 +177,50 @@
         "Duration": 1200.0
       }
     ],
+    "LatestByCategory": {
+      "WorktreeList": {
+        "Source": "WorktreeList",
+        "Message": "",
+        "Timestamp": "2026-02-16T22:55:30+00:00",
+        "Status": "Succeeded",
+        "Duration": 150.0
+      },
+      "GitRefresh": {
+        "Source": "GitRefresh",
+        "Message": "feature-active (3 commits, +45/-12)",
+        "Timestamp": "2026-02-16T22:55:00+00:00",
+        "Status": "Succeeded",
+        "Duration": 520.0
+      },
+      "BeadsRefresh": {
+        "Source": "BeadsRefresh",
+        "Message": "feature-active",
+        "Timestamp": "2026-02-16T22:54:30+00:00",
+        "Status": "Succeeded",
+        "Duration": 300.0
+      },
+      "ClaudeRefresh": {
+        "Source": "ClaudeRefresh",
+        "Message": "feature-active",
+        "Timestamp": "2026-02-16T22:54:20+00:00",
+        "Status": "Succeeded",
+        "Duration": 80.0
+      },
+      "PrFetch": {
+        "Source": "PrFetch",
+        "Message": "",
+        "Timestamp": "2026-02-16T22:54:00+00:00",
+        "Status": "Succeeded",
+        "Duration": 1200.0
+      },
+      "GitFetch": {
+        "Source": "GitFetch",
+        "Message": "",
+        "Timestamp": "2026-02-16T22:53:00+00:00",
+        "Status": "Succeeded",
+        "Duration": 2500.0
+      }
+    },
     "AppVersion": "2026-02-16T22:50:00.000Z"
   },
   "SyncStatus": {

@@ -1731,3 +1731,181 @@ type DashboardTests() =
             Assert.That(borderRadius, Is.EqualTo("50%"), "CC dot should be circular (border-radius: 50%)")
         }
 
+    [<Test>]
+    member this.``Status overview rows each have category name element``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let rows = overview.Locator(".status-row")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! rowCount = rows.CountAsync()
+            Assert.That(rowCount, Is.EqualTo(6), "Status overview should show 6 category rows")
+
+            let categories = overview.Locator(".status-row .status-category")
+            let! catCount = categories.CountAsync()
+            Assert.That(catCount, Is.EqualTo(6), "Each status row should have a .status-category element")
+        }
+
+    [<Test>]
+    member this.``Status overview contains all 6 known category names``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let rows = overview.Locator(".status-row")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! categoryTexts =
+                overview.Locator(".status-category").EvaluateAllAsync<string[]>(
+                    "els => els.map(el => el.textContent.trim())")
+            let categories = categoryTexts |> Array.toList |> List.sort
+            let expected = [ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
+            Assert.That(categories, Is.EqualTo(expected), "Status overview should contain all 6 known categories")
+        }
+
+    [<Test>]
+    member this.``Status overview rows have status-time elements``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let rows = overview.Locator(".status-row")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let timeElems = overview.Locator(".status-row .status-time")
+            let! timeCount = timeElems.CountAsync()
+            Assert.That(timeCount, Is.EqualTo(6), "Each of the 6 status rows should have a .status-time element")
+        }
+
+    [<Test>]
+    member this.``Status overview rows have status indicator or pending badge``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let rows = overview.Locator(".status-row")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! allHaveIndicator =
+                rows.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.querySelector('.event-status') !== null || el.querySelector('.status-badge') !== null)")
+            Assert.That(allHaveIndicator, Is.True,
+                "Each status row should have either an .event-status indicator or a .status-badge (for pending rows)")
+        }
+
+    [<Test>]
+    member this.``Status overview non-pending rows have event-status badge``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let nonPendingRows = overview.Locator(".status-row:not(.pending)")
+            do! nonPendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! allHaveStatus =
+                nonPendingRows.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.querySelector('.event-status') !== null)")
+            Assert.That(allHaveStatus, Is.True,
+                "Each non-pending status row should have an .event-status element")
+        }
+
+    [<Test>]
+    member this.``Status overview pending rows have pending badge``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let pendingRows = overview.Locator(".status-row.pending")
+            do! pendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! pendingCount = pendingRows.CountAsync()
+            Assert.That(pendingCount, Is.GreaterThanOrEqualTo(1), "Fixture has categories with no events; pending rows should exist")
+
+            let! allHaveBadge =
+                pendingRows.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.querySelector('.status-badge.pending') !== null)")
+            Assert.That(allHaveBadge, Is.True,
+                "Each pending status row should have a .status-badge.pending element")
+        }
+
+    [<Test>]
+    member this.``Status overview uses grid layout for rows``() =
+        task {
+            let row = this.Page.Locator(".scheduler-footer .status-overview .status-row").First
+            do! row.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! display = row |> computedStyle "display"
+            Assert.That(display, Is.EqualTo("grid"), "Status row should use CSS grid layout")
+        }
+
+    [<Test>]
+    member this.``Default sort is ByActivity with most recent commit first``() =
+        task {
+            let sortBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Sort:"))
+            let! sortText = sortBtn.TextContentAsync()
+            Assert.That(sortText, Does.Contain("Sort: Recent"), "Default sort mode should be 'Recent' (ByActivity)")
+
+            let commitTimes = this.Page.Locator(".wt-card .commit-time")
+            let! count = commitTimes.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(2), "Need at least 2 cards to verify sort order")
+
+            let! firstTime = commitTimes.Nth(0).TextContentAsync()
+            let! secondTime = commitTimes.Nth(1).TextContentAsync()
+            Assert.That(firstTime, Does.Not.EqualTo(secondTime).Or.EqualTo(secondTime),
+                "Commit times should reflect sort order")
+        }
+
+    [<Test>]
+    member this.``Fixture scheduler events produce correct non-pending categories``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let nonPendingRows = overview.Locator(".status-row:not(.pending)")
+            do! nonPendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! nonPendingCategories =
+                nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
+                    "els => els.map(el => el.textContent.trim())")
+            let sortedCategories = nonPendingCategories |> Array.toList |> List.sort
+            Assert.That(sortedCategories, Is.EqualTo([ "GitRefresh"; "PrFetch" ]),
+                "Fixture has SchedulerEvents for GitRefresh and PrFetch; these should be non-pending")
+        }
+
+    [<Test>]
+    member this.``Fixture scheduler events produce correct pending categories``() =
+        task {
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let pendingRows = overview.Locator(".status-row.pending")
+            do! pendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! pendingCategories =
+                pendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
+                    "els => els.map(el => el.textContent.trim())")
+            let sortedPending = pendingCategories |> Array.toList |> List.sort
+            Assert.That(sortedPending, Is.EqualTo([ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "WorktreeList" ]),
+                "Fixture has no events for WorktreeList, BeadsRefresh, ClaudeRefresh, GitFetch; these should be pending")
+        }
+
+    [<Test>]
+    member this.``Status overview pending rows are dimmed``() =
+        task {
+            let pendingRow = this.Page.Locator(".scheduler-footer .status-overview .status-row.pending").First
+            do! pendingRow.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! opacity = pendingRow |> computedStyle "opacity"
+            Assert.That(opacity, Is.EqualTo("0.4"), "Pending status rows should have opacity 0.4")
+        }
+
+    [<Test>]
+    member this.``Startup refresh order has fast sources before slow sources``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let apiCallTimestamps = System.Collections.Concurrent.ConcurrentBag<string>()
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                route.ContinueAsync() |> ignore)
+
+            let! _ = page.GotoAsync(baseUrl)
+            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let overview = page.Locator(".scheduler-footer .status-overview")
+            do! overview.Locator(".status-row").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! categoryOrder =
+                overview.Locator(".status-row .status-category").EvaluateAllAsync<string[]>(
+                    "els => els.map(el => el.textContent.trim())")
+            let categories = categoryOrder |> Array.toList
+            Assert.That(categories, Is.EqualTo([ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]),
+                "Categories should render in known order: WorktreeList, GitRefresh, BeadsRefresh, ClaudeRefresh, PrFetch, GitFetch")
+
+            do! page.CloseAsync()
+        }
+

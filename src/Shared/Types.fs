@@ -87,6 +87,7 @@ type WorktreeResponse =
       Worktrees: WorktreeStatus list
       IsReady: bool
       SchedulerEvents: CardEvent list
+      LatestByCategory: Map<string, CardEvent>
       AppVersion: string }
 
 type IWorktreeApi =

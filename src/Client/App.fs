@@ -16,6 +16,7 @@ type Model =
       SortMode: SortMode
       IsCompact: bool
       SchedulerEvents: CardEvent list
+      LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
       AppVersion: string option }
 
@@ -60,6 +61,7 @@ let init () =
       SortMode = ByActivity
       IsCompact = false
       SchedulerEvents = []
+      LatestByCategory = Map.empty
       BranchEvents = Map.empty
       AppVersion = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -79,6 +81,7 @@ let update msg model =
                 HasError = false
                 IsReady = response.IsReady
                 SchedulerEvents = response.SchedulerEvents
+                LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion },
             Cmd.none
 
@@ -325,14 +328,6 @@ let eventLog (events: CardEvent list) =
 let knownCategories =
     [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]
 
-let latestEventBySource (events: CardEvent list) =
-    events
-    |> List.sortByDescending (fun e -> e.Timestamp)
-    |> List.fold (fun acc evt ->
-        match Map.containsKey evt.Source acc with
-        | true -> acc
-        | false -> Map.add evt.Source evt acc) Map.empty
-
 let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string) =
     match Map.tryFind category latestBySource with
     | None ->
@@ -384,9 +379,8 @@ let pinnedErrorEntry (evt: CardEvent) =
         ]
     ]
 
-let schedulerFooter (events: CardEvent list) =
+let schedulerFooter (events: CardEvent list) (latestByCategory: Map<string, CardEvent>) =
     let errors = pinnedErrors events
-    let latestBySource = latestEventBySource events
     Html.div [
         prop.className "scheduler-footer"
         prop.children [
@@ -399,7 +393,7 @@ let schedulerFooter (events: CardEvent list) =
                 ]
             Html.div [
                 prop.className "status-overview"
-                prop.children (knownCategories |> List.map (statusOverviewRow latestBySource))
+                prop.children (knownCategories |> List.map (statusOverviewRow latestByCategory))
             ]
         ]
     ]
@@ -725,7 +719,7 @@ let view model dispatch =
                     prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
                 ]
 
-            schedulerFooter model.SchedulerEvents
+            schedulerFooter model.SchedulerEvents model.LatestByCategory
         ]
     ]
 
