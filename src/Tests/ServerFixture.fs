@@ -95,7 +95,7 @@ let private resolveCmdShim (fileName: string) =
         | None -> fileName
     | _ -> fileName
 
-let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) =
+let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) (redirectOutput: bool) =
     let resolved = resolveCmdShim fileName
 
     let psi =
@@ -104,8 +104,8 @@ let private startProcess (fileName: string) (args: string) (workingDir: string) 
             Arguments = args,
             WorkingDirectory = workingDir,
             UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
+            RedirectStandardOutput = redirectOutput,
+            RedirectStandardError = redirectOutput,
             CreateNoWindow = true
         )
 
@@ -154,6 +154,7 @@ let startServer () =
                 $"""run --project "{serverProjectPath}" -- "{worktreeRoot}" --port 5001 --test-fixtures "{fixturesPath}" """
                 repoRoot
                 []
+                false
 
         serverProcess.Value <- Some proc
         do! waitForUrl serverUrl 30000
@@ -165,7 +166,7 @@ let compileFable () =
         let outDir = Path.Combine(clientDir, "output")
 
         let proc =
-            startProcess "dotnet" $"fable {clientDir} --outDir {outDir}" repoRoot []
+            startProcess "dotnet" $"fable {clientDir} --outDir {outDir}" repoRoot [] true
 
         let! stdout = proc.StandardOutput.ReadToEndAsync()
         let! stderr = proc.StandardError.ReadToEndAsync()
@@ -191,6 +192,7 @@ let startVite () =
                 [ "VITE_PORT", "5174"
                   "API_PORT", "5001"
                   "NODE_OPTIONS", "--max-old-space-size=512" ]
+                false
 
         viteProcess.Value <- Some proc
         do! waitForUrl viteUrl 15000
