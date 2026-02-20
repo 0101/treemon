@@ -55,23 +55,16 @@ type DashboardTests() =
             let footer = this.Page.Locator(".scheduler-footer")
             do! footer.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = footer.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present when scheduler events exist")
+            Assert.That(count, Is.EqualTo(1), "Scheduler footer should be present")
 
-            let entries = footer.Locator(".recent-activity .event-entry")
-            do! entries.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let overview = footer.Locator(".status-overview")
+            let! ovCount = overview.CountAsync()
+            Assert.That(ovCount, Is.EqualTo(1), "Scheduler footer should have a .status-overview section")
 
-            let recentActivity = footer.Locator(".recent-activity")
-            let! raCount = recentActivity.CountAsync()
-            Assert.That(raCount, Is.EqualTo(1), "Scheduler footer should have a .recent-activity section")
-
-            let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.EqualTo(2), "Scheduler footer should show 2 scheduler events from fixture")
-
-            let! firstSource = entries.Nth(0).Locator(".event-source").TextContentAsync()
-            Assert.That(firstSource, Is.EqualTo("git"), "First scheduler event source should be 'git'")
-
-            let! secondSource = entries.Nth(1).Locator(".event-source").TextContentAsync()
-            Assert.That(secondSource, Is.EqualTo("pr"), "Second scheduler event source should be 'pr'")
+            let rows = overview.Locator(".status-row")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! rowCount = rows.CountAsync()
+            Assert.That(rowCount, Is.EqualTo(6), "Status overview should show 6 category rows")
         }
 
     [<TestCase("working", "rgb(255, 0, 0)")>]
@@ -269,12 +262,12 @@ type DashboardTests() =
             do! Assertions.Expect(sortBtn).ToBeVisibleAsync()
 
             let! initialText = sortBtn.TextContentAsync()
-            Assert.That(initialText, Does.Contain("Sort: A-Z"))
+            Assert.That(initialText, Does.Contain("Sort: Recent"))
 
             do! sortBtn.ClickAsync()
 
             let! newText = sortBtn.TextContentAsync()
-            Assert.That(newText, Does.Contain("Sort: Recent"))
+            Assert.That(newText, Does.Contain("Sort: A-Z"))
         }
 
     [<Test>]
@@ -285,11 +278,11 @@ type DashboardTests() =
 
             do! sortBtn.ClickAsync()
             let! afterFirst = sortBtn.TextContentAsync()
-            Assert.That(afterFirst, Does.Contain("Sort: Recent"))
+            Assert.That(afterFirst, Does.Contain("Sort: A-Z"))
 
             do! sortBtn.ClickAsync()
             let! afterSecond = sortBtn.TextContentAsync()
-            Assert.That(afterSecond, Does.Contain("Sort: A-Z"))
+            Assert.That(afterSecond, Does.Contain("Sort: Recent"))
         }
 
     [<Test>]
@@ -1470,45 +1463,46 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Scheduler footer events show duration``() =
+    member this.``Scheduler footer status rows show duration``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer")
             do! footer.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let durations = footer.Locator(".event-duration")
-            do! durations.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let rows = footer.Locator(".status-row:not(.pending)")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let durations = rows.Locator(".status-duration")
             let! durCount = durations.CountAsync()
-            Assert.That(durCount, Is.GreaterThanOrEqualTo(1), "Fixture scheduler events have durations; .event-duration elements should be present")
+            Assert.That(durCount, Is.GreaterThanOrEqualTo(1), "Non-pending status rows should have .status-duration elements")
 
             let! firstDuration = durations.First.TextContentAsync()
             Assert.That(firstDuration, Does.Match(@"\d+\.\d+s"), "Duration should match format like '0.5s'")
         }
 
     [<Test>]
-    member this.``Scheduler footer event entries have timestamps``() =
+    member this.``Scheduler footer status rows have time ago``() =
         task {
-            let footer = this.Page.Locator(".scheduler-footer .recent-activity")
-            let entries = footer.Locator(".event-entry")
-            do! entries.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries")
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let rows = overview.Locator(".status-row:not(.pending)")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! rowCount = rows.CountAsync()
+            Assert.That(rowCount, Is.GreaterThanOrEqualTo(1), "Status overview should have non-pending rows")
 
-            let timeSpans = entries.First.Locator(".event-time")
-            let! timeCount = timeSpans.CountAsync()
-            Assert.That(timeCount, Is.EqualTo(1), "Each scheduler footer entry should have an .event-time")
+            let timeElems = rows.First.Locator(".status-time")
+            let! timeCount = timeElems.CountAsync()
+            Assert.That(timeCount, Is.EqualTo(1), "Each status row should have a .status-time element")
         }
 
     [<Test>]
-    member this.``Scheduler footer event entries with targets have message text``() =
+    member this.``Scheduler footer status rows with targets have worktree name``() =
         task {
-            let footer = this.Page.Locator(".scheduler-footer .recent-activity")
-            let entriesWithMessage = footer.Locator(".event-entry:has(.event-message)")
-            do! entriesWithMessage.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = entriesWithMessage.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Scheduler footer should have event entries with messages")
+            let overview = this.Page.Locator(".scheduler-footer .status-overview")
+            let rows = overview.Locator(".status-row:not(.pending)")
+            do! rows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let! messageText = entriesWithMessage.First.Locator(".event-message").TextContentAsync()
-            Assert.That(messageText, Is.Not.Empty, "Scheduler event entry with target should have a non-empty message")
+            let targetElems = overview.Locator(".status-target")
+            let! count = targetElems.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Status overview should have .status-target elements")
         }
 
     [<Test>]

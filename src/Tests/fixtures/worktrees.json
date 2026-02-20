@@ -163,17 +163,17 @@
     "IsReady": true,
     "SchedulerEvents": [
       {
-        "Source": "git",
-        "Message": "Refreshed feature-active",
+        "Source": "GitRefresh",
+        "Message": "feature-active (3 commits, +45/-12)",
         "Timestamp": "2026-02-16T22:55:00+00:00",
-        "Status": null,
+        "Status": "Succeeded",
         "Duration": 520.0
       },
       {
-        "Source": "pr",
-        "Message": "Refreshed PR statuses",
+        "Source": "PrFetch",
+        "Message": "",
         "Timestamp": "2026-02-16T22:54:00+00:00",
-        "Status": null,
+        "Status": "Succeeded",
         "Duration": 1200.0
       }
     ],

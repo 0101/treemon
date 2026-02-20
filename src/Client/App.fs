@@ -57,7 +57,7 @@ let init () =
       IsLoading = true
       HasError = false
       IsReady = false
-      SortMode = ByName
+      SortMode = ByActivity
       IsCompact = false
       SchedulerEvents = []
       BranchEvents = Map.empty
@@ -322,27 +322,50 @@ let eventLog (events: CardEvent list) =
             prop.children (evts |> List.map eventLogEntry)
         ]
 
-let schedulerEventEntry (evt: CardEvent) =
-    Html.div [
-        prop.className "event-entry"
-        prop.children [
-            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
-            Html.span [ prop.className "event-source"; prop.text evt.Source ]
-            match evt.Message with
-            | "" -> Html.span [ prop.className "event-message" ]
-            | msg -> Html.span [ prop.className "event-message"; prop.text msg ]
-            match evt.Duration with
-            | Some d -> Html.span [ prop.className "event-duration"; prop.text (sprintf "%.1fs" d.TotalSeconds) ]
-            | None -> Html.none
-            match evt.Status with
-            | Some _ ->
-                Html.span [
-                    prop.className (stepStatusClassName evt.Status)
-                    prop.text (stepStatusText evt.Status)
-                ]
-            | None -> Html.none
+let knownCategories =
+    [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]
+
+let latestEventBySource (events: CardEvent list) =
+    events
+    |> List.sortByDescending (fun e -> e.Timestamp)
+    |> List.fold (fun acc evt ->
+        match Map.containsKey evt.Source acc with
+        | true -> acc
+        | false -> Map.add evt.Source evt acc) Map.empty
+
+let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string) =
+    match Map.tryFind category latestBySource with
+    | None ->
+        Html.div [
+            prop.className "status-row pending"
+            prop.children [
+                Html.span [ prop.className "status-category"; prop.text category ]
+                Html.span [ prop.className "status-target" ]
+                Html.span [ prop.className "status-duration" ]
+                Html.span [ prop.className "status-time" ]
+                Html.span [ prop.className "status-badge pending"; prop.text "pending" ]
+            ]
         ]
-    ]
+    | Some evt ->
+        let target = extractBranchName evt.Message |> Option.defaultValue ""
+        Html.div [
+            prop.className "status-row"
+            prop.children [
+                Html.span [ prop.className "status-category"; prop.text category ]
+                Html.span [ prop.className "status-target"; prop.text target ]
+                match evt.Duration with
+                | Some d -> Html.span [ prop.className "status-duration"; prop.text (sprintf "%.1fs" d.TotalSeconds) ]
+                | None -> Html.span [ prop.className "status-duration" ]
+                Html.span [ prop.className "status-time"; prop.text (relativeEventTime evt.Timestamp) ]
+                match evt.Status with
+                | Some _ ->
+                    Html.span [
+                        prop.className (stepStatusClassName evt.Status)
+                        prop.text (stepStatusText evt.Status)
+                    ]
+                | None -> Html.none
+            ]
+        ]
 
 let pinnedErrorEntry (evt: CardEvent) =
     Html.div [
@@ -363,29 +386,23 @@ let pinnedErrorEntry (evt: CardEvent) =
 
 let schedulerFooter (events: CardEvent list) =
     let errors = pinnedErrors events
-    let recent = events |> List.sortByDescending (fun e -> e.Timestamp) |> List.truncate 5
-    match errors, recent with
-    | [], [] -> Html.none
-    | _ ->
-        Html.div [
-            prop.className "scheduler-footer"
-            prop.children [
-                match errors with
-                | [] -> Html.none
-                | errs ->
-                    Html.div [
-                        prop.className "pinned-errors"
-                        prop.children (errs |> List.map pinnedErrorEntry)
-                    ]
-                match recent with
-                | [] -> Html.none
-                | _ ->
-                    Html.div [
-                        prop.className "recent-activity"
-                        prop.children (recent |> List.map schedulerEventEntry)
-                    ]
+    let latestBySource = latestEventBySource events
+    Html.div [
+        prop.className "scheduler-footer"
+        prop.children [
+            match errors with
+            | [] -> Html.none
+            | errs ->
+                Html.div [
+                    prop.className "pinned-errors"
+                    prop.children (errs |> List.map pinnedErrorEntry)
+                ]
+            Html.div [
+                prop.className "status-overview"
+                prop.children (knownCategories |> List.map (statusOverviewRow latestBySource))
             ]
         ]
+    ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
     let stripped =
@@ -708,9 +725,7 @@ let view model dispatch =
                     prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
                 ]
 
-            match model.SchedulerEvents with
-            | [] -> Html.none
-            | events -> schedulerFooter events
+            schedulerFooter model.SchedulerEvents
         ]
     ]
 

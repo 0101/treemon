@@ -132,10 +132,21 @@
         .pinned-errors .event-source { color: #f38ba8; opacity: 0.7; }
         .pinned-errors .event-time { color: #f38ba8; opacity: 0.5; }
         .pinned-errors .event-message { color: #f38ba8; }
-        .recent-activity {
-            display: flex; flex-direction: column; gap: 3px;
+        .status-overview {
+            display: flex; flex-direction: column; gap: 2px;
             padding: 4px 0;
         }
+        .status-row {
+            display: grid; grid-template-columns: 110px 1fr 50px 56px auto;
+            align-items: center; gap: 6px; padding: 2px 4px; border-radius: 3px;
+        }
+        .status-row:hover { background: rgba(255,255,255,0.03); }
+        .status-row.pending { opacity: 0.4; }
+        .status-category { color: #6c7086; white-space: nowrap; }
+        .status-target { color: #9399b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+        .status-duration { color: #6c7086; text-align: right; white-space: nowrap; }
+        .status-time { color: #585b70; text-align: right; white-space: nowrap; }
+        .status-badge.pending { color: #585b70; font-style: italic; }
 
         .main-behind-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
         .main-behind-row .main-behind { margin-bottom: 0; }

@@ -143,11 +143,11 @@ let private intervalOf = function
 
 let private buildTaskList (worktrees: GitWorktree.WorktreeInfo list) =
     [ RefreshWorktreeList
-      RefreshPr
-      RefreshFetch
       yield! worktrees |> List.map (fun wt -> RefreshGit wt.Path)
       yield! worktrees |> List.map (fun wt -> RefreshBeads wt.Path)
-      yield! worktrees |> List.map (fun wt -> RefreshClaude wt.Path) ]
+      yield! worktrees |> List.map (fun wt -> RefreshClaude wt.Path)
+      RefreshPr
+      RefreshFetch ]
 
 let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
