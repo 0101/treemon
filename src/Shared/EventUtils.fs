@@ -10,7 +10,11 @@ let extractBranchName (message: string) =
     | _ ->
         match message.IndexOf(": ") with
         | i when i > 0 -> Some message.[..i-1]
-        | _ -> None
+        | _ ->
+            let trimmed = message.Trim()
+            match trimmed.Length > 0 && not (message.Contains(" (")) && not (message.Contains(": ")) with
+            | true -> Some trimmed
+            | false -> None
 
 let eventKey (evt: CardEvent) =
     evt.Source, extractBranchName evt.Message |> Option.defaultValue ""

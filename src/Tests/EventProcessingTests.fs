@@ -21,9 +21,9 @@ type ExtractBranchNameTests() =
         Assert.That(result, Is.EqualTo(Some "main"))
 
     [<Test>]
-    member _.``Plain text without delimiter returns None``() =
+    member _.``Plain text without delimiter returns bare name``() =
         let result = extractBranchName "just-plain-text"
-        Assert.That(result, Is.EqualTo(None))
+        Assert.That(result, Is.EqualTo(Some "just-plain-text"))
 
     [<Test>]
     member _.``Empty string returns None``() =
@@ -70,10 +70,10 @@ type EventKeyTests() =
         Assert.That(key, Is.EqualTo(("Git", "main")))
 
     [<Test>]
-    member _.``Plain message uses empty string for branch``() =
+    member _.``Plain message uses bare name for branch``() =
         let evt = makeEvent "Scheduler" "tick"
         let key = eventKey evt
-        Assert.That(key, Is.EqualTo(("Scheduler", "")))
+        Assert.That(key, Is.EqualTo(("Scheduler", "tick")))
 
     [<Test>]
     member _.``Different sources produce different keys``() =
