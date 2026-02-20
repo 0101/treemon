@@ -419,6 +419,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("Fast")>]
     member this.``Dark theme: body has dark background color``() =
         task {
             let! bgColor = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
