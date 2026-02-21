@@ -166,10 +166,7 @@ type ComputeSleepMsTests() =
 type StateAgentTests() =
 
     let waitForAgent (agent: MailboxProcessor<StateMsg>) =
-        async {
-            let! _ = agent.PostAndAsyncReply(GetState)
-            return ()
-        }
+        agent.PostAndAsyncReply(GetState) |> Async.Ignore
 
     [<Test>]
     member _.``UpdateWorktreeList then UpdateGit populates state``() =

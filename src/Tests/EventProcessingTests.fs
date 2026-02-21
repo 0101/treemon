@@ -5,6 +5,20 @@ open NUnit.Framework
 open Shared
 open Shared.EventUtils
 
+module TestHelpers =
+    let makeEvent source message status timestamp : CardEvent =
+        { Source = source
+          Message = message
+          Timestamp = timestamp
+          Status = status
+          Duration = None }
+
+    let makeSimpleEvent source message =
+        makeEvent source message None DateTimeOffset.UtcNow
+
+    let makeStatusEvent source message status timestamp =
+        makeEvent source message (Some status) timestamp
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -56,35 +70,28 @@ type ExtractBranchNameTests() =
 [<Category("Fast")>]
 type EventKeyTests() =
 
-    let makeEvent source message =
-        { Source = source
-          Message = message
-          Timestamp = DateTimeOffset.UtcNow
-          Status = None
-          Duration = None }
-
     [<Test>]
     member _.``Composite key from source and extracted branch``() =
-        let evt = makeEvent "Git" "main (15s)"
+        let evt = TestHelpers.makeSimpleEvent "Git" "main (15s)"
         let key = eventKey evt
         Assert.That(key, Is.EqualTo(("Git", "main")))
 
     [<Test>]
     member _.``Plain message uses bare name for branch``() =
-        let evt = makeEvent "Scheduler" "tick"
+        let evt = TestHelpers.makeSimpleEvent "Scheduler" "tick"
         let key = eventKey evt
         Assert.That(key, Is.EqualTo(("Scheduler", "tick")))
 
     [<Test>]
     member _.``Different sources produce different keys``() =
-        let evt1 = makeEvent "Git" "main (5s)"
-        let evt2 = makeEvent "PR" "main (5s)"
+        let evt1 = TestHelpers.makeSimpleEvent "Git" "main (5s)"
+        let evt2 = TestHelpers.makeSimpleEvent "PR" "main (5s)"
         Assert.That(eventKey evt1, Is.Not.EqualTo(eventKey evt2))
 
     [<Test>]
     member _.``Same source and branch produce same key``() =
-        let evt1 = makeEvent "Git" "feature/x (10ms)"
-        let evt2 = makeEvent "Git" "feature/x (200ms)"
+        let evt1 = TestHelpers.makeSimpleEvent "Git" "feature/x (10ms)"
+        let evt2 = TestHelpers.makeSimpleEvent "Git" "feature/x (200ms)"
         Assert.That(eventKey evt1, Is.EqualTo(eventKey evt2))
 
 
@@ -93,12 +100,7 @@ type EventKeyTests() =
 [<Category("Fast")>]
 type PinnedErrorsTests() =
 
-    let makeEvent source message status timestamp =
-        { Source = source
-          Message = message
-          Timestamp = timestamp
-          Status = Some status
-          Duration = None }
+    let makeEvent = TestHelpers.makeStatusEvent
 
     let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)
 
@@ -194,12 +196,7 @@ type PinnedErrorsTests() =
 [<Category("Fast")>]
 type MergeWithPinnedErrorsTests() =
 
-    let makeEvent source message status timestamp =
-        { Source = source
-          Message = message
-          Timestamp = timestamp
-          Status = Some status
-          Duration = None }
+    let makeEvent = TestHelpers.makeStatusEvent
 
     let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)
 
@@ -283,7 +280,7 @@ type SortWorktreesTests() =
 
         let result = sortWorktrees ByName worktrees
 
-        let branches = result |> List.map (fun wt -> wt.Branch)
+        let branches = result |> List.map _.Branch
         Assert.That(branches, Is.EqualTo([ "alpha"; "middle"; "zebra" ]))
 
     [<Test>]
@@ -295,7 +292,7 @@ type SortWorktreesTests() =
 
         let result = sortWorktrees ByActivity worktrees
 
-        let branches = result |> List.map (fun wt -> wt.Branch)
+        let branches = result |> List.map _.Branch
         Assert.That(branches, Is.EqualTo([ "newest"; "middle"; "old" ]))
 
     [<Test>]
@@ -315,8 +312,7 @@ type SortWorktreesTests() =
         let resultName = sortWorktrees ByName worktrees
         let resultActivity = sortWorktrees ByActivity worktrees
 
-        Assert.That(resultName.Length, Is.EqualTo(1))
-        Assert.That(resultActivity.Length, Is.EqualTo(1))
+        Assert.That((resultName.Length, resultActivity.Length), Is.EqualTo((1, 1)))
 
     [<Test>]
     member _.``ByName is case-sensitive``() =
@@ -325,7 +321,7 @@ type SortWorktreesTests() =
               makeWorktree "alpha" baseTime ]
 
         let result = sortWorktrees ByName worktrees
-        let branches = result |> List.map (fun wt -> wt.Branch)
+        let branches = result |> List.map _.Branch
         Assert.That(branches, Is.EqualTo([ "Beta"; "alpha" ]))
 
     [<Test>]

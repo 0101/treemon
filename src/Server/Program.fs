@@ -14,7 +14,7 @@ let readAppVersion () =
         ""
     | true ->
         let json = System.IO.File.ReadAllText(path)
-        let doc = System.Text.Json.JsonDocument.Parse(json)
+        use doc = System.Text.Json.JsonDocument.Parse(json)
 
         match doc.RootElement.TryGetProperty("buildTime") with
         | true, elem -> elem.GetString()
@@ -36,21 +36,19 @@ let parseArgs (args: string array) =
                 exit 1
         | "--test-fixtures" :: path :: rest ->
             parse worktreeRoot port (Some path) rest
-        | path :: rest when worktreeRoot = None ->
+        | path :: rest when Option.isNone worktreeRoot ->
             parse (Some path) port testFixtures rest
         | [] -> worktreeRoot, port, testFixtures
         | unexpected :: _ ->
             eprintfn "Unexpected argument: %s" unexpected
             exit 1
 
-    let worktreeRoot, port, testFixtures = args |> Array.toList |> parse None 5000 None
-
-    match worktreeRoot with
-    | Some root ->
+    match args |> Array.toList |> parse None 5000 None with
+    | Some root, port, testFixtures ->
         { WorktreeRoot = root.TrimEnd([| '\\'; '/' |])
           Port = port
           TestFixtures = testFixtures }
-    | None ->
+    | None, _, _ ->
         eprintfn "Usage: Server <worktree-root-path> [--port <port>] [--test-fixtures <path>]"
         exit 1
 
@@ -58,9 +56,9 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
     let worktreeInfos =
         fixtures.Worktrees.Worktrees
         |> List.map (fun wt ->
-            ({ Path = wt.Path
-               Head = ""
-               Branch = Some wt.Branch }: GitWorktree.WorktreeInfo))
+            { Path = wt.Path
+              Head = ""
+              Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
     agent.Post(RefreshScheduler.UpdateWorktreeList worktreeInfos)
     Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees"
@@ -78,9 +76,7 @@ let main args =
     let appVersion = readAppVersion ()
     Log.log "Startup" $"App version: {appVersion}"
 
-    match config.TestFixtures with
-    | Some path -> Log.log "Startup" $"Test fixtures: {path}"
-    | None -> ()
+    config.TestFixtures |> Option.iter (fun path -> Log.log "Startup" $"Test fixtures: {path}")
 
     printfn "Monitoring worktrees under: %s" config.WorktreeRoot
 

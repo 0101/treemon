@@ -141,11 +141,7 @@ let getUpstreamBranch (worktreePath: string) =
             output
             |> Option.bind (fun s ->
                 let trimmed = s.Trim()
-
-                if String.IsNullOrEmpty(trimmed) then
-                    None
-                else
-                    Some trimmed)
+                if String.IsNullOrEmpty(trimmed) then None else Some trimmed)
     }
 
 let isDirty (worktreePath: string) =
@@ -171,29 +167,20 @@ let getCommitCount (worktreePath: string) =
             |> Option.defaultValue 0
     }
 
+let private extractRegexInt (pattern: string) (text: string) =
+    let m = System.Text.RegularExpressions.Regex.Match(text, pattern)
+    if m.Success then Int32.Parse(m.Groups.[1].Value: string) else 0
+
 let parseDiffStats (output: string option) =
     output
     |> Option.bind (fun s ->
-        let trimmed = s.Trim()
-
-        match trimmed with
+        match s.Trim() with
         | "" -> None
-        | _ ->
-            let insertions =
-                System.Text.RegularExpressions.Regex.Match(trimmed, @"(\d+) insertion")
-                |> fun m ->
-                    match m.Success with
-                    | true -> Int32.Parse(m.Groups.[1].Value)
-                    | false -> 0
-
-            let deletions =
-                System.Text.RegularExpressions.Regex.Match(trimmed, @"(\d+) deletion")
-                |> fun m ->
-                    match m.Success with
-                    | true -> Int32.Parse(m.Groups.[1].Value)
-                    | false -> 0
-
-            Some(insertions, deletions))
+        | trimmed ->
+            Some(
+                extractRegexInt @"(\d+) insertion" trimmed,
+                extractRegexInt @"(\d+) deletion" trimmed
+            ))
     |> Option.defaultValue (0, 0)
 
 let getDiffStats (worktreePath: string) =
@@ -220,11 +207,8 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
 
         let upstreamBranch =
             upstream
-            |> Option.map (fun (u: string) ->
-                if u.StartsWith("origin/") then
-                    u.["origin/".Length..]
-                else
-                    u)
+            |> Option.map (fun u ->
+                if u.StartsWith("origin/") then u.["origin/".Length..] else u)
 
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with
@@ -253,7 +237,7 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
         match removeResult with
         | Error msg -> return Error $"git worktree remove failed: {msg}"
         | Ok _ ->
-            let! branchResult = runGitResult repoRoot $"branch -D {branch}"
+            let! branchResult = runGitResult repoRoot $"branch -D -- {branch}"
 
             match branchResult with
             | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"

@@ -65,15 +65,15 @@ type SmokeTests() =
 
     let rec waitForReady (client: HttpClient) (deadline: DateTime) : Async<string> =
         async {
-            match DateTime.UtcNow > deadline with
-            | true -> return failwith "Timed out waiting for IsReady=true (30s)"
-            | false ->
+            if DateTime.UtcNow > deadline then
+                return failwith "Timed out waiting for IsReady=true (30s)"
+            else
                 try
                     let! statusCode, body = pollApi client
 
-                    match statusCode < 500 && body.Contains("\"IsReady\":true") with
-                    | true -> return body
-                    | false ->
+                    if statusCode < 500 && body.Contains("\"IsReady\":true") then
+                        return body
+                    else
                         do! Async.Sleep 2000
                         return! waitForReady client deadline
                 with
@@ -99,8 +99,7 @@ type SmokeTests() =
     member _.``Server returns IsReady=true with real data within 30s``() =
         task {
             use client = new HttpClient()
-            let deadline = DateTime.UtcNow.AddSeconds(30.0)
-            let! body = waitForReady client deadline |> Async.StartAsTask
+            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
             TestContext.Out.WriteLine($"API response (first 1000 chars): {body.Substring(0, Math.Min(1000, body.Length))}")
             Assert.That(body, Does.Contain("\"IsReady\":true"), "API should return IsReady=true after scheduler populates data")
         }
@@ -109,8 +108,7 @@ type SmokeTests() =
     member _.``At least one worktree with Branch and LastCommitTime populated``() =
         task {
             use client = new HttpClient()
-            let deadline = DateTime.UtcNow.AddSeconds(30.0)
-            let! body = waitForReady client deadline |> Async.StartAsTask
+            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
 
             Assert.That(body, Does.Contain("\"Branch\":"), "Response should contain at least one worktree with a Branch field")
             Assert.That(body, Does.Contain("\"LastCommitTime\":"), "Response should contain at least one worktree with LastCommitTime")
@@ -122,8 +120,7 @@ type SmokeTests() =
     member _.``SchedulerEvents is non-empty after first refresh``() =
         task {
             use client = new HttpClient()
-            let deadline = DateTime.UtcNow.AddSeconds(30.0)
-            let! body = waitForReady client deadline |> Async.StartAsTask
+            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
 
             Assert.That(body, Does.Contain("\"SchedulerEvents\":"), "Response should contain SchedulerEvents field")
             Assert.That(body, Does.Not.Contain("\"SchedulerEvents\":[]"), "SchedulerEvents should not be empty after scheduler has run")
@@ -133,8 +130,7 @@ type SmokeTests() =
     member _.``Server process exits cleanly after kill``() =
         task {
             use client = new HttpClient()
-            let deadline = DateTime.UtcNow.AddSeconds(30.0)
-            let! _ = waitForReady client deadline |> Async.StartAsTask
+            let! _ = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
 
             match serverProc with
             | None -> Assert.Fail("Server process reference is missing")

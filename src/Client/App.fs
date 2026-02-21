@@ -71,8 +71,7 @@ let update msg model =
     | DataLoaded response ->
         match model.AppVersion with
         | Some v when v <> response.AppVersion ->
-            Dom.window.location.reload ()
-            model, Cmd.none
+            model, Cmd.ofEffect (fun _ -> Dom.window.location.reload ())
         | _ ->
             { model with
                 Worktrees = sortWorktrees model.SortMode response.Worktrees
@@ -147,11 +146,10 @@ let pollingSubscription (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    match hasSyncRunning model.BranchEvents with
-    | true ->
+    if hasSyncRunning model.BranchEvents then
         [ [ "polling" ], worktreePolling
           [ "sync-polling" ], syncPolling ]
-    | false ->
+    else
         [ [ "polling" ], worktreePolling ]
 
 let relativeTime (dt: System.DateTimeOffset) =
@@ -177,16 +175,14 @@ let isMerged (wt: WorktreeStatus) =
 
 let cardClassName (wt: WorktreeStatus) =
     let cc = ccClassName wt.Claude
-    match isMerged wt with
-    | true  -> $"wt-card cc-{cc} merged"
-    | false -> $"wt-card cc-{cc}"
+    if isMerged wt then $"wt-card cc-{cc} merged" else $"wt-card cc-{cc}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
 
 let segmentPct count total =
     match total with
-    | 0 -> 0
-    | _ -> (count * 100) / total
+    | 0 -> 0.0
+    | _ -> (float count * 100.0) / float total
 
 let beadsCounts (className: string) (b: BeadsSummary) =
     Html.span [
@@ -221,16 +217,15 @@ let beadsProgressBar (b: BeadsSummary) =
     ]
 
 let mainBehindIndicator (count: int) =
-    match count with
-    | 0 ->
+    if count = 0 then
         Html.span [
             prop.className "main-behind up-to-date"
             prop.text "up to date"
         ]
-    | n ->
+    else
         Html.span [
-            prop.className (match n > 20 with true -> "main-behind behind-warning" | false -> "main-behind")
-            prop.text ($"{n} behind main")
+            prop.className (if count > 20 then "main-behind behind-warning" else "main-behind")
+            prop.text ($"{count} behind main")
         ]
 
 let isBranchSyncing (events: CardEvent list) =
@@ -240,19 +235,18 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
     let syncing = isBranchSyncing branchEvents
     let claudeBlocked = wt.Claude = Working || wt.Claude = WaitingForUser
     let disabled = syncing || claudeBlocked
-    match syncing with
-    | true ->
+    if syncing then
         Html.button [
             prop.className "sync-cancel-btn"
             prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
             prop.text "Cancel"
         ]
-    | false ->
+    else
         Html.button [
-            prop.className (match disabled with true -> "sync-btn disabled" | false -> "sync-btn")
+            prop.className (if disabled then "sync-btn disabled" else "sync-btn")
             prop.disabled disabled
             prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync wt.Branch))
-            prop.title (match claudeBlocked with true -> "Claude is active" | false -> "Sync with main")
+            prop.title (if claudeBlocked then "Claude is active" else "Sync with main")
             prop.text "Sync"
         ]
 
@@ -261,16 +255,13 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
         prop.className "main-behind-row"
         prop.children [
             mainBehindIndicator wt.MainBehindCount
-            match wt.MainBehindCount with
-            | 0 -> ()
-            | _ ->
-                match wt.IsDirty with
-                | true ->
+            if wt.MainBehindCount > 0 then
+                if wt.IsDirty then
                     Html.span [
                         prop.className "dirty-warning"
                         prop.text "uncommitted changes"
                     ]
-                | false -> syncButton dispatch wt branchEvents
+                else syncButton dispatch wt branchEvents
         ]
     ]
 
@@ -400,12 +391,12 @@ let schedulerFooter (events: CardEvent list) (latestByCategory: Map<string, Card
 
 let abbreviatePipelineName (repoName: string) (name: string) =
     let stripped =
-        match name.Length >= repoName.Length && name.StartsWith(repoName, System.StringComparison.OrdinalIgnoreCase) with
-        | true -> name.[repoName.Length..].TrimStart()
-        | false -> name
-    match stripped.EndsWith(" - pr", System.StringComparison.OrdinalIgnoreCase) with
-    | true -> stripped.[..stripped.Length-6].TrimEnd()
-    | false -> stripped
+        if name.Length >= repoName.Length && name.StartsWith(repoName, System.StringComparison.OrdinalIgnoreCase)
+        then name.[repoName.Length..].TrimStart()
+        else name
+    if stripped.EndsWith(" - pr", System.StringComparison.OrdinalIgnoreCase)
+    then stripped.[..stripped.Length-6].TrimEnd()
+    else stripped
 
 let buildBadge (repoName: string) (build: BuildInfo) =
     let statusText =
@@ -419,10 +410,7 @@ let buildBadge (repoName: string) (build: BuildInfo) =
     let text =
         match build.Failure with
         | Some f -> $"{f.StepName}: {statusText}"
-        | None ->
-            match abbreviated with
-            | "" -> statusText
-            | name -> $"{name}: {statusText}"
+        | None -> if abbreviated = "" then statusText else $"{abbreviated}: {statusText}"
     let className =
         match build.Status with
         | Building -> "build-badge building"
@@ -482,8 +470,7 @@ let deleteButton dispatch (wt: WorktreeStatus) =
 
 let prBadgeContent (repoName: string) (pr: PrInfo) =
     React.fragment [
-        match pr.IsMerged with
-        | true ->
+        if pr.IsMerged then
             Interop.createElement "a" [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
@@ -491,20 +478,18 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                 prop.target "_blank"
                 prop.text "Merged"
             ]
-        | false ->
+        else
             Interop.createElement "a" [
-                prop.className (match pr.IsDraft with true -> "pr-badge draft" | false -> "pr-badge")
+                prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title
                 prop.href pr.Url
                 prop.target "_blank"
                 prop.text ($"PR #{pr.Id}")
             ]
-            match pr.ThreadCounts.Total with
-            | 0 -> Html.none
-            | total ->
+            if pr.ThreadCounts.Total > 0 then
                 Html.span [
-                    prop.className (match pr.ThreadCounts.Unresolved with 0 -> "thread-badge dimmed" | _ -> "thread-badge")
-                    prop.text ($"{pr.ThreadCounts.Unresolved}/{total} threads")
+                    prop.className (if pr.ThreadCounts.Unresolved = 0 then "thread-badge dimmed" else "thread-badge")
+                    prop.text ($"{pr.ThreadCounts.Unresolved}/{pr.ThreadCounts.Total} threads")
                 ]
             buildBadges repoName pr.Builds
     ]
@@ -540,9 +525,8 @@ let workMetricsView (metrics: WorkMetrics option) =
                             Html.span [ prop.className "commit-square" ])
                     )
                 ]
-                match overflow with
-                | 0 -> Html.none
-                | n -> Html.span [ prop.className "commit-overflow"; prop.text $"+{n}" ]
+                if overflow > 0 then
+                    Html.span [ prop.className "commit-overflow"; prop.text $"+{overflow}" ]
                 match m.LinesAdded, m.LinesRemoved with
                 | 0, 0 -> Html.none
                 | added, removed ->
@@ -559,6 +543,7 @@ let workMetricsView (metrics: WorkMetrics option) =
 
 let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
     Html.div [
+        prop.key wt.Branch
         prop.className (cardClassName wt + " compact")
         prop.children [
             Html.div [
@@ -585,6 +570,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
 
 let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt: WorktreeStatus) =
     Html.div [
+        prop.key wt.Branch
         prop.className (cardClassName wt)
         prop.children [
             Html.div [
@@ -668,12 +654,10 @@ let view model dispatch =
                             Html.h1 [
                                 prop.children [
                                     Html.text "Treemon"
-                                    match model.RootFolderName with
-                                    | "" -> Html.none
-                                    | name ->
+                                    if model.RootFolderName <> "" then
                                         Html.span [
                                             prop.className "folder-accent"
-                                            prop.text ($": {name}")
+                                            prop.text ($": {model.RootFolderName}")
                                         ]
                                 ]
                             ]
@@ -686,7 +670,7 @@ let view model dispatch =
                                         prop.text ($"Sort: {sortLabel model.SortMode}")
                                     ]
                                     Html.button [
-                                        prop.className (match model.IsCompact with true -> "ctrl-btn active" | false -> "ctrl-btn")
+                                        prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
                                         prop.onClick (fun _ -> dispatch ToggleCompact)
                                         prop.text "Compact"
                                     ]
@@ -697,9 +681,8 @@ let view model dispatch =
                     Html.div [
                         prop.className "status-bar"
                         prop.children [
-                            match model.IsReady, model.Worktrees with
-                            | false, [] -> Html.span "Waiting for first refresh..."
-                            | _ -> ()
+                            if not model.IsReady && model.Worktrees.IsEmpty then
+                                Html.span "Waiting for first refresh..."
                         ]
                     ]
                 ]
@@ -711,9 +694,9 @@ let view model dispatch =
                     prop.text "Failed to fetch data. Showing last known state."
                 ]
 
-            match model.IsReady, model.Worktrees with
-            | false, [] -> skeletonGrid ()
-            | _ ->
+            if not model.IsReady && model.Worktrees.IsEmpty then
+                skeletonGrid ()
+            else
                 Html.div [
                     prop.className "card-grid"
                     prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))

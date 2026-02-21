@@ -1,6 +1,9 @@
 module Server.ProcessRunner
 
 open System.Diagnostics
+open System.Threading
+
+let private processTimeoutMs = 60_000
 
 let private truncate (s: string) =
     if s.Length > 200 then s.[..199] + "..." else s
@@ -21,14 +24,30 @@ let private startAndCapture (context: string) (fileName: string) (arguments: str
                 )
 
             use proc = Process.Start(psi)
-            let stdoutTask = proc.StandardOutput.ReadToEndAsync()
-            let stderrTask = proc.StandardError.ReadToEndAsync()
-            do! proc.WaitForExitAsync() |> Async.AwaitTask
-            let! stdout = stdoutTask |> Async.AwaitTask
-            let! stderr = stderrTask |> Async.AwaitTask
+            use cts = new CancellationTokenSource(processTimeoutMs)
+            let ct = cts.Token
 
-            Log.log context $"{cmdString} -> exit {proc.ExitCode}, stdout: {truncate (stdout.TrimEnd())}, stderr: {truncate (stderr.TrimEnd())}"
-            return Ok(proc.ExitCode, stdout.TrimEnd(), stderr.TrimEnd())
+            let! waitResult =
+                async {
+                    try
+                        let stdoutTask = proc.StandardOutput.ReadToEndAsync(ct)
+                        let stderrTask = proc.StandardError.ReadToEndAsync(ct)
+                        do! proc.WaitForExitAsync(ct) |> Async.AwaitTask
+                        let! stdout = stdoutTask |> Async.AwaitTask
+                        let! stderr = stderrTask |> Async.AwaitTask
+                        return Ok(proc.ExitCode, stdout.TrimEnd(), stderr.TrimEnd())
+                    with :? System.OperationCanceledException ->
+                        try proc.Kill(entireProcessTree = true) with _ -> ()
+                        return Error $"Timed out after {processTimeoutMs}ms"
+                }
+
+            match waitResult with
+            | Ok(exitCode, stdout, stderr) ->
+                Log.log context $"{cmdString} -> exit {exitCode}, stdout: {truncate stdout}, stderr: {truncate stderr}"
+                return Ok(exitCode, stdout, stderr)
+            | Error msg ->
+                Log.log context $"{cmdString} -> {msg}"
+                return Error msg
         with :? System.ComponentModel.Win32Exception as ex ->
             Log.log context $"{cmdString} -> failed to start: {ex.Message}"
             return Error ex.Message

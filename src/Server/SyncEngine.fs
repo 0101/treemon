@@ -29,8 +29,7 @@ type ProcessResult =
 
 type SyncProcess =
     { State: SyncState
-      CancellationTokenSource: CancellationTokenSource
-      RunningProcess: Process option }
+      CancellationTokenSource: CancellationTokenSource }
 
 let private syncProcesses = ConcurrentDictionary<string, SyncProcess>()
 
@@ -130,17 +129,16 @@ let runProcess
     }
 
 let isRunning (branch: string) : bool =
-    match syncProcesses.TryGetValue(branch) with
-    | true, sp ->
-        match sp.State with
-        | SyncState.Running _ -> true
-        | _ -> false
-    | false, _ -> false
+    syncProcesses.TryGetValue(branch)
+    |> function
+       | true, { State = SyncState.Running _ } -> true
+       | _ -> false
 
 let getState (branch: string) : SyncState =
-    match syncProcesses.TryGetValue(branch) with
-    | true, sp -> sp.State
-    | false, _ -> SyncState.Idle
+    syncProcesses.TryGetValue(branch)
+    |> function
+       | true, sp -> sp.State
+       | false, _ -> SyncState.Idle
 
 let beginSync (branch: string) : Result<CancellationToken, string> =
     match isRunning branch with
@@ -150,8 +148,7 @@ let beginSync (branch: string) : Result<CancellationToken, string> =
 
         let sp =
             { State = SyncState.Running SyncStep.CheckClean
-              CancellationTokenSource = cts
-              RunningProcess = None }
+              CancellationTokenSource = cts }
 
         syncProcesses.AddOrUpdate(branch, sp, fun _ _ -> sp) |> ignore
         branchEvents.AddOrUpdate(branch, [], fun _ _ -> []) |> ignore
@@ -183,8 +180,7 @@ let completeSync (branch: string) (result: StepStatus) =
 
         updateProcess branch (fun s ->
             { s with
-                State = finalState
-                RunningProcess = None })
+                State = finalState })
 
         sp.CancellationTokenSource.Dispose()
     | false, _ -> ()
@@ -210,6 +206,16 @@ let cancelSync (branch: string) =
         | _ -> ()
     | false, _ -> ()
 
+let private isValidSolutionPath (worktreePath: string) (solutionPath: string) =
+    let isSolutionExtension =
+        solutionPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+        || solutionPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
+
+    let fullPath = Path.Combine(worktreePath, solutionPath) |> Path.GetFullPath
+    let normalizedRoot = Path.GetFullPath(worktreePath)
+
+    isSolutionExtension && fullPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(fullPath)
+
 let private readTreemonConfig (worktreePath: string) : string option =
     let configPath = Path.Combine(worktreePath, ".treemon.json")
 
@@ -218,14 +224,24 @@ let private readTreemonConfig (worktreePath: string) : string option =
     | true ->
         try
             let json = File.ReadAllText(configPath)
-            let doc = System.Text.Json.JsonDocument.Parse(json)
+            use doc = System.Text.Json.JsonDocument.Parse(json)
 
             match doc.RootElement.TryGetProperty("testSolution") with
-            | true, elem -> Some(elem.GetString())
+            | true, elem ->
+                let solutionPath = elem.GetString()
+
+                match isValidSolutionPath worktreePath solutionPath with
+                | true -> Some solutionPath
+                | false ->
+                    Log.log "SyncEngine" $"testSolution '{solutionPath}' rejected: must be a .sln/.slnx file within {worktreePath}"
+                    None
             | false, _ -> None
         with ex ->
             Log.log "SyncEngine" $"Failed to read .treemon.json: {ex.Message}"
             None
+
+let private truncateStderr (stderr: string) (maxLen: int) : string =
+    if stderr = "" then "" else stderr.[..min (maxLen - 1) (stderr.Length - 1)]
 
 let private runStep
     (branch: string)
@@ -248,11 +264,7 @@ let private runStep
             addStepEvent branch step status cmdString
             return Error status
         | Ok proc when proc.ExitCode <> 0 ->
-            let msg =
-                match proc.Stderr with
-                | "" -> $"exit {proc.ExitCode}"
-                | stderr -> $"exit {proc.ExitCode}: {stderr.[..min 199 (stderr.Length - 1)]}"
-
+            let msg = $"exit {proc.ExitCode}: {truncateStderr proc.Stderr 200}"
             let status = StepStatus.Failed msg
             addStepEvent branch step status cmdString
             return Error status
@@ -308,11 +320,7 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                 addStepEvent branch SyncStep.Merge StepStatus.Succeeded "git merge origin/main"
             | _ ->
                 // Step 4: Conflict resolution
-                let mergeMsg =
-                    match mergeProc.Stderr with
-                    | "" -> $"exit {mergeProc.ExitCode}"
-                    | stderr -> $"exit {mergeProc.ExitCode}: {stderr.[..min 199 (stderr.Length - 1)]}"
-
+                let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
                 addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) "git merge origin/main"
 
                 let! conflictResult =
@@ -330,12 +338,12 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                     return ()
                 | Ok _ -> ()
 
-            // Step 5: Test (config from .treemon.json in repo root, default to 'dotnet test')
+            // Step 5: Test
             let testArgs =
                 match readTreemonConfig repoRoot with
                 | Some solutionPath ->
                     Log.log "SyncEngine" $"Using testSolution from .treemon.json: {solutionPath}"
-                    $"test {solutionPath}"
+                    $"""test "{solutionPath}" """
                 | None ->
                     Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
                     "test"

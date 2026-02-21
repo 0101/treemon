@@ -80,20 +80,19 @@ let private waitForUrl (url: string) (timeoutMs: int) : Task =
     work |> Async.StartAsTask :> Task
 
 let private resolveCmdShim (fileName: string) =
-    match Path.GetExtension(fileName) with
-    | "" ->
+    if Path.GetExtension(fileName) = "" then
         let cmdPath = $"{fileName}.cmd"
-
-        match
-            (Environment.GetEnvironmentVariable("PATH") |> Option.ofObj)
+        let pathDirs =
+            Environment.GetEnvironmentVariable("PATH")
+            |> Option.ofObj
             |> Option.map (fun p -> p.Split(Path.PathSeparator))
             |> Option.defaultValue [||]
-            |> Array.tryFind (fun dir ->
-                File.Exists(Path.Combine(dir, cmdPath)))
-        with
+
+        match Array.tryFind (fun dir -> File.Exists(Path.Combine(dir, cmdPath))) pathDirs with
         | Some dir -> Path.Combine(dir, cmdPath)
         | None -> fileName
-    | _ -> fileName
+    else
+        fileName
 
 let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) (redirectOutput: bool) =
     let resolved = resolveCmdShim fileName
@@ -113,6 +112,13 @@ let private startProcess (fileName: string) (args: string) (workingDir: string) 
     Process.Start(psi)
 
 let private killOrphansOnPort (port: int) =
+    let extractPidsFromNetstat (output: string) (port: int) =
+        let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
+        pattern.Matches(output)
+        |> Seq.cast<Match>
+        |> Seq.map (fun m -> int m.Groups.[1].Value)
+        |> Seq.distinct
+
     try
         let psi =
             ProcessStartInfo(
@@ -127,12 +133,7 @@ let private killOrphansOnPort (port: int) =
         let output = proc.StandardOutput.ReadToEnd()
         proc.WaitForExit(5000) |> ignore
 
-        let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
-
-        pattern.Matches(output)
-        |> Seq.cast<Match>
-        |> Seq.map (fun m -> int m.Groups.[1].Value)
-        |> Seq.distinct
+        extractPidsFromNetstat output port
         |> Seq.iter (fun pid ->
             try
                 use orphan = Process.GetProcessById(pid)
@@ -216,8 +217,7 @@ let private killProc (procOpt: Process option) =
             TestContext.Error.WriteLine($"Failed to kill process: {ex.Message}"))
 
 let private formatBytes (bytes: int64) =
-    let mb = float bytes / (1024.0 * 1024.0)
-    $"%.1f{mb} MB"
+    sprintf "%.1f MB" (float bytes / (1024.0 * 1024.0))
 
 let stopAll () =
     let stats = getMemoryStats ()

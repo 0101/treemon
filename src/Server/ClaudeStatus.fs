@@ -41,7 +41,7 @@ let private readLastLines (filePath: string) (maxLines: int) =
 
             use reader = new StreamReader(stream)
             let content = reader.ReadToEnd()
-            let lines = content.Split('\n')
+            let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.None)
 
             // If we didn't read the whole file, the first line might be partial
             let linesToProcess =
@@ -108,7 +108,9 @@ let private tryParseEntryKind (line: string) =
                 | _ -> Some AssistantDone
             | _ -> None
         | _ -> None
-    with _ -> None
+    with ex ->
+        Log.log "Claude" $"Failed to parse entry kind: {ex.Message}"
+        None
 
 let private statusFromEntry entryKind =
     match entryKind with
@@ -125,19 +127,15 @@ let getClaudeStatus (worktreePath: string) =
     | Some fi ->
         try
             let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-
-            match age > TimeSpan.FromHours(2.0) with
-            | true -> Idle
-            | false ->
-                let jsonlStatus =
-                    readLastLines fi.FullName 20
-                    |> List.tryPick tryParseEntryKind
-                    |> Option.map statusFromEntry
-                    |> Option.defaultValue Idle
-
-                match jsonlStatus, age < TimeSpan.FromMinutes(1.0) with
-                | Done, true -> Working
-                | status, _ -> status
+            if age > TimeSpan.FromHours(2.0) then
+                Idle
+            else
+                readLastLines fi.FullName 20
+                |> List.tryPick tryParseEntryKind
+                |> Option.map statusFromEntry
+                |> Option.defaultValue Idle
+                |> fun status ->
+                    if status = Done && age < TimeSpan.FromMinutes(1.0) then Working else status
         with ex ->
             Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
             Idle
@@ -145,14 +143,12 @@ let getClaudeStatus (worktreePath: string) =
 
 let private truncateMessage (maxLen: int) (text: string) =
     let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
-
-    match singleLine.Length <= maxLen with
-    | true -> singleLine
-    | false -> singleLine.[..maxLen-1].TrimEnd() + "..."
+    if singleLine.Length <= maxLen then singleLine
+    else singleLine.[..maxLen-1].TrimEnd() + "..."
 
 let private tryParseAssistantText (line: string) =
     try
-        let doc = JsonDocument.Parse(line)
+        use doc = JsonDocument.Parse(line)
         let root = doc.RootElement
 
         match root.TryGetProperty("type") with
@@ -183,7 +179,8 @@ let private tryParseAssistantText (line: string) =
             | Some text, Some ts -> Some(text, ts)
             | _ -> None
         | _ -> None
-    with _ ->
+    with ex ->
+        Log.log "Claude" $"Failed to parse assistant text: {ex.Message}"
         None
 
 let getLastClaudeMessage (worktreePath: string) =

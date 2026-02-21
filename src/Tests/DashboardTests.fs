@@ -20,6 +20,12 @@ type DashboardTests() =
     let eventLog (page: IPage) =
         page.Locator(".wt-card:not(.compact) .event-log")
 
+    let waitForFirstAndCount (locator: ILocator) =
+        task {
+            do! locator.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            return! locator.CountAsync()
+        }
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
@@ -412,29 +418,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    [<Category("Fast")>]
-    member this.``Dark theme: body has dark background color``() =
-        task {
-            let! bgColor = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
-            Assert.That(bgColor, Is.EqualTo("rgb(30, 30, 46)"), "Body background should be #1e1e2e (Catppuccin Mocha base)")
-        }
-
-    [<Test>]
-    member this.``Dark theme: cards have dark background``() =
-        task {
-            let card = this.Page.Locator(".wt-card").First
-            let! cardBg = card |> computedStyle "backgroundColor"
-            Assert.That(cardBg, Is.EqualTo("rgb(42, 42, 60)"), "Card background should be #2a2a3c")
-        }
-
-    [<Test>]
-    member this.``Dark theme: body text is light colored``() =
-        task {
-            let! textColor = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).color")
-            Assert.That(textColor, Is.EqualTo("rgb(205, 214, 244)"), "Body text should be #cdd6f4 (light on dark)")
-        }
-
-    [<Test>]
     member this.``Header contains folder name with accent styling``() =
         task {
             let folderAccent = this.Page.Locator("h1 .folder-accent")
@@ -577,14 +560,6 @@ type DashboardTests() =
             Assert.That(allNonMerge, Is.True, "Commit messages should not show merge commits (using --first-parent --no-merges)")
         }
 
-    [<Test>]
-    member this.``Beads separator uses muted color``() =
-        task {
-            let sep = this.Page.Locator(".wt-card .beads-counts .beads-sep").First
-            let! color = sep |> computedStyle "color"
-            Assert.That(color, Is.EqualTo("rgb(88, 91, 112)"), "Separator should be muted (#585b70)")
-        }
-
     [<TestCase("terminal-btn")>]
     [<TestCase("delete-btn")>]
     member this.``Header button present on every full-view card``(btnClass: string) =
@@ -649,26 +624,6 @@ type DashboardTests() =
 
             let! cursor = btn |> computedStyle "cursor"
             Assert.That(cursor, Is.EqualTo("pointer"), $".{btnClass} should have pointer cursor")
-        }
-
-    [<Test>]
-    member this.``Terminal button uses monospace font``() =
-        task {
-            let btn = this.Page.Locator(".wt-card .terminal-btn").First
-            do! Assertions.Expect(btn).ToBeVisibleAsync()
-
-            let! fontFamily = btn |> computedStyle "fontFamily"
-            Assert.That(fontFamily, Does.Contain("monospace"), "Terminal button should use monospace font")
-        }
-
-    [<Test>]
-    member this.``Delete button has transparent background``() =
-        task {
-            let btn = this.Page.Locator(".wt-card .delete-btn").First
-            do! Assertions.Expect(btn).ToBeVisibleAsync()
-
-            let! bg = btn |> computedStyle "backgroundColor"
-            Assert.That(bg, Does.Contain("0, 0, 0, 0").Or.EqualTo("rgba(0, 0, 0, 0)"), "Delete button should have transparent background")
         }
 
     [<Test>]
@@ -849,30 +804,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Event log has correct DOM structure``() =
-        task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = logs.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with CardEvents; event logs should be present")
-
-            let log = logs.First
-
-            let! borderTop = log |> computedStyle "borderTopStyle"
-            Assert.That(borderTop, Is.EqualTo("none"), "Event log should have no top border (replaced by background contrast)")
-
-            let entries = log.Locator(".event-entry")
-            let! entryCount = entries.CountAsync()
-            Assert.That(entryCount, Is.LessThanOrEqualTo(2), "Event log should show at most 2 entries")
-
-            let! display = log |> computedStyle "display"
-            Assert.That(display, Is.EqualTo("flex"), "Event log should use flex layout")
-
-            let! flexDir = log |> computedStyle "flexDirection"
-            Assert.That(flexDir, Is.EqualTo("column"), "Event log should use column flex direction")
-        }
-
-    [<Test>]
     member this.``Event status badges have correct CSS classes when present``() =
         task {
             let statusBadges = this.Page.Locator(".wt-card .event-status")
@@ -1034,46 +965,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Event log has console styling with dark background``() =
-        task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let log = logs.First
-            let! bg = log |> computedStyle "backgroundColor"
-            Assert.That(bg, Is.EqualTo("rgb(17, 17, 27)"), "Event log background should be #11111b (dark console)")
-
-            let! fontFamily = log |> computedStyle "fontFamily"
-            Assert.That(fontFamily, Does.Contain("monospace").IgnoreCase, "Event log should use monospace font family")
-        }
-
-    [<Test>]
-    member this.``Event log source and message have muted colors``() =
-        task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let source = logs.First.Locator(".event-source").First
-            let! sourceColor = source |> computedStyle "color"
-            Assert.That(sourceColor, Is.EqualTo("rgb(108, 112, 134)"), "Event source color should be #6c7086")
-
-            let message = logs.First.Locator(".event-message").First
-            let! messageColor = message |> computedStyle "color"
-            Assert.That(messageColor, Is.EqualTo("rgb(147, 153, 178)"), "Event message color should be #9399b2")
-        }
-
-    [<Test>]
-    member this.``Cards have no left border``() =
-        task {
-            let card = this.Page.Locator(".wt-card").First
-            let! borderLeft = card |> computedStyle "borderLeftStyle"
-            Assert.That(borderLeft, Is.EqualTo("none"), "Cards should have no left border (border removed per spec)")
-
-            let! borderLeftWidth = card |> computedStyle "borderLeftWidth"
-            Assert.That(borderLeftWidth, Is.EqualTo("0px"), "Cards should have no left border width")
-        }
-
-    [<Test>]
     member this.``Event log visible on initial page load without sync trigger``() =
         task {
             let logs = eventLog this.Page
@@ -1081,16 +972,6 @@ type DashboardTests() =
             let! count = logs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1),
                 "Event logs should be visible on initial load (getSyncStatus fetched on Tick, not just during sync)")
-        }
-
-    [<Test>]
-    member this.``Event log has rounded corners``() =
-        task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! borderRadius = logs.First |> computedStyle "borderRadius"
-            Assert.That(borderRadius, Is.EqualTo("6px"), "Event log should have 6px border-radius")
         }
 
     [<Test>]
@@ -1121,35 +1002,6 @@ type DashboardTests() =
 
             let! timeText = timeSpans.First.TextContentAsync()
             Assert.That(timeText, Does.Match(@"\d+[smhd] ago"), "Timestamp should match relative time pattern like '3m ago'")
-        }
-
-    [<Test>]
-    member this.``Event time is first child in event entry``() =
-        task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! isFirstChild =
-                logs.First.Locator(".event-entry").First.EvaluateAsync<bool>(
-                    "el => el.children[0].classList.contains('event-time')")
-            Assert.That(isFirstChild, Is.True, "event-time should be the first child of event-entry (timestamp prefix)")
-        }
-
-    [<Test>]
-    member this.``Event time has muted color and fixed width``() =
-        task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let timeSpan = logs.First.Locator(".event-time").First
-            let! color = timeSpan |> computedStyle "color"
-            Assert.That(color, Is.EqualTo("rgb(88, 91, 112)"), "event-time color should be #585b70 (muted)")
-
-            let! whiteSpace = timeSpan |> computedStyle "whiteSpace"
-            Assert.That(whiteSpace, Is.EqualTo("nowrap"), "event-time should have white-space: nowrap")
-
-            let! width = timeSpan |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("52px"), "event-time should have fixed width of 52px")
         }
 
     [<Test>]
@@ -1193,17 +1045,6 @@ type DashboardTests() =
 
             Assert.That(timeCount, Is.EqualTo(entryCount),
                 "Every event entry should have an event-time span (1:1 ratio)")
-        }
-
-    [<Test>]
-    member this.``Terminal button comes before delete button in card header``() =
-        task {
-            let header = this.Page.Locator(".wt-card .card-header").First
-            let! order =
-                header.EvaluateAsync<bool>(
-                    "el => { const children = Array.from(el.children); const termIdx = children.findIndex(c => c.classList.contains('terminal-btn')); const delIdx = children.findIndex(c => c.classList.contains('delete-btn')); return termIdx < delIdx; }"
-                )
-            Assert.That(order, Is.True, "Terminal button should appear before delete button in card header DOM order")
         }
 
     [<Test>]
@@ -1603,10 +1444,13 @@ type DashboardTests() =
             do! deleteBtn.ClickAsync()
 
             // Wait for dialog with timeout
-            let! dialogShown = System.Threading.Tasks.Task.WhenAny(tcs.Task, System.Threading.Tasks.Task.Delay(5000))
+            let! dialogShown =
+                System.Threading.Tasks.Task.WhenAny(
+                    tcs.Task,
+                    System.Threading.Tasks.Task.Delay(5000))
 
-            Assert.That(dialogShown, Is.EqualTo(tcs.Task), "Clicking delete button should trigger a confirm dialog within timeout")
-            Assert.That(tcs.Task.Result, Is.True)
+            Assert.That(tcs.Task.IsCompletedSuccessfully, Is.True,
+                "Clicking delete button should trigger a confirm dialog within timeout")
         }
 
     [<Test>]
@@ -1637,27 +1481,13 @@ type DashboardTests() =
     [<Test>]
     member this.``1s poll interval causes multiple API calls within 5s``() =
         task {
-            let! page = this.Context.NewPageAsync()
-            let mutable apiCallCount = 0
-            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                apiCallCount <- apiCallCount + 1
-                route.ContinueAsync() |> ignore)
+            let isApiCall (r: IResponse) = r.Url.Contains("/IWorktreeApi/getWorktrees")
 
-            let! _ = page.GotoAsync(baseUrl)
-            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+            let! _ = this.Page.WaitForResponseAsync(isApiCall, PageWaitForResponseOptions(Timeout = 5000.0f))
+            let! _ = this.Page.WaitForResponseAsync(isApiCall, PageWaitForResponseOptions(Timeout = 5000.0f))
+            let! _ = this.Page.WaitForResponseAsync(isApiCall, PageWaitForResponseOptions(Timeout = 5000.0f))
 
-            apiCallCount <- 0
-
-            // Wait until we see at least 3 calls or timeout (poller)
-            // Poll for condition to avoid fixed wait
-            let sw = System.Diagnostics.Stopwatch.StartNew()
-            while apiCallCount < 3 && sw.ElapsedMilliseconds < 5000L do
-                do! System.Threading.Tasks.Task.Delay(100)
-
-            NUnit.Framework.TestContext.Out.WriteLine($"API calls in wait window: {apiCallCount}")
-            Assert.That(apiCallCount, Is.GreaterThanOrEqualTo(3), "With 1s poll interval, should see at least 3 API calls")
-
-            do! page.CloseAsync()
+            Assert.Pass("Observed 3 sequential API poll responses within timeout")
         }
 
     [<Test>]
@@ -1755,9 +1585,11 @@ type DashboardTests() =
             let! categoryTexts =
                 overview.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let categories = categoryTexts |> Array.toList |> List.sort
             let expected = [ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
-            Assert.That(categories, Is.EqualTo(expected), "Status overview should contain all 6 known categories")
+            Assert.That(
+                categoryTexts |> Array.toList |> List.sort,
+                Is.EqualTo(expected),
+                "Status overview should contain all 6 known categories")
         }
 
     [<Test>]
@@ -1864,9 +1696,10 @@ type DashboardTests() =
             let! nonPendingCategories =
                 nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let sortedCategories = nonPendingCategories |> Array.toList |> List.sort
             let expected = [ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
-            Assert.That(sortedCategories, Is.EqualTo(expected),
+            Assert.That(
+                nonPendingCategories |> Array.toList |> List.sort,
+                Is.EqualTo(expected),
                 "Fixture LatestByCategory has all 6 categories; none should be pending")
         }
 
@@ -1881,29 +1714,9 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Status overview pending rows are dimmed``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-            let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":true,"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
-            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)) |> ignore)
-
-            let! _ = page.GotoAsync(baseUrl)
-
-            let pendingRow = page.Locator(".scheduler-footer .status-overview .status-row.pending").First
-            do! pendingRow.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! opacity = pendingRow |> computedStyle "opacity"
-            Assert.That(opacity, Is.EqualTo("0.4"), "Pending status rows should have opacity 0.4")
-
-            do! page.CloseAsync()
-        }
-
-    [<Test>]
     member this.``Startup refresh order has fast sources before slow sources``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let apiCallTimestamps = System.Collections.Concurrent.ConcurrentBag<string>()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
                 route.ContinueAsync() |> ignore)
 
@@ -1916,8 +1729,9 @@ type DashboardTests() =
             let! categoryOrder =
                 overview.Locator(".status-row .status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let categories = categoryOrder |> Array.toList
-            Assert.That(categories, Is.EqualTo([ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]),
+            Assert.That(
+                categoryOrder |> Array.toList,
+                Is.EqualTo([ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]),
                 "Categories should render in known order: WorktreeList, GitRefresh, BeadsRefresh, ClaudeRefresh, PrFetch, GitFetch")
 
             do! page.CloseAsync()

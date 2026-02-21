@@ -79,19 +79,22 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             IsReady = true }
 
     | UpdateGit(path, gitData) ->
-        match Set.contains path state.KnownPaths with
-        | true -> { state with GitData = state.GitData |> Map.add path gitData }
-        | false -> state
+        if Set.contains path state.KnownPaths then
+            { state with GitData = state.GitData |> Map.add path gitData }
+        else
+            state
 
     | UpdateBeads(path, beads) ->
-        match Set.contains path state.KnownPaths with
-        | true -> { state with BeadsData = state.BeadsData |> Map.add path beads }
-        | false -> state
+        if Set.contains path state.KnownPaths then
+            { state with BeadsData = state.BeadsData |> Map.add path beads }
+        else
+            state
 
     | UpdateClaude(path, status) ->
-        match Set.contains path state.KnownPaths with
-        | true -> { state with ClaudeData = state.ClaudeData |> Map.add path status }
-        | false -> state
+        if Set.contains path state.KnownPaths then
+            { state with ClaudeData = state.ClaudeData |> Map.add path status }
+        else
+            state
 
     | UpdatePr prMap ->
         { state with PrData = prMap }
@@ -185,7 +188,7 @@ let private executeTask
             agent.Post(UpdateBeads(path, beads))
 
         | RefreshClaude path ->
-            let! status = async { return ClaudeStatus.getClaudeStatus path }
+            let status = ClaudeStatus.getClaudeStatus path
             agent.Post(UpdateClaude(path, status))
 
         | RefreshPr ->
@@ -253,7 +256,7 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
 let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.filter (fun task -> deadlineOf lastRuns task <= now)
-    |> List.tryFind (fun _ -> true)
+    |> List.tryHead
 
 let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks

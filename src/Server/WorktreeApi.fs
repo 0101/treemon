@@ -23,19 +23,18 @@ let private assembleFromState
     let gitData = state.GitData |> Map.tryFind wt.Path
     let beads = state.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
     let claude = state.ClaudeData |> Map.tryFind wt.Path |> Option.defaultValue ClaudeCodeStatus.Idle
-
     let upstreamBranch = gitData |> Option.bind (fun g -> g.UpstreamBranch)
     let pr = PrStatus.lookupPrStatus state.PrData upstreamBranch
 
     { Path = wt.Path
       Branch = wt.Branch |> Option.defaultValue "(detached)"
-      LastCommitMessage = gitData |> Option.map (fun g -> g.LastCommitMessage) |> Option.defaultValue ""
-      LastCommitTime = gitData |> Option.map (fun g -> g.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
+      LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
+      LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
       Claude = claude
       Pr = pr
-      MainBehindCount = gitData |> Option.map (fun g -> g.MainBehindCount) |> Option.defaultValue 0
-      IsDirty = gitData |> Option.map (fun g -> g.IsDirty) |> Option.defaultValue false
+      MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
+      IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind (fun g -> g.WorkMetrics) }
 
 let getWorktrees
@@ -70,14 +69,14 @@ let private openTerminal
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-        match Set.contains path state.KnownPaths with
-        | false ->
+        if not (Set.contains path state.KnownPaths) then
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
-        | true ->
+        else
+            let escapedPath = path.Replace("'", "''")
             let startInfo =
                 ProcessStartInfo(
                     FileName = "wt.exe",
-                    Arguments = $"""-w 0 new-tab pwsh -NoExit -Command "Set-Location '{path}'" """,
+                    Arguments = $"""-w 0 new-tab pwsh -NoExit -Command "Set-Location -LiteralPath '{escapedPath}'" """,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 )

@@ -77,7 +77,7 @@ type private ParsedPr =
 
 let private parsePrList (json: string) =
     try
-        let doc = JsonDocument.Parse(json)
+        use doc = JsonDocument.Parse(json)
         let prElements = doc.RootElement.EnumerateArray() |> Seq.toList
 
         let repoGuid =
@@ -132,7 +132,7 @@ let private parsePrList (json: string) =
 
 let private parseThreadCounts (json: string) =
     try
-        let doc = JsonDocument.Parse(json)
+        use doc = JsonDocument.Parse(json)
 
         let threads =
             doc.RootElement.GetProperty("value").EnumerateArray()
@@ -211,7 +211,7 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
 
 let private parseBuilds (remote: AzDoRemote) (json: string) =
     try
-        let doc = JsonDocument.Parse(json)
+        use doc = JsonDocument.Parse(json)
         let runs = doc.RootElement.GetProperty("value").EnumerateArray() |> Seq.toList
 
         runs
@@ -226,7 +226,7 @@ let private parseBuilds (remote: AzDoRemote) (json: string) =
 
 let private parseFailedStep (json: string) =
     try
-        let doc = JsonDocument.Parse(json)
+        use doc = JsonDocument.Parse(json)
         let records = doc.RootElement.GetProperty("records").EnumerateArray() |> Seq.toList
 
         records
@@ -248,7 +248,7 @@ let private parseFailedStep (json: string) =
 
 let private parseBuildLog (json: string) =
     try
-        let doc = JsonDocument.Parse(json)
+        use doc = JsonDocument.Parse(json)
 
         let lines =
             doc.RootElement.GetProperty("value").EnumerateArray()
@@ -258,15 +258,12 @@ let private parseBuildLog (json: string) =
         let trimmedLines =
             lines
             |> List.map (fun line ->
-                match line.IndexOf(" ") with
-                | i when i > 20 -> line.[i + 1..]
-                | _ -> line)
+                let spaceIdx = line.IndexOf(" ")
+                if spaceIdx > 20 then line.[spaceIdx + 1..] else line)
 
         let tail =
-            trimmedLines
-            |> List.rev
-            |> List.truncate 50
-            |> List.rev
+            let start = max 0 (trimmedLines.Length - 50)
+            trimmedLines.[start..]
 
         Some(String.concat Environment.NewLine tail)
     with ex ->
@@ -342,9 +339,7 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
 let private firstPerBranch (prs: ParsedPr list) =
     prs
     |> List.sortBy (fun pr ->
-        // Active PRs first (isMerged=false sorts before true), then most recently closed
-        pr.IsMerged,
-        pr.ClosedDate |> Option.defaultValue DateTimeOffset.MaxValue |> (fun d -> -d.Ticks))
+        (pr.IsMerged, pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
     |> List.distinctBy (fun pr -> pr.BranchName)
 
 let fetchPrStatuses (remote: AzDoRemote) =
@@ -368,19 +363,16 @@ let fetchPrStatuses (remote: AzDoRemote) =
                 |> List.map (fun pr ->
                     async {
                         let! threadCounts, builds =
-                            match pr.IsMerged with
-                            | true ->
+                            if pr.IsMerged then
                                 async { return { Unresolved = 0; Total = 0 }, [] }
-                            | false ->
+                            else
                                 async {
                                     let! tcChild = Async.StartChild(fetchPrThreadCount remote pr.PrId)
-
                                     let! bsChild =
                                         Async.StartChild(
                                             match repoGuid with
                                             | Some guid -> fetchBuildStatus remote guid pr.PrId
                                             | None -> async { return [] })
-
                                     let! tc = tcChild
                                     let! bs = bsChild
                                     return tc, bs
