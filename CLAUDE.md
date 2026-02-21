@@ -9,6 +9,14 @@
 
 For detailed requirements, expected behavior, and design decisions see `docs/spec/worktree-monitor.md`.
 
+## Setup
+
+After cloning or creating a new worktree, install npm dependencies (not shared between worktrees):
+
+```
+npm install
+```
+
 ## Quick Reference
 
 ```
