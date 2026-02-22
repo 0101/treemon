@@ -56,7 +56,6 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
 
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (worktreeRoot: string)
     (appVersion: string)
     : Async<DashboardResponse> =
     async {
@@ -85,7 +84,6 @@ let getWorktrees
 
 let private openTerminal
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (worktreeRoot: string)
     (path: string)
     =
     async {
@@ -116,7 +114,7 @@ let private openTerminal
 
 let private deleteWorktree
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (worktreeRoot: string)
+    (rootPaths: Map<string, string>)
     (branch: string)
     =
     async {
@@ -137,10 +135,13 @@ let private deleteWorktree
             | None -> ()
 
             let repoRoot =
-                worktrees
-                |> List.tryFind (fun w -> w.Branch = Some "main")
-                |> Option.map (fun w -> w.Path)
-                |> Option.defaultValue worktreeRoot
+                repoId
+                |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
+                |> Option.defaultWith (fun () ->
+                    worktrees
+                    |> List.tryFind (fun w -> w.Branch = Some "main")
+                    |> Option.map (fun w -> w.Path)
+                    |> Option.defaultValue "")
 
             let! result = GitWorktree.removeWorktree repoRoot wt.Path branch
             return result
@@ -148,11 +149,16 @@ let private deleteWorktree
 
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (worktreeRoot: string)
+    (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
     : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
+
+    let rootPaths =
+        worktreeRoots
+        |> List.map (fun root -> System.IO.Path.GetFileName(root), root)
+        |> Map.ofList
 
     match fixtures with
     | Some f ->
@@ -163,25 +169,31 @@ let worktreeApi
           getSyncStatus = fun () -> async { return f.SyncStatus }
           deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent worktreeRoot appVersion
-          openTerminal = openTerminal agent worktreeRoot
+        { getWorktrees = fun () -> getWorktrees agent appVersion
+          openTerminal = openTerminal agent
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                   let worktrees = allWorktrees state
 
-                  let worktreePath =
+                  let worktreeWithRepo =
                       worktrees
                       |> List.tryFind (fun wt -> wt.Branch = Some branch)
-                      |> Option.map (fun wt -> wt.Path)
+                      |> Option.map (fun wt ->
+                          let repoId = findRepoForPath state wt.Path
+                          let repoRoot =
+                              repoId
+                              |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
+                              |> Option.defaultValue (worktreeRoots |> List.head)
+                          wt.Path, repoRoot)
 
-                  match worktreePath with
+                  match worktreeWithRepo with
                   | None -> return Error $"No worktree found for branch '{branch}'"
-                  | Some path ->
+                  | Some (path, repoRoot) ->
                       match SyncEngine.beginSync branch with
                       | Error msg -> return Error msg
                       | Ok ct ->
-                          Async.Start(SyncEngine.executeSyncPipeline branch path worktreeRoot ct, ct)
+                          Async.Start(SyncEngine.executeSyncPipeline branch path repoRoot ct, ct)
                           return Ok ()
               }
           cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
@@ -233,4 +245,4 @@ let worktreeApi
                               Some(branch, recent))
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent worktreeRoot }
+          deleteWorktree = deleteWorktree agent rootPaths }

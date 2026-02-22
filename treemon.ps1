@@ -3,8 +3,8 @@ param(
     [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy")]
     [string]$Command,
 
-    [Parameter(Position = 1)]
-    [string]$WorktreeRoot
+    [Parameter(Position = 1, ValueFromRemainingArguments)]
+    [string[]]$WorktreeRoots
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,29 +17,35 @@ $WwwRoot = Join-Path $ScriptDir "wwwroot"
 $DefaultPort = 5000
 
 if (-not $Command) {
-    Write-Host "Usage: .\treemon.ps1 <command> [worktree-root]" -ForegroundColor Cyan
+    Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Commands:" -ForegroundColor White
-    Write-Host "  start <path>   Start production server (auto-builds if wwwroot/ is empty)"
-    Write-Host "  stop           Stop the production server"
-    Write-Host "  restart        Stop + start (reuses previously configured worktree root)"
-    Write-Host "  status         Show production server status"
-    Write-Host "  log            Tail the production server log"
-    Write-Host "  dev <path>     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
-    Write-Host "  deploy         Build frontend and deploy to wwwroot/ (restarts prod if running)"
+    Write-Host "  start <path> [<path>...]   Start production server (auto-builds if wwwroot/ is empty)"
+    Write-Host "  stop                       Stop the production server"
+    Write-Host "  restart                    Stop + start (reuses previously configured roots)"
+    Write-Host "  status                     Show production server status"
+    Write-Host "  log                        Tail the production server log"
+    Write-Host "  dev <path> [<path>...]     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
+    Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
     exit 0
 }
 
 function Get-SavedConfig {
     if (Test-Path $ConfigFile) {
         $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
-        return $config
+        if ($config.PSObject.Properties.Name -contains "WorktreeRoots") {
+            return @{ WorktreeRoots = @($config.WorktreeRoots) }
+        }
+        if ($config.PSObject.Properties.Name -contains "WorktreeRoot") {
+            return @{ WorktreeRoots = @($config.WorktreeRoot) }
+        }
     }
     return $null
 }
 
-function Save-Config([string]$Root) {
-    @{ WorktreeRoot = $Root.TrimEnd('\', '/') } | ConvertTo-Json | Set-Content $ConfigFile
+function Save-Config([string[]]$Roots) {
+    $trimmed = $Roots | ForEach-Object { $_.TrimEnd('\', '/') }
+    @{ WorktreeRoots = @($trimmed) } | ConvertTo-Json | Set-Content $ConfigFile
 }
 
 function Get-RunningPid {
@@ -51,17 +57,18 @@ function Get-RunningPid {
     return $null
 }
 
-function Resolve-WorktreeRoot([string]$Cmd) {
-    if ($WorktreeRoot) { return $WorktreeRoot }
+function Resolve-WorktreeRoots([string]$Cmd) {
+    if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) { return $WorktreeRoots }
 
     $config = Get-SavedConfig
     if ($config) {
-        Write-Host "Using previously configured worktree root: $($config.WorktreeRoot)" -ForegroundColor Gray
-        return $config.WorktreeRoot
+        $roots = $config.WorktreeRoots -join ", "
+        Write-Host "Using previously configured worktree roots: $roots" -ForegroundColor Gray
+        return $config.WorktreeRoots
     }
 
     Write-Host "Error: worktree root path is required for first $Cmd" -ForegroundColor Red
-    Write-Host "Usage: .\treemon.ps1 $Cmd <worktree-root-path>" -ForegroundColor Gray
+    Write-Host "Usage: .\treemon.ps1 $Cmd <worktree-root-path> [<additional-roots>...]" -ForegroundColor Gray
     exit 1
 }
 
@@ -91,7 +98,7 @@ function Ensure-WwwRoot {
     Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
 }
 
-function Start-ProductionServer([string]$Root) {
+function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
         Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
@@ -105,11 +112,13 @@ function Start-ProductionServer([string]$Root) {
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
     "" | Set-Content $LogFile
 
-    Save-Config $Root
+    Save-Config $Roots
+
+    $rootArgs = ($Roots | ForEach-Object { "`"$_`"" }) -join " "
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath "dotnet" `
-        -ArgumentList "run", "-c", "Release", "--project", (Join-Path $ScriptDir "src/Server"), "--", $Root, "--port", $DefaultPort `
+        -ArgumentList "run -c Release --project `"$(Join-Path $ScriptDir "src/Server")`" -- $rootArgs --port $DefaultPort" `
         -WorkingDirectory $ScriptDir `
         -RedirectStandardOutput $LogFile `
         -RedirectStandardError (Join-Path $LogDir "treemon-prod-stderr.log") `
@@ -119,7 +128,7 @@ function Start-ProductionServer([string]$Root) {
 
     $process.Id | Set-Content $PidFile
     Write-Host "Production server started (PID: $($process.Id))" -ForegroundColor Green
-    Write-Host "Monitoring: $Root" -ForegroundColor Gray
+    $Roots | ForEach-Object { Write-Host "Monitoring: $_" -ForegroundColor Gray }
     Write-Host "URL: http://localhost:$DefaultPort" -ForegroundColor Gray
     Write-Host "Log: $LogFile" -ForegroundColor Gray
 }
@@ -159,7 +168,7 @@ function Show-Status {
     Write-Host "  Uptime:  $uptimeStr"
     Write-Host "  URL:     http://localhost:$DefaultPort"
     if ($config) {
-        Write-Host "  Monitor: $($config.WorktreeRoot)"
+        $config.WorktreeRoots | ForEach-Object { Write-Host "  Monitor: $_" }
     }
     Write-Host "  Log:     $LogFile"
 }
@@ -173,7 +182,7 @@ function Show-Log {
     Get-Content $LogFile -Tail 50 -Wait
 }
 
-function Start-DevMode([string]$Root) {
+function Start-DevMode([string[]]$Roots) {
     $devApiPort = 5001
     $devVitePort = 5174
 
@@ -186,12 +195,14 @@ function Start-DevMode([string]$Root) {
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
 
+    $rootArgs = ($Roots | ForEach-Object { "`"$_`"" }) -join " "
+
     $serverProcess = $null
     $viteProcess = $null
 
     try {
         $serverProcess = Start-Process -FilePath "dotnet" `
-            -ArgumentList "watch", "run", "--project", (Join-Path $ScriptDir "src/Server"), "--", $Root, "--port", $devApiPort `
+            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $rootArgs --port $devApiPort" `
             -WorkingDirectory $ScriptDir `
             -PassThru `
             -NoNewWindow
@@ -234,16 +245,16 @@ function Deploy-Frontend {
     if ($runningPid) {
         Write-Host "Restarting production server..." -ForegroundColor Cyan
         $config = Get-SavedConfig
-        $root = if ($config) { $config.WorktreeRoot } else { $null }
+        $roots = if ($config) { $config.WorktreeRoots } else { $null }
 
-        if (-not $root) {
-            Write-Host "Warning: could not find saved worktree root, skipping restart" -ForegroundColor Yellow
+        if (-not $roots) {
+            Write-Host "Warning: could not find saved worktree roots, skipping restart" -ForegroundColor Yellow
             return
         }
 
         Stop-ProductionServer
         Start-Sleep -Seconds 1
-        Start-ProductionServer $root
+        Start-ProductionServer $roots
     } else {
         Write-Host "Production server is not running, skipping restart" -ForegroundColor Gray
     }
@@ -251,30 +262,32 @@ function Deploy-Frontend {
 
 switch ($Command) {
     "start" {
-        $root = Resolve-WorktreeRoot "start"
-        if (-not (Test-Path $root)) {
-            Write-Host "Error: worktree root path does not exist: $root" -ForegroundColor Red
-            exit 1
+        $roots = Resolve-WorktreeRoots "start"
+        $roots | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
+                exit 1
+            }
         }
-        Start-ProductionServer $root
+        Start-ProductionServer $roots
     }
     "stop" {
         Stop-ProductionServer
     }
     "restart" {
         $config = Get-SavedConfig
-        $root = if ($WorktreeRoot) { $WorktreeRoot }
-                elseif ($config) { $config.WorktreeRoot }
-                else { $null }
+        $roots = if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) { $WorktreeRoots }
+                 elseif ($config) { $config.WorktreeRoots }
+                 else { $null }
 
-        if (-not $root) {
-            Write-Host "Error: no worktree root configured. Run 'start' first." -ForegroundColor Red
+        if (-not $roots) {
+            Write-Host "Error: no worktree roots configured. Run 'start' first." -ForegroundColor Red
             exit 1
         }
 
         Stop-ProductionServer
         Start-Sleep -Seconds 1
-        Start-ProductionServer $root
+        Start-ProductionServer $roots
     }
     "status" {
         Show-Status
@@ -283,12 +296,14 @@ switch ($Command) {
         Show-Log
     }
     "dev" {
-        $root = Resolve-WorktreeRoot "dev"
-        if (-not (Test-Path $root)) {
-            Write-Host "Error: worktree root path does not exist: $root" -ForegroundColor Red
-            exit 1
+        $roots = Resolve-WorktreeRoots "dev"
+        $roots | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
+                exit 1
+            }
         }
-        Start-DevMode $root
+        Start-DevMode $roots
     }
     "deploy" {
         Deploy-Frontend
