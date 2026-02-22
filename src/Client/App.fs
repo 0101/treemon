@@ -7,12 +7,17 @@ open Feliz
 open Fable.Remoting.Client
 open Browser
 
+type RepoModel =
+    { RepoId: string
+      Name: string
+      Worktrees: WorktreeStatus list
+      IsReady: bool
+      IsCollapsed: bool }
+
 type Model =
-    { Worktrees: WorktreeStatus list
-      RootFolderName: string
+    { Repos: RepoModel list
       IsLoading: bool
       HasError: bool
-      IsReady: bool
       SortMode: SortMode
       IsCompact: bool
       SchedulerEvents: CardEvent list
@@ -25,6 +30,7 @@ type Msg =
     | DataFailed of exn
     | ToggleSort
     | ToggleCompact
+    | ToggleCollapse of repoId: string
     | Tick
     | OpenTerminal of string
     | StartSync of string
@@ -53,11 +59,9 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
             e.Status = Some StepStatus.Running))
 
 let init () =
-    { Worktrees = []
-      RootFolderName = ""
+    { Repos = []
       IsLoading = true
       HasError = false
-      IsReady = false
       SortMode = ByActivity
       IsCompact = false
       SchedulerEvents = []
@@ -73,16 +77,22 @@ let update msg model =
         | Some v when v <> response.AppVersion ->
             model, Cmd.ofEffect (fun _ -> Dom.window.location.reload ())
         | _ ->
-            let firstRepo = response.Repos |> List.tryHead
-            let worktrees = firstRepo |> Option.map (fun r -> r.Worktrees) |> Option.defaultValue []
-            let rootName = firstRepo |> Option.map (fun r -> r.RootFolderName) |> Option.defaultValue ""
-            let isReady = firstRepo |> Option.map (fun r -> r.IsReady) |> Option.defaultValue false
+            let existingCollapse =
+                model.Repos
+                |> List.map (fun r -> r.RepoId, r.IsCollapsed)
+                |> Map.ofList
+            let repos =
+                response.Repos
+                |> List.map (fun r ->
+                    { RepoId = r.RepoId
+                      Name = r.RootFolderName
+                      Worktrees = sortWorktrees model.SortMode r.Worktrees
+                      IsReady = r.IsReady
+                      IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
             { model with
-                Worktrees = sortWorktrees model.SortMode worktrees
-                RootFolderName = rootName
+                Repos = repos
                 IsLoading = false
                 HasError = false
-                IsReady = isReady
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion },
@@ -101,11 +111,18 @@ let update msg model =
             | ByActivity -> ByName
         { model with
             SortMode = newSort
-            Worktrees = sortWorktrees newSort model.Worktrees },
+            Repos = model.Repos |> List.map (fun r -> { r with Worktrees = sortWorktrees newSort r.Worktrees }) },
         Cmd.none
 
     | ToggleCompact ->
         { model with IsCompact = not model.IsCompact }, Cmd.none
+
+    | ToggleCollapse repoId ->
+        { model with
+            Repos = model.Repos |> List.map (fun r ->
+                if r.RepoId = repoId then { r with IsCollapsed = not r.IsCollapsed }
+                else r) },
+        Cmd.none
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
@@ -496,9 +513,9 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                     prop.className (if unresolved = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{unresolved}/{total} threads")
                 ]
-            | CountOnly total when total > 0 ->
+            | CountOnly total ->
                 Html.span [
-                    prop.className "thread-badge"
+                    prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{total} comments")
                 ]
             | _ -> ()
@@ -652,6 +669,42 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
+let allReposReady (repos: RepoModel list) =
+    repos |> List.exists (fun r -> r.IsReady)
+
+let allWorktreesEmpty (repos: RepoModel list) =
+    repos |> List.forall (fun r -> r.Worktrees.IsEmpty)
+
+let repoSectionHeader dispatch (repo: RepoModel) =
+    let branchCount = List.length repo.Worktrees
+    let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
+    Html.div [
+        prop.className "repo-header"
+        prop.onClick (fun _ -> dispatch (ToggleCollapse repo.RepoId))
+        prop.children [
+            Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
+            Html.span [ prop.className "repo-name"; prop.text repo.Name ]
+            Html.span [ prop.className "repo-branch-count"; prop.text ($"{branchCount} branches") ]
+        ]
+    ]
+
+let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (repo: RepoModel) =
+    Html.div [
+        prop.key repo.RepoId
+        prop.className "repo-section"
+        prop.children [
+            repoSectionHeader dispatch repo
+            if not repo.IsCollapsed then
+                if not repo.IsReady && repo.Worktrees.IsEmpty then
+                    skeletonGrid ()
+                else
+                    Html.div [
+                        prop.className "card-grid"
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact repo.Name branchEvents))
+                    ]
+        ]
+    ]
+
 let view model dispatch =
     Html.div [
         prop.className "dashboard"
@@ -665,11 +718,6 @@ let view model dispatch =
                             Html.h1 [
                                 prop.children [
                                     Html.text "Treemon"
-                                    if model.RootFolderName <> "" then
-                                        Html.span [
-                                            prop.className "folder-accent"
-                                            prop.text ($": {model.RootFolderName}")
-                                        ]
                                 ]
                             ]
                             Html.div [
@@ -692,7 +740,7 @@ let view model dispatch =
                     Html.div [
                         prop.className "status-bar"
                         prop.children [
-                            if not model.IsReady && model.Worktrees.IsEmpty then
+                            if not (allReposReady model.Repos) && allWorktreesEmpty model.Repos then
                                 Html.span "Waiting for first refresh..."
                         ]
                     ]
@@ -705,12 +753,12 @@ let view model dispatch =
                     prop.text "Failed to fetch data. Showing last known state."
                 ]
 
-            if not model.IsReady && model.Worktrees.IsEmpty then
+            if not (allReposReady model.Repos) && allWorktreesEmpty model.Repos then
                 skeletonGrid ()
             else
                 Html.div [
-                    prop.className "card-grid"
-                    prop.children (model.Worktrees |> List.map (renderCard dispatch model.IsCompact model.RootFolderName model.BranchEvents))
+                    prop.className "repo-list"
+                    prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.BranchEvents))
                 ]
 
             schedulerFooter model.SchedulerEvents model.LatestByCategory
