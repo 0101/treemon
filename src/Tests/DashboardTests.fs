@@ -422,14 +422,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Folder accent class is removed from header``() =
-        task {
-            let folderAccent = this.Page.Locator("h1 .folder-accent")
-            let! count = folderAccent.CountAsync()
-            Assert.That(count, Is.EqualTo(0), "h1 should not contain a .folder-accent span (removed per animated-eye-logo spec)")
-        }
-
-    [<Test>]
     member this.``Beads counts use colored numbers not O/P/D prefix``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts").First

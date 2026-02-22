@@ -393,15 +393,13 @@ type MultiRepoSmokeTests() =
             do! sections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
             let! count = sections.CountAsync()
 
-            let mutable idx = 0
-            while idx < count do
+            for idx in 0 .. count - 1 do
                 let section = sections.Nth(idx)
                 let! repoName = section.Locator(".repo-name").TextContentAsync()
                 let cards = section.Locator(".wt-card")
                 let! cardCount = cards.CountAsync()
                 TestContext.Out.WriteLine($"Repo '{repoName}': {cardCount} cards")
                 Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), $"Repo section '{repoName}' should have at least one worktree card")
-                idx <- idx + 1
         }
 
     [<Test>]

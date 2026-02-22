@@ -725,7 +725,7 @@ let viewEyeLogo (dx: float, dy: float) =
         ]
     ]
 
-let allReposReady (repos: RepoModel list) =
+let anyRepoReady (repos: RepoModel list) =
     repos |> List.exists (fun r -> r.IsReady)
 
 let allWorktreesEmpty (repos: RepoModel list) =
@@ -802,7 +802,7 @@ let view model dispatch =
                     Html.div [
                         prop.className "status-bar"
                         prop.children [
-                            if not (allReposReady model.Repos) && allWorktreesEmpty model.Repos then
+                            if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                                 Html.span "Waiting for first refresh..."
                         ]
                     ]
@@ -815,7 +815,7 @@ let view model dispatch =
                     prop.text "Failed to fetch data. Showing last known state."
                 ]
 
-            if not (allReposReady model.Repos) && allWorktreesEmpty model.Repos then
+            if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                 skeletonGrid ()
             else
                 Html.div [

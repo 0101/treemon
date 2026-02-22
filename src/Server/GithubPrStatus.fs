@@ -44,7 +44,6 @@ let internal parsePrList (json: string) =
         doc.RootElement.EnumerateArray()
         |> Seq.toList
         |> List.choose (fun el ->
-            try
                 let number = el.GetProperty("number").GetInt32()
                 let title = el.GetProperty("title").GetString()
                 let isDraft = el |> tryProp "draft" |> Option.map (fun v -> v.GetBoolean()) |> Option.defaultValue false
@@ -60,10 +59,7 @@ let internal parsePrList (json: string) =
                       IsDraft = isDraft
                       IsMerged = isMerged
                       CommentCount = comments
-                      ReviewCommentCount = reviewComments }
-            with ex ->
-                Log.log "GH" $"Failed to parse GitHub PR entry: {ex.Message}"
-                None)
+                      ReviewCommentCount = reviewComments })
     with ex ->
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
         []
