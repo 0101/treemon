@@ -342,18 +342,33 @@ let private firstPerBranch (prs: ParsedPr list) =
         (pr.IsMerged, pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
     |> List.distinctBy (fun pr -> pr.BranchName)
 
-let fetchPrStatuses (remote: AzDoRemote) =
+let private fetchPrList (remote: AzDoRemote) (status: string) (top: int option) =
     async {
+        let topArg = top |> Option.map (fun n -> $" --top {n}") |> Option.defaultValue ""
         let args =
-            $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status all -o json"
+            $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status {status}{topArg} -o json"
 
         let! output = runAz args
+        return
+            output
+            |> Option.map parsePrList
+            |> Option.defaultValue (None, [])
+    }
 
-        match output with
-        | None -> return Map.empty
-        | Some json ->
-            let repoGuid, prs = parsePrList json
-            let prsFiltered = firstPerBranch prs
+let fetchPrStatuses (remote: AzDoRemote) =
+    async {
+        let! activeChild = Async.StartChild(fetchPrList remote "active" None)
+        let! completedChild = Async.StartChild(fetchPrList remote "completed" (Some 50))
+        let! activeGuid, activePrs = activeChild
+        let! completedGuid, completedPrs = completedChild
+
+        let allPrs = activePrs @ completedPrs
+        let repoGuid = activeGuid |> Option.orElse completedGuid
+
+        match allPrs with
+        | [] -> return Map.empty
+        | _ ->
+            let prsFiltered = firstPerBranch allPrs
 
             if repoGuid.IsNone then
                 Log.log "PR" "No repository GUID found in PR list, builds will be empty"

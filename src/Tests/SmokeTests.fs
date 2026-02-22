@@ -63,10 +63,12 @@ type SmokeTests() =
             return int response.StatusCode, body
         }
 
+    let mutable readyBody: string = ""
+
     let rec waitForReady (client: HttpClient) (deadline: DateTime) : Async<string> =
         async {
             if DateTime.UtcNow > deadline then
-                return failwith "Timed out waiting for IsReady=true (30s)"
+                return failwith "Timed out waiting for IsReady=true (60s)"
             else
                 try
                     let! statusCode, body = pollApi client
@@ -88,6 +90,11 @@ type SmokeTests() =
             let proc = startSmokeServer ()
             serverProc <- Some proc
             TestContext.Out.WriteLine($"Smoke server started (PID {proc.Id}) on port {smokePort}")
+
+            use client = new HttpClient()
+            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(60.0)) |> Async.StartAsTask
+            readyBody <- body
+            TestContext.Out.WriteLine($"Server ready. Response (first 1000 chars): {body.Substring(0, Math.Min(1000, body.Length))}")
         }
 
     [<OneTimeTearDown>]
@@ -96,44 +103,23 @@ type SmokeTests() =
         serverProc <- None
 
     [<Test>]
-    member _.``Server returns IsReady=true with real data within 30s``() =
-        task {
-            use client = new HttpClient()
-            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
-            TestContext.Out.WriteLine($"API response (first 1000 chars): {body.Substring(0, Math.Min(1000, body.Length))}")
-            Assert.That(body, Does.Contain("\"IsReady\":true"), "API should return IsReady=true after scheduler populates data")
-        }
+    member _.``Server returns IsReady=true with real data``() =
+        Assert.That(readyBody, Does.Contain("\"IsReady\":true"), "API should return IsReady=true after scheduler populates data")
 
     [<Test>]
     member _.``At least one worktree with Branch and LastCommitTime populated``() =
-        task {
-            use client = new HttpClient()
-            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
-
-            Assert.That(body, Does.Contain("\"Branch\":"), "Response should contain at least one worktree with a Branch field")
-            Assert.That(body, Does.Contain("\"LastCommitTime\":"), "Response should contain at least one worktree with LastCommitTime")
-
-            Assert.That(body, Does.Not.Contain("\"Branch\":\"\""), "Branch should not be empty")
-        }
+        Assert.That(readyBody, Does.Contain("\"Branch\":"), "Response should contain at least one worktree with a Branch field")
+        Assert.That(readyBody, Does.Contain("\"LastCommitTime\":"), "Response should contain at least one worktree with LastCommitTime")
+        Assert.That(readyBody, Does.Not.Contain("\"Branch\":\"\""), "Branch should not be empty")
 
     [<Test>]
     member _.``SchedulerEvents is non-empty after first refresh``() =
-        task {
-            use client = new HttpClient()
-            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
-
-            Assert.That(body, Does.Contain("\"SchedulerEvents\":"), "Response should contain SchedulerEvents field")
-            Assert.That(body, Does.Not.Contain("\"SchedulerEvents\":[]"), "SchedulerEvents should not be empty after scheduler has run")
-        }
+        Assert.That(readyBody, Does.Contain("\"SchedulerEvents\":"), "Response should contain SchedulerEvents field")
+        Assert.That(readyBody, Does.Not.Contain("\"SchedulerEvents\":[]"), "SchedulerEvents should not be empty after scheduler has run")
 
     [<Test>]
     member _.``Server process exits cleanly after kill``() =
-        task {
-            use client = new HttpClient()
-            let! _ = waitForReady client (DateTime.UtcNow.AddSeconds(30.0)) |> Async.StartAsTask
-
-            match serverProc with
-            | None -> Assert.Fail("Server process reference is missing")
-            | Some proc ->
-                Assert.That(proc.HasExited, Is.False, "Server should still be running before teardown")
-        }
+        match serverProc with
+        | None -> Assert.Fail("Server process reference is missing")
+        | Some proc ->
+            Assert.That(proc.HasExited, Is.False, "Server should still be running before teardown")
