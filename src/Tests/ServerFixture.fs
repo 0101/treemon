@@ -17,7 +17,7 @@ let private serverProjectPath =
 let private fixturesPath =
     Path.Combine(repoRoot, "src", "Tests", "fixtures", "worktrees.json")
 
-let private worktreeRoot = @"Q:\code\AITestAgent"
+let private worktreeRoots = [ @"Q:\code\AITestAgent"; repoRoot ]
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
@@ -149,10 +149,12 @@ let private killOrphansOnPort (port: int) =
 
 let startServer () =
     task {
+        let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
+
         let proc =
             startProcess
                 "dotnet"
-                $"""run --project "{serverProjectPath}" -- "{worktreeRoot}" --port 5001 --test-fixtures "{fixturesPath}" """
+                $"""run --project "{serverProjectPath}" -- {rootArgs} --port 5001 --test-fixtures "{fixturesPath}" """
                 repoRoot
                 []
                 false
