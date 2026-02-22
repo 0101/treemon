@@ -560,7 +560,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
             Html.div [
                 prop.className "compact-detail"
                 prop.children [
-                    beadsCounts "beads-inline" wt.Beads
+                    if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
                     prSection repoName wt
                 ]
@@ -592,13 +592,14 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
                 ]
             ]
 
-            Html.div [
-                prop.className "beads-row"
-                prop.children [
-                    beadsCounts "beads-counts" wt.Beads
-                    beadsProgressBar wt.Beads
+            if beadsTotal wt.Beads > 0 then
+                Html.div [
+                    prop.className "beads-row"
+                    prop.children [
+                        beadsCounts "beads-counts" wt.Beads
+                        beadsProgressBar wt.Beads
+                    ]
                 ]
-            ]
 
             mainBehindWithSync dispatch wt branchEvents
 
