@@ -6,6 +6,7 @@ open Microsoft.Playwright.NUnit
 
 [<TestFixture>]
 [<Category("E2E")>]
+[<Category("Local")>]
 type DashboardTests() =
     inherit PageTest()
 

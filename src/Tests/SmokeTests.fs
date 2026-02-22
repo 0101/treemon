@@ -33,6 +33,7 @@ let private startSmokeServer () =
 
 [<TestFixture>]
 [<Category("Smoke")>]
+[<Category("Local")>]
 type SmokeTests() =
     let mutable serverProc: Process option = None
 
