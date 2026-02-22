@@ -1872,6 +1872,153 @@ type DashboardTests() =
         }
 
     [<Test>]
+    member this.``Repo section header has repo-header class with name and branch count``() =
+        task {
+            let headers = this.Page.Locator(".repo-section .repo-header")
+            do! headers.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = headers.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(2), "Fixture has two repos; at least 2 repo-header elements should be present")
+
+            let header = headers.First
+            let nameElem = header.Locator(".repo-name")
+            let! nameCount = nameElem.CountAsync()
+            Assert.That(nameCount, Is.EqualTo(1), "Each repo-header should contain exactly one .repo-name element")
+
+            let! nameText = nameElem.TextContentAsync()
+            Assert.That(nameText, Is.Not.Empty, "Repo name should not be empty")
+
+            let branchCountElem = header.Locator(".repo-branch-count")
+            let! branchCountCount = branchCountElem.CountAsync()
+            Assert.That(branchCountCount, Is.EqualTo(1), "Each repo-header should contain exactly one .repo-branch-count element")
+
+            let! branchCountText = branchCountElem.TextContentAsync()
+            Assert.That(branchCountText, Does.Match(@"^\d+ branches$"), "Branch count should match 'N branches' format")
+
+            let arrowElem = header.Locator(".collapse-arrow")
+            let! arrowCount = arrowElem.CountAsync()
+            Assert.That(arrowCount, Is.EqualTo(1), "Each repo-header should contain exactly one .collapse-arrow element")
+        }
+
+    [<Test>]
+    member this.``Clicking collapse toggle hides cards and shows right arrow``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridCountBefore = cardGrid.CountAsync()
+            Assert.That(gridCountBefore, Is.EqualTo(1), "Card grid should be visible before collapse")
+
+            let arrow = header.Locator(".collapse-arrow")
+            let! arrowTextBefore = arrow.TextContentAsync()
+            Assert.That(arrowTextBefore, Is.EqualTo("\u25BC"), "Expanded arrow should be down-pointing (U+25BC)")
+
+            do! header.ClickAsync()
+
+            let! gridCountAfter = cardGrid.CountAsync()
+            Assert.That(gridCountAfter, Is.EqualTo(0), "Card grid should be removed from DOM after collapse")
+
+            let cards = firstSection.Locator(".wt-card")
+            let! cardCount = cards.CountAsync()
+            Assert.That(cardCount, Is.EqualTo(0), "No worktree cards should be visible after collapse")
+
+            let! arrowTextAfter = arrow.TextContentAsync()
+            Assert.That(arrowTextAfter, Is.EqualTo("\u25B6"), "Collapsed arrow should be right-pointing (U+25B6)")
+        }
+
+    [<Test>]
+    member this.``Clicking collapsed section again restores expanded state``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let cards = firstSection.Locator(".wt-card")
+            let! cardCountOriginal = cards.CountAsync()
+            Assert.That(cardCountOriginal, Is.GreaterThanOrEqualTo(1), "Should have cards initially")
+
+            do! header.ClickAsync()
+            let! gridCountCollapsed = cardGrid.CountAsync()
+            Assert.That(gridCountCollapsed, Is.EqualTo(0), "Card grid should be gone after collapse")
+
+            do! header.ClickAsync()
+
+            let! gridCountExpanded = cardGrid.CountAsync()
+            Assert.That(gridCountExpanded, Is.EqualTo(1), "Card grid should reappear after expand")
+
+            let! cardCountRestored = cards.CountAsync()
+            Assert.That(cardCountRestored, Is.EqualTo(cardCountOriginal), "Same number of cards should be present after expand as originally")
+
+            let arrow = header.Locator(".collapse-arrow")
+            let! arrowText = arrow.TextContentAsync()
+            Assert.That(arrowText, Is.EqualTo("\u25BC"), "Arrow should be down-pointing again after expand")
+        }
+
+    [<Test>]
+    member this.``Repo header remains visible when section is collapsed``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! header.ClickAsync()
+
+            do! Assertions.Expect(header).ToBeVisibleAsync()
+
+            let repoName = header.Locator(".repo-name")
+            do! Assertions.Expect(repoName).ToBeVisibleAsync()
+
+            let branchCount = header.Locator(".repo-branch-count")
+            do! Assertions.Expect(branchCount).ToBeVisibleAsync()
+        }
+
+    [<Test>]
+    member this.``Collapsing one section does not affect other sections``() =
+        task {
+            let sections = this.Page.Locator(".repo-section")
+            do! sections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! sectionCount = sections.CountAsync()
+            Assert.That(sectionCount, Is.GreaterThanOrEqualTo(2), "Fixture has at least 2 repo sections")
+
+            let firstHeader = sections.First.Locator(".repo-header")
+            let secondSection = sections.Nth(1)
+            let secondCardGrid = secondSection.Locator(".card-grid")
+            let! secondGridBefore = secondCardGrid.CountAsync()
+            Assert.That(secondGridBefore, Is.EqualTo(1), "Second section should have card grid initially")
+
+            do! firstHeader.ClickAsync()
+
+            let firstCardGrid = sections.First.Locator(".card-grid")
+            let! firstGridAfter = firstCardGrid.CountAsync()
+            Assert.That(firstGridAfter, Is.EqualTo(0), "First section should be collapsed")
+
+            let! secondGridAfter = secondCardGrid.CountAsync()
+            Assert.That(secondGridAfter, Is.EqualTo(1), "Second section card grid should remain visible")
+
+            let secondCards = secondSection.Locator(".wt-card")
+            let! secondCardCount = secondCards.CountAsync()
+            Assert.That(secondCardCount, Is.GreaterThanOrEqualTo(1), "Second section should still have cards")
+        }
+
+    [<Test>]
+    member this.``Repo header click handler responds to click``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridBefore = cardGrid.CountAsync()
+            Assert.That(gridBefore, Is.EqualTo(1), "Card grid should exist before click")
+
+            do! header.ClickAsync()
+            let! gridAfter = cardGrid.CountAsync()
+            Assert.That(gridAfter, Is.EqualTo(0), "Card grid should be gone after header click, confirming onClick handler works")
+        }
+
+    [<Test>]
     member this.``AzDo PR uses threads format while GitHub uses comments format``() =
         task {
             let azdoSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('TestProject'))")
