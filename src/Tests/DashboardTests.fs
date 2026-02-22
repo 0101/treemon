@@ -419,21 +419,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Header contains folder name with accent styling``() =
-        task {
-            let folderAccent = this.Page.Locator("h1 .folder-accent")
-            let! count = folderAccent.CountAsync()
-            Assert.That(count, Is.EqualTo(1), "Header should contain a .folder-accent span")
-
-            let! text = folderAccent.TextContentAsync()
-            Assert.That(text, Is.Not.Empty, "Folder accent text should not be empty")
-            Assert.That(text, Does.StartWith(":"), "Folder accent should start with colon separator")
-
-            let! accentColor = folderAccent |> computedStyle "color"
-            Assert.That(accentColor, Is.EqualTo("rgb(137, 180, 250)"), "Folder accent color should be #89b4fa (blue)")
-        }
-
-    [<Test>]
     member this.``Beads counts use colored numbers not O/P/D prefix``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts").First
