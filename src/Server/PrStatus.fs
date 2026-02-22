@@ -15,6 +15,10 @@ type AzDoRemote =
       Project: string
       Repo: string }
 
+type RemoteInfo =
+    | AzureDevOps of AzDoRemote
+    | GitHub of GithubPrStatus.GithubRemote
+
 let parseAzureDevOpsUrl (url: string) =
     try
         let parts = url.TrimEnd('/').Split('/')
@@ -37,11 +41,17 @@ let parseAzureDevOpsUrl (url: string) =
             let project = parts.[gitIdx - 1]
             Some { Org = org; Project = project; Repo = repo }
         else
-            Log.log "PR" $"URL not recognized as Azure DevOps: {url}"
             None
     with ex ->
         Log.log "PR" $"Failed to parse Azure DevOps URL '{url}': {ex.Message}"
         None
+
+let detectProvider (url: string) =
+    parseAzureDevOpsUrl url
+    |> Option.map AzureDevOps
+    |> Option.orElseWith (fun () ->
+        GithubPrStatus.parseGithubUrl url
+        |> Option.map GitHub)
 
 let private azPythonExe =
     lazy
@@ -422,12 +432,13 @@ let fetchPrStatusesByRepoRoot (repoRoot: string) (knownBranches: Set<string>) =
     async {
         let! remoteUrl = getRemoteUrl repoRoot
 
-        let remote =
-            remoteUrl |> Option.bind parseAzureDevOpsUrl
+        let provider =
+            remoteUrl |> Option.bind detectProvider
 
-        match remote with
+        match provider with
+        | Some(AzureDevOps remote) -> return! fetchPrStatuses remote knownBranches
+        | Some(GitHub remote) -> return! GithubPrStatus.fetchGithubPrStatuses remote knownBranches
         | None -> return Map.empty
-        | Some r -> return! fetchPrStatuses r knownBranches
     }
 
 let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
