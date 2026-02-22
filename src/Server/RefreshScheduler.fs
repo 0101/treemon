@@ -192,7 +192,15 @@ let private executeTask
             agent.Post(UpdateClaude(path, status))
 
         | RefreshPr ->
-            let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            let knownBranches =
+                state.GitData
+                |> Map.values
+                |> Seq.choose (fun g -> g.UpstreamBranch)
+                |> Set.ofSeq
+
+            let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot knownBranches
             agent.Post(UpdatePr prMap)
 
         | RefreshFetch ->

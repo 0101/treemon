@@ -6,6 +6,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="Log.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="GitWorktree.fs" />

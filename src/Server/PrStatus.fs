@@ -67,7 +67,7 @@ let private runAz (arguments: string) =
 let getRemoteUrl (repoRoot: string) =
     ProcessRunner.run "PR" "git" $"""-C "{repoRoot}" remote get-url origin"""
 
-type private ParsedPr =
+type internal ParsedPr =
     { BranchName: string
       PrId: int
       Title: string
@@ -336,11 +336,16 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
         return enriched |> Array.toList
     }
 
-let private firstPerBranch (prs: ParsedPr list) =
+let internal firstPerBranch (prs: ParsedPr list) =
     prs
     |> List.sortBy (fun pr ->
         (pr.IsMerged, pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
     |> List.distinctBy (fun pr -> pr.BranchName)
+
+let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedPr list) =
+    prs
+    |> firstPerBranch
+    |> List.filter (fun pr -> Set.contains pr.BranchName knownBranches)
 
 let private fetchPrList (remote: AzDoRemote) (status: string) (top: int option) =
     async {
@@ -355,7 +360,7 @@ let private fetchPrList (remote: AzDoRemote) (status: string) (top: int option) 
             |> Option.defaultValue (None, [])
     }
 
-let fetchPrStatuses (remote: AzDoRemote) =
+let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
     async {
         let! activeChild = Async.StartChild(fetchPrList remote "active" None)
         let! completedChild = Async.StartChild(fetchPrList remote "completed" (Some 50))
@@ -368,13 +373,15 @@ let fetchPrStatuses (remote: AzDoRemote) =
         match allPrs with
         | [] -> return Map.empty
         | _ ->
-            let prsFiltered = firstPerBranch allPrs
+            let relevant = filterRelevantPrs knownBranches allPrs
+
+            Log.log "PR" $"PRs: {List.length allPrs} fetched, {List.length relevant} relevant to worktrees"
 
             if repoGuid.IsNone then
                 Log.log "PR" "No repository GUID found in PR list, builds will be empty"
 
             let! entries =
-                prsFiltered
+                relevant
                 |> List.map (fun pr ->
                     async {
                         let! threadCounts, builds =
@@ -412,7 +419,7 @@ let fetchPrStatuses (remote: AzDoRemote) =
             return entries |> Array.toList |> Map.ofList
     }
 
-let fetchPrStatusesByRepoRoot (repoRoot: string) =
+let fetchPrStatusesByRepoRoot (repoRoot: string) (knownBranches: Set<string>) =
     async {
         let! remoteUrl = getRemoteUrl repoRoot
 
@@ -421,7 +428,7 @@ let fetchPrStatusesByRepoRoot (repoRoot: string) =
 
         match remote with
         | None -> return Map.empty
-        | Some r -> return! fetchPrStatuses r
+        | Some r -> return! fetchPrStatuses r knownBranches
     }
 
 let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
