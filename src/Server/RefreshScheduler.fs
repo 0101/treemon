@@ -240,7 +240,7 @@ let private executeTask
                 repo.GitData
                 |> Map.values
                 |> Seq.choose (fun g -> g.UpstreamBranch)
-                |> Set.ofSeq
+                |> set
 
             let! prMap = PrStatus.fetchPrStatusesByRepoRoot root knownBranches
             agent.Post(UpdatePr(repoId, prMap))
