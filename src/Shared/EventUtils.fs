@@ -30,7 +30,7 @@ let pinnedErrors (events: CardEvent list) =
         | _ -> false)
 
 let mergeWithPinnedErrors (events: CardEvent list) (pinnedMap: Map<string * string, CardEvent>) =
-    let existingKeys = events |> List.map eventKey |> Set.ofList
+    let existingKeys = events |> List.map eventKey |> set
     let missing =
         pinnedMap
         |> Map.toList

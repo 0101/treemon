@@ -65,7 +65,7 @@ let private removeWorktreeData (path: string) (state: DashboardState) =
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList worktrees ->
-        let newPaths = worktrees |> List.map (fun wt -> wt.Path) |> Set.ofList
+        let newPaths = worktrees |> List.map _.Path |> set
         let oldPaths = state.KnownPaths
         let removedPaths = Set.difference oldPaths newPaths
 
@@ -198,7 +198,7 @@ let private executeTask
                 state.GitData
                 |> Map.values
                 |> Seq.choose (fun g -> g.UpstreamBranch)
-                |> Set.ofSeq
+                |> set
 
             let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot knownBranches
             agent.Post(UpdatePr prMap)

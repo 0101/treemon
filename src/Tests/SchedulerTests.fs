@@ -266,7 +266,7 @@ type StateAgentTests() =
 
             Assert.That(state.SchedulerEvents.Length, Is.EqualTo(50))
 
-            let messages = state.SchedulerEvents |> List.map (fun e -> e.Message)
+            let messages = state.SchedulerEvents |> List.map _.Message
             Assert.That(messages, Does.Contain("event-60"))
             Assert.That(messages, Does.Not.Contain("event-1"))
         }
