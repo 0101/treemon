@@ -679,7 +679,7 @@ let allWorktreesEmpty (repos: RepoModel list) =
 let repoSectionHeader dispatch (repo: RepoModel) =
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
     Html.div [
-        prop.className "repo-header"
+        prop.className (if repo.IsCollapsed then "repo-header collapsed" else "repo-header")
         prop.onClick (fun _ -> dispatch (ToggleCollapse repo.RepoId))
         prop.children [
             Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
