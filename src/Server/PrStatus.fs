@@ -85,7 +85,7 @@ type internal ParsedPr =
       IsMerged: bool
       ClosedDate: DateTimeOffset option }
 
-let private parsePrList (json: string) =
+let internal parsePrList (json: string) =
     try
         use doc = JsonDocument.Parse(json)
         let prElements = doc.RootElement.EnumerateArray() |> Seq.toList
@@ -140,7 +140,7 @@ let private parsePrList (json: string) =
         Log.log "PR" $"Failed to parse PR list JSON: {ex.Message}"
         None, []
 
-let private parseThreadCounts (json: string) =
+let internal parseThreadCounts (json: string) =
     try
         use doc = JsonDocument.Parse(json)
 
@@ -218,7 +218,7 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
 
         info, definitionId, buildId)
 
-let private parseBuilds (remote: AzDoRemote) (json: string) =
+let internal parseBuilds (remote: AzDoRemote) (json: string) =
     try
         use doc = JsonDocument.Parse(json)
         let runs = doc.RootElement.GetProperty("value").EnumerateArray() |> Seq.toList
@@ -233,7 +233,7 @@ let private parseBuilds (remote: AzDoRemote) (json: string) =
         Log.log "PR" $"Failed to parse build status JSON: {ex.Message}"
         []
 
-let private parseFailedStep (json: string) =
+let internal parseFailedStep (json: string) =
     try
         use doc = JsonDocument.Parse(json)
         let records = doc.RootElement.GetProperty("records").EnumerateArray() |> Seq.toList
@@ -255,7 +255,7 @@ let private parseFailedStep (json: string) =
         Log.log "PR" $"Failed to parse build timeline: {ex.Message}"
         None
 
-let private parseBuildLog (json: string) =
+let internal parseBuildLog (json: string) =
     try
         use doc = JsonDocument.Parse(json)
 

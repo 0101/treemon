@@ -1,0 +1,25 @@
+{
+  "records": [
+    {
+      "type": "Job",
+      "name": "Build",
+      "result": "succeeded"
+    },
+    {
+      "type": "Task",
+      "name": "Restore NuGet packages",
+      "result": "succeeded"
+    },
+    {
+      "type": "Task",
+      "name": "Run unit tests",
+      "result": "failed",
+      "log": { "id": 42 }
+    },
+    {
+      "type": "Task",
+      "name": "Publish artifacts",
+      "result": "succeeded"
+    }
+  ]
+}

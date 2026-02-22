@@ -13,8 +13,14 @@
     <Compile Include="ServerParsingTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
     <Compile Include="GithubParsingTests.fs" />
+    <Compile Include="GithubFixtureTests.fs" />
+    <Compile Include="AzDoFixtureTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="SmokeTests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

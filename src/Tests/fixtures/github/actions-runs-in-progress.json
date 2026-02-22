@@ -1,0 +1,12 @@
+{
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 99999999,
+      "name": "CI",
+      "head_branch": "feature/in-progress",
+      "status": "in_progress",
+      "html_url": "https://github.com/testowner/testrepo/actions/runs/99999999"
+    }
+  ]
+}

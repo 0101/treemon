@@ -1,0 +1,10 @@
+{
+  "value": [
+    "2026-02-22T15:13:38.1234567Z Starting test execution...",
+    "2026-02-22T15:13:39.2345678Z Discovered 42 tests",
+    "2026-02-22T15:13:40.3456789Z [xUnit.net 00:00:01.23] Tests.AuthTests.Login_WithInvalidCredentials_ReturnsUnauthorized [FAIL]",
+    "2026-02-22T15:13:40.4567890Z   Expected: 401",
+    "2026-02-22T15:13:40.5678901Z   Actual:   500",
+    "2026-02-22T15:13:41.6789012Z Failed! - Failed: 1, Passed: 41, Skipped: 0, Total: 42"
+  ]
+}
