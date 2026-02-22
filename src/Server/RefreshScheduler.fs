@@ -315,11 +315,13 @@ let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOff
     |> List.fold min Int32.MaxValue
     |> max 100
 
+let buildRootPaths (worktreeRoots: string list) =
+    worktreeRoots
+    |> List.map (fun root -> Path.GetFullPath(root), root)
+    |> Map.ofList
+
 let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
-    let rootPaths =
-        worktreeRoots
-        |> List.map (fun root -> Path.GetFileName(root), root)
-        |> Map.ofList
+    let rootPaths = buildRootPaths worktreeRoots
 
     let initialRepos =
         rootPaths

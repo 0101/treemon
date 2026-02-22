@@ -73,7 +73,7 @@ let getWorktrees
                     |> List.map (assembleFromState repo)
 
                 { RepoId = repoId
-                  RootFolderName = repoId
+                  RootFolderName = Path.GetFileName(repoId)
                   Worktrees = statuses
                   IsReady = repo.IsReady })
 
@@ -157,10 +157,7 @@ let worktreeApi
     : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
-    let rootPaths =
-        worktreeRoots
-        |> List.map (fun root -> System.IO.Path.GetFileName(root), root)
-        |> Map.ofList
+    let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
 
     match fixtures with
     | Some f ->
