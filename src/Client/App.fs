@@ -686,6 +686,12 @@ let viewEyeLogo (dx: float, dy: float) =
                     ]
                 ]
             ]
+            Svg.circle [
+                svg.cx 23
+                svg.cy 5
+                svg.r 2
+                svg.fill "rgba(255, 255, 255, 0.8)"
+            ]
         ]
     ]
 
