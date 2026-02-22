@@ -18,7 +18,8 @@ type Model =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
-      AppVersion: string option }
+      AppVersion: string option
+      EyeDirection: float * float }
 
 type Msg =
     | DataLoaded of WorktreeResponse
@@ -63,8 +64,16 @@ let init () =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      AppVersion = None },
+      AppVersion = None
+      EyeDirection = (0.0, 0.0) },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+
+let rng = System.Random()
+
+let randomEyeDirection () =
+    let dx = rng.NextDouble() * 3.0 - 1.5
+    let dy = rng.NextDouble() * 2.0 - 1.0
+    (dx, dy)
 
 let update msg model =
     match msg with
@@ -81,7 +90,8 @@ let update msg model =
                 IsReady = response.IsReady
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
-                AppVersion = Some response.AppVersion },
+                AppVersion = Some response.AppVersion
+                EyeDirection = randomEyeDirection () },
             Cmd.none
 
     | DataFailed _ ->
@@ -641,6 +651,35 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
+let viewEyeLogo (dx: float, dy: float) =
+    Svg.svg [
+        svg.className "eye-logo"
+        svg.viewBox (0, 0, 40, 20)
+        svg.children [
+            Svg.path [
+                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
+                svg.fill "none"
+                svg.stroke "#94e2d5"
+                svg.strokeWidth 1.5
+            ]
+            Svg.circle [
+                svg.cx 20
+                svg.cy 10
+                svg.r 6
+                svg.fill "rgba(148, 226, 213, 0.15)"
+                svg.stroke "#94e2d5"
+                svg.strokeWidth 0.5
+            ]
+            Svg.circle [
+                svg.className "eye-pupil"
+                svg.cx (20.0 + dx)
+                svg.cy (10.0 + dy)
+                svg.r 3
+                svg.fill "#94e2d5"
+            ]
+        ]
+    ]
+
 let view model dispatch =
     Html.div [
         prop.className "dashboard"
@@ -653,12 +692,7 @@ let view model dispatch =
                         prop.children [
                             Html.h1 [
                                 prop.children [
-                                    Html.text "Treemon"
-                                    if model.RootFolderName <> "" then
-                                        Html.span [
-                                            prop.className "folder-accent"
-                                            prop.text ($": {model.RootFolderName}")
-                                        ]
+                                    viewEyeLogo model.EyeDirection
                                 ]
                             ]
                             Html.div [
