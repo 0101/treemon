@@ -528,6 +528,7 @@ type LatestByCategoryTests() =
 
     [<Test>]
     member _.``LatestByCategory is never trimmed unlike SchedulerEvents``() =
+
         async {
             let agent = createAgent ()
 
@@ -545,3 +546,111 @@ type LatestByCategoryTests() =
                 "LatestByCategory should never be trimmed, holding all 60 categories")
         }
         |> Async.RunSynchronously
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildTaskListTests() =
+
+    let makeWorktree path branch : WorktreeInfo =
+        { Path = path; Head = "abc123"; Branch = Some branch }
+
+    let makeRepo worktrees : PerRepoState =
+        { PerRepoState.empty with
+            WorktreeList = worktrees
+            KnownPaths = worktrees |> List.map (fun wt -> wt.Path) |> Set.ofList }
+
+    [<Test>]
+    member _.``All worktree-list tasks come before any per-worktree tasks``() =
+        let repos =
+            [ "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
+              "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
+        let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false
+
+        let lastWorktreeListIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isWorktreeList t)
+            |> List.map fst
+            |> List.max
+
+        let firstPerWorktreeIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isPerWorktree t)
+            |> List.map fst
+            |> List.min
+
+        Assert.That(lastWorktreeListIdx, Is.LessThan(firstPerWorktreeIdx),
+            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads/Claude tasks")
+
+    [<Test>]
+    member _.``All local tasks come before any network tasks``() =
+        let repos =
+            [ "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ]
+              "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false
+        let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
+
+        let lastLocalIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isLocal t)
+            |> List.map fst
+            |> List.max
+
+        let firstNetworkIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isNetwork t)
+            |> List.map fst
+            |> List.min
+
+        Assert.That(lastLocalIdx, Is.LessThan(firstNetworkIdx),
+            "All local tasks (Git/Beads/Claude) must appear before any network tasks (Pr/Fetch)")
+
+    [<Test>]
+    member _.``Contains expected task count``() =
+        let repos =
+            [ "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
+              "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
+        Assert.That(tasks.Length, Is.EqualTo(15))
+
+    [<Test>]
+    member _.``Local tasks are interleaved across repos not grouped by repo``() =
+        let repos =
+            [ "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ]
+              "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        let localTasks =
+            tasks
+            |> List.filter (function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false)
+
+        let repoIds =
+            localTasks
+            |> List.map (function
+                | RefreshGit(r, _) -> r
+                | RefreshBeads(r, _) -> r
+                | RefreshClaude(r, _) -> r
+                | _ -> "")
+
+        Assert.That(repoIds |> List.filter ((=) "Repo1") |> List.length, Is.EqualTo(3))
+        Assert.That(repoIds |> List.filter ((=) "Repo2") |> List.length, Is.EqualTo(3))

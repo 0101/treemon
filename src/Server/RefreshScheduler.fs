@@ -171,16 +171,27 @@ let private intervalOf = function
     | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
     | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
 
-let private buildTaskList (repos: Map<string, PerRepoState>) =
-    repos
-    |> Map.toList
-    |> List.collect (fun (repoId, repo) ->
-        [ RefreshWorktreeList repoId
-          yield! repo.WorktreeList |> List.map (fun wt -> RefreshGit(repoId, wt.Path))
-          yield! repo.WorktreeList |> List.map (fun wt -> RefreshBeads(repoId, wt.Path))
-          yield! repo.WorktreeList |> List.map (fun wt -> RefreshClaude(repoId, wt.Path))
-          RefreshPr repoId
-          RefreshFetch repoId ])
+let buildTaskList (repos: Map<string, PerRepoState>) =
+    let repoList = repos |> Map.toList
+
+    let worktreeLists =
+        repoList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
+
+    let localTasks =
+        repoList
+        |> List.collect (fun (repoId, repo) ->
+            repo.WorktreeList
+            |> List.collect (fun wt ->
+                [ RefreshGit(repoId, wt.Path)
+                  RefreshBeads(repoId, wt.Path)
+                  RefreshClaude(repoId, wt.Path) ]))
+
+    let networkTasks =
+        repoList
+        |> List.collect (fun (repoId, _) ->
+            [ RefreshPr repoId; RefreshFetch repoId ])
+
+    worktreeLists @ localTasks @ networkTasks
 
 let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
