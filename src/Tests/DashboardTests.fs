@@ -242,7 +242,7 @@ type DashboardTests() =
 
             let! href = prLinks.First.GetAttributeAsync("href")
             Assert.That(href, Is.Not.Null.And.Not.Empty)
-            Assert.That(href, Does.Contain("pullrequest"))
+            Assert.That(href, Does.Contain("pullrequest").Or.Contain("/pull/"))
 
             let! target = prLinks.First.GetAttributeAsync("target")
             Assert.That(target, Is.EqualTo("_blank"))
@@ -257,7 +257,7 @@ type DashboardTests() =
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
             let! threadText = threadBadges.First.TextContentAsync()
-            Assert.That(threadText, Does.Match(@"\d+/\d+"))
+            Assert.That(threadText, Does.Match(@"\d+/\d+ threads").Or.Match(@"\d+ comments"))
         }
 
     [<Test>]
@@ -351,7 +351,7 @@ type DashboardTests() =
                 null,
                 PageWaitForFunctionOptions(Timeout = 5000.0f))
 
-            let grid = this.Page.Locator(".card-grid")
+            let grid = this.Page.Locator(".card-grid").First
             let! gridStyle = grid |> computedStyle "gridTemplateColumns"
             let columnCount = gridStyle.Split(' ') |> Array.length
             Assert.That(columnCount, Is.EqualTo(expectedColumns), $"At {width}px width, expected {expectedColumns} columns")
@@ -415,7 +415,7 @@ type DashboardTests() =
 
             let! href = mergedBadges.First.GetAttributeAsync("href")
             Assert.That(href, Is.Not.Null.And.Not.Empty)
-            Assert.That(href, Does.Contain("pullrequest"))
+            Assert.That(href, Does.Contain("pullrequest").Or.Contain("/pull/"))
         }
 
     [<Test>]
@@ -655,9 +655,10 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``All build badges are links to Azure DevOps build results``() =
+    member this.``All AzDo build badges are links to Azure DevOps build results``() =
         task {
-            let buildLinks = this.Page.Locator(".wt-card a.build-badge")
+            let azdoSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('TestProject'))")
+            let buildLinks = azdoSection.Locator("a.build-badge")
             do! buildLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = buildLinks.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badge links should be present")
@@ -666,7 +667,7 @@ type DashboardTests() =
                 buildLinks.EvaluateAllAsync<bool>(
                     "els => els.every(el => el.href && el.href.includes('dev.azure.com') && el.href.includes('_build/results') && el.target === '_blank')"
                 )
-            Assert.That(allValid, Is.True, "Every build badge link should point to dev.azure.com with _build/results path and target=_blank")
+            Assert.That(allValid, Is.True, "Every AzDo build badge link should point to dev.azure.com with _build/results path and target=_blank")
         }
 
     [<Test>]
@@ -1738,3 +1739,150 @@ type DashboardTests() =
             do! page.CloseAsync()
         }
 
+    [<Test>]
+    member this.``GitHub PR badge links to github.com pull URL``() =
+        task {
+            let ghPrLinks = this.Page.Locator(".wt-card a.pr-badge[href*='github.com']")
+            do! ghPrLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = ghPrLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has GitHub PRs; PR badge links with github.com href should be present")
+
+            let! href = ghPrLinks.First.GetAttributeAsync("href")
+            Assert.That(href, Does.Contain("github.com"), "GitHub PR link should point to github.com")
+            Assert.That(href, Does.Contain("/pull/"), "GitHub PR link should contain /pull/ path")
+
+            let! target = ghPrLinks.First.GetAttributeAsync("target")
+            Assert.That(target, Is.EqualTo("_blank"), "GitHub PR link should open in new tab")
+
+            let! text = ghPrLinks.First.TextContentAsync()
+            Assert.That(text, Does.Match(@"^PR #\d+$"), "GitHub PR badge should show 'PR #N' format")
+        }
+
+    [<Test>]
+    member this.``GitHub PR comment badge shows N comments format``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let commentBadges = ghCards.Locator(".thread-badge")
+            do! commentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = commentBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR cards should have comment badges")
+
+            let! allUseCommentsFormat =
+                commentBadges.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.textContent.includes('comments'))")
+            Assert.That(allUseCommentsFormat, Is.True,
+                "GitHub PR comment badges should use 'N comments' format (not 'N/M threads')")
+        }
+
+    [<Test>]
+    member this.``GitHub PR with comments shows non-dimmed comment badge``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let nonDimmedBadges = ghCards.Locator(".thread-badge:not(.dimmed)")
+            let! count = nonDimmedBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR with comments should have non-dimmed badge")
+
+            let! text = nonDimmedBadges.First.TextContentAsync()
+            Assert.That(text, Does.Match(@"^\d+ comments$"), "Non-dimmed comment badge should show count with 'comments' suffix")
+            Assert.That(text, Does.Not.StartWith("0"), "Non-dimmed comment badge should have non-zero count")
+        }
+
+    [<Test>]
+    member this.``GitHub PR with zero comments shows dimmed comment badge``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let dimmedBadges = ghCards.Locator(".thread-badge.dimmed")
+            let! count = dimmedBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has GitHub PR with 0 comments; dimmed badge should be present")
+
+            let! text = dimmedBadges.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("0 comments"), "Dimmed comment badge should show '0 comments'")
+        }
+
+    [<Test>]
+    member this.``GitHub Actions build badge is visible on PR card``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let buildBadges = ghCards.Locator(".build-badge")
+            do! buildBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = buildBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR cards should have build badges for Actions runs")
+
+            let! cssClass = buildBadges.First.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("failed"), "Fixture GitHub Actions runs have 'failure' conclusion; badge should have 'failed' class")
+        }
+
+    [<Test>]
+    member this.``GitHub Actions build badge links to github.com actions URL``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let buildLinks = ghCards.Locator("a.build-badge")
+            do! buildLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = buildLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub build badges should be links")
+
+            let! allValid =
+                buildLinks.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.href && el.href.includes('github.com') && el.href.includes('actions/runs') && el.target === '_blank')")
+            Assert.That(allValid, Is.True, "GitHub build badge links should point to github.com/actions/runs with target=_blank")
+        }
+
+    [<Test>]
+    member this.``Multi-repo sections render with distinct repo headers``() =
+        task {
+            let repoSections = this.Page.Locator(".repo-section")
+            do! repoSections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = repoSections.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(2), "Fixture has two repos; at least 2 repo sections should render")
+
+            let repoNames = this.Page.Locator(".repo-section .repo-name")
+            let! nameCount = repoNames.CountAsync()
+            Assert.That(nameCount, Is.GreaterThanOrEqualTo(2), "Each repo section should have a repo name")
+
+            let! names =
+                repoNames.EvaluateAllAsync<string[]>(
+                    "els => els.map(el => el.textContent.trim())")
+            let nameList = names |> Array.toList
+            Assert.That(nameList, Does.Contain("TestProject"), "Should have TestProject repo section")
+            Assert.That(nameList, Does.Contain("treemon"), "Should have treemon repo section")
+        }
+
+    [<Test>]
+    member this.``GitHub PR and AzDo PR coexist in different repo sections``() =
+        task {
+            let azDoLinks = this.Page.Locator(".wt-card a.pr-badge[href*='dev.azure.com']")
+            do! azDoLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! azDoCount = azDoLinks.CountAsync()
+            Assert.That(azDoCount, Is.GreaterThanOrEqualTo(1), "AzDo PR links should be present in TestProject section")
+
+            let ghLinks = this.Page.Locator(".wt-card a.pr-badge[href*='github.com']")
+            do! ghLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! ghCount = ghLinks.CountAsync()
+            Assert.That(ghCount, Is.GreaterThanOrEqualTo(1), "GitHub PR links should be present in treemon section")
+        }
+
+    [<Test>]
+    member this.``AzDo PR uses threads format while GitHub uses comments format``() =
+        task {
+            let azdoSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('TestProject'))")
+            let azdoThreadBadges = azdoSection.Locator(".thread-badge")
+            do! azdoThreadBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! azdoText = azdoThreadBadges.First.TextContentAsync()
+            Assert.That(azdoText, Does.Contain("threads"), "AzDo PR should use 'threads' format")
+
+            let ghSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
+            let ghCommentBadges = ghSection.Locator(".thread-badge")
+            do! ghCommentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! ghText = ghCommentBadges.First.TextContentAsync()
+            Assert.That(ghText, Does.Contain("comments"), "GitHub PR should use 'comments' format")
+        }

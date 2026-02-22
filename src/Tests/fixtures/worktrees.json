@@ -164,6 +164,83 @@
           }
         ],
         "IsReady": true
+      },
+      {
+        "RepoId": "treemon",
+        "RootFolderName": "treemon",
+        "Worktrees": [
+          {
+            "Path": "Q:/code/treemon/test-add-health-endpoint",
+            "Branch": "test/add-health-endpoint",
+            "LastCommitMessage": "Add CI workflow and contributing guide",
+            "LastCommitTime": "2026-02-22T15:12:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Closed": 0 },
+            "Claude": "Idle",
+            "Pr": {
+              "HasPr": {
+                "Id": 1,
+                "Title": "Add contributing guide and CI workflow",
+                "Url": "https://github.com/0101/treemon/pull/1",
+                "IsDraft": false,
+                "Comments": { "CountOnly": 4 },
+                "Builds": [
+                  {
+                    "Name": "CI",
+                    "Status": "Failed",
+                    "Url": "https://github.com/0101/treemon/actions/runs/22279694651",
+                    "Failure": {
+                      "StepName": "Run tests",
+                      "Log": ""
+                    }
+                  }
+                ],
+                "IsMerged": false
+              }
+            },
+            "MainBehindCount": 0
+          },
+          {
+            "Path": "Q:/code/treemon/test-add-editorconfig",
+            "Branch": "test/add-editorconfig",
+            "LastCommitMessage": "Add editorconfig for consistent formatting",
+            "LastCommitTime": "2026-02-22T15:10:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Closed": 0 },
+            "Claude": "Idle",
+            "Pr": {
+              "HasPr": {
+                "Id": 2,
+                "Title": "Add editorconfig for consistent formatting",
+                "Url": "https://github.com/0101/treemon/pull/2",
+                "IsDraft": false,
+                "Comments": { "CountOnly": 0 },
+                "Builds": [
+                  {
+                    "Name": "CI",
+                    "Status": "Failed",
+                    "Url": "https://github.com/0101/treemon/actions/runs/22279694652",
+                    "Failure": {
+                      "StepName": "Build",
+                      "Log": ""
+                    }
+                  }
+                ],
+                "IsMerged": false
+              }
+            },
+            "MainBehindCount": 0
+          },
+          {
+            "Path": "Q:/code/treemon/multirepo",
+            "Branch": "multirepo",
+            "LastCommitMessage": "Multi-repo support implementation",
+            "LastCommitTime": "2026-02-22T14:00:00+00:00",
+            "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
+            "Claude": "Idle",
+            "Pr": "NoPr",
+            "MainBehindCount": 3
+          }
+        ],
+        "IsReady": true
       }
     ],
     "SchedulerEvents": [
@@ -229,7 +306,7 @@
     "AppVersion": "2026-02-16T22:50:00.000Z"
   },
   "SyncStatus": {
-    "feature-active": [
+    "TestProject/feature-active": [
       {
         "Source": "sync",
         "Message": "Merge main",
@@ -245,7 +322,7 @@
         "Duration": null
       }
     ],
-    "feature-recent": [
+    "TestProject/feature-recent": [
       {
         "Source": "sync",
         "Message": "Pull",
@@ -261,7 +338,7 @@
         "Duration": null
       }
     ],
-    "feature-draft": [
+    "TestProject/feature-draft": [
       {
         "Source": "claude",
         "Message": "Setting up API route handlers",
@@ -279,7 +356,7 @@
         "Duration": null
       }
     ],
-    "feature-unknown": [
+    "TestProject/feature-unknown": [
       {
         "Source": "sync",
         "Message": "Check clean",
