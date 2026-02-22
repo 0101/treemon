@@ -654,28 +654,37 @@ let sortLabel =
 let viewEyeLogo (dx: float, dy: float) =
     Svg.svg [
         svg.className "eye-logo"
-        svg.viewBox (0, 0, 40, 20)
+        svg.viewBox (-2, -2, 44, 24)
         svg.children [
             Svg.path [
                 svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                svg.fill "none"
-                svg.stroke "#94e2d5"
-                svg.strokeWidth 1.5
+                svg.fill "#e8e8e8"
+                svg.stroke "#56b6c2"
+                svg.strokeWidth 2.5
             ]
-            Svg.circle [
-                svg.cx 20
-                svg.cy 10
-                svg.r 6
-                svg.fill "rgba(148, 226, 213, 0.15)"
-                svg.stroke "#94e2d5"
-                svg.strokeWidth 0.5
-            ]
-            Svg.circle [
-                svg.className "eye-pupil"
-                svg.cx (20.0 + dx)
-                svg.cy (10.0 + dy)
-                svg.r 3
-                svg.fill "#94e2d5"
+            Svg.g [
+                svg.className "eye-iris"
+                svg.custom ("transform", $"translate({dx}, {dy})")
+                svg.children [
+                    Svg.circle [
+                        svg.cx 20
+                        svg.cy 10
+                        svg.r 9
+                        svg.fill "#1a1b2e"
+                    ]
+                    Svg.circle [
+                        svg.cx 20
+                        svg.cy 10
+                        svg.r 6
+                        svg.fill "#56b6c2"
+                    ]
+                    Svg.circle [
+                        svg.cx 20
+                        svg.cy 10
+                        svg.r 3
+                        svg.fill "#1a1b2e"
+                    ]
+                ]
             ]
         ]
     ]
