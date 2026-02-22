@@ -190,6 +190,15 @@ type PinnedErrorsTests() =
         let result = pinnedErrors events
         Assert.That(result, Is.Empty)
 
+    [<Test>]
+    member _.``Branchless task success clears branchless failure``() =
+        let events =
+            [ makeEvent "PrFetch" "" (StepStatus.Failed "Timed out") baseTime
+              makeEvent "PrFetch" "" StepStatus.Succeeded (baseTime.AddSeconds(120.0)) ]
+
+        let result = pinnedErrors events
+        Assert.That(result, Is.Empty)
+
 
 [<TestFixture>]
 [<Category("Unit")>]

@@ -235,9 +235,7 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
         | Error msg ->
             Some(StepStatus.Failed msg),
             None,
-            (match target with
-             | "" -> msg
-             | t -> $"{t}: {msg}")
+            target
 
     agent.Post(
         LogSchedulerEvent
