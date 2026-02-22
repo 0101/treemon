@@ -132,21 +132,17 @@ let private deleteWorktree
         | Some wt ->
             let repoId = findRepoForPath state wt.Path
 
-            match repoId with
-            | Some rid -> agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(rid, wt.Path))
-            | None -> ()
-
             let repoRoot =
                 repoId
                 |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
-                |> Option.defaultWith (fun () ->
-                    worktrees
-                    |> List.tryFind (fun w -> w.Branch = Some "main")
-                    |> Option.map (fun w -> w.Path)
-                    |> Option.defaultValue "")
 
-            let! result = GitWorktree.removeWorktree repoRoot wt.Path branch
-            return result
+            match repoId, repoRoot with
+            | Some rid, Some root ->
+                agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(rid, wt.Path))
+                let! result = GitWorktree.removeWorktree root wt.Path branch
+                return result
+            | _ ->
+                return Error $"Could not identify repo root for worktree at '{wt.Path}'"
     }
 
 let worktreeApi
