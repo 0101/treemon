@@ -54,6 +54,8 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
         if Set.contains path repo.KnownPaths then Some repoId
         else None)
 
+let private scopedBranchKey (repoId: string) (branch: string) = $"{repoId}/{branch}"
+
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (appVersion: string)
@@ -174,58 +176,75 @@ let worktreeApi
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                  let worktrees = allWorktrees state
 
                   let worktreeWithRepo =
-                      worktrees
-                      |> List.tryFind (fun wt -> wt.Branch = Some branch)
-                      |> Option.map (fun wt ->
-                          let repoId = findRepoForPath state wt.Path
-                          let repoRoot =
-                              repoId
-                              |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
-                              |> Option.defaultValue (worktreeRoots |> List.head)
-                          wt.Path, repoRoot)
+                      state.Repos
+                      |> Map.toList
+                      |> List.tryPick (fun (repoId, repo) ->
+                          repo.WorktreeList
+                          |> List.tryFind (fun wt -> wt.Branch = Some branch)
+                          |> Option.map (fun wt ->
+                              let repoRoot =
+                                  rootPaths
+                                  |> Map.tryFind repoId
+                                  |> Option.defaultValue (worktreeRoots |> List.head)
+                              let syncKey = scopedBranchKey repoId branch
+                              wt.Path, repoRoot, syncKey))
 
                   match worktreeWithRepo with
                   | None -> return Error $"No worktree found for branch '{branch}'"
-                  | Some (path, repoRoot) ->
-                      match SyncEngine.beginSync branch with
+                  | Some (path, repoRoot, syncKey) ->
+                      match SyncEngine.beginSync syncKey with
                       | Error msg -> return Error msg
                       | Ok ct ->
-                          Async.Start(SyncEngine.executeSyncPipeline branch path repoRoot ct, ct)
+                          Async.Start(SyncEngine.executeSyncPipeline syncKey path repoRoot ct, ct)
                           return Ok ()
               }
-          cancelSync = fun branch -> async { SyncEngine.cancelSync branch }
+          cancelSync = fun branch ->
+              async {
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                  state.Repos
+                  |> Map.toList
+                  |> List.tryPick (fun (repoId, repo) ->
+                      repo.WorktreeList
+                      |> List.tryFind (fun wt -> wt.Branch = Some branch)
+                      |> Option.map (fun _ -> scopedBranchKey repoId branch))
+                  |> Option.iter SyncEngine.cancelSync
+              }
           getSyncStatus = fun () ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                  let worktrees = allWorktrees state
 
-                  let branchToPath =
-                      worktrees
-                      |> List.choose (fun wt ->
-                          wt.Branch |> Option.map (fun b -> b, wt.Path))
+                  let branchToScopedKey =
+                      state.Repos
+                      |> Map.toList
+                      |> List.collect (fun (repoId, repo) ->
+                          repo.WorktreeList
+                          |> List.choose (fun wt ->
+                              wt.Branch |> Option.map (fun b ->
+                                  let key = scopedBranchKey repoId b
+                                  key, wt.Path)))
                       |> Map.ofList
 
                   let syncEvents = SyncEngine.getAllEvents ()
 
-                  let allBranches =
+                  let allKeys =
                       [ yield! syncEvents |> Map.keys
-                        yield! branchToPath |> Map.keys ]
+                        yield! branchToScopedKey |> Map.keys ]
                       |> List.distinct
 
                   return
-                      allBranches
-                      |> List.choose (fun branch ->
+                      allKeys
+                      |> List.choose (fun key ->
                           let syncEvts =
                               syncEvents
-                              |> Map.tryFind branch
+                              |> Map.tryFind key
                               |> Option.defaultValue []
 
                           let claudeEvt =
-                              branchToPath
-                              |> Map.tryFind branch
+                              branchToScopedKey
+                              |> Map.tryFind key
                               |> Option.bind ClaudeStatus.getLastClaudeMessage
 
                           let merged =
@@ -242,7 +261,7 @@ let worktreeApi
                                   |> List.truncate 2
                                   |> List.rev
 
-                              Some(branch, recent))
+                              Some(key, recent))
                       |> Map.ofList
               }
           deleteWorktree = deleteWorktree agent rootPaths }

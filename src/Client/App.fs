@@ -637,7 +637,8 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
     ]
 
 let renderCard dispatch isCompact repoName (branchEvents: Map<string, CardEvent list>) (wt: WorktreeStatus) =
-    let events = branchEvents |> Map.tryFind wt.Branch |> Option.defaultValue []
+    let scopedKey = $"{repoName}/{wt.Branch}"
+    let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     match isCompact with
     | true -> compactWorktreeCard dispatch repoName wt
     | false -> worktreeCard dispatch repoName events wt
