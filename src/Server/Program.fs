@@ -54,11 +54,13 @@ let parseArgs (args: string array) =
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: WorktreeApi.FixtureData) =
     let worktreeInfos =
-        fixtures.Worktrees.Worktrees
-        |> List.map (fun wt ->
-            { Path = wt.Path
-              Head = ""
-              Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
+        fixtures.Worktrees.Repos
+        |> List.collect (fun repo ->
+            repo.Worktrees
+            |> List.map (fun wt ->
+                { Path = wt.Path
+                  Head = ""
+                  Branch = Some wt.Branch }: GitWorktree.WorktreeInfo))
 
     agent.Post(RefreshScheduler.UpdateWorktreeList worktreeInfos)
     Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees"

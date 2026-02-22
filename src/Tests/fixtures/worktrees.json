@@ -1,166 +1,171 @@
 {
   "Worktrees": {
-    "RootFolderName": "TestProject",
-    "Worktrees": [
+    "Repos": [
       {
-        "Path": "Q:/code/TestProject/feature-active",
-        "Branch": "feature-active",
-        "LastCommitMessage": "Add comprehensive input validation",
-        "LastCommitTime": "2026-02-16T22:30:00+00:00",
-        "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
-        "Claude": "Working",
-        "Pr": {
-          "HasPr": {
-            "Id": 101,
-            "Title": "Add input validation layer",
-            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/101",
-            "IsDraft": false,
-            "ThreadCounts": { "Unresolved": 2, "Total": 7 },
-            "Builds": [
-              {
-                "Name": "CI Pipeline",
-                "Status": "Succeeded",
-                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5001",
-                "Failure": null
-              },
-              {
-                "Name": "Integration Tests",
-                "Status": "Failed",
-                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5002",
-                "Failure": {
-                  "StepName": "Run tests",
-                  "Log": "3 tests failed: TestA, TestB, TestC"
-                }
+        "RepoId": "TestProject",
+        "RootFolderName": "TestProject",
+        "Worktrees": [
+          {
+            "Path": "Q:/code/TestProject/feature-active",
+            "Branch": "feature-active",
+            "LastCommitMessage": "Add comprehensive input validation",
+            "LastCommitTime": "2026-02-16T22:30:00+00:00",
+            "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
+            "Claude": "Working",
+            "Pr": {
+              "HasPr": {
+                "Id": 101,
+                "Title": "Add input validation layer",
+                "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/101",
+                "IsDraft": false,
+                "Comments": { "WithResolution": [2, 7] },
+                "Builds": [
+                  {
+                    "Name": "CI Pipeline",
+                    "Status": "Succeeded",
+                    "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5001",
+                    "Failure": null
+                  },
+                  {
+                    "Name": "Integration Tests",
+                    "Status": "Failed",
+                    "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5002",
+                    "Failure": {
+                      "StepName": "Run tests",
+                      "Log": "3 tests failed: TestA, TestB, TestC"
+                    }
+                  }
+                ],
+                "IsMerged": false
               }
-            ],
-            "IsMerged": false
-          }
-        },
-        "MainBehindCount": 25,
-        "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 }
-      },
-      {
-        "Path": "Q:/code/TestProject/feature-recent",
-        "Branch": "feature-recent",
-        "LastCommitMessage": "Refactor data access layer for clarity",
-        "LastCommitTime": "2026-02-16T22:00:00+00:00",
-        "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
-        "Claude": "WaitingForUser",
-        "Pr": {
-          "HasPr": {
-            "Id": 102,
-            "Title": "Refactor data access layer",
-            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/102",
-            "IsDraft": false,
-            "ThreadCounts": { "Unresolved": 0, "Total": 3 },
-            "Builds": [
-              {
-                "Name": "CI Pipeline",
-                "Status": "Building",
-                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5003",
-                "Failure": null
+            },
+            "MainBehindCount": 25,
+            "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 }
+          },
+          {
+            "Path": "Q:/code/TestProject/feature-recent",
+            "Branch": "feature-recent",
+            "LastCommitMessage": "Refactor data access layer for clarity",
+            "LastCommitTime": "2026-02-16T22:00:00+00:00",
+            "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
+            "Claude": "WaitingForUser",
+            "Pr": {
+              "HasPr": {
+                "Id": 102,
+                "Title": "Refactor data access layer",
+                "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/102",
+                "IsDraft": false,
+                "Comments": { "WithResolution": [0, 3] },
+                "Builds": [
+                  {
+                    "Name": "CI Pipeline",
+                    "Status": "Building",
+                    "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5003",
+                    "Failure": null
+                  }
+                ],
+                "IsMerged": false
               }
-            ],
-            "IsMerged": false
-          }
-        },
-        "MainBehindCount": 5,
-        "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 }
-      },
-      {
-        "Path": "Q:/code/TestProject/feature-idle",
-        "Branch": "feature-idle",
-        "LastCommitMessage": "Complete logging improvements",
-        "LastCommitTime": "2026-02-16T20:00:00+00:00",
-        "Beads": { "Open": 0, "InProgress": 0, "Closed": 3 },
-        "Claude": "Idle",
-        "Pr": "NoPr",
-        "MainBehindCount": 0
-      },
-      {
-        "Path": "Q:/code/TestProject/feature-stale",
-        "Branch": "feature-stale",
-        "LastCommitMessage": "Initial experiment with caching",
-        "LastCommitTime": "2026-02-10T08:00:00+00:00",
-        "Beads": { "Open": 1, "InProgress": 0, "Closed": 0 },
-        "Claude": "Idle",
-        "Pr": "NoPr",
-        "MainBehindCount": 42,
-        "IsDirty": true
-      },
-      {
-        "Path": "Q:/code/TestProject/feature-merged",
-        "Branch": "feature-merged",
-        "LastCommitMessage": "Final cleanup before merge",
-        "LastCommitTime": "2026-02-15T16:00:00+00:00",
-        "Beads": { "Open": 0, "InProgress": 0, "Closed": 8 },
-        "Claude": "Idle",
-        "Pr": {
-          "HasPr": {
-            "Id": 99,
-            "Title": "Implement caching layer",
-            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/99",
-            "IsDraft": false,
-            "ThreadCounts": { "Unresolved": 0, "Total": 12 },
-            "Builds": [
-              {
-                "Name": "CI Pipeline",
-                "Status": "Succeeded",
-                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=4999",
-                "Failure": null
+            },
+            "MainBehindCount": 5,
+            "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 }
+          },
+          {
+            "Path": "Q:/code/TestProject/feature-idle",
+            "Branch": "feature-idle",
+            "LastCommitMessage": "Complete logging improvements",
+            "LastCommitTime": "2026-02-16T20:00:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Closed": 3 },
+            "Claude": "Idle",
+            "Pr": "NoPr",
+            "MainBehindCount": 0
+          },
+          {
+            "Path": "Q:/code/TestProject/feature-stale",
+            "Branch": "feature-stale",
+            "LastCommitMessage": "Initial experiment with caching",
+            "LastCommitTime": "2026-02-10T08:00:00+00:00",
+            "Beads": { "Open": 1, "InProgress": 0, "Closed": 0 },
+            "Claude": "Idle",
+            "Pr": "NoPr",
+            "MainBehindCount": 42,
+            "IsDirty": true
+          },
+          {
+            "Path": "Q:/code/TestProject/feature-merged",
+            "Branch": "feature-merged",
+            "LastCommitMessage": "Final cleanup before merge",
+            "LastCommitTime": "2026-02-15T16:00:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Closed": 8 },
+            "Claude": "Idle",
+            "Pr": {
+              "HasPr": {
+                "Id": 99,
+                "Title": "Implement caching layer",
+                "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/99",
+                "IsDraft": false,
+                "Comments": { "WithResolution": [0, 12] },
+                "Builds": [
+                  {
+                    "Name": "CI Pipeline",
+                    "Status": "Succeeded",
+                    "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=4999",
+                    "Failure": null
+                  }
+                ],
+                "IsMerged": true
               }
-            ],
-            "IsMerged": true
-          }
-        },
-        "MainBehindCount": 0
-      },
-      {
-        "Path": "Q:/code/TestProject/feature-draft",
-        "Branch": "feature-draft",
-        "LastCommitMessage": "Wire up API endpoints for new feature",
-        "LastCommitTime": "2026-02-16T21:00:00+00:00",
-        "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
-        "Claude": "Working",
-        "Pr": {
-          "HasPr": {
-            "Id": 103,
-            "Title": "WIP: New reporting module",
-            "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/103",
-            "IsDraft": true,
-            "ThreadCounts": { "Unresolved": 1, "Total": 1 },
-            "Builds": [
-              {
-                "Name": "CI Pipeline",
-                "Status": "PartiallySucceeded",
-                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5004",
-                "Failure": null
-              },
-              {
-                "Name": "Deploy Preview",
-                "Status": "Canceled",
-                "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5005",
-                "Failure": null
+            },
+            "MainBehindCount": 0
+          },
+          {
+            "Path": "Q:/code/TestProject/feature-draft",
+            "Branch": "feature-draft",
+            "LastCommitMessage": "Wire up API endpoints for new feature",
+            "LastCommitTime": "2026-02-16T21:00:00+00:00",
+            "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
+            "Claude": "Working",
+            "Pr": {
+              "HasPr": {
+                "Id": 103,
+                "Title": "WIP: New reporting module",
+                "Url": "https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/103",
+                "IsDraft": true,
+                "Comments": { "WithResolution": [1, 1] },
+                "Builds": [
+                  {
+                    "Name": "CI Pipeline",
+                    "Status": "PartiallySucceeded",
+                    "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5004",
+                    "Failure": null
+                  },
+                  {
+                    "Name": "Deploy Preview",
+                    "Status": "Canceled",
+                    "Url": "https://dev.azure.com/testorg/testproject/_build/results?buildId=5005",
+                    "Failure": null
+                  }
+                ],
+                "IsMerged": false
               }
-            ],
-            "IsMerged": false
+            },
+            "MainBehindCount": 2,
+            "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 }
+          },
+          {
+            "Path": "Q:/code/TestProject/feature-unknown",
+            "Branch": "feature-unknown",
+            "LastCommitMessage": "Update configuration defaults",
+            "LastCommitTime": "2026-02-16T18:00:00+00:00",
+            "Beads": { "Open": 2, "InProgress": 0, "Closed": 0 },
+            "Claude": "Idle",
+            "Pr": "NoPr",
+            "MainBehindCount": 10
           }
-        },
-        "MainBehindCount": 2,
-        "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 }
-      },
-      {
-        "Path": "Q:/code/TestProject/feature-unknown",
-        "Branch": "feature-unknown",
-        "LastCommitMessage": "Update configuration defaults",
-        "LastCommitTime": "2026-02-16T18:00:00+00:00",
-        "Beads": { "Open": 2, "InProgress": 0, "Closed": 0 },
-        "Claude": "Idle",
-        "Pr": "NoPr",
-        "MainBehindCount": 10
+        ],
+        "IsReady": true
       }
     ],
-    "IsReady": true,
     "SchedulerEvents": [
       {
         "Source": "GitRefresh",

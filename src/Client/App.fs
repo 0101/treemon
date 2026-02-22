@@ -21,7 +21,7 @@ type Model =
       AppVersion: string option }
 
 type Msg =
-    | DataLoaded of WorktreeResponse
+    | DataLoaded of DashboardResponse
     | DataFailed of exn
     | ToggleSort
     | ToggleCompact
@@ -73,12 +73,16 @@ let update msg model =
         | Some v when v <> response.AppVersion ->
             model, Cmd.ofEffect (fun _ -> Dom.window.location.reload ())
         | _ ->
+            let firstRepo = response.Repos |> List.tryHead
+            let worktrees = firstRepo |> Option.map (fun r -> r.Worktrees) |> Option.defaultValue []
+            let rootName = firstRepo |> Option.map (fun r -> r.RootFolderName) |> Option.defaultValue ""
+            let isReady = firstRepo |> Option.map (fun r -> r.IsReady) |> Option.defaultValue false
             { model with
-                Worktrees = sortWorktrees model.SortMode response.Worktrees
-                RootFolderName = response.RootFolderName
+                Worktrees = sortWorktrees model.SortMode worktrees
+                RootFolderName = rootName
                 IsLoading = false
                 HasError = false
-                IsReady = response.IsReady
+                IsReady = isReady
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion },
@@ -486,11 +490,18 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                 prop.target "_blank"
                 prop.text ($"PR #{pr.Id}")
             ]
-            if pr.ThreadCounts.Total > 0 then
+            match pr.Comments with
+            | WithResolution (unresolved, total) when total > 0 ->
                 Html.span [
-                    prop.className (if pr.ThreadCounts.Unresolved = 0 then "thread-badge dimmed" else "thread-badge")
-                    prop.text ($"{pr.ThreadCounts.Unresolved}/{pr.ThreadCounts.Total} threads")
+                    prop.className (if unresolved = 0 then "thread-badge dimmed" else "thread-badge")
+                    prop.text ($"{unresolved}/{total} threads")
                 ]
+            | CountOnly total when total > 0 ->
+                Html.span [
+                    prop.className "thread-badge"
+                    prop.text ($"{total} comments")
+                ]
+            | _ -> ()
             buildBadges repoName pr.Builds
     ]
 

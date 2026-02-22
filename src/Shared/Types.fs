@@ -23,9 +23,9 @@ type BuildStatus =
     | PartiallySucceeded
     | Canceled
 
-type ThreadCounts =
-    { Unresolved: int
-      Total: int }
+type CommentSummary =
+    | WithResolution of unresolved: int * total: int
+    | CountOnly of total: int
 
 type BuildFailure =
     { StepName: string
@@ -46,7 +46,7 @@ and PrInfo =
       Title: string
       Url: string
       IsDraft: bool
-      ThreadCounts: ThreadCounts
+      Comments: CommentSummary
       Builds: BuildInfo list
       IsMerged: bool }
 
@@ -82,16 +82,20 @@ type CardEvent =
       Status: StepStatus option
       Duration: TimeSpan option }
 
-type WorktreeResponse =
-    { RootFolderName: string
+type RepoWorktrees =
+    { RepoId: string
+      RootFolderName: string
       Worktrees: WorktreeStatus list
-      IsReady: bool
+      IsReady: bool }
+
+type DashboardResponse =
+    { Repos: RepoWorktrees list
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       AppVersion: string }
 
 type IWorktreeApi =
-    { getWorktrees: unit -> Async<WorktreeResponse>
+    { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: string -> Async<unit>
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>

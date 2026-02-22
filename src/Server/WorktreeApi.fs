@@ -8,7 +8,7 @@ open Shared.EventUtils
 open Newtonsoft.Json
 
 type FixtureData =
-    { Worktrees: WorktreeResponse
+    { Worktrees: DashboardResponse
       SyncStatus: Map<string, CardEvent list> }
 
 let loadFixtures (path: string) =
@@ -41,7 +41,7 @@ let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (worktreeRoot: string)
     (appVersion: string)
-    : Async<WorktreeResponse> =
+    : Async<DashboardResponse> =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
@@ -53,9 +53,11 @@ let getWorktrees
         let folderName = Path.GetFileName worktreeRoot
 
         return
-            { RootFolderName = folderName
-              Worktrees = statuses
-              IsReady = state.IsReady
+            { Repos =
+                [ { RepoId = folderName
+                    RootFolderName = folderName
+                    Worktrees = statuses
+                    IsReady = state.IsReady } ]
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
               AppVersion = appVersion }

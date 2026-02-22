@@ -1352,7 +1352,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1383,7 +1383,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1403,7 +1403,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1636,7 +1636,7 @@ type DashboardTests() =
     member this.``Status overview pending rows have pending badge``() =
         task {
             let! page = this.Context.NewPageAsync()
-            let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":true,"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
+            let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":true}],"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)) |> ignore)
 

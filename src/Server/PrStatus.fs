@@ -154,11 +154,10 @@ let private parseThreadCounts (json: string) =
                 | _ -> false)
             |> List.length
 
-        { Unresolved = unresolved
-          Total = threads.Length }
+        WithResolution(unresolved, threads.Length)
     with ex ->
         Log.log "PR" $"Failed to parse thread list JSON: {ex.Message}"
-        { Unresolved = 0; Total = 0 }
+        WithResolution(0, 0)
 
 let private parseBuildRun (run: JsonElement) =
     let status = run.GetProperty("status").GetString()
@@ -306,7 +305,7 @@ let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
         return
             output
             |> Option.map parseThreadCounts
-            |> Option.defaultValue { Unresolved = 0; Total = 0 }
+            |> Option.defaultValue (WithResolution(0, 0))
     }
 
 let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int) =
@@ -386,7 +385,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                     async {
                         let! threadCounts, builds =
                             if pr.IsMerged then
-                                async { return { Unresolved = 0; Total = 0 }, [] }
+                                async { return WithResolution(0, 0), [] }
                             else
                                 async {
                                     let! tcChild = Async.StartChild(fetchPrThreadCount remote pr.PrId)
@@ -410,7 +409,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   Title = pr.Title
                                   Url = url
                                   IsDraft = pr.IsDraft
-                                  ThreadCounts = threadCounts
+                                  Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged }
                     })
