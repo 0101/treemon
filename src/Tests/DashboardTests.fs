@@ -48,12 +48,15 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Heading text starts with Treemon``() =
+    member this.``Header h1 contains eye SVG and no text``() =
         task {
-            let h1 = this.Page.Locator("h1")
-            let! text = h1.TextContentAsync()
-            Assert.That(text, Does.StartWith("Treemon"), "h1 should start with 'Treemon'")
-            Assert.That(text, Does.Not.Contain("Worktree Monitor"), "h1 should not contain old name 'Worktree Monitor'")
+            let h1 = this.Page.Locator(".dashboard-header h1")
+            let svg = h1.Locator("svg")
+            let! svgCount = svg.CountAsync()
+            Assert.That(svgCount, Is.EqualTo(1), "h1 should contain exactly one SVG element (the eye logo)")
+
+            let! text = h1.EvaluateAsync<string>("el => Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join('')")
+            Assert.That(text, Is.Empty, "h1 should have no direct text content (Treemon text removed)")
         }
 
     [<Test>]
@@ -416,6 +419,14 @@ type DashboardTests() =
             let! href = mergedBadges.First.GetAttributeAsync("href")
             Assert.That(href, Is.Not.Null.And.Not.Empty)
             Assert.That(href, Does.Contain("pullrequest").Or.Contain("/pull/"))
+        }
+
+    [<Test>]
+    member this.``Folder accent class is removed from header``() =
+        task {
+            let folderAccent = this.Page.Locator("h1 .folder-accent")
+            let! count = folderAccent.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "h1 should not contain a .folder-accent span (removed per animated-eye-logo spec)")
         }
 
     [<Test>]
@@ -2088,4 +2099,70 @@ type DashboardTests() =
             do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! marginBottom = header |> computedStyle "marginBottom"
             Assert.That(marginBottom, Is.EqualTo("8px"), "Repo header should have 8px bottom margin for spacing from cards")
+        }
+
+    [<Test>]
+    member this.``Eye SVG has almond outline path``() =
+        task {
+            let svg = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
+            do! Assertions.Expect(svg).ToBeVisibleAsync()
+
+            let paths = svg.Locator("path")
+            let! pathCount = paths.CountAsync()
+            Assert.That(pathCount, Is.EqualTo(1), "Eye SVG should have one path element (the almond outline)")
+
+            let! stroke = paths.First.GetAttributeAsync("stroke")
+            Assert.That(stroke, Is.EqualTo("#94e2d5"), "Eye outline stroke should be teal (#94e2d5)")
+
+            let! fill = paths.First.GetAttributeAsync("fill")
+            Assert.That(fill, Is.EqualTo("none"), "Eye outline should have no fill")
+        }
+
+    [<Test>]
+    member this.``Eye SVG has iris and pupil circles``() =
+        task {
+            let svg = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
+            do! Assertions.Expect(svg).ToBeVisibleAsync()
+
+            let circles = svg.Locator("circle")
+            let! circleCount = circles.CountAsync()
+            Assert.That(circleCount, Is.EqualTo(2), "Eye SVG should have two circle elements (iris and pupil)")
+
+            let pupil = svg.Locator("circle.eye-pupil")
+            let! pupilCount = pupil.CountAsync()
+            Assert.That(pupilCount, Is.EqualTo(1), "Eye SVG should have one .eye-pupil circle")
+
+            let! pupilFill = pupil.GetAttributeAsync("fill")
+            Assert.That(pupilFill, Is.EqualTo("#94e2d5"), "Eye pupil fill should be teal (#94e2d5)")
+        }
+
+    [<Test>]
+    member this.``Eye logo has correct CSS dimensions``() =
+        task {
+            let eyeLogo = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
+            do! Assertions.Expect(eyeLogo).ToBeVisibleAsync()
+
+            let! width = eyeLogo |> computedStyle "width"
+            Assert.That(width, Is.EqualTo("36px"), "Eye logo width should be 36px")
+
+            let! height = eyeLogo |> computedStyle "height"
+            Assert.That(height, Is.EqualTo("18px"), "Eye logo height should be 18px")
+        }
+
+    [<Test>]
+    member this.``Eye pupil has CSS transition for smooth movement``() =
+        task {
+            let pupil = this.Page.Locator(".dashboard-header h1 svg.eye-logo .eye-pupil")
+            do! Assertions.Expect(pupil).ToBeVisibleAsync()
+
+            let! transition = pupil |> computedStyle "transition"
+            Assert.That(transition, Does.Contain("0.3s"), "Eye pupil transition should be 0.3s")
+        }
+
+    [<Test>]
+    member this.``Folder accent CSS class absent from index.html``() =
+        task {
+            let! styles = this.Page.EvaluateAsync<bool>(
+                "() => { const sheets = document.styleSheets; for (let s = 0; s < sheets.length; s++) { try { const rules = sheets[s].cssRules; for (let r = 0; r < rules.length; r++) { if (rules[r].selectorText && rules[r].selectorText.includes('folder-accent')) return true; } } catch(e) {} } return false; }")
+            Assert.That(styles, Is.False, ".folder-accent should not be defined in any stylesheet")
         }

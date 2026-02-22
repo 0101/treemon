@@ -23,7 +23,8 @@ type Model =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
-      AppVersion: string option }
+      AppVersion: string option
+      EyeDirection: float * float }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -67,8 +68,16 @@ let init () =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      AppVersion = None },
+      AppVersion = None
+      EyeDirection = (0.0, 0.0) },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+
+let rng = System.Random()
+
+let randomEyeDirection () =
+    let dx = rng.NextDouble() * 3.0 - 1.5
+    let dy = rng.NextDouble() * 2.0 - 1.0
+    (dx, dy)
 
 let update msg model =
     match msg with
@@ -95,7 +104,8 @@ let update msg model =
                 HasError = false
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
-                AppVersion = Some response.AppVersion },
+                AppVersion = Some response.AppVersion
+                EyeDirection = randomEyeDirection () },
             Cmd.none
 
     | DataFailed _ ->
@@ -588,7 +598,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
             Html.div [
                 prop.className "compact-detail"
                 prop.children [
-                    beadsCounts "beads-inline" wt.Beads
+                    if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
                     prSection repoName wt
                 ]
@@ -620,13 +630,14 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
                 ]
             ]
 
-            Html.div [
-                prop.className "beads-row"
-                prop.children [
-                    beadsCounts "beads-counts" wt.Beads
-                    beadsProgressBar wt.Beads
+            if beadsTotal wt.Beads > 0 then
+                Html.div [
+                    prop.className "beads-row"
+                    prop.children [
+                        beadsCounts "beads-counts" wt.Beads
+                        beadsProgressBar wt.Beads
+                    ]
                 ]
-            ]
 
             mainBehindWithSync dispatch wt branchEvents
 
@@ -669,6 +680,50 @@ let sortLabel =
     function
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
+
+let viewEyeLogo (dx: float, dy: float) =
+    Svg.svg [
+        svg.className "eye-logo"
+        svg.viewBox (-2, -2, 44, 24)
+        svg.children [
+            Svg.path [
+                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
+                svg.fill "#e8e8e8"
+                svg.stroke "#56b6c2"
+                svg.strokeWidth 2.5
+            ]
+            Svg.g [
+                svg.className "eye-iris"
+                svg.custom ("transform", $"translate({dx}, {dy})")
+                svg.children [
+                    Svg.circle [
+                        svg.cx 20
+                        svg.cy 10
+                        svg.r 9
+                        svg.fill "#1a1b2e"
+                    ]
+                    Svg.circle [
+                        svg.cx 20
+                        svg.cy 10
+                        svg.r 6
+                        svg.fill "#56b6c2"
+                    ]
+                    Svg.circle [
+                        svg.cx 20
+                        svg.cy 10
+                        svg.r 3
+                        svg.fill "#1a1b2e"
+                    ]
+                ]
+            ]
+            Svg.circle [
+                svg.cx 23
+                svg.cy 5
+                svg.r 2
+                svg.fill "rgba(255, 255, 255, 0.8)"
+            ]
+        ]
+    ]
 
 let allReposReady (repos: RepoModel list) =
     repos |> List.exists (fun r -> r.IsReady)
@@ -724,7 +779,7 @@ let view model dispatch =
                         prop.children [
                             Html.h1 [
                                 prop.children [
-                                    Html.text "Treemon"
+                                    viewEyeLogo model.EyeDirection
                                 ]
                             ]
                             Html.div [
