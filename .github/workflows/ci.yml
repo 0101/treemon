@@ -26,6 +26,9 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
+      - name: Restore .NET tools
+        run: dotnet tool restore
+
       - name: Build
         run: dotnet build treemon.slnx
 

@@ -26,10 +26,28 @@
 
 ### UI
 
-- Collapsible repo sections: header with repo name, branch count, toggle arrow
+- Collapsible repo sections: header with repo name, toggle arrow, Claude status dots (when collapsed)
+- When collapsed: header shows one cc-dot per worktree reflecting its Claude status — gives at-a-glance activity view without expanding
+- When expanded: dots disappear from header (visible on individual cards)
 - Collapsed sections show only the header row (click to expand)
 - Collapse state is client-side only (per `RepoModel.IsCollapsed`)
+- Repo header has visual styling: spacing/padding, cursor pointer, clear separation from cards
 - Scheduler footer aggregates events across all repos
+
+### Scheduler Startup Ordering
+
+On startup, all tasks are overdue (never-run). The scheduler processes them in `buildTaskList` order. Reorder to prioritize fast, broad discovery:
+
+1. **All worktree lists first** — `RefreshWorktreeList` for every repo before any per-worktree tasks. This ensures all repo sections appear quickly with skeleton loaders.
+2. **Local cheap tasks next** — `RefreshGit`, `RefreshBeads`, `RefreshClaude` across all repos (interleaved, not repo-by-repo). Cards fill in progressively across all sections.
+3. **Network tasks last** — `RefreshPr`, `RefreshFetch` are slow and can wait.
+
+### CI
+
+- `.github/workflows/ci.yml` runs on push to `main` and PRs targeting `main`
+- Must include `dotnet tool restore` before build (Fable is a local tool)
+- Test filter: `Category!=Local` excludes E2E/Smoke tests needing live server
+- All test fixtures using `ServerFixture` must have `[Category("Local")]`
 
 ## Technical Approach
 
