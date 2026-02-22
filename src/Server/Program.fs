@@ -53,17 +53,17 @@ let parseArgs (args: string array) =
         exit 1
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: WorktreeApi.FixtureData) =
-    let worktreeInfos =
-        fixtures.Worktrees.Repos
-        |> List.collect (fun repo ->
+    fixtures.Worktrees.Repos
+    |> List.iter (fun repo ->
+        let worktreeInfos =
             repo.Worktrees
             |> List.map (fun wt ->
                 { Path = wt.Path
                   Head = ""
-                  Branch = Some wt.Branch }: GitWorktree.WorktreeInfo))
+                  Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
-    agent.Post(RefreshScheduler.UpdateWorktreeList worktreeInfos)
-    Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees"
+        agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
+        Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{repo.RepoId}'")
 
 [<EntryPoint>]
 let main args =
@@ -91,7 +91,7 @@ let main args =
         populateAgentFromFixtures agent fixtures
         Log.log "Startup" "Fixture mode: scheduler background loop skipped"
     | None ->
-        RefreshScheduler.start agent config.WorktreeRoot cts.Token
+        RefreshScheduler.start agent [ config.WorktreeRoot ] cts.Token
         Log.log "Startup" "Scheduler background loop started"
 
     let remotingApi =

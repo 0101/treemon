@@ -2,23 +2,21 @@ module Server.RefreshScheduler
 
 open System
 open System.Diagnostics
+open System.IO
 open System.Threading
 open Shared
 open Shared.EventUtils
 
-type DashboardState =
+type PerRepoState =
     { WorktreeList: GitWorktree.WorktreeInfo list
       KnownPaths: Set<string>
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
       ClaudeData: Map<string, ClaudeCodeStatus>
       PrData: Map<string, PrStatus>
-      SchedulerEvents: CardEvent list
-      PinnedErrors: Map<string * string, CardEvent>
-      LatestByCategory: Map<string, CardEvent>
       IsReady: bool }
 
-module DashboardState =
+module PerRepoState =
     let empty =
         { WorktreeList = []
           KnownPaths = Set.empty
@@ -26,18 +24,28 @@ module DashboardState =
           BeadsData = Map.empty
           ClaudeData = Map.empty
           PrData = Map.empty
-          SchedulerEvents = []
-          PinnedErrors = Map.empty
-          LatestByCategory = Map.empty
           IsReady = false }
 
+type DashboardState =
+    { Repos: Map<string, PerRepoState>
+      SchedulerEvents: CardEvent list
+      PinnedErrors: Map<string * string, CardEvent>
+      LatestByCategory: Map<string, CardEvent> }
+
+module DashboardState =
+    let empty =
+        { Repos = Map.empty
+          SchedulerEvents = []
+          PinnedErrors = Map.empty
+          LatestByCategory = Map.empty }
+
 type StateMsg =
-    | UpdateWorktreeList of GitWorktree.WorktreeInfo list
-    | UpdateGit of path: string * GitWorktree.GitData
-    | UpdateBeads of path: string * BeadsSummary
-    | UpdateClaude of path: string * ClaudeCodeStatus
-    | UpdatePr of Map<string, PrStatus>
-    | RemoveWorktree of path: string
+    | UpdateWorktreeList of repoId: string * GitWorktree.WorktreeInfo list
+    | UpdateGit of repoId: string * path: string * GitWorktree.GitData
+    | UpdateBeads of repoId: string * path: string * BeadsSummary
+    | UpdateClaude of repoId: string * path: string * ClaudeCodeStatus
+    | UpdatePr of repoId: string * Map<string, PrStatus>
+    | RemoveWorktree of repoId: string * path: string
     | GetState of AsyncReplyChannel<DashboardState>
     | LogSchedulerEvent of CardEvent
 
@@ -55,52 +63,68 @@ let private updatePinnedErrors (errors: Map<string * string, CardEvent>) (event:
     | Some StepStatus.Succeeded -> errors |> Map.remove key
     | _ -> errors
 
-let private removeWorktreeData (path: string) (state: DashboardState) =
-    { state with
-        WorktreeList = state.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
-        GitData = state.GitData |> Map.remove path
-        BeadsData = state.BeadsData |> Map.remove path
-        ClaudeData = state.ClaudeData |> Map.remove path }
+let private getRepo (repoId: string) (state: DashboardState) =
+    state.Repos
+    |> Map.tryFind repoId
+    |> Option.defaultValue PerRepoState.empty
+
+let private updateRepo (repoId: string) (repo: PerRepoState) (state: DashboardState) =
+    { state with Repos = state.Repos |> Map.add repoId repo }
+
+let private removeWorktreeData (path: string) (repo: PerRepoState) =
+    { repo with
+        WorktreeList = repo.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
+        GitData = repo.GitData |> Map.remove path
+        BeadsData = repo.BeadsData |> Map.remove path
+        ClaudeData = repo.ClaudeData |> Map.remove path }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
-    | UpdateWorktreeList worktrees ->
+    | UpdateWorktreeList(repoId, worktrees) ->
+        let repo = getRepo repoId state
         let newPaths = worktrees |> List.map (fun wt -> wt.Path) |> Set.ofList
-        let oldPaths = state.KnownPaths
-        let removedPaths = Set.difference oldPaths newPaths
+        let removedPaths = Set.difference repo.KnownPaths newPaths
 
         let cleaned =
             removedPaths
-            |> Set.fold (fun s path -> removeWorktreeData path s) state
+            |> Set.fold (fun r path -> removeWorktreeData path r) repo
 
-        { cleaned with
-            WorktreeList = worktrees
-            KnownPaths = newPaths
-            IsReady = true }
+        let updated =
+            { cleaned with
+                WorktreeList = worktrees
+                KnownPaths = newPaths
+                IsReady = true }
 
-    | UpdateGit(path, gitData) ->
-        if Set.contains path state.KnownPaths then
-            { state with GitData = state.GitData |> Map.add path gitData }
+        updateRepo repoId updated state
+
+    | UpdateGit(repoId, path, gitData) ->
+        let repo = getRepo repoId state
+        if Set.contains path repo.KnownPaths then
+            updateRepo repoId { repo with GitData = repo.GitData |> Map.add path gitData } state
         else
             state
 
-    | UpdateBeads(path, beads) ->
-        if Set.contains path state.KnownPaths then
-            { state with BeadsData = state.BeadsData |> Map.add path beads }
+    | UpdateBeads(repoId, path, beads) ->
+        let repo = getRepo repoId state
+        if Set.contains path repo.KnownPaths then
+            updateRepo repoId { repo with BeadsData = repo.BeadsData |> Map.add path beads } state
         else
             state
 
-    | UpdateClaude(path, status) ->
-        if Set.contains path state.KnownPaths then
-            { state with ClaudeData = state.ClaudeData |> Map.add path status }
+    | UpdateClaude(repoId, path, status) ->
+        let repo = getRepo repoId state
+        if Set.contains path repo.KnownPaths then
+            updateRepo repoId { repo with ClaudeData = repo.ClaudeData |> Map.add path status } state
         else
             state
 
-    | UpdatePr prMap ->
-        { state with PrData = prMap }
+    | UpdatePr(repoId, prMap) ->
+        let repo = getRepo repoId state
+        updateRepo repoId { repo with PrData = prMap } state
 
-    | RemoveWorktree path ->
-        removeWorktreeData path state
+    | RemoveWorktree(repoId, path) ->
+        let repo = getRepo repoId state
+        updateRepo repoId (removeWorktreeData path repo) state
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -124,36 +148,39 @@ let createAgent () =
         loop DashboardState.empty)
 
 type RefreshTask =
-    | RefreshWorktreeList
-    | RefreshGit of path: string
-    | RefreshBeads of path: string
-    | RefreshClaude of path: string
-    | RefreshPr
-    | RefreshFetch
+    | RefreshWorktreeList of repoId: string
+    | RefreshGit of repoId: string * path: string
+    | RefreshBeads of repoId: string * path: string
+    | RefreshClaude of repoId: string * path: string
+    | RefreshPr of repoId: string
+    | RefreshFetch of repoId: string
 
 let private taskLabel = function
-    | RefreshWorktreeList -> "WorktreeList", ""
-    | RefreshGit path -> "GitRefresh", System.IO.Path.GetFileName(path)
-    | RefreshBeads path -> "BeadsRefresh", System.IO.Path.GetFileName(path)
-    | RefreshClaude path -> "ClaudeRefresh", System.IO.Path.GetFileName(path)
-    | RefreshPr -> "PrFetch", ""
-    | RefreshFetch -> "GitFetch", ""
+    | RefreshWorktreeList repoId -> "WorktreeList", repoId
+    | RefreshGit(repoId, path) -> "GitRefresh", $"{repoId}/{Path.GetFileName(path)}"
+    | RefreshBeads(repoId, path) -> "BeadsRefresh", $"{repoId}/{Path.GetFileName(path)}"
+    | RefreshClaude(repoId, path) -> "ClaudeRefresh", $"{repoId}/{Path.GetFileName(path)}"
+    | RefreshPr repoId -> "PrFetch", repoId
+    | RefreshFetch repoId -> "GitFetch", repoId
 
 let private intervalOf = function
-    | RefreshWorktreeList -> TimeSpan.FromSeconds(60.0)
+    | RefreshWorktreeList _ -> TimeSpan.FromSeconds(60.0)
     | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
     | RefreshBeads _ -> TimeSpan.FromSeconds(15.0)
     | RefreshClaude _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshPr -> TimeSpan.FromSeconds(120.0)
-    | RefreshFetch -> TimeSpan.FromSeconds(120.0)
+    | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
+    | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
 
-let private buildTaskList (worktrees: GitWorktree.WorktreeInfo list) =
-    [ RefreshWorktreeList
-      yield! worktrees |> List.map (fun wt -> RefreshGit wt.Path)
-      yield! worktrees |> List.map (fun wt -> RefreshBeads wt.Path)
-      yield! worktrees |> List.map (fun wt -> RefreshClaude wt.Path)
-      RefreshPr
-      RefreshFetch ]
+let private buildTaskList (repos: Map<string, PerRepoState>) =
+    repos
+    |> Map.toList
+    |> List.collect (fun (repoId, repo) ->
+        [ RefreshWorktreeList repoId
+          yield! repo.WorktreeList |> List.map (fun wt -> RefreshGit(repoId, wt.Path))
+          yield! repo.WorktreeList |> List.map (fun wt -> RefreshBeads(repoId, wt.Path))
+          yield! repo.WorktreeList |> List.map (fun wt -> RefreshClaude(repoId, wt.Path))
+          RefreshPr repoId
+          RefreshFetch repoId ])
 
 let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
@@ -163,62 +190,67 @@ let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: Refre
 
 let private executeTask
     (agent: MailboxProcessor<StateMsg>)
-    (worktreeRoot: string)
+    (rootPaths: Map<string, string>)
     (task: RefreshTask)
     =
     async {
         match task with
-        | RefreshWorktreeList ->
-            let! worktrees = GitWorktree.listWorktrees worktreeRoot
-            agent.Post(UpdateWorktreeList worktrees)
+        | RefreshWorktreeList repoId ->
+            let root = rootPaths |> Map.find repoId
+            let! worktrees = GitWorktree.listWorktrees root
+            agent.Post(UpdateWorktreeList(repoId, worktrees))
 
-        | RefreshGit path ->
+        | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
+            let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
 
             let branch =
-                state.WorktreeList
+                repo.WorktreeList
                 |> List.tryFind (fun wt -> wt.Path = path)
                 |> Option.bind (fun wt -> wt.Branch)
 
             let! gitData = GitWorktree.collectWorktreeGitData path branch
-            agent.Post(UpdateGit(path, gitData))
+            agent.Post(UpdateGit(repoId, path, gitData))
 
-        | RefreshBeads path ->
+        | RefreshBeads(repoId, path) ->
             let! beads = BeadsStatus.getBeadsSummary path
-            agent.Post(UpdateBeads(path, beads))
+            agent.Post(UpdateBeads(repoId, path, beads))
 
-        | RefreshClaude path ->
+        | RefreshClaude(repoId, path) ->
             let status = ClaudeStatus.getClaudeStatus path
-            agent.Post(UpdateClaude(path, status))
+            agent.Post(UpdateClaude(repoId, path, status))
 
-        | RefreshPr ->
+        | RefreshPr repoId ->
+            let root = rootPaths |> Map.find repoId
             let! state = agent.PostAndAsyncReply(GetState)
+            let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
 
             let knownBranches =
-                state.GitData
+                repo.GitData
                 |> Map.values
                 |> Seq.choose (fun g -> g.UpstreamBranch)
                 |> Set.ofSeq
 
-            let! prMap = PrStatus.fetchPrStatusesByRepoRoot worktreeRoot knownBranches
-            agent.Post(UpdatePr prMap)
+            let! prMap = PrStatus.fetchPrStatusesByRepoRoot root knownBranches
+            agent.Post(UpdatePr(repoId, prMap))
 
-        | RefreshFetch ->
-            do! GitWorktree.fetchFromOrigin worktreeRoot
+        | RefreshFetch repoId ->
+            let root = rootPaths |> Map.find repoId
+            do! GitWorktree.fetchFromOrigin root
     }
 
 let private timeoutMs = 60_000
 
 let private executeWithTimeout
     (agent: MailboxProcessor<StateMsg>)
-    (worktreeRoot: string)
+    (rootPaths: Map<string, string>)
     (task: RefreshTask)
     =
     async {
         let sw = Stopwatch.StartNew()
 
         try
-            let! child = Async.StartChild(executeTask agent worktreeRoot task, timeoutMs)
+            let! child = Async.StartChild(executeTask agent rootPaths task, timeoutMs)
             do! child
             sw.Stop()
             return Ok sw.Elapsed
@@ -272,16 +304,34 @@ let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOff
     |> List.fold min Int32.MaxValue
     |> max 100
 
-let start (agent: MailboxProcessor<StateMsg>) (worktreeRoot: string) (ct: CancellationToken) =
+let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
+    let rootPaths =
+        worktreeRoots
+        |> List.map (fun root -> Path.GetFileName(root), root)
+        |> Map.ofList
+
+    let initialRepos =
+        rootPaths
+        |> Map.map (fun _ _ -> PerRepoState.empty)
+
+    rootPaths
+    |> Map.iter (fun repoId _ ->
+        agent.Post(UpdateWorktreeList(repoId, [])))
+
     let rec loop (lastRuns: Map<RefreshTask, DateTimeOffset>) =
         async {
             let! state = agent.PostAndAsyncReply(GetState)
-            let tasks = buildTaskList state.WorktreeList
+
+            let repos =
+                if Map.isEmpty state.Repos then initialRepos
+                else state.Repos
+
+            let tasks = buildTaskList repos
             let now = DateTimeOffset.UtcNow
 
             match pickMostOverdue now lastRuns tasks with
             | Some task ->
-                let! result = executeWithTimeout agent worktreeRoot task
+                let! result = executeWithTimeout agent rootPaths task
                 logTaskResult agent task result
                 let updatedRuns = lastRuns |> Map.add task now
                 return! loop updatedRuns

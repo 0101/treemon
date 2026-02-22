@@ -17,14 +17,14 @@ let loadFixtures (path: string) =
     JsonConvert.DeserializeObject<FixtureData>(json, converter)
 
 let private assembleFromState
-    (state: RefreshScheduler.DashboardState)
+    (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
-    let gitData = state.GitData |> Map.tryFind wt.Path
-    let beads = state.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let claude = state.ClaudeData |> Map.tryFind wt.Path |> Option.defaultValue ClaudeCodeStatus.Idle
+    let gitData = repo.GitData |> Map.tryFind wt.Path
+    let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
+    let claude = repo.ClaudeData |> Map.tryFind wt.Path |> Option.defaultValue ClaudeCodeStatus.Idle
     let upstreamBranch = gitData |> Option.bind (fun g -> g.UpstreamBranch)
-    let pr = PrStatus.lookupPrStatus state.PrData upstreamBranch
+    let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
     { Path = wt.Path
       Branch = wt.Branch |> Option.defaultValue "(detached)"
@@ -37,6 +37,23 @@ let private assembleFromState
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind (fun g -> g.WorkMetrics) }
 
+let private allWorktrees (state: RefreshScheduler.DashboardState) =
+    state.Repos
+    |> Map.toList
+    |> List.collect (fun (_, repo) -> repo.WorktreeList)
+
+let private allKnownPaths (state: RefreshScheduler.DashboardState) =
+    state.Repos
+    |> Map.toList
+    |> List.collect (fun (_, repo) -> repo.KnownPaths |> Set.toList)
+    |> Set.ofList
+
+let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: string) =
+    state.Repos
+    |> Map.tryPick (fun repoId repo ->
+        if Set.contains path repo.KnownPaths then Some repoId
+        else None)
+
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (worktreeRoot: string)
@@ -45,19 +62,22 @@ let getWorktrees
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-        let statuses =
-            state.WorktreeList
-            |> List.filter (fun w -> w.Branch <> Some "main")
-            |> List.map (assembleFromState state)
+        let repos =
+            state.Repos
+            |> Map.toList
+            |> List.map (fun (repoId, repo) ->
+                let statuses =
+                    repo.WorktreeList
+                    |> List.filter (fun w -> w.Branch <> Some "main")
+                    |> List.map (assembleFromState repo)
 
-        let folderName = Path.GetFileName worktreeRoot
+                { RepoId = repoId
+                  RootFolderName = repoId
+                  Worktrees = statuses
+                  IsReady = repo.IsReady })
 
         return
-            { Repos =
-                [ { RepoId = folderName
-                    RootFolderName = folderName
-                    Worktrees = statuses
-                    IsReady = state.IsReady } ]
+            { Repos = repos
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
               AppVersion = appVersion }
@@ -70,8 +90,9 @@ let private openTerminal
     =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let knownPaths = allKnownPaths state
 
-        if not (Set.contains path state.KnownPaths) then
+        if not (Set.contains path knownPaths) then
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
             let escapedPath = path.Replace("'", "''")
@@ -100,18 +121,23 @@ let private deleteWorktree
     =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let worktrees = allWorktrees state
 
         let worktree =
-            state.WorktreeList
+            worktrees
             |> List.tryFind (fun wt -> wt.Branch = Some branch)
 
         match worktree with
         | None -> return Error $"No worktree found for branch '{branch}'"
         | Some wt ->
-            agent.Post(RefreshScheduler.StateMsg.RemoveWorktree wt.Path)
+            let repoId = findRepoForPath state wt.Path
+
+            match repoId with
+            | Some rid -> agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(rid, wt.Path))
+            | None -> ()
 
             let repoRoot =
-                state.WorktreeList
+                worktrees
                 |> List.tryFind (fun w -> w.Branch = Some "main")
                 |> Option.map (fun w -> w.Path)
                 |> Option.defaultValue worktreeRoot
@@ -142,9 +168,10 @@ let worktreeApi
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                  let worktrees = allWorktrees state
 
                   let worktreePath =
-                      state.WorktreeList
+                      worktrees
                       |> List.tryFind (fun wt -> wt.Branch = Some branch)
                       |> Option.map (fun wt -> wt.Path)
 
@@ -161,9 +188,10 @@ let worktreeApi
           getSyncStatus = fun () ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                  let worktrees = allWorktrees state
 
                   let branchToPath =
-                      state.WorktreeList
+                      worktrees
                       |> List.choose (fun wt ->
                           wt.Branch |> Option.map (fun b -> b, wt.Path))
                       |> Map.ofList
