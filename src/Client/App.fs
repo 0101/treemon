@@ -677,7 +677,6 @@ let allWorktreesEmpty (repos: RepoModel list) =
     repos |> List.forall (fun r -> r.Worktrees.IsEmpty)
 
 let repoSectionHeader dispatch (repo: RepoModel) =
-    let branchCount = List.length repo.Worktrees
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
     Html.div [
         prop.className "repo-header"
@@ -685,7 +684,14 @@ let repoSectionHeader dispatch (repo: RepoModel) =
         prop.children [
             Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
             Html.span [ prop.className "repo-name"; prop.text repo.Name ]
-            Html.span [ prop.className "repo-branch-count"; prop.text ($"{branchCount} branches") ]
+            if repo.IsCollapsed then
+                Html.span [
+                    prop.className "repo-cc-dots"
+                    prop.children (
+                        repo.Worktrees
+                        |> List.map (fun wt ->
+                            Html.span [ prop.className ($"cc-dot {ccClassName wt.Claude}") ]))
+                ]
         ]
     ]
 

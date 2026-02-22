@@ -1872,7 +1872,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Repo section header has repo-header class with name and branch count``() =
+    member this.``Repo section header has repo-header class with name and collapse arrow``() =
         task {
             let headers = this.Page.Locator(".repo-section .repo-header")
             do! headers.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -1886,13 +1886,6 @@ type DashboardTests() =
 
             let! nameText = nameElem.TextContentAsync()
             Assert.That(nameText, Is.Not.Empty, "Repo name should not be empty")
-
-            let branchCountElem = header.Locator(".repo-branch-count")
-            let! branchCountCount = branchCountElem.CountAsync()
-            Assert.That(branchCountCount, Is.EqualTo(1), "Each repo-header should contain exactly one .repo-branch-count element")
-
-            let! branchCountText = branchCountElem.TextContentAsync()
-            Assert.That(branchCountText, Does.Match(@"^\d+ branches$"), "Branch count should match 'N branches' format")
 
             let arrowElem = header.Locator(".collapse-arrow")
             let! arrowCount = arrowElem.CountAsync()
@@ -1969,9 +1962,6 @@ type DashboardTests() =
 
             let repoName = header.Locator(".repo-name")
             do! Assertions.Expect(repoName).ToBeVisibleAsync()
-
-            let branchCount = header.Locator(".repo-branch-count")
-            do! Assertions.Expect(branchCount).ToBeVisibleAsync()
         }
 
     [<Test>]
@@ -2032,4 +2022,85 @@ type DashboardTests() =
             do! ghCommentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! ghText = ghCommentBadges.First.TextContentAsync()
             Assert.That(ghText, Does.Contain("comments"), "GitHub PR should use 'comments' format")
+        }
+
+    [<Test>]
+    member this.``Repo header has cursor pointer``() =
+        task {
+            let header = this.Page.Locator(".repo-header").First
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! cursor = header |> computedStyle "cursor"
+            Assert.That(cursor, Is.EqualTo("pointer"), "Repo header should have cursor:pointer")
+        }
+
+    [<Test>]
+    member this.``Repo header does not contain branches text``() =
+        task {
+            let headers = this.Page.Locator(".repo-header")
+            do! headers.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = headers.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "At least one repo-header should be present")
+
+            let! allText = headers.First.TextContentAsync()
+            Assert.That(allText, Does.Not.Contain("branches"), "Repo header should not contain 'branches' text")
+
+            let branchCountElements = headers.First.Locator(".repo-branch-count")
+            let! branchCountCount = branchCountElements.CountAsync()
+            Assert.That(branchCountCount, Is.EqualTo(0), "No .repo-branch-count elements should exist in repo header")
+        }
+
+    [<Test>]
+    member this.``Collapsed repo header shows cc-dots``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! header.ClickAsync()
+
+            let ccDots = header.Locator(".repo-cc-dots .cc-dot")
+            do! ccDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! dotCount = ccDots.CountAsync()
+            Assert.That(dotCount, Is.GreaterThanOrEqualTo(1), "Collapsed header should show at least one cc-dot")
+        }
+
+    [<Test>]
+    member this.``Expanded repo header hides cc-dots``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let ccDotsContainer = header.Locator(".repo-cc-dots")
+            let! containerCount = ccDotsContainer.CountAsync()
+            Assert.That(containerCount, Is.EqualTo(0), "Expanded header should not have .repo-cc-dots container")
+        }
+
+    [<Test>]
+    member this.``Cc-dots appear on collapse and disappear on expand``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let ccDotsContainer = header.Locator(".repo-cc-dots")
+            let! containerBefore = ccDotsContainer.CountAsync()
+            Assert.That(containerBefore, Is.EqualTo(0), "Expanded header should not show cc-dots")
+
+            do! header.ClickAsync()
+            let! containerAfterCollapse = ccDotsContainer.CountAsync()
+            Assert.That(containerAfterCollapse, Is.EqualTo(1), "Collapsed header should show cc-dots container")
+
+            do! header.ClickAsync()
+            let! containerAfterExpand = ccDotsContainer.CountAsync()
+            Assert.That(containerAfterExpand, Is.EqualTo(0), "Re-expanded header should hide cc-dots again")
+        }
+
+    [<Test>]
+    member this.``Repo header has adequate spacing from cards``() =
+        task {
+            let header = this.Page.Locator(".repo-header").First
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! marginBottom = header |> computedStyle "marginBottom"
+            Assert.That(marginBottom, Is.EqualTo("8px"), "Repo header should have 8px bottom margin for spacing from cards")
         }

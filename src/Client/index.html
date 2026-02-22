@@ -208,6 +208,20 @@
         @keyframes skeleton-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
         .event-duration { color: #6c7086; white-space: nowrap; flex-shrink: 0; }
+
+        .repo-section { margin-bottom: 16px; }
+        .repo-header {
+            display: flex; align-items: center; gap: 8px;
+            cursor: pointer; padding: 8px 12px; border-radius: 6px;
+            margin-bottom: 8px; user-select: none;
+            background: #232334; border-bottom: 1px solid #313244;
+            transition: background 0.15s;
+        }
+        .repo-header:hover { background: #2a2a3c; }
+        .collapse-arrow { color: #6c7086; font-size: 0.8em; flex-shrink: 0; width: 14px; text-align: center; }
+        .repo-name { font-weight: 600; font-size: 1.05em; color: #cdd6f4; }
+        .repo-cc-dots { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+        .repo-cc-dots .cc-dot { width: 8px; height: 8px; }
     </style>
 </head>
 <body>
