@@ -15,6 +15,7 @@
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeDetector.fs" />
+    <Compile Include="CopilotDetector.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
