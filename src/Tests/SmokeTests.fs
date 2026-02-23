@@ -17,6 +17,7 @@ let private serverProjectPath =
     Path.Combine(repoRoot, "src", "Server")
 
 let private worktreeRoot = @"Q:\code\AITestAgent"
+let private thisRepoName = Path.GetFileName(repoRoot)
 let private smokePort = 5002
 let private smokeUrl = $"http://localhost:{smokePort}"
 
@@ -297,7 +298,7 @@ type MultiRepoSmokeTests() =
             let sections = this.Page.Locator(".repo-section")
             do! sections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
             let! count = sections.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(2), "Dashboard should show at least 2 repo sections (AITestAgent + tm-multirepo)")
+            Assert.That(count, Is.GreaterThanOrEqualTo(2), $"Dashboard should show at least 2 repo sections (AITestAgent + {thisRepoName})")
 
             let repoNames = this.Page.Locator(".repo-section .repo-name")
             let! names =
@@ -307,7 +308,7 @@ type MultiRepoSmokeTests() =
             let joined = String.Join(", ", names)
             TestContext.Out.WriteLine($"Repo sections found: {joined}")
             Assert.That(names, Has.Some.Contains("AITestAgent"), "Should have an AITestAgent section")
-            Assert.That(names, Has.Some.Contains("tm-multirepo"), "Should have a tm-multirepo section")
+            Assert.That(names, Has.Some.Contains(thisRepoName), $"Should have a {thisRepoName} section")
         }
 
     [<Test>]
@@ -337,17 +338,17 @@ type MultiRepoSmokeTests() =
             TestContext.Out.WriteLine($"AITestAgent PR badges: {azdoPrCount}")
             Assert.That(azdoPrCount, Is.GreaterThanOrEqualTo(1), "AITestAgent (AzDo) should have at least one card with a PR badge")
 
-            let ghSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('tm-multirepo'))")
+            let ghSection = this.Page.Locator($".repo-section:has(.repo-name:text-is('{thisRepoName}'))")
             do! ghSection.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
             let ghPrBadges = ghSection.Locator(".pr-badge")
 
             let! ghPrCount = ghPrBadges.CountAsync()
-            TestContext.Out.WriteLine($"tm-multirepo PR badges (initial): {ghPrCount}")
+            TestContext.Out.WriteLine($"{thisRepoName} PR badges (initial): {ghPrCount}")
 
             if ghPrCount = 0 then
                 do! this.Page.WaitForTimeoutAsync(30000.0f)
                 let! ghPrCountRetry = ghPrBadges.CountAsync()
-                TestContext.Out.WriteLine($"tm-multirepo PR badges (after 30s wait): {ghPrCountRetry}")
+                TestContext.Out.WriteLine($"{thisRepoName} PR badges (after 30s wait): {ghPrCountRetry}")
 
                 if ghPrCountRetry = 0 then
                     TestContext.Out.WriteLine(
@@ -392,17 +393,17 @@ type MultiRepoSmokeTests() =
     [<Test>]
     member this.``GitHub section uses comments format when PR data is present``() =
         task {
-            let ghSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('tm-multirepo'))")
+            let ghSection = this.Page.Locator($".repo-section:has(.repo-name:text-is('{thisRepoName}'))")
             do! ghSection.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
 
             let ghCommentBadges = ghSection.Locator(".thread-badge")
             let! count = ghCommentBadges.CountAsync()
-            TestContext.Out.WriteLine($"tm-multirepo thread badges: {count}")
+            TestContext.Out.WriteLine($"{thisRepoName} thread badges: {count}")
 
             if count = 0 then
                 do! this.Page.WaitForTimeoutAsync(30000.0f)
                 let! countRetry = ghCommentBadges.CountAsync()
-                TestContext.Out.WriteLine($"tm-multirepo thread badges (after 30s wait): {countRetry}")
+                TestContext.Out.WriteLine($"{thisRepoName} thread badges (after 30s wait): {countRetry}")
 
                 if countRetry = 0 then
                     Assert.Ignore(
