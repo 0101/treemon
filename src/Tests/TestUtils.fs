@@ -3,6 +3,7 @@ module Tests.TestUtils
 open System
 open System.Diagnostics
 open System.IO
+open System.Runtime.InteropServices
 open System.Text.RegularExpressions
 open NUnit.Framework
 
@@ -55,30 +56,59 @@ let killProc (procOpt: Process option) =
         with ex ->
             TestContext.Error.WriteLine($"Failed to kill process: {ex.Message}"))
 
+let private findPidsOnPortWindows (port: int) =
+    let psi =
+        ProcessStartInfo(
+            FileName = "netstat",
+            Arguments = "-ano",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        )
+
+    use proc = Process.Start(psi)
+    let output = proc.StandardOutput.ReadToEnd()
+    proc.WaitForExit(5000) |> ignore
+
+    let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
+    pattern.Matches(output)
+    |> Seq.cast<Match>
+    |> Seq.map (fun m -> int m.Groups[1].Value)
+    |> Seq.distinct
+    |> Seq.toList
+
+let private findPidsOnPortLinux (port: int) =
+    let psi =
+        ProcessStartInfo(
+            FileName = "lsof",
+            Arguments = $"-ti :{port}",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        )
+
+    use proc = Process.Start(psi)
+    let output = proc.StandardOutput.ReadToEnd()
+    proc.WaitForExit(5000) |> ignore
+
+    output.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.choose (fun s ->
+        match Int32.TryParse(s.Trim()) with
+        | true, pid -> Some pid
+        | _ -> None)
+    |> Array.distinct
+    |> Array.toList
+
 let killOrphansOnPort (port: int) =
-    let extractPidsFromNetstat (output: string) (port: int) =
-        let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
-        pattern.Matches(output)
-        |> Seq.cast<Match>
-        |> Seq.map (fun m -> int m.Groups[1].Value)
-        |> Seq.distinct
-
     try
-        let psi =
-            ProcessStartInfo(
-                FileName = "netstat",
-                Arguments = "-ano",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true
-            )
+        let pids =
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                findPidsOnPortWindows port
+            else
+                findPidsOnPortLinux port
 
-        use proc = Process.Start(psi)
-        let output = proc.StandardOutput.ReadToEnd()
-        proc.WaitForExit(5000) |> ignore
-
-        extractPidsFromNetstat output port
-        |> Seq.iter (fun pid ->
+        pids
+        |> List.iter (fun pid ->
             try
                 use orphan = Process.GetProcessById(pid)
 

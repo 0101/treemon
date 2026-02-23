@@ -166,7 +166,7 @@ let private taskLabel = function
 let private intervalOf = function
     | RefreshWorktreeList _ -> TimeSpan.FromSeconds(60.0)
     | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshBeads _ -> TimeSpan.FromSeconds(15.0)
+    | RefreshBeads _ -> TimeSpan.FromSeconds(60.0)
     | RefreshCodingTool _ -> TimeSpan.FromSeconds(15.0)
     | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
     | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)

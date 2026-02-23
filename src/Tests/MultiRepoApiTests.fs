@@ -13,7 +13,6 @@ let private deserializeDashboard (json: string) =
 
 [<TestFixture>]
 [<Category("E2E")>]
-[<Category("Local")>]
 type MultiRepoApiTests() =
 
     let serverUrl = ServerFixture.serverUrl
