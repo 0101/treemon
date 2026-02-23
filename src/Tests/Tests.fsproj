@@ -18,6 +18,7 @@
     <Compile Include="GithubFixtureTests.fs" />
     <Compile Include="AzDoFixtureTests.fs" />
     <Compile Include="CopilotDetectorTests.fs" />
+    <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>

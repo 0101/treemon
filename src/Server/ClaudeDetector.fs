@@ -183,6 +183,13 @@ let private tryParseAssistantText (line: string) =
         Log.log "Claude" $"Failed to parse assistant text: {ex.Message}"
         None
 
+let getSessionMtime (worktreePath: string) =
+    let encoded = encodeWorktreePath worktreePath
+    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+
+    findLatestJsonl projectDir
+    |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+
 let getLastMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)

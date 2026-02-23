@@ -158,6 +158,12 @@ let private findMostRecentEventsFile (sessionDirs: string list) =
     |> List.sortByDescending _.LastWriteTimeUtc
     |> List.tryHead
 
+let getSessionMtime (worktreePath: string) =
+    let sessionDirs = getSessionDirsForPath worktreePath
+
+    findMostRecentEventsFile sessionDirs
+    |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+
 let getStatus (worktreePath: string) =
     let sessionDirs = getSessionDirsForPath worktreePath
 
