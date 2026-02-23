@@ -647,8 +647,8 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
         ]
     ]
 
-let renderCard dispatch isCompact repoName (branchEvents: Map<string, CardEvent list>) (wt: WorktreeStatus) =
-    let scopedKey = $"{repoName}/{wt.Branch}"
+let renderCard dispatch isCompact repoId repoName (branchEvents: Map<string, CardEvent list>) (wt: WorktreeStatus) =
+    let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     match isCompact with
     | true -> compactWorktreeCard dispatch repoName wt
@@ -762,7 +762,7 @@ let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact repo.Name branchEvents))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact (RepoId.value repo.RepoId) repo.Name branchEvents))
                     ]
         ]
     ]

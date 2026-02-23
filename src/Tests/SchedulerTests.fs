@@ -8,6 +8,14 @@ open Shared
 
 let private testRepoId = RepoId "TestRepo"
 
+let private makeWorktree path branch : WorktreeInfo =
+    { Path = path; Head = "abc123"; Branch = Some branch }
+
+let private makeRepo worktrees : PerRepoState =
+    { PerRepoState.empty with
+        WorktreeList = worktrees
+        KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -554,14 +562,6 @@ type LatestByCategoryTests() =
 [<Category("Fast")>]
 type BuildTaskListTests() =
 
-    let makeWorktree path branch : WorktreeInfo =
-        { Path = path; Head = "abc123"; Branch = Some branch }
-
-    let makeRepo worktrees : PerRepoState =
-        { PerRepoState.empty with
-            WorktreeList = worktrees
-            KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
-
     [<Test>]
     member _.``All worktree-list tasks come before any per-worktree tasks``() =
         let repos =
@@ -655,3 +655,119 @@ type BuildTaskListTests() =
 
         Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(3))
         Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(3))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildPhase1TasksTests() =
+
+    [<Test>]
+    member _.``Returns one RefreshWorktreeList per root path``() =
+        let rootPaths =
+            [ RepoId "Repo1", "/r1"
+              RepoId "Repo2", "/r2"
+              RepoId "Repo3", "/r3" ]
+            |> Map.ofList
+
+        let tasks = buildPhase1Tasks rootPaths
+
+        Assert.That(tasks.Length, Is.EqualTo(3))
+
+        tasks
+        |> List.iter (fun t ->
+            match t with
+            | RefreshWorktreeList _ -> ()
+            | _ -> Assert.Fail($"Expected RefreshWorktreeList but got {t}"))
+
+    [<Test>]
+    member _.``Empty root paths returns empty task list``() =
+        let tasks = buildPhase1Tasks Map.empty
+        Assert.That(tasks, Is.Empty)
+
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildPhase2TasksTests() =
+
+    [<Test>]
+    member _.``Contains Git, Beads, Claude per worktree plus Fetch per repo``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
+              RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildPhase2Tasks repos
+
+        let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
+        let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
+        let claudeCount = tasks |> List.filter (function RefreshClaude _ -> true | _ -> false) |> List.length
+        let fetchCount = tasks |> List.filter (function RefreshFetch _ -> true | _ -> false) |> List.length
+
+        Assert.That(gitCount, Is.EqualTo(3), "One RefreshGit per worktree")
+        Assert.That(beadsCount, Is.EqualTo(3), "One RefreshBeads per worktree")
+        Assert.That(claudeCount, Is.EqualTo(3), "One RefreshClaude per worktree")
+        Assert.That(fetchCount, Is.EqualTo(2), "One RefreshFetch per repo")
+
+    [<Test>]
+    member _.``Does not include RefreshWorktreeList or RefreshPr``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildPhase2Tasks repos
+
+        let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList _ -> true | _ -> false)
+        let hasPr = tasks |> List.exists (function RefreshPr _ -> true | _ -> false)
+
+        Assert.That(hasWorktreeList, Is.False, "Phase 2 should not include RefreshWorktreeList")
+        Assert.That(hasPr, Is.False, "Phase 2 should not include RefreshPr")
+
+    [<Test>]
+    member _.``Empty repos returns empty task list``() =
+        let tasks = buildPhase2Tasks Map.empty
+        Assert.That(tasks, Is.Empty)
+
+    [<Test>]
+    member _.``Repo with no worktrees still produces RefreshFetch``() =
+        let repos =
+            [ RepoId "Repo1", PerRepoState.empty ]
+            |> Map.ofList
+
+        let tasks = buildPhase2Tasks repos
+
+        Assert.That(tasks.Length, Is.EqualTo(1))
+        Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildPhase3TasksTests() =
+
+    [<Test>]
+    member _.``Returns one RefreshPr per repo``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ]
+              RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ]
+              RepoId "Repo3", makeRepo [ makeWorktree "/r3/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildPhase3Tasks repos
+
+        Assert.That(tasks.Length, Is.EqualTo(3))
+
+        tasks
+        |> List.iter (fun t ->
+            match t with
+            | RefreshPr _ -> ()
+            | _ -> Assert.Fail($"Expected RefreshPr but got {t}"))
+
+    [<Test>]
+    member _.``Empty repos returns empty task list``() =
+        let tasks = buildPhase3Tasks Map.empty
+        Assert.That(tasks, Is.Empty)
+
+
