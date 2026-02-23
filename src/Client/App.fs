@@ -262,6 +262,12 @@ let mainBehindIndicator (count: int) =
 let isBranchSyncing (events: CardEvent list) =
     events |> List.exists (fun e -> e.Status = Some StepStatus.Running)
 
+let private providerDisplayName (provider: CodingToolProvider option) =
+    match provider with
+    | Some Claude -> "Claude"
+    | Some Copilot -> "Copilot"
+    | None -> "Coding tool"
+
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
     let syncing = isBranchSyncing branchEvents
     let claudeBlocked = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
@@ -277,7 +283,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
             prop.className (if disabled then "sync-btn disabled" else "sync-btn")
             prop.disabled disabled
             prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync wt.Branch))
-            prop.title (if claudeBlocked then "Claude is active" else "Sync with main")
+            prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main")
             prop.text "Sync"
         ]
 

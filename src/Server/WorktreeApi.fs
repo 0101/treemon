@@ -188,15 +188,19 @@ let worktreeApi
                                   |> Map.tryFind repoId
                                   |> Option.defaultValue (worktreeRoots |> List.head)
                               let syncKey = scopedBranchKey repoId branch
-                              wt.Path, repoRoot, syncKey))
+                              let provider =
+                                  repo.CodingToolData
+                                  |> Map.tryFind wt.Path
+                                  |> Option.bind snd
+                              wt.Path, repoRoot, syncKey, provider))
 
                   match worktreeWithRepo with
                   | None -> return Error $"No worktree found for branch '{branch}'"
-                  | Some (path, repoRoot, syncKey) ->
+                  | Some (path, repoRoot, syncKey, provider) ->
                       match SyncEngine.beginSync syncKey with
                       | Error msg -> return Error msg
                       | Ok ct ->
-                          Async.Start(SyncEngine.executeSyncPipeline syncKey path repoRoot ct, ct)
+                          Async.Start(SyncEngine.executeSyncPipeline syncKey path repoRoot provider ct, ct)
                           return Ok ()
               }
           cancelSync = fun branch ->
