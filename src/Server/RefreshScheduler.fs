@@ -193,6 +193,25 @@ let buildTaskList (repos: Map<RepoId, PerRepoState>) =
 
     worktreeLists @ localTasks @ networkTasks
 
+let buildPhase1Tasks (rootPaths: Map<RepoId, string>) =
+    rootPaths |> Map.toList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
+
+let buildPhase2Tasks (repos: Map<RepoId, PerRepoState>) =
+    repos
+    |> Map.toList
+    |> List.collect (fun (repoId, repo) ->
+        let perWorktree =
+            repo.WorktreeList
+            |> List.collect (fun wt ->
+                [ RefreshGit(repoId, wt.Path)
+                  RefreshBeads(repoId, wt.Path)
+                  RefreshClaude(repoId, wt.Path) ])
+
+        RefreshFetch repoId :: perWorktree)
+
+let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
+    repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
+
 let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
@@ -302,6 +321,51 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
     | Error msg ->
         Log.log "Scheduler" $"{source} {target} failed: {msg}"
 
+let private runPhase
+    (agent: MailboxProcessor<StateMsg>)
+    (rootPaths: Map<RepoId, string>)
+    (tasks: RefreshTask list)
+    =
+    async {
+        let now = DateTimeOffset.UtcNow
+
+        let! results =
+            tasks
+            |> List.map (fun task ->
+                async {
+                    let! result = executeWithTimeout agent rootPaths task
+                    logTaskResult agent task result
+                    return task, now
+                })
+            |> Async.Parallel
+
+        return results |> Array.toList
+    }
+
+let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, string>) =
+    async {
+        Log.log "Scheduler" "Starting initial burst — Phase 1 (discover worktrees)"
+        let phase1Tasks = buildPhase1Tasks rootPaths
+        let! phase1Runs = runPhase agent rootPaths phase1Tasks
+
+        let! state = agent.PostAndAsyncReply(GetState)
+        Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
+        let phase2Tasks = buildPhase2Tasks state.Repos
+        let! phase2Runs = runPhase agent rootPaths phase2Tasks
+
+        let! state = agent.PostAndAsyncReply(GetState)
+        Log.log "Scheduler" "Starting initial burst — Phase 3 (PR data)"
+        let phase3Tasks = buildPhase3Tasks state.Repos
+        let! phase3Runs = runPhase agent rootPaths phase3Tasks
+
+        Log.log "Scheduler" "Initial burst complete"
+
+        return
+            [ phase1Runs; phase2Runs; phase3Runs ]
+            |> List.collect id
+            |> Map.ofList
+    }
+
 let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.filter (fun task -> deadlineOf lastRuns task <= now)
@@ -354,4 +418,10 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 return! loop lastRuns
         }
 
-    Async.Start(loop Map.empty, ct)
+    let startup =
+        async {
+            let! lastRuns = runInitialBurst agent rootPaths
+            return! loop lastRuns
+        }
+
+    Async.Start(startup, ct)
