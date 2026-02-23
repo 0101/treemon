@@ -205,7 +205,7 @@ let isMerged (wt: WorktreeStatus) =
     | NoPr -> false
 
 let cardClassName (wt: WorktreeStatus) =
-    let cc = ccClassName wt.Claude
+    let cc = ccClassName wt.CodingTool
     if isMerged wt then $"wt-card cc-{cc} merged" else $"wt-card cc-{cc}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
@@ -264,7 +264,7 @@ let isBranchSyncing (events: CardEvent list) =
 
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
     let syncing = isBranchSyncing branchEvents
-    let claudeBlocked = wt.Claude = Working || wt.Claude = WaitingForUser
+    let claudeBlocked = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
     let disabled = syncing || claudeBlocked
     if syncing then
         Html.button [
@@ -587,7 +587,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"cc-dot {ccClassName wt.Claude}") ]
+                    Html.span [ prop.className ($"cc-dot {ccClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
@@ -614,7 +614,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"cc-dot {ccClassName wt.Claude}") ]
+                    Html.span [ prop.className ($"cc-dot {ccClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
@@ -745,7 +745,7 @@ let repoSectionHeader dispatch (repo: RepoModel) =
                     prop.children (
                         repo.Worktrees
                         |> List.map (fun wt ->
-                            Html.span [ prop.className ($"cc-dot {ccClassName wt.Claude}") ]))
+                            Html.span [ prop.className ($"cc-dot {ccClassName wt.CodingTool}") ]))
                 ]
         ]
     ]

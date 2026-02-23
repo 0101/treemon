@@ -1,4 +1,4 @@
-module Server.ClaudeStatus
+module Server.ClaudeDetector
 
 open System
 open System.IO
@@ -119,7 +119,7 @@ let private statusFromEntry entryKind =
     | AssistantToolUse false -> Working
     | AssistantDone -> Done
 
-let getClaudeStatus (worktreePath: string) =
+let getStatus (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
@@ -183,7 +183,7 @@ let private tryParseAssistantText (line: string) =
         Log.log "Claude" $"Failed to parse assistant text: {ex.Message}"
         None
 
-let getLastClaudeMessage (worktreePath: string) =
+let getLastMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 

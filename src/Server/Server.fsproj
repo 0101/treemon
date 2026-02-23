@@ -14,7 +14,8 @@
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
-    <Compile Include="ClaudeStatus.fs" />
+    <Compile Include="ClaudeDetector.fs" />
+    <Compile Include="CodingToolStatus.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="RefreshScheduler.fs" />

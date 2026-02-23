@@ -22,7 +22,11 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let claude = repo.ClaudeData |> Map.tryFind wt.Path |> Option.defaultValue ClaudeCodeStatus.Idle
+    let codingToolStatus, codingToolProvider =
+        repo.CodingToolData
+        |> Map.tryFind wt.Path
+        |> Option.map (fun (status, provider) -> status, provider)
+        |> Option.defaultValue (CodingToolStatus.Idle, None)
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -31,7 +35,8 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
-      Claude = claude
+      CodingTool = codingToolStatus
+      CodingToolProvider = codingToolProvider
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -239,7 +244,7 @@ let worktreeApi
                           let claudeEvt =
                               branchToScopedKey
                               |> Map.tryFind key
-                              |> Option.bind ClaudeStatus.getLastClaudeMessage
+                              |> Option.bind CodingToolStatus.getLastMessage
 
                           let merged =
                               match claudeEvt with

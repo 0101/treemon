@@ -572,7 +572,7 @@ type BuildTaskListTests() =
         let tasks = buildTaskList repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
-        let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false
+        let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
 
         let lastWorktreeListIdx =
             tasks
@@ -600,7 +600,7 @@ type BuildTaskListTests() =
 
         let tasks = buildTaskList repos
 
-        let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false
+        let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
 
         let lastLocalIdx =
@@ -643,14 +643,14 @@ type BuildTaskListTests() =
 
         let localTasks =
             tasks
-            |> List.filter (function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false)
+            |> List.filter (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
 
         let repoIds =
             localTasks
             |> List.map (function
                 | RefreshGit(r, _) -> r
                 | RefreshBeads(r, _) -> r
-                | RefreshClaude(r, _) -> r
+                | RefreshCodingTool(r, _) -> r
                 | _ -> RepoId "")
 
         Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(3))
@@ -703,12 +703,12 @@ type BuildPhase2TasksTests() =
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
-        let claudeCount = tasks |> List.filter (function RefreshClaude _ -> true | _ -> false) |> List.length
+        let claudeCount = tasks |> List.filter (function RefreshCodingTool _ -> true | _ -> false) |> List.length
         let fetchCount = tasks |> List.filter (function RefreshFetch _ -> true | _ -> false) |> List.length
 
         Assert.That(gitCount, Is.EqualTo(3), "One RefreshGit per worktree")
         Assert.That(beadsCount, Is.EqualTo(3), "One RefreshBeads per worktree")
-        Assert.That(claudeCount, Is.EqualTo(3), "One RefreshClaude per worktree")
+        Assert.That(claudeCount, Is.EqualTo(3), "One RefreshCodingTool per worktree")
         Assert.That(fetchCount, Is.EqualTo(2), "One RefreshFetch per repo")
 
     [<Test>]
