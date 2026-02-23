@@ -6,7 +6,7 @@ open System.Threading
 let private processTimeoutMs = 60_000
 
 let private truncate (s: string) =
-    if s.Length > 200 then s.[..199] + "..." else s
+    if s.Length > 200 then s[..199] + "..." else s
 
 let private startAndCapture (context: string) (fileName: string) (arguments: string) =
     async {

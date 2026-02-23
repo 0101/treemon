@@ -1,0 +1,27 @@
+[
+  {
+    "pullRequestId": 101,
+    "title": "Add authentication middleware",
+    "isDraft": false,
+    "sourceRefName": "refs/heads/feature/auth",
+    "status": "active",
+    "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
+  },
+  {
+    "pullRequestId": 102,
+    "title": "Fix login page styling",
+    "isDraft": true,
+    "sourceRefName": "refs/heads/fix/login-style",
+    "status": "active",
+    "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
+  },
+  {
+    "pullRequestId": 100,
+    "title": "Refactor data layer",
+    "isDraft": false,
+    "sourceRefName": "refs/heads/refactor/data-layer",
+    "status": "completed",
+    "closedDate": "2026-02-20T14:30:00Z",
+    "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
+  }
+]

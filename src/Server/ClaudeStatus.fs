@@ -20,7 +20,7 @@ let private findLatestJsonl (projectDir: string) =
         if Directory.Exists(projectDir) then
             Directory.GetFiles(projectDir, "*.jsonl")
             |> Array.map (fun f -> FileInfo(f))
-            |> Array.sortByDescending (fun fi -> fi.LastWriteTimeUtc)
+            |> Array.sortByDescending _.LastWriteTimeUtc
             |> Array.tryHead
         else
             None
@@ -46,12 +46,12 @@ let private readLastLines (filePath: string) (maxLines: int) =
             // If we didn't read the whole file, the first line might be partial
             let linesToProcess =
                 if start > 0L && lines.Length > 0 then
-                    lines.[1..]
+                    lines[1..]
                 else
                     lines
 
             linesToProcess
-            |> Array.map (fun s -> s.Trim())
+            |> Array.map _.Trim()
             |> Array.filter (fun s -> s.Length > 0)
             |> Array.rev
             |> Array.truncate maxLines
@@ -144,7 +144,7 @@ let getClaudeStatus (worktreePath: string) =
 let private truncateMessage (maxLen: int) (text: string) =
     let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
     if singleLine.Length <= maxLen then singleLine
-    else singleLine.[..maxLen-1].TrimEnd() + "..."
+    else singleLine[..maxLen-1].TrimEnd() + "..."
 
 let private tryParseAssistantText (line: string) =
     try

@@ -41,7 +41,7 @@ let parseWorktreeList (porcelainOutput: string) =
         let findValue (prefix: string) =
             lines
             |> Array.tryFind (fun l -> l.StartsWith(prefix))
-            |> Option.map (fun l -> l.[prefix.Length..])
+            |> Option.map (fun l -> l[prefix.Length..])
 
         match findValue "worktree ", findValue "HEAD " with
         | Some path, Some head ->
@@ -104,7 +104,7 @@ let private tryFastForwardMain (repoRoot: string) =
     async {
         let! currentBranch = runGit repoRoot "rev-parse --abbrev-ref HEAD"
 
-        match currentBranch |> Option.map (fun s -> s.Trim()) with
+        match currentBranch |> Option.map _.Trim() with
         | Some "main" ->
             let! result = runGitResult repoRoot "merge --ff-only origin/main"
 
@@ -169,7 +169,7 @@ let getCommitCount (worktreePath: string) =
 
 let private extractRegexInt (pattern: string) (text: string) =
     let m = System.Text.RegularExpressions.Regex.Match(text, pattern)
-    if m.Success then Int32.Parse(m.Groups.[1].Value: string) else 0
+    if m.Success then Int32.Parse(m.Groups[1].Value: string) else 0
 
 let parseDiffStats (output: string option) =
     output
@@ -208,7 +208,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
         let upstreamBranch =
             upstream
             |> Option.map (fun u ->
-                if u.StartsWith("origin/") then u.["origin/".Length..] else u)
+                if u.StartsWith("origin/") then u["origin/".Length..] else u)
 
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with
@@ -222,8 +222,8 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
         return
             { Path = worktreePath
               Branch = branch |> Option.defaultValue "(detached)"
-              LastCommitMessage = commit |> Option.map (fun c -> c.Message) |> Option.defaultValue ""
-              LastCommitTime = commit |> Option.map (fun c -> c.Time) |> Option.defaultValue DateTimeOffset.MinValue
+              LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
+              LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch
               MainBehindCount = mainBehind
               IsDirty = dirty

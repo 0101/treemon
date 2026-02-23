@@ -34,7 +34,7 @@ type FirstPerBranchTests() =
         let result = firstPerBranch prs
 
         Assert.That(result, Has.Exactly(1).Items)
-        Assert.That(result.[0].PrId, Is.EqualTo(2))
+        Assert.That(result[0].PrId, Is.EqualTo(2))
 
     [<Test>]
     member _.``Most recently closed merged PR preferred when no active``() =
@@ -45,7 +45,7 @@ type FirstPerBranchTests() =
         let result = firstPerBranch prs
 
         Assert.That(result, Has.Exactly(1).Items)
-        Assert.That(result.[0].PrId, Is.EqualTo(2))
+        Assert.That(result[0].PrId, Is.EqualTo(2))
 
     [<Test>]
     member _.``Different branches each get one PR``() =
@@ -93,7 +93,7 @@ type FilterRelevantPrsTests() =
         let result = filterRelevantPrs known prs
 
         Assert.That(result, Has.Exactly(1).Items)
-        Assert.That(result.[0].IsMerged, Is.True)
+        Assert.That(result[0].IsMerged, Is.True)
 
     [<Test>]
     member _.``Deduplication happens before filtering``() =
@@ -105,4 +105,4 @@ type FilterRelevantPrsTests() =
         let result = filterRelevantPrs known prs
 
         Assert.That(result, Has.Exactly(1).Items)
-        Assert.That(result.[0].PrId, Is.EqualTo(1), "Active PR should win over merged")
+        Assert.That(result[0].PrId, Is.EqualTo(1), "Active PR should win over merged")

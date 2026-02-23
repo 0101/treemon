@@ -1,0 +1,38 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 64448260968,
+      "run_id": 22279694651,
+      "name": "build-and-test",
+      "status": "completed",
+      "conclusion": "failure",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Build",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Test",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 7
+        },
+        {
+          "name": "Post cleanup",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8
+        }
+      ]
+    }
+  ]
+}

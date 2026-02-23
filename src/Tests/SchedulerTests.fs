@@ -4,6 +4,9 @@ open System
 open NUnit.Framework
 open Server.GitWorktree
 open Server.RefreshScheduler
+open Shared
+
+let private testRepoId = RepoId "TestRepo"
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -12,22 +15,22 @@ type PickMostOverdueTests() =
 
     [<Test>]
     member _.``Cold start with empty lastRuns returns first task``() =
-        let tasks = [ RefreshWorktreeList; RefreshPr; RefreshGit "/repo/a" ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
         let result = pickMostOverdue DateTimeOffset.UtcNow Map.empty tasks
 
         Assert.That(result.IsSome, Is.True)
 
     [<Test>]
     member _.``Cold start with empty lastRuns picks earliest deadline (all MinValue)``() =
-        let tasks = [ RefreshWorktreeList; RefreshPr; RefreshGit "/repo/a" ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
         let result = pickMostOverdue DateTimeOffset.UtcNow Map.empty tasks
 
-        Assert.That(result, Is.EqualTo(Some RefreshWorktreeList))
+        Assert.That(result, Is.EqualTo(Some(RefreshWorktreeList testRepoId)))
 
     [<Test>]
     member _.``All tasks just ran returns None``() =
         let now = DateTimeOffset.UtcNow
-        let tasks = [ RefreshWorktreeList; RefreshPr; RefreshGit "/repo/a" ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
 
         let lastRuns =
             tasks
@@ -43,17 +46,17 @@ type PickMostOverdueTests() =
         let now = DateTimeOffset.UtcNow
         let longAgo = now.AddSeconds(-200.0)
 
-        let tasks = [ RefreshWorktreeList; RefreshPr; RefreshGit "/repo/a" ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
 
         let lastRuns =
-            [ RefreshWorktreeList, now
-              RefreshPr, longAgo
-              RefreshGit "/repo/a", now ]
+            [ RefreshWorktreeList testRepoId, now
+              RefreshPr testRepoId, longAgo
+              RefreshGit(testRepoId, "/repo/a"), now ]
             |> Map.ofList
 
         let result = pickMostOverdue now lastRuns tasks
 
-        Assert.That(result, Is.EqualTo(Some RefreshPr))
+        Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
     [<Test>]
     member _.``Multiple overdue returns most overdue (earliest deadline)``() =
@@ -61,17 +64,17 @@ type PickMostOverdueTests() =
         let slightlyOverdue = now.AddSeconds(-20.0)
         let veryOverdue = now.AddSeconds(-200.0)
 
-        let tasks = [ RefreshWorktreeList; RefreshPr; RefreshGit "/repo/a" ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
 
         let lastRuns =
-            [ RefreshWorktreeList, slightlyOverdue
-              RefreshPr, veryOverdue
-              RefreshGit "/repo/a", now ]
+            [ RefreshWorktreeList testRepoId, slightlyOverdue
+              RefreshPr testRepoId, veryOverdue
+              RefreshGit(testRepoId, "/repo/a"), now ]
             |> Map.ofList
 
         let result = pickMostOverdue now lastRuns tasks
 
-        Assert.That(result, Is.EqualTo(Some RefreshPr))
+        Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
     [<Test>]
     member _.``Empty task list returns None``() =
@@ -83,14 +86,14 @@ type PickMostOverdueTests() =
         let now = DateTimeOffset.UtcNow
 
         let lastRuns =
-            [ RefreshWorktreeList, now ]
+            [ RefreshWorktreeList testRepoId, now ]
             |> Map.ofList
 
-        let tasks = [ RefreshWorktreeList; RefreshPr ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId ]
 
         let result = pickMostOverdue now lastRuns tasks
 
-        Assert.That(result, Is.EqualTo(Some RefreshPr))
+        Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
 
 [<TestFixture>]
@@ -101,11 +104,11 @@ type ComputeSleepMsTests() =
     [<Test>]
     member _.``Nothing due soon returns large sleep``() =
         let now = DateTimeOffset.UtcNow
-        let tasks = [ RefreshWorktreeList; RefreshPr ]
+        let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId ]
 
         let lastRuns =
-            [ RefreshWorktreeList, now
-              RefreshPr, now ]
+            [ RefreshWorktreeList testRepoId, now
+              RefreshPr testRepoId, now ]
             |> Map.ofList
 
         let result = computeSleepMs now lastRuns tasks
@@ -116,10 +119,10 @@ type ComputeSleepMsTests() =
     member _.``Overdue task returns minimum 100ms``() =
         let now = DateTimeOffset.UtcNow
         let longAgo = now.AddSeconds(-200.0)
-        let tasks = [ RefreshPr ]
+        let tasks = [ RefreshPr testRepoId ]
 
         let lastRuns =
-            [ RefreshPr, longAgo ]
+            [ RefreshPr testRepoId, longAgo ]
             |> Map.ofList
 
         let result = computeSleepMs now lastRuns tasks
@@ -130,10 +133,10 @@ type ComputeSleepMsTests() =
     member _.``Returns correct ms until next task due``() =
         let now = DateTimeOffset.UtcNow
         let ranTenSecondsAgo = now.AddSeconds(-10.0)
-        let tasks = [ RefreshGit "/repo/a" ]
+        let tasks = [ RefreshGit(testRepoId, "/repo/a") ]
 
         let lastRuns =
-            [ RefreshGit "/repo/a", ranTenSecondsAgo ]
+            [ RefreshGit(testRepoId, "/repo/a"), ranTenSecondsAgo ]
             |> Map.ofList
 
         let result = computeSleepMs now lastRuns tasks
@@ -148,11 +151,11 @@ type ComputeSleepMsTests() =
     [<Test>]
     member _.``Multiple tasks returns sleep for soonest``() =
         let now = DateTimeOffset.UtcNow
-        let tasks = [ RefreshGit "/repo/a"; RefreshPr ]
+        let tasks = [ RefreshGit(testRepoId, "/repo/a"); RefreshPr testRepoId ]
 
         let lastRuns =
-            [ RefreshGit "/repo/a", now.AddSeconds(-10.0)
-              RefreshPr, now ]
+            [ RefreshGit(testRepoId, "/repo/a"), now.AddSeconds(-10.0)
+              RefreshPr testRepoId, now ]
             |> Map.ofList
 
         let result = computeSleepMs now lastRuns tasks
@@ -168,6 +171,9 @@ type StateAgentTests() =
     let waitForAgent (agent: MailboxProcessor<StateMsg>) =
         agent.PostAndAsyncReply(GetState) |> Async.Ignore
 
+    let getRepo (state: DashboardState) =
+        state.Repos |> Map.find testRepoId
+
     [<Test>]
     member _.``UpdateWorktreeList then UpdateGit populates state``() =
         async {
@@ -178,7 +184,7 @@ type StateAgentTests() =
                     Head = "abc123"
                     Branch = Some "main" } ]
 
-            agent.Post(UpdateWorktreeList worktrees)
+            agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
             let gitData : GitData =
@@ -191,15 +197,16 @@ type StateAgentTests() =
                   IsDirty = false
                   WorkMetrics = None }
 
-            agent.Post(UpdateGit("/repo/main", gitData))
+            agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))
 
             let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
 
-            Assert.That(state.WorktreeList.Length, Is.EqualTo(1))
-            Assert.That(state.WorktreeList.[0].Path, Is.EqualTo("/repo/main"))
-            Assert.That(state.GitData.ContainsKey("/repo/main"), Is.True)
-            Assert.That(state.GitData.["/repo/main"].Branch, Is.EqualTo("main"))
-            Assert.That(state.IsReady, Is.True)
+            Assert.That(repo.WorktreeList.Length, Is.EqualTo(1))
+            Assert.That(repo.WorktreeList[0].Path, Is.EqualTo("/repo/main"))
+            Assert.That(repo.GitData.ContainsKey("/repo/main"), Is.True)
+            Assert.That(repo.GitData["/repo/main"].Branch, Is.EqualTo("main"))
+            Assert.That(repo.IsReady, Is.True)
         }
         |> Async.RunSynchronously
 
@@ -216,7 +223,7 @@ type StateAgentTests() =
                     Head = "def456"
                     Branch = Some "feature" } ]
 
-            agent.Post(UpdateWorktreeList worktrees)
+            agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
             let gitData : GitData =
@@ -229,20 +236,21 @@ type StateAgentTests() =
                   IsDirty = false
                   WorkMetrics = None }
 
-            agent.Post(UpdateGit("/repo/feature", gitData))
+            agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 2; Closed = 3 }
-            agent.Post(UpdateBeads("/repo/feature", beads))
+            agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads))
             do! waitForAgent agent
 
-            agent.Post(RemoveWorktree "/repo/feature")
+            agent.Post(RemoveWorktree(testRepoId, "/repo/feature"))
 
             let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
 
-            Assert.That(state.WorktreeList.Length, Is.EqualTo(1))
-            Assert.That(state.WorktreeList.[0].Path, Is.EqualTo("/repo/main"))
-            Assert.That(state.GitData.ContainsKey("/repo/feature"), Is.False)
-            Assert.That(state.BeadsData.ContainsKey("/repo/feature"), Is.False)
+            Assert.That(repo.WorktreeList.Length, Is.EqualTo(1))
+            Assert.That(repo.WorktreeList[0].Path, Is.EqualTo("/repo/main"))
+            Assert.That(repo.GitData.ContainsKey("/repo/feature"), Is.False)
+            Assert.That(repo.BeadsData.ContainsKey("/repo/feature"), Is.False)
         }
         |> Async.RunSynchronously
 
@@ -282,7 +290,7 @@ type StateAgentTests() =
                     Head = "abc123"
                     Branch = Some "main" } ]
 
-            agent.Post(UpdateWorktreeList worktrees)
+            agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
             let gitData : GitData =
@@ -295,11 +303,12 @@ type StateAgentTests() =
                   IsDirty = false
                   WorkMetrics = None }
 
-            agent.Post(UpdateGit("/repo/unknown", gitData))
+            agent.Post(UpdateGit(testRepoId, "/repo/unknown", gitData))
 
             let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
 
-            Assert.That(state.GitData.ContainsKey("/repo/unknown"), Is.False)
+            Assert.That(repo.GitData.ContainsKey("/repo/unknown"), Is.False)
         }
         |> Async.RunSynchronously
 
@@ -313,30 +322,27 @@ type StateAgentTests() =
                     Head = "abc123"
                     Branch = Some "main" } ]
 
-            agent.Post(UpdateWorktreeList worktrees)
+            agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 0; Closed = 0 }
-            agent.Post(UpdateBeads("/repo/unknown", beads))
+            agent.Post(UpdateBeads(testRepoId, "/repo/unknown", beads))
 
             let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
 
-            Assert.That(state.BeadsData.ContainsKey("/repo/unknown"), Is.False)
+            Assert.That(repo.BeadsData.ContainsKey("/repo/unknown"), Is.False)
         }
         |> Async.RunSynchronously
 
     [<Test>]
-    member _.``Initial state is empty and not ready``() =
+    member _.``Initial state is empty and repos map is empty``() =
         async {
             let agent = createAgent ()
             let! state = agent.PostAndAsyncReply(GetState)
 
-            Assert.That(state.WorktreeList, Is.Empty)
-            Assert.That(state.GitData, Is.Empty)
-            Assert.That(state.BeadsData, Is.Empty)
-            Assert.That(state.PrData, Is.Empty)
+            Assert.That(state.Repos, Is.Empty)
             Assert.That(state.SchedulerEvents, Is.Empty)
-            Assert.That(state.IsReady, Is.False)
         }
         |> Async.RunSynchronously
 
@@ -353,7 +359,7 @@ type StateAgentTests() =
                     Head = "def456"
                     Branch = Some "old" } ]
 
-            agent.Post(UpdateWorktreeList initial)
+            agent.Post(UpdateWorktreeList(testRepoId, initial))
             do! waitForAgent agent
 
             let gitData : GitData =
@@ -366,7 +372,7 @@ type StateAgentTests() =
                   IsDirty = false
                   WorkMetrics = None }
 
-            agent.Post(UpdateGit("/repo/old", gitData))
+            agent.Post(UpdateGit(testRepoId, "/repo/old", gitData))
             do! waitForAgent agent
 
             let updated =
@@ -374,12 +380,47 @@ type StateAgentTests() =
                     Head = "abc123"
                     Branch = Some "main" } ]
 
-            agent.Post(UpdateWorktreeList updated)
+            agent.Post(UpdateWorktreeList(testRepoId, updated))
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
+
+            Assert.That(repo.WorktreeList.Length, Is.EqualTo(1))
+            Assert.That(repo.GitData.ContainsKey("/repo/old"), Is.False)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Multiple repos are independently tracked``() =
+        async {
+            let agent = createAgent ()
+
+            let repo1Worktrees =
+                [ { WorktreeInfo.Path = "/repo1/main"
+                    Head = "abc123"
+                    Branch = Some "main" } ]
+
+            let repo2Worktrees =
+                [ { WorktreeInfo.Path = "/repo2/main"
+                    Head = "def456"
+                    Branch = Some "main" } ]
+
+            agent.Post(UpdateWorktreeList(RepoId "Repo1", repo1Worktrees))
+            agent.Post(UpdateWorktreeList(RepoId "Repo2", repo2Worktrees))
 
             let! state = agent.PostAndAsyncReply(GetState)
 
-            Assert.That(state.WorktreeList.Length, Is.EqualTo(1))
-            Assert.That(state.GitData.ContainsKey("/repo/old"), Is.False)
+            Assert.That(state.Repos.Count, Is.EqualTo(2))
+            Assert.That(state.Repos.ContainsKey(RepoId "Repo1"), Is.True)
+            Assert.That(state.Repos.ContainsKey(RepoId "Repo2"), Is.True)
+
+            let r1 = state.Repos |> Map.find (RepoId "Repo1")
+            let r2 = state.Repos |> Map.find (RepoId "Repo2")
+
+            Assert.That(r1.WorktreeList.Length, Is.EqualTo(1))
+            Assert.That(r1.WorktreeList[0].Path, Is.EqualTo("/repo1/main"))
+            Assert.That(r2.WorktreeList.Length, Is.EqualTo(1))
+            Assert.That(r2.WorktreeList[0].Path, Is.EqualTo("/repo2/main"))
         }
         |> Async.RunSynchronously
 
@@ -409,8 +450,8 @@ type LatestByCategoryTests() =
 
             Assert.That(state.LatestByCategory.Count, Is.EqualTo(1))
             Assert.That(state.LatestByCategory.ContainsKey("GitRefresh"), Is.True)
-            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("main"))
-            Assert.That(state.LatestByCategory.["GitRefresh"].Timestamp, Is.EqualTo(baseTime))
+            Assert.That(state.LatestByCategory["GitRefresh"].Message, Is.EqualTo("main"))
+            Assert.That(state.LatestByCategory["GitRefresh"].Timestamp, Is.EqualTo(baseTime))
         }
         |> Async.RunSynchronously
 
@@ -426,8 +467,8 @@ type LatestByCategoryTests() =
             let! state = agent.PostAndAsyncReply(GetState)
 
             Assert.That(state.LatestByCategory.Count, Is.EqualTo(1))
-            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("feature"))
-            Assert.That(state.LatestByCategory.["GitRefresh"].Timestamp, Is.EqualTo(baseTime.AddSeconds(30.0)))
+            Assert.That(state.LatestByCategory["GitRefresh"].Message, Is.EqualTo("feature"))
+            Assert.That(state.LatestByCategory["GitRefresh"].Timestamp, Is.EqualTo(baseTime.AddSeconds(30.0)))
         }
         |> Async.RunSynchronously
 
@@ -445,8 +486,8 @@ type LatestByCategoryTests() =
             Assert.That(state.LatestByCategory.Count, Is.EqualTo(2))
             Assert.That(state.LatestByCategory.ContainsKey("GitRefresh"), Is.True)
             Assert.That(state.LatestByCategory.ContainsKey("PrFetch"), Is.True)
-            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("main"))
-            Assert.That(state.LatestByCategory.["PrFetch"].Message, Is.EqualTo("fetched"))
+            Assert.That(state.LatestByCategory["GitRefresh"].Message, Is.EqualTo("main"))
+            Assert.That(state.LatestByCategory["PrFetch"].Message, Is.EqualTo("fetched"))
         }
         |> Async.RunSynchronously
 
@@ -467,12 +508,12 @@ type LatestByCategoryTests() =
             let! state = agent.PostAndAsyncReply(GetState)
 
             Assert.That(state.LatestByCategory.Count, Is.EqualTo(4))
-            Assert.That(state.LatestByCategory.["GitRefresh"].Message, Is.EqualTo("feature"),
+            Assert.That(state.LatestByCategory["GitRefresh"].Message, Is.EqualTo("feature"),
                 "GitRefresh should have the last posted event (feature, not main)")
-            Assert.That(state.LatestByCategory.["BeadsRefresh"].Message, Is.EqualTo("main"),
+            Assert.That(state.LatestByCategory["BeadsRefresh"].Message, Is.EqualTo("main"),
                 "BeadsRefresh should have the last posted event (main, not feature)")
-            Assert.That(state.LatestByCategory.["ClaudeRefresh"].Message, Is.EqualTo("dev"))
-            Assert.That(state.LatestByCategory.["PrFetch"].Message, Is.EqualTo("all"))
+            Assert.That(state.LatestByCategory["ClaudeRefresh"].Message, Is.EqualTo("dev"))
+            Assert.That(state.LatestByCategory["PrFetch"].Message, Is.EqualTo("all"))
         }
         |> Async.RunSynchronously
 
@@ -488,6 +529,7 @@ type LatestByCategoryTests() =
 
     [<Test>]
     member _.``LatestByCategory is never trimmed unlike SchedulerEvents``() =
+
         async {
             let agent = createAgent ()
 
@@ -505,3 +547,111 @@ type LatestByCategoryTests() =
                 "LatestByCategory should never be trimmed, holding all 60 categories")
         }
         |> Async.RunSynchronously
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildTaskListTests() =
+
+    let makeWorktree path branch : WorktreeInfo =
+        { Path = path; Head = "abc123"; Branch = Some branch }
+
+    let makeRepo worktrees : PerRepoState =
+        { PerRepoState.empty with
+            WorktreeList = worktrees
+            KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
+
+    [<Test>]
+    member _.``All worktree-list tasks come before any per-worktree tasks``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
+              RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
+        let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false
+
+        let lastWorktreeListIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isWorktreeList t)
+            |> List.map fst
+            |> List.max
+
+        let firstPerWorktreeIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isPerWorktree t)
+            |> List.map fst
+            |> List.min
+
+        Assert.That(lastWorktreeListIdx, Is.LessThan(firstPerWorktreeIdx),
+            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads/Claude tasks")
+
+    [<Test>]
+    member _.``All local tasks come before any network tasks``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ]
+              RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false
+        let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
+
+        let lastLocalIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isLocal t)
+            |> List.map fst
+            |> List.max
+
+        let firstNetworkIdx =
+            tasks
+            |> List.mapi (fun i t -> i, t)
+            |> List.filter (fun (_, t) -> isNetwork t)
+            |> List.map fst
+            |> List.min
+
+        Assert.That(lastLocalIdx, Is.LessThan(firstNetworkIdx),
+            "All local tasks (Git/Beads/Claude) must appear before any network tasks (Pr/Fetch)")
+
+    [<Test>]
+    member _.``Contains expected task count``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
+              RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
+        Assert.That(tasks.Length, Is.EqualTo(15))
+
+    [<Test>]
+    member _.``Local tasks are interleaved across repos not grouped by repo``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ]
+              RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
+            |> Map.ofList
+
+        let tasks = buildTaskList repos
+
+        let localTasks =
+            tasks
+            |> List.filter (function RefreshGit _ | RefreshBeads _ | RefreshClaude _ -> true | _ -> false)
+
+        let repoIds =
+            localTasks
+            |> List.map (function
+                | RefreshGit(r, _) -> r
+                | RefreshBeads(r, _) -> r
+                | RefreshClaude(r, _) -> r
+                | _ -> RepoId "")
+
+        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(3))
+        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(3))

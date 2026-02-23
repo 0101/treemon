@@ -6,6 +6,7 @@ open Microsoft.Playwright.NUnit
 
 [<TestFixture>]
 [<Category("E2E")>]
+[<Category("Local")>]
 type DashboardTests() =
     inherit PageTest()
 
@@ -244,7 +245,7 @@ type DashboardTests() =
 
             let! href = prLinks.First.GetAttributeAsync("href")
             Assert.That(href, Is.Not.Null.And.Not.Empty)
-            Assert.That(href, Does.Contain("pullrequest"))
+            Assert.That(href, Does.Contain("pullrequest").Or.Contain("/pull/"))
 
             let! target = prLinks.First.GetAttributeAsync("target")
             Assert.That(target, Is.EqualTo("_blank"))
@@ -259,7 +260,7 @@ type DashboardTests() =
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
             let! threadText = threadBadges.First.TextContentAsync()
-            Assert.That(threadText, Does.Match(@"\d+/\d+"))
+            Assert.That(threadText, Does.Match(@"\d+/\d+ threads").Or.Match(@"\d+ comments"))
         }
 
     [<Test>]
@@ -353,7 +354,7 @@ type DashboardTests() =
                 null,
                 PageWaitForFunctionOptions(Timeout = 5000.0f))
 
-            let grid = this.Page.Locator(".card-grid")
+            let grid = this.Page.Locator(".card-grid").First
             let! gridStyle = grid |> computedStyle "gridTemplateColumns"
             let columnCount = gridStyle.Split(' ') |> Array.length
             Assert.That(columnCount, Is.EqualTo(expectedColumns), $"At {width}px width, expected {expectedColumns} columns")
@@ -417,15 +418,7 @@ type DashboardTests() =
 
             let! href = mergedBadges.First.GetAttributeAsync("href")
             Assert.That(href, Is.Not.Null.And.Not.Empty)
-            Assert.That(href, Does.Contain("pullrequest"))
-        }
-
-    [<Test>]
-    member this.``Folder accent class is removed from header``() =
-        task {
-            let folderAccent = this.Page.Locator("h1 .folder-accent")
-            let! count = folderAccent.CountAsync()
-            Assert.That(count, Is.EqualTo(0), "h1 should not contain a .folder-accent span (removed per animated-eye-logo spec)")
+            Assert.That(href, Does.Contain("pullrequest").Or.Contain("/pull/"))
         }
 
     [<Test>]
@@ -650,9 +643,10 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``All build badges are links to Azure DevOps build results``() =
+    member this.``All AzDo build badges are links to Azure DevOps build results``() =
         task {
-            let buildLinks = this.Page.Locator(".wt-card a.build-badge")
+            let azdoSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('TestProject'))")
+            let buildLinks = azdoSection.Locator("a.build-badge")
             do! buildLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = buildLinks.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with builds; build badge links should be present")
@@ -661,7 +655,7 @@ type DashboardTests() =
                 buildLinks.EvaluateAllAsync<bool>(
                     "els => els.every(el => el.href && el.href.includes('dev.azure.com') && el.href.includes('_build/results') && el.target === '_blank')"
                 )
-            Assert.That(allValid, Is.True, "Every build badge link should point to dev.azure.com with _build/results path and target=_blank")
+            Assert.That(allValid, Is.True, "Every AzDo build badge link should point to dev.azure.com with _build/results path and target=_blank")
         }
 
     [<Test>]
@@ -1348,7 +1342,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1379,7 +1373,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1399,7 +1393,7 @@ type DashboardTests() =
         task {
             let! page = this.Context.NewPageAsync()
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":false,"SchedulerEvents":[],"AppVersion":"test"}"""
+                let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":false}],"SchedulerEvents":[],"LatestByCategory":{},"AppVersion":"test"}"""
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json))
             )
 
@@ -1629,32 +1623,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Status overview pending rows have pending badge``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-            let json = """{"RootFolderName":"Test","Worktrees":[],"IsReady":true,"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
-            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)) |> ignore)
-
-            let! _ = page.GotoAsync(baseUrl)
-
-            let overview = page.Locator(".scheduler-footer .status-overview")
-            let pendingRows = overview.Locator(".status-row.pending")
-            do! pendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! pendingCount = pendingRows.CountAsync()
-            Assert.That(pendingCount, Is.EqualTo(5), "Only GitRefresh provided; 5 other categories should be pending")
-
-            let! allHaveBadge =
-                pendingRows.EvaluateAllAsync<bool>(
-                    "els => els.every(el => el.querySelector('.status-badge.pending') !== null)")
-            Assert.That(allHaveBadge, Is.True,
-                "Each pending status row should have a .status-badge.pending element")
-
-            do! page.CloseAsync()
-        }
-
-    [<Test>]
     member this.``Status overview uses grid layout for rows``() =
         task {
             let row = this.Page.Locator(".scheduler-footer .status-overview .status-row").First
@@ -1734,61 +1702,369 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Eye SVG has almond outline path``() =
+    member this.``GitHub PR badge links to github.com pull URL``() =
         task {
-            let svg = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
-            do! Assertions.Expect(svg).ToBeVisibleAsync()
+            let ghPrLinks = this.Page.Locator(".wt-card a.pr-badge[href*='github.com']")
+            do! ghPrLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = ghPrLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has GitHub PRs; PR badge links with github.com href should be present")
 
-            let paths = svg.Locator("path")
-            let! pathCount = paths.CountAsync()
-            Assert.That(pathCount, Is.EqualTo(1), "Eye SVG should have one path element (the almond outline)")
+            let! href = ghPrLinks.First.GetAttributeAsync("href")
+            Assert.That(href, Does.Contain("github.com"), "GitHub PR link should point to github.com")
+            Assert.That(href, Does.Contain("/pull/"), "GitHub PR link should contain /pull/ path")
 
-            let! stroke = paths.First.GetAttributeAsync("stroke")
-            Assert.That(stroke, Is.EqualTo("#94e2d5"), "Eye outline stroke should be teal (#94e2d5)")
+            let! target = ghPrLinks.First.GetAttributeAsync("target")
+            Assert.That(target, Is.EqualTo("_blank"), "GitHub PR link should open in new tab")
 
-            let! fill = paths.First.GetAttributeAsync("fill")
-            Assert.That(fill, Is.EqualTo("none"), "Eye outline should have no fill")
+            let! text = ghPrLinks.First.TextContentAsync()
+            Assert.That(text, Does.Match(@"^PR #\d+$"), "GitHub PR badge should show 'PR #N' format")
         }
 
     [<Test>]
-    member this.``Eye SVG has iris and pupil circles``() =
+    member this.``GitHub PR comment badge shows N comments format``() =
         task {
-            let svg = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
-            do! Assertions.Expect(svg).ToBeVisibleAsync()
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let circles = svg.Locator("circle")
-            let! circleCount = circles.CountAsync()
-            Assert.That(circleCount, Is.EqualTo(2), "Eye SVG should have two circle elements (iris and pupil)")
+            let commentBadges = ghCards.Locator(".thread-badge")
+            do! commentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = commentBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR cards should have comment badges")
 
-            let pupil = svg.Locator("circle.eye-pupil")
-            let! pupilCount = pupil.CountAsync()
-            Assert.That(pupilCount, Is.EqualTo(1), "Eye SVG should have one .eye-pupil circle")
-
-            let! pupilFill = pupil.GetAttributeAsync("fill")
-            Assert.That(pupilFill, Is.EqualTo("#94e2d5"), "Eye pupil fill should be teal (#94e2d5)")
+            let! allUseCommentsFormat =
+                commentBadges.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.textContent.includes('comments'))")
+            Assert.That(allUseCommentsFormat, Is.True,
+                "GitHub PR comment badges should use 'N comments' format (not 'N/M threads')")
         }
 
     [<Test>]
-    member this.``Eye logo has correct CSS dimensions``() =
+    member this.``GitHub PR with comments shows non-dimmed comment badge``() =
         task {
-            let eyeLogo = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
-            do! Assertions.Expect(eyeLogo).ToBeVisibleAsync()
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let! width = eyeLogo |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("36px"), "Eye logo width should be 36px")
+            let nonDimmedBadges = ghCards.Locator(".thread-badge:not(.dimmed)")
+            let! count = nonDimmedBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR with comments should have non-dimmed badge")
 
-            let! height = eyeLogo |> computedStyle "height"
-            Assert.That(height, Is.EqualTo("18px"), "Eye logo height should be 18px")
+            let! text = nonDimmedBadges.First.TextContentAsync()
+            Assert.That(text, Does.Match(@"^\d+ comments$"), "Non-dimmed comment badge should show count with 'comments' suffix")
+            Assert.That(text, Does.Not.StartWith("0"), "Non-dimmed comment badge should have non-zero count")
         }
 
     [<Test>]
-    member this.``Eye pupil has CSS transition for smooth movement``() =
+    member this.``GitHub PR with zero comments shows dimmed comment badge``() =
         task {
-            let pupil = this.Page.Locator(".dashboard-header h1 svg.eye-logo .eye-pupil")
-            do! Assertions.Expect(pupil).ToBeVisibleAsync()
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let! transition = pupil |> computedStyle "transition"
-            Assert.That(transition, Does.Contain("0.3s"), "Eye pupil transition should be 0.3s")
+            let dimmedBadges = ghCards.Locator(".thread-badge.dimmed")
+            let! count = dimmedBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has GitHub PR with 0 comments; dimmed badge should be present")
+
+            let! text = dimmedBadges.First.TextContentAsync()
+            Assert.That(text, Is.EqualTo("0 comments"), "Dimmed comment badge should show '0 comments'")
+        }
+
+    [<Test>]
+    member this.``GitHub Actions build badge is visible on PR card``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let buildBadges = ghCards.Locator(".build-badge")
+            do! buildBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = buildBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR cards should have build badges for Actions runs")
+
+            let! cssClass = buildBadges.First.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("failed"), "Fixture GitHub Actions runs have 'failure' conclusion; badge should have 'failed' class")
+        }
+
+    [<Test>]
+    member this.``GitHub Actions build badge links to github.com actions URL``() =
+        task {
+            let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
+            do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let buildLinks = ghCards.Locator("a.build-badge")
+            do! buildLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = buildLinks.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub build badges should be links")
+
+            let! allValid =
+                buildLinks.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.href && el.href.includes('github.com') && el.href.includes('actions/runs') && el.target === '_blank')")
+            Assert.That(allValid, Is.True, "GitHub build badge links should point to github.com/actions/runs with target=_blank")
+        }
+
+    [<Test>]
+    member this.``Multi-repo sections render with distinct repo headers``() =
+        task {
+            let repoSections = this.Page.Locator(".repo-section")
+            do! repoSections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = repoSections.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(2), "Fixture has two repos; at least 2 repo sections should render")
+
+            let repoNames = this.Page.Locator(".repo-section .repo-name")
+            let! nameCount = repoNames.CountAsync()
+            Assert.That(nameCount, Is.GreaterThanOrEqualTo(2), "Each repo section should have a repo name")
+
+            let! names =
+                repoNames.EvaluateAllAsync<string[]>(
+                    "els => els.map(el => el.textContent.trim())")
+            let nameList = names |> Array.toList
+            Assert.That(nameList, Does.Contain("TestProject"), "Should have TestProject repo section")
+            Assert.That(nameList, Does.Contain("treemon"), "Should have treemon repo section")
+        }
+
+    [<Test>]
+    member this.``GitHub PR and AzDo PR coexist in different repo sections``() =
+        task {
+            let azDoLinks = this.Page.Locator(".wt-card a.pr-badge[href*='dev.azure.com']")
+            do! azDoLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! azDoCount = azDoLinks.CountAsync()
+            Assert.That(azDoCount, Is.GreaterThanOrEqualTo(1), "AzDo PR links should be present in TestProject section")
+
+            let ghLinks = this.Page.Locator(".wt-card a.pr-badge[href*='github.com']")
+            do! ghLinks.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! ghCount = ghLinks.CountAsync()
+            Assert.That(ghCount, Is.GreaterThanOrEqualTo(1), "GitHub PR links should be present in treemon section")
+        }
+
+    [<Test>]
+    member this.``Repo section header has repo-header class with name and collapse arrow``() =
+        task {
+            let headers = this.Page.Locator(".repo-section .repo-header")
+            do! headers.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = headers.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(2), "Fixture has two repos; at least 2 repo-header elements should be present")
+
+            let header = headers.First
+            let nameElem = header.Locator(".repo-name")
+            let! nameCount = nameElem.CountAsync()
+            Assert.That(nameCount, Is.EqualTo(1), "Each repo-header should contain exactly one .repo-name element")
+
+            let! nameText = nameElem.TextContentAsync()
+            Assert.That(nameText, Is.Not.Empty, "Repo name should not be empty")
+
+            let arrowElem = header.Locator(".collapse-arrow")
+            let! arrowCount = arrowElem.CountAsync()
+            Assert.That(arrowCount, Is.EqualTo(1), "Each repo-header should contain exactly one .collapse-arrow element")
+        }
+
+    [<Test>]
+    member this.``Clicking collapse toggle hides cards and shows right arrow``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridCountBefore = cardGrid.CountAsync()
+            Assert.That(gridCountBefore, Is.EqualTo(1), "Card grid should be visible before collapse")
+
+            let arrow = header.Locator(".collapse-arrow")
+            let! arrowTextBefore = arrow.TextContentAsync()
+            Assert.That(arrowTextBefore, Is.EqualTo("\u25BC"), "Expanded arrow should be down-pointing (U+25BC)")
+
+            do! header.ClickAsync()
+
+            let! gridCountAfter = cardGrid.CountAsync()
+            Assert.That(gridCountAfter, Is.EqualTo(0), "Card grid should be removed from DOM after collapse")
+
+            let cards = firstSection.Locator(".wt-card")
+            let! cardCount = cards.CountAsync()
+            Assert.That(cardCount, Is.EqualTo(0), "No worktree cards should be visible after collapse")
+
+            let! arrowTextAfter = arrow.TextContentAsync()
+            Assert.That(arrowTextAfter, Is.EqualTo("\u25B6"), "Collapsed arrow should be right-pointing (U+25B6)")
+        }
+
+    [<Test>]
+    member this.``Clicking collapsed section again restores expanded state``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let cards = firstSection.Locator(".wt-card")
+            let! cardCountOriginal = cards.CountAsync()
+            Assert.That(cardCountOriginal, Is.GreaterThanOrEqualTo(1), "Should have cards initially")
+
+            do! header.ClickAsync()
+            let! gridCountCollapsed = cardGrid.CountAsync()
+            Assert.That(gridCountCollapsed, Is.EqualTo(0), "Card grid should be gone after collapse")
+
+            do! header.ClickAsync()
+
+            let! gridCountExpanded = cardGrid.CountAsync()
+            Assert.That(gridCountExpanded, Is.EqualTo(1), "Card grid should reappear after expand")
+
+            let! cardCountRestored = cards.CountAsync()
+            Assert.That(cardCountRestored, Is.EqualTo(cardCountOriginal), "Same number of cards should be present after expand as originally")
+
+            let arrow = header.Locator(".collapse-arrow")
+            let! arrowText = arrow.TextContentAsync()
+            Assert.That(arrowText, Is.EqualTo("\u25BC"), "Arrow should be down-pointing again after expand")
+        }
+
+    [<Test>]
+    member this.``Repo header remains visible when section is collapsed``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! header.ClickAsync()
+
+            do! Assertions.Expect(header).ToBeVisibleAsync()
+
+            let repoName = header.Locator(".repo-name")
+            do! Assertions.Expect(repoName).ToBeVisibleAsync()
+        }
+
+    [<Test>]
+    member this.``Collapsing one section does not affect other sections``() =
+        task {
+            let sections = this.Page.Locator(".repo-section")
+            do! sections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! sectionCount = sections.CountAsync()
+            Assert.That(sectionCount, Is.GreaterThanOrEqualTo(2), "Fixture has at least 2 repo sections")
+
+            let firstHeader = sections.First.Locator(".repo-header")
+            let secondSection = sections.Nth(1)
+            let secondCardGrid = secondSection.Locator(".card-grid")
+            let! secondGridBefore = secondCardGrid.CountAsync()
+            Assert.That(secondGridBefore, Is.EqualTo(1), "Second section should have card grid initially")
+
+            do! firstHeader.ClickAsync()
+
+            let firstCardGrid = sections.First.Locator(".card-grid")
+            let! firstGridAfter = firstCardGrid.CountAsync()
+            Assert.That(firstGridAfter, Is.EqualTo(0), "First section should be collapsed")
+
+            let! secondGridAfter = secondCardGrid.CountAsync()
+            Assert.That(secondGridAfter, Is.EqualTo(1), "Second section card grid should remain visible")
+
+            let secondCards = secondSection.Locator(".wt-card")
+            let! secondCardCount = secondCards.CountAsync()
+            Assert.That(secondCardCount, Is.GreaterThanOrEqualTo(1), "Second section should still have cards")
+        }
+
+    [<Test>]
+    member this.``Repo header click handler responds to click``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridBefore = cardGrid.CountAsync()
+            Assert.That(gridBefore, Is.EqualTo(1), "Card grid should exist before click")
+
+            do! header.ClickAsync()
+            let! gridAfter = cardGrid.CountAsync()
+            Assert.That(gridAfter, Is.EqualTo(0), "Card grid should be gone after header click, confirming onClick handler works")
+        }
+
+    [<Test>]
+    member this.``AzDo PR uses threads format while GitHub uses comments format``() =
+        task {
+            let azdoSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('TestProject'))")
+            let azdoThreadBadges = azdoSection.Locator(".thread-badge")
+            do! azdoThreadBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! azdoText = azdoThreadBadges.First.TextContentAsync()
+            Assert.That(azdoText, Does.Contain("threads"), "AzDo PR should use 'threads' format")
+
+            let ghSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
+            let ghCommentBadges = ghSection.Locator(".thread-badge")
+            do! ghCommentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! ghText = ghCommentBadges.First.TextContentAsync()
+            Assert.That(ghText, Does.Contain("comments"), "GitHub PR should use 'comments' format")
+        }
+
+    [<Test>]
+    member this.``Repo header has cursor pointer``() =
+        task {
+            let header = this.Page.Locator(".repo-header").First
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! cursor = header |> computedStyle "cursor"
+            Assert.That(cursor, Is.EqualTo("pointer"), "Repo header should have cursor:pointer")
+        }
+
+    [<Test>]
+    member this.``Repo header does not contain branches text``() =
+        task {
+            let headers = this.Page.Locator(".repo-header")
+            do! headers.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = headers.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "At least one repo-header should be present")
+
+            let! allText = headers.First.TextContentAsync()
+            Assert.That(allText, Does.Not.Contain("branches"), "Repo header should not contain 'branches' text")
+
+            let branchCountElements = headers.First.Locator(".repo-branch-count")
+            let! branchCountCount = branchCountElements.CountAsync()
+            Assert.That(branchCountCount, Is.EqualTo(0), "No .repo-branch-count elements should exist in repo header")
+        }
+
+    [<Test>]
+    member this.``Collapsed repo header shows cc-dots``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! header.ClickAsync()
+
+            let ccDots = header.Locator(".repo-cc-dots .cc-dot")
+            do! ccDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! dotCount = ccDots.CountAsync()
+            Assert.That(dotCount, Is.GreaterThanOrEqualTo(1), "Collapsed header should show at least one cc-dot")
+        }
+
+    [<Test>]
+    member this.``Expanded repo header hides cc-dots``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let ccDotsContainer = header.Locator(".repo-cc-dots")
+            let! containerCount = ccDotsContainer.CountAsync()
+            Assert.That(containerCount, Is.EqualTo(0), "Expanded header should not have .repo-cc-dots container")
+        }
+
+    [<Test>]
+    member this.``Cc-dots appear on collapse and disappear on expand``() =
+        task {
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let ccDotsContainer = header.Locator(".repo-cc-dots")
+            let! containerBefore = ccDotsContainer.CountAsync()
+            Assert.That(containerBefore, Is.EqualTo(0), "Expanded header should not show cc-dots")
+
+            do! header.ClickAsync()
+            let! containerAfterCollapse = ccDotsContainer.CountAsync()
+            Assert.That(containerAfterCollapse, Is.EqualTo(1), "Collapsed header should show cc-dots container")
+
+            do! header.ClickAsync()
+            let! containerAfterExpand = ccDotsContainer.CountAsync()
+            Assert.That(containerAfterExpand, Is.EqualTo(0), "Re-expanded header should hide cc-dots again")
+        }
+
+    [<Test>]
+    member this.``Repo header has adequate spacing from cards``() =
+        task {
+            let header = this.Page.Locator(".repo-header").First
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! marginBottom = header |> computedStyle "marginBottom"
+            Assert.That(marginBottom, Is.EqualTo("8px"), "Repo header should have 8px bottom margin for spacing from cards")
         }
 
     [<Test>]

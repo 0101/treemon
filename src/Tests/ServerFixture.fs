@@ -4,7 +4,6 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Net.Http
-open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
 
@@ -17,7 +16,7 @@ let private serverProjectPath =
 let private fixturesPath =
     Path.Combine(repoRoot, "src", "Tests", "fixtures", "worktrees.json")
 
-let private worktreeRoot = @"Q:\code\AITestAgent"
+let private worktreeRoots = [ @"Q:\code\AITestAgent"; repoRoot ]
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
@@ -79,80 +78,20 @@ let private waitForUrl (url: string) (timeoutMs: int) : Task =
 
     work |> Async.StartAsTask :> Task
 
-let private resolveCmdShim (fileName: string) =
-    if Path.GetExtension(fileName) = "" then
-        let cmdPath = $"{fileName}.cmd"
-        let pathDirs =
-            Environment.GetEnvironmentVariable("PATH")
-            |> Option.ofObj
-            |> Option.map (fun p -> p.Split(Path.PathSeparator))
-            |> Option.defaultValue [||]
+let private startProcess fileName args workingDir envVars redirectOutput =
+    TestUtils.startProcess fileName args workingDir envVars redirectOutput
 
-        match Array.tryFind (fun dir -> File.Exists(Path.Combine(dir, cmdPath))) pathDirs with
-        | Some dir -> Path.Combine(dir, cmdPath)
-        | None -> fileName
-    else
-        fileName
-
-let private startProcess (fileName: string) (args: string) (workingDir: string) (envVars: (string * string) list) (redirectOutput: bool) =
-    let resolved = resolveCmdShim fileName
-
-    let psi =
-        ProcessStartInfo(
-            FileName = resolved,
-            Arguments = args,
-            WorkingDirectory = workingDir,
-            UseShellExecute = false,
-            RedirectStandardOutput = redirectOutput,
-            RedirectStandardError = redirectOutput,
-            CreateNoWindow = true
-        )
-
-    envVars |> List.iter (fun (k, v) -> psi.Environment.[k] <- v)
-    Process.Start(psi)
-
-let private killOrphansOnPort (port: int) =
-    let extractPidsFromNetstat (output: string) (port: int) =
-        let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
-        pattern.Matches(output)
-        |> Seq.cast<Match>
-        |> Seq.map (fun m -> int m.Groups.[1].Value)
-        |> Seq.distinct
-
-    try
-        let psi =
-            ProcessStartInfo(
-                FileName = "netstat",
-                Arguments = "-ano",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true
-            )
-
-        use proc = Process.Start(psi)
-        let output = proc.StandardOutput.ReadToEnd()
-        proc.WaitForExit(5000) |> ignore
-
-        extractPidsFromNetstat output port
-        |> Seq.iter (fun pid ->
-            try
-                use orphan = Process.GetProcessById(pid)
-
-                if not orphan.HasExited then
-                    TestContext.Out.WriteLine($"[Cleanup] Killing orphaned process PID {pid} on port {port}")
-                    orphan.Kill(entireProcessTree = true)
-                    orphan.WaitForExit(5000) |> ignore
-            with :? ArgumentException ->
-                ())
-    with ex ->
-        TestContext.Error.WriteLine($"[Cleanup] Failed to scan port {port}: {ex.Message}")
+let private killOrphansOnPort port =
+    TestUtils.killOrphansOnPort port
 
 let startServer () =
     task {
+        let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
+
         let proc =
             startProcess
                 "dotnet"
-                $"""run --project "{serverProjectPath}" -- "{worktreeRoot}" --port 5001 --test-fixtures "{fixturesPath}" """
+                $"""run --project "{serverProjectPath}" -- {rootArgs} --port 5001 --test-fixtures "{fixturesPath}" """
                 repoRoot
                 []
                 false
@@ -199,25 +138,11 @@ let startVite () =
         do! waitForUrl viteUrl 15000
     }
 
-let private killProc (procOpt: Process option) =
-    procOpt
-    |> Option.iter (fun p ->
-        try
-            if not p.HasExited then
-                p.Kill(entireProcessTree = true)
-
-                match p.WaitForExit(10000) with
-                | true -> ()
-                | false ->
-                    TestContext.Error.WriteLine(
-                        $"Process {p.Id} did not exit within 10s after Kill")
-
-            p.Dispose()
-        with ex ->
-            TestContext.Error.WriteLine($"Failed to kill process: {ex.Message}"))
+let private killProc procOpt =
+    TestUtils.killProc procOpt
 
 let private formatBytes (bytes: int64) =
-    sprintf "%.1f MB" (float bytes / (1024.0 * 1024.0))
+    $"%.1f{float bytes / (1024.0 * 1024.0)} MB"
 
 let stopAll () =
     let stats = getMemoryStats ()

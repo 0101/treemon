@@ -241,7 +241,7 @@ let private readTreemonConfig (worktreePath: string) : string option =
             None
 
 let private truncateStderr (stderr: string) (maxLen: int) : string =
-    if stderr = "" then "" else stderr.[..min (maxLen - 1) (stderr.Length - 1)]
+    if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
 let private runStep
     (branch: string)

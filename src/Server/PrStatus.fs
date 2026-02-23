@@ -10,10 +10,18 @@ let private tryProp (name: string) (el: JsonElement) =
     | true, v when v.ValueKind <> JsonValueKind.Null && v.ValueKind <> JsonValueKind.Undefined -> Some v
     | _ -> None
 
+let private tryString name el = tryProp name el |> Option.map _.GetString()
+let private tryInt name el = tryProp name el |> Option.map _.GetInt32()
+let private tryBool name el = tryProp name el |> Option.map _.GetBoolean()
+
 type AzDoRemote =
     { Org: string
       Project: string
       Repo: string }
+
+type RemoteInfo =
+    | AzureDevOps of AzDoRemote
+    | GitHub of GithubPrStatus.GithubRemote
 
 let parseAzureDevOpsUrl (url: string) =
     try
@@ -22,26 +30,32 @@ let parseAzureDevOpsUrl (url: string) =
         if url.Contains("dev.azure.com") then
             if url.StartsWith("git@") then
                 Some
-                    { Org = parts.[parts.Length - 3]
-                      Project = parts.[parts.Length - 2]
-                      Repo = parts.[parts.Length - 1].Replace(".git", "") }
+                    { Org = parts[parts.Length - 3]
+                      Project = parts[parts.Length - 2]
+                      Repo = parts[parts.Length - 1].Replace(".git", "") }
             else
                 Some
-                    { Org = parts.[parts.Length - 4]
-                      Project = parts.[parts.Length - 3]
-                      Repo = parts.[parts.Length - 1].Replace(".git", "") }
+                    { Org = parts[parts.Length - 4]
+                      Project = parts[parts.Length - 3]
+                      Repo = parts[parts.Length - 1].Replace(".git", "") }
         elif url.Contains("visualstudio.com") then
-            let org = url.Split("//").[1].Split('.').[0]
-            let repo = parts.[parts.Length - 1].Replace(".git", "")
+            let org = (url.Split("//")[1]).Split('.')[0]
+            let repo = parts[parts.Length - 1].Replace(".git", "")
             let gitIdx = parts |> Array.findIndex ((=) "_git")
-            let project = parts.[gitIdx - 1]
+            let project = parts[gitIdx - 1]
             Some { Org = org; Project = project; Repo = repo }
         else
-            Log.log "PR" $"URL not recognized as Azure DevOps: {url}"
             None
     with ex ->
         Log.log "PR" $"Failed to parse Azure DevOps URL '{url}': {ex.Message}"
         None
+
+let detectProvider (url: string) =
+    parseAzureDevOpsUrl url
+    |> Option.map AzureDevOps
+    |> Option.orElseWith (fun () ->
+        GithubPrStatus.parseGithubUrl url
+        |> Option.map GitHub)
 
 let private azPythonExe =
     lazy
@@ -75,7 +89,7 @@ type internal ParsedPr =
       IsMerged: bool
       ClosedDate: DateTimeOffset option }
 
-let private parsePrList (json: string) =
+let internal parsePrList (json: string) =
     try
         use doc = JsonDocument.Parse(json)
         let prElements = doc.RootElement.EnumerateArray() |> Seq.toList
@@ -84,8 +98,7 @@ let private parsePrList (json: string) =
             prElements
             |> List.tryHead
             |> Option.bind (tryProp "repository")
-            |> Option.bind (tryProp "id")
-            |> Option.map (fun v -> v.GetString())
+            |> Option.bind (tryString "id")
 
         let prs =
             prElements
@@ -99,7 +112,7 @@ let private parsePrList (json: string) =
 
                     let branchName =
                         if sourceRef.StartsWith("refs/heads/") then
-                            sourceRef.["refs/heads/".Length..]
+                            sourceRef["refs/heads/".Length..]
                         else
                             sourceRef
 
@@ -130,7 +143,7 @@ let private parsePrList (json: string) =
         Log.log "PR" $"Failed to parse PR list JSON: {ex.Message}"
         None, []
 
-let private parseThreadCounts (json: string) =
+let internal parseThreadCounts (json: string) =
     try
         use doc = JsonDocument.Parse(json)
 
@@ -138,7 +151,7 @@ let private parseThreadCounts (json: string) =
             doc.RootElement.GetProperty("value").EnumerateArray()
             |> Seq.filter (fun thread ->
                 let isDeleted =
-                    thread |> tryProp "isDeleted" |> Option.map (fun v -> v.GetBoolean()) |> Option.defaultValue false
+                    thread |> tryBool "isDeleted" |> Option.defaultValue false
 
                 let hasStatus = (thread |> tryProp "status").IsSome
 
@@ -154,11 +167,10 @@ let private parseThreadCounts (json: string) =
                 | _ -> false)
             |> List.length
 
-        { Unresolved = unresolved
-          Total = threads.Length }
+        WithResolution(unresolved, threads.Length)
     with ex ->
         Log.log "PR" $"Failed to parse thread list JSON: {ex.Message}"
-        { Unresolved = 0; Total = 0 }
+        WithResolution(0, 0)
 
 let private parseBuildRun (run: JsonElement) =
     let status = run.GetProperty("status").GetString()
@@ -182,17 +194,15 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
 
     let name =
         definition
-        |> Option.bind (tryProp "name")
-        |> Option.map (fun v -> v.GetString())
+        |> Option.bind (tryString "name")
         |> Option.defaultValue "Unknown"
 
     let definitionId =
         definition
-        |> Option.bind (tryProp "id")
-        |> Option.map (fun v -> v.GetInt32())
+        |> Option.bind (tryInt "id")
 
     let buildId =
-        run |> tryProp "id" |> Option.map (fun v -> v.GetInt32())
+        run |> tryInt "id"
 
     let url =
         buildId
@@ -209,7 +219,7 @@ let private parseBuildInfo (remote: AzDoRemote) (run: JsonElement) =
 
         info, definitionId, buildId)
 
-let private parseBuilds (remote: AzDoRemote) (json: string) =
+let internal parseBuilds (remote: AzDoRemote) (json: string) =
     try
         use doc = JsonDocument.Parse(json)
         let runs = doc.RootElement.GetProperty("value").EnumerateArray() |> Seq.toList
@@ -224,7 +234,7 @@ let private parseBuilds (remote: AzDoRemote) (json: string) =
         Log.log "PR" $"Failed to parse build status JSON: {ex.Message}"
         []
 
-let private parseFailedStep (json: string) =
+let internal parseFailedStep (json: string) =
     try
         use doc = JsonDocument.Parse(json)
         let records = doc.RootElement.GetProperty("records").EnumerateArray() |> Seq.toList
@@ -232,38 +242,38 @@ let private parseFailedStep (json: string) =
         records
         |> List.tryFind (fun r ->
             let isTask =
-                r |> tryProp "type" |> Option.map (fun v -> v.GetString() = "Task") |> Option.defaultValue false
+                r |> tryString "type" |> Option.map ((=) "Task") |> Option.defaultValue false
             let isFailed =
-                r |> tryProp "result" |> Option.map (fun v -> v.GetString() = "failed") |> Option.defaultValue false
+                r |> tryString "result" |> Option.map ((=) "failed") |> Option.defaultValue false
             isTask && isFailed)
         |> Option.bind (fun r ->
             let name =
-                r |> tryProp "name" |> Option.map (fun v -> v.GetString()) |> Option.defaultValue "Unknown step"
+                r |> tryString "name" |> Option.defaultValue "Unknown step"
             let logId =
-                r |> tryProp "log" |> Option.bind (tryProp "id") |> Option.map (fun v -> v.GetInt32())
+                r |> tryProp "log" |> Option.bind (tryInt "id")
             logId |> Option.map (fun id -> name, id))
     with ex ->
         Log.log "PR" $"Failed to parse build timeline: {ex.Message}"
         None
 
-let private parseBuildLog (json: string) =
+let internal parseBuildLog (json: string) =
     try
         use doc = JsonDocument.Parse(json)
 
         let lines =
             doc.RootElement.GetProperty("value").EnumerateArray()
-            |> Seq.map (fun el -> el.GetString())
+            |> Seq.map _.GetString()
             |> Seq.toList
 
         let trimmedLines =
             lines
             |> List.map (fun line ->
                 let spaceIdx = line.IndexOf(" ")
-                if spaceIdx > 20 then line.[spaceIdx + 1..] else line)
+                if spaceIdx > 20 then line[spaceIdx + 1..] else line)
 
         let tail =
             let start = max 0 (trimmedLines.Length - 50)
-            trimmedLines.[start..]
+            trimmedLines[start..]
 
         Some(String.concat Environment.NewLine tail)
     with ex ->
@@ -306,7 +316,7 @@ let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
         return
             output
             |> Option.map parseThreadCounts
-            |> Option.defaultValue { Unresolved = 0; Total = 0 }
+            |> Option.defaultValue (WithResolution(0, 0))
     }
 
 let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int) =
@@ -340,7 +350,7 @@ let internal firstPerBranch (prs: ParsedPr list) =
     prs
     |> List.sortBy (fun pr ->
         (pr.IsMerged, pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
-    |> List.distinctBy (fun pr -> pr.BranchName)
+    |> List.distinctBy _.BranchName
 
 let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedPr list) =
     prs
@@ -386,7 +396,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                     async {
                         let! threadCounts, builds =
                             if pr.IsMerged then
-                                async { return { Unresolved = 0; Total = 0 }, [] }
+                                async { return WithResolution(0, 0), [] }
                             else
                                 async {
                                     let! tcChild = Async.StartChild(fetchPrThreadCount remote pr.PrId)
@@ -410,25 +420,26 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   Title = pr.Title
                                   Url = url
                                   IsDraft = pr.IsDraft
-                                  ThreadCounts = threadCounts
+                                  Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged }
                     })
                 |> Async.Parallel
 
-            return entries |> Array.toList |> Map.ofList
+            return Map entries
     }
 
 let fetchPrStatusesByRepoRoot (repoRoot: string) (knownBranches: Set<string>) =
     async {
         let! remoteUrl = getRemoteUrl repoRoot
 
-        let remote =
-            remoteUrl |> Option.bind parseAzureDevOpsUrl
+        let provider =
+            remoteUrl |> Option.bind detectProvider
 
-        match remote with
+        match provider with
+        | Some(AzureDevOps remote) -> return! fetchPrStatuses remote knownBranches
+        | Some(GitHub remote) -> return! GithubPrStatus.fetchGithubPrStatuses remote knownBranches
         | None -> return Map.empty
-        | Some r -> return! fetchPrStatuses r knownBranches
     }
 
 let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =

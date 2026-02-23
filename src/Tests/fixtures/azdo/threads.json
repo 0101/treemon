@@ -1,0 +1,38 @@
+{
+  "value": [
+    {
+      "id": 1001,
+      "status": "active",
+      "isDeleted": false
+    },
+    {
+      "id": 1002,
+      "status": "fixed",
+      "isDeleted": false
+    },
+    {
+      "id": 1003,
+      "status": "active",
+      "isDeleted": false
+    },
+    {
+      "id": 1004,
+      "status": "closed",
+      "isDeleted": false
+    },
+    {
+      "id": 1005,
+      "status": "pending",
+      "isDeleted": false
+    },
+    {
+      "id": 1006,
+      "status": "wontFix",
+      "isDeleted": true
+    },
+    {
+      "id": 1007,
+      "isDeleted": false
+    }
+  ]
+}

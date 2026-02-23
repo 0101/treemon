@@ -6,10 +6,10 @@ type SortMode =
 
 let extractBranchName (message: string) =
     match message.IndexOf(" (") with
-    | i when i > 0 -> Some message.[..i-1]
+    | i when i > 0 -> Some message[..i-1]
     | _ ->
         match message.IndexOf(": ") with
-        | i when i > 0 -> Some message.[..i-1]
+        | i when i > 0 -> Some message[..i-1]
         | _ ->
             let trimmed = message.Trim()
             if trimmed.Length > 0 && not (message.Contains(" (")) && not (message.Contains(": ")) then
@@ -22,7 +22,7 @@ let eventKey (evt: CardEvent) =
 
 let pinnedErrors (events: CardEvent list) =
     events
-    |> List.sortByDescending (fun e -> e.Timestamp)
+    |> List.sortByDescending _.Timestamp
     |> List.distinctBy eventKey
     |> List.filter (fun evt ->
         match evt.Status with

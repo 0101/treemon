@@ -1,0 +1,32 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 64448260999,
+      "run_id": 22279710912,
+      "name": "build-and-test",
+      "status": "completed",
+      "conclusion": "success",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Build",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Test",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        }
+      ]
+    }
+  ]
+}

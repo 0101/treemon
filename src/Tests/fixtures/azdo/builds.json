@@ -1,0 +1,27 @@
+{
+  "value": [
+    {
+      "id": 5001,
+      "status": "completed",
+      "result": "failed",
+      "definition": { "id": 10, "name": "PR Validation" }
+    },
+    {
+      "id": 5002,
+      "status": "completed",
+      "result": "succeeded",
+      "definition": { "id": 11, "name": "Code Analysis" }
+    },
+    {
+      "id": 5003,
+      "status": "inProgress",
+      "definition": { "id": 12, "name": "Integration Tests" }
+    },
+    {
+      "id": 5000,
+      "status": "completed",
+      "result": "succeeded",
+      "definition": { "id": 10, "name": "PR Validation" }
+    }
+  ]
+}

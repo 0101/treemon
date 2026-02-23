@@ -1,0 +1,21 @@
+{
+  "total_count": 2,
+  "workflow_runs": [
+    {
+      "id": 22279694651,
+      "name": "CI",
+      "head_branch": "test/add-health-endpoint",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/testowner/testrepo/actions/runs/22279694651"
+    },
+    {
+      "id": 22279710912,
+      "name": "Deploy",
+      "head_branch": "test/add-health-endpoint",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/testowner/testrepo/actions/runs/22279710912"
+    }
+  ]
+}
