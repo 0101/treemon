@@ -40,16 +40,16 @@ type MultiRepoApiTests() =
     member _.``API response contains TestProject repo``() =
         task {
             let! dashboard = fetchDashboard ()
-            let repoIds = dashboard.Repos |> List.map (fun r -> r.RepoId)
-            Assert.That(repoIds, Does.Contain("TestProject"), "Repos should include TestProject")
+            let repoIds = dashboard.Repos |> List.map _.RepoId
+            Assert.That(repoIds, Does.Contain(RepoId "TestProject"), "Repos should include TestProject")
         }
 
     [<Test>]
     member _.``API response contains treemon repo``() =
         task {
             let! dashboard = fetchDashboard ()
-            let repoIds = dashboard.Repos |> List.map (fun r -> r.RepoId)
-            Assert.That(repoIds, Does.Contain("treemon"), "Repos should include treemon")
+            let repoIds = dashboard.Repos |> List.map _.RepoId
+            Assert.That(repoIds, Does.Contain(RepoId "treemon"), "Repos should include treemon")
         }
 
     [<Test>]
@@ -59,7 +59,7 @@ type MultiRepoApiTests() =
 
             let testProject =
                 dashboard.Repos
-                |> List.find (fun r -> r.RepoId = "TestProject")
+                |> List.find (fun r -> r.RepoId = RepoId "TestProject")
 
             Assert.That(testProject.Worktrees.Length, Is.GreaterThan(0), "TestProject repo should have at least one worktree")
             TestContext.Out.WriteLine($"TestProject has {testProject.Worktrees.Length} worktrees")
@@ -72,7 +72,7 @@ type MultiRepoApiTests() =
 
             let treemon =
                 dashboard.Repos
-                |> List.find (fun r -> r.RepoId = "treemon")
+                |> List.find (fun r -> r.RepoId = RepoId "treemon")
 
             Assert.That(treemon.Worktrees.Length, Is.GreaterThan(0), "treemon repo should have at least one worktree")
             TestContext.Out.WriteLine($"treemon has {treemon.Worktrees.Length} worktrees")
@@ -85,7 +85,7 @@ type MultiRepoApiTests() =
 
             dashboard.Repos
             |> List.iter (fun repo ->
-                Assert.That(repo.IsReady, Is.True, $"Repo '{repo.RepoId}' should have IsReady=true in fixture mode"))
+                Assert.That(repo.IsReady, Is.True, $"Repo '{RepoId.value repo.RepoId}' should have IsReady=true in fixture mode"))
         }
 
     [<Test>]
@@ -95,8 +95,8 @@ type MultiRepoApiTests() =
 
             dashboard.Repos
             |> List.iter (fun repo ->
-                Assert.That(repo.RootFolderName, Is.EqualTo(repo.RepoId),
-                    $"Repo '{repo.RepoId}' RootFolderName should match RepoId"))
+                Assert.That(repo.RootFolderName, Is.EqualTo(RepoId.value repo.RepoId),
+                    $"Repo '{RepoId.value repo.RepoId}' RootFolderName should match RepoId"))
         }
 
     [<Test>]
@@ -120,7 +120,7 @@ type MultiRepoApiTests() =
 
             let allBranches =
                 dashboard.Repos
-                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+                |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
 
             Assert.That(allBranches.Length, Is.EqualTo(allBranches |> List.distinct |> List.length),
                 "Branch names should be distinct across all repos in fixture data")
@@ -132,7 +132,7 @@ type MultiRepoApiTests() =
             let! dashboard = fetchDashboard ()
 
             let testProject =
-                dashboard.Repos |> List.find (fun r -> r.RepoId = "TestProject")
+                dashboard.Repos |> List.find (fun r -> r.RepoId = RepoId "TestProject")
 
             let hasPr =
                 testProject.Worktrees
@@ -150,7 +150,7 @@ type MultiRepoApiTests() =
             let! dashboard = fetchDashboard ()
 
             let treemon =
-                dashboard.Repos |> List.find (fun r -> r.RepoId = "treemon")
+                dashboard.Repos |> List.find (fun r -> r.RepoId = RepoId "treemon")
 
             let hasPr =
                 treemon.Worktrees
@@ -168,7 +168,7 @@ type MultiRepoApiTests() =
             let! dashboard = fetchDashboard ()
 
             let treemon =
-                dashboard.Repos |> List.find (fun r -> r.RepoId = "treemon")
+                dashboard.Repos |> List.find (fun r -> r.RepoId = RepoId "treemon")
 
             let githubPr =
                 treemon.Worktrees
@@ -188,7 +188,7 @@ type MultiRepoApiTests() =
             let! dashboard = fetchDashboard ()
 
             let testProject =
-                dashboard.Repos |> List.find (fun r -> r.RepoId = "TestProject")
+                dashboard.Repos |> List.find (fun r -> r.RepoId = RepoId "TestProject")
 
             let azdoPr =
                 testProject.Worktrees

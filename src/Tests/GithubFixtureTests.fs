@@ -26,14 +26,14 @@ type ParsePrListFixtureTests() =
     [<Test>]
     member _.``Extracts branch name from head ref``() =
         let prs = readFixture "pr-list.json" |> parsePrList
-        let branches = prs |> List.map (fun pr -> pr.BranchName)
+        let branches = prs |> List.map _.BranchName
         Assert.That(branches, Does.Contain("test/add-editorconfig"))
         Assert.That(branches, Does.Contain("test/add-health-endpoint"))
 
     [<Test>]
     member _.``Extracts PR number``() =
         let prs = readFixture "pr-list.json" |> parsePrList
-        let numbers = prs |> List.map (fun pr -> pr.PrNumber)
+        let numbers = prs |> List.map _.PrNumber
         Assert.That(numbers, Does.Contain(1))
         Assert.That(numbers, Does.Contain(2))
 
@@ -105,13 +105,13 @@ type ParseActionRunsFixtureTests() =
     member _.``Failed run has Failed status``() =
         let runs = readFixture "actions-runs.json" |> parseActionRuns
         let failed = runs |> List.find (fun (info, _) -> info.Name = "CI")
-        Assert.That(fst failed |> (fun i -> i.Status), Is.EqualTo(BuildStatus.Failed))
+        Assert.That(fst failed |> _.Status, Is.EqualTo(BuildStatus.Failed))
 
     [<Test>]
     member _.``Successful run has Succeeded status``() =
         let runs = readFixture "actions-runs.json" |> parseActionRuns
         let succeeded = runs |> List.find (fun (info, _) -> info.Name = "Deploy")
-        Assert.That(fst succeeded |> (fun i -> i.Status), Is.EqualTo(BuildStatus.Succeeded))
+        Assert.That(fst succeeded |> _.Status, Is.EqualTo(BuildStatus.Succeeded))
 
     [<Test>]
     member _.``Run includes html_url``() =
@@ -129,7 +129,7 @@ type ParseActionRunsFixtureTests() =
     member _.``In-progress run has Building status``() =
         let runs = readFixture "actions-runs-in-progress.json" |> parseActionRuns
         Assert.That(runs.Length, Is.EqualTo(1))
-        Assert.That(fst runs.[0] |> (fun i -> i.Status), Is.EqualTo(BuildStatus.Building))
+        Assert.That(fst runs[0] |> _.Status, Is.EqualTo(BuildStatus.Building))
 
     [<Test>]
     member _.``Empty workflow_runs returns empty list``() =

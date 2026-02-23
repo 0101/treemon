@@ -142,7 +142,7 @@ let private killProc procOpt =
     TestUtils.killProc procOpt
 
 let private formatBytes (bytes: int64) =
-    sprintf "%.1f MB" (float bytes / (1024.0 * 1024.0))
+    $"%.1f{float bytes / (1024.0 * 1024.0)} MB"
 
 let stopAll () =
     let stats = getMemoryStats ()

@@ -30,7 +30,7 @@ type ParsePrListFixtureTests() =
     [<Test>]
     member _.``Extracts branch names from sourceRefName stripping refs/heads/``() =
         let _, prs = readFixture "pr-list.json" |> parsePrList
-        let branches = prs |> List.map (fun pr -> pr.BranchName)
+        let branches = prs |> List.map _.BranchName
         Assert.That(branches, Does.Contain("feature/auth"))
         Assert.That(branches, Does.Contain("fix/login-style"))
         Assert.That(branches, Does.Contain("refactor/data-layer"))

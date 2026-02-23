@@ -116,7 +116,7 @@ type PinnedErrorsTests() =
 
         let result = pinnedErrors events
         Assert.That(result.Length, Is.EqualTo(1))
-        Assert.That(result.[0].Message, Is.EqualTo("main (5s)"))
+        Assert.That(result[0].Message, Is.EqualTo("main (5s)"))
 
     [<Test>]
     member _.``Success after error clears the pin``() =
@@ -146,7 +146,7 @@ type PinnedErrorsTests() =
         let result = pinnedErrors events
 
         Assert.That(result.Length, Is.EqualTo(1))
-        Assert.That(result.[0].Source, Is.EqualTo("PR"))
+        Assert.That(result[0].Source, Is.EqualTo("PR"))
 
     [<Test>]
     member _.``All succeeded returns empty``() =
@@ -167,7 +167,7 @@ type PinnedErrorsTests() =
         let result = pinnedErrors events
 
         Assert.That(result.Length, Is.EqualTo(1))
-        Assert.That(result.[0].Message, Is.EqualTo("main (3s)"))
+        Assert.That(result[0].Message, Is.EqualTo("main (3s)"))
 
     [<Test>]
     member _.``Pending and Running status are not pinned``() =
@@ -226,7 +226,7 @@ type MergeWithPinnedErrorsTests() =
 
         let result = mergeWithPinnedErrors events pinnedMap
         Assert.That(result.Length, Is.EqualTo(2))
-        Assert.That(result.[1].Source, Is.EqualTo("PrFetch"))
+        Assert.That(result[1].Source, Is.EqualTo("PrFetch"))
 
     [<Test>]
     member _.``Pinned error already in events is not duplicated``() =
@@ -258,7 +258,7 @@ type MergeWithPinnedErrorsTests() =
 
         let result = mergeWithPinnedErrors [] pinnedMap
         Assert.That(result.Length, Is.EqualTo(1))
-        Assert.That(result.[0].Source, Is.EqualTo("PrFetch"))
+        Assert.That(result[0].Source, Is.EqualTo("PrFetch"))
 
 
 [<TestFixture>]

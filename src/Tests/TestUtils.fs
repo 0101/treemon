@@ -35,7 +35,7 @@ let startProcess (fileName: string) (args: string) (workingDir: string) (envVars
             CreateNoWindow = true
         )
 
-    envVars |> List.iter (fun (k, v) -> psi.Environment.[k] <- v)
+    envVars |> List.iter (fun (k, v) -> psi.Environment[k] <- v)
     Process.Start(psi)
 
 let killProc (procOpt: Process option) =
@@ -60,7 +60,7 @@ let killOrphansOnPort (port: int) =
         let pattern = Regex($@"TCP\s+\S+:{port}\s+\S+\s+LISTENING\s+(\d+)")
         pattern.Matches(output)
         |> Seq.cast<Match>
-        |> Seq.map (fun m -> int m.Groups.[1].Value)
+        |> Seq.map (fun m -> int m.Groups[1].Value)
         |> Seq.distinct
 
     try

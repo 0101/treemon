@@ -8,7 +8,7 @@ open Fable.Remoting.Client
 open Browser
 
 type RepoModel =
-    { RepoId: string
+    { RepoId: RepoId
       Name: string
       Worktrees: WorktreeStatus list
       IsReady: bool
@@ -31,7 +31,7 @@ type Msg =
     | DataFailed of exn
     | ToggleSort
     | ToggleCompact
-    | ToggleCollapse of repoId: string
+    | ToggleCollapse of repoId: RepoId
     | Tick
     | OpenTerminal of string
     | StartSync of string
@@ -371,7 +371,7 @@ let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string
                 Html.span [ prop.className "status-category"; prop.text category ]
                 Html.span [ prop.className "status-target"; prop.text target ]
                 match evt.Duration with
-                | Some d -> Html.span [ prop.className "status-duration"; prop.text (sprintf "%.1fs" d.TotalSeconds) ]
+                | Some d -> Html.span [ prop.className "status-duration"; prop.text $"%.1f{d.TotalSeconds}s" ]
                 | None -> Html.span [ prop.className "status-duration" ]
                 Html.span [ prop.className "status-time"; prop.text (relativeEventTime evt.Timestamp) ]
                 match evt.Status with
@@ -423,10 +423,10 @@ let schedulerFooter (events: CardEvent list) (latestByCategory: Map<string, Card
 let abbreviatePipelineName (repoName: string) (name: string) =
     let stripped =
         if name.Length >= repoName.Length && name.StartsWith(repoName, System.StringComparison.OrdinalIgnoreCase)
-        then name.[repoName.Length..].TrimStart()
+        then name[repoName.Length..].TrimStart()
         else name
     if stripped.EndsWith(" - pr", System.StringComparison.OrdinalIgnoreCase)
-    then stripped.[..stripped.Length-6].TrimEnd()
+    then stripped[..stripped.Length-6].TrimEnd()
     else stripped
 
 let buildBadge (repoName: string) (build: BuildInfo) =
@@ -726,10 +726,10 @@ let viewEyeLogo (dx: float, dy: float) =
     ]
 
 let anyRepoReady (repos: RepoModel list) =
-    repos |> List.exists (fun r -> r.IsReady)
+    repos |> List.exists _.IsReady
 
 let allWorktreesEmpty (repos: RepoModel list) =
-    repos |> List.forall (fun r -> r.Worktrees.IsEmpty)
+    repos |> List.forall _.Worktrees.IsEmpty
 
 let repoSectionHeader dispatch (repo: RepoModel) =
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
@@ -752,7 +752,7 @@ let repoSectionHeader dispatch (repo: RepoModel) =
 
 let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (repo: RepoModel) =
     Html.div [
-        prop.key repo.RepoId
+        prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
         prop.children [
             repoSectionHeader dispatch repo

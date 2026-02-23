@@ -2,6 +2,12 @@ namespace Shared
 
 open System
 
+type RepoId = RepoId of string
+
+module RepoId =
+    let create (path: string) = RepoId path
+    let value (RepoId id) = id
+
 type BeadsSummary =
     { Open: int
       InProgress: int
@@ -83,7 +89,7 @@ type CardEvent =
       Duration: TimeSpan option }
 
 type RepoWorktrees =
-    { RepoId: string
+    { RepoId: RepoId
       RootFolderName: string
       Worktrees: WorktreeStatus list
       IsReady: bool }

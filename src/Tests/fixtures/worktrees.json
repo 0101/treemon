@@ -2,7 +2,7 @@
   "Worktrees": {
     "Repos": [
       {
-        "RepoId": "TestProject",
+        "RepoId": {"RepoId": "TestProject"},
         "RootFolderName": "TestProject",
         "Worktrees": [
           {
@@ -166,7 +166,7 @@
         "IsReady": true
       },
       {
-        "RepoId": "treemon",
+        "RepoId": {"RepoId": "treemon"},
         "RootFolderName": "treemon",
         "Worktrees": [
           {

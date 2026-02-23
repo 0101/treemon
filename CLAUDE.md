@@ -104,8 +104,6 @@ src/
     SmokeTests.fs          — smoke tests against live data
 docs/spec/
   worktree-monitor.md     — full specification
-  future/
-    llm-comment-resolution.md — future spec for LLM-based comment resolution
 treemon.ps1                — production lifecycle + dev mode + deploy
 vite.config.js            — Vite config with API proxy (ports via env vars)
 treemon.slnx               — .NET 9 solution file (.slnx format)

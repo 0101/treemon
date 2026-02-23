@@ -16,7 +16,7 @@ let parseGithubUrl (url: string) =
         let m = Regex.Match(url, pattern)
 
         if m.Success then
-            Some { Owner = m.Groups.[1].Value; Repo = m.Groups.[2].Value }
+            Some { Owner = m.Groups[1].Value; Repo = m.Groups[2].Value }
         else
             None)
 
@@ -24,6 +24,11 @@ let private tryProp (name: string) (el: JsonElement) =
     match el.TryGetProperty(name) with
     | true, v when v.ValueKind <> JsonValueKind.Null && v.ValueKind <> JsonValueKind.Undefined -> Some v
     | _ -> None
+
+let private tryString name el = tryProp name el |> Option.map _.GetString()
+let private tryInt name el = tryProp name el |> Option.map _.GetInt32()
+let private tryInt64 name el = tryProp name el |> Option.map _.GetInt64()
+let private tryBool name el = tryProp name el |> Option.map _.GetBoolean()
 
 let private runGh (arguments: string) =
     ProcessRunner.run "GH" "gh" arguments
@@ -46,11 +51,11 @@ let internal parsePrList (json: string) =
         |> List.choose (fun el ->
                 let number = el.GetProperty("number").GetInt32()
                 let title = el.GetProperty("title").GetString()
-                let isDraft = el |> tryProp "draft" |> Option.map (fun v -> v.GetBoolean()) |> Option.defaultValue false
+                let isDraft = el |> tryBool "draft" |> Option.defaultValue false
                 let isMerged = el |> tryProp "merged_at" |> Option.isSome
                 let branchName = el.GetProperty("head").GetProperty("ref").GetString()
-                let comments = el |> tryProp "comments" |> Option.map (fun v -> v.GetInt32()) |> Option.defaultValue 0
-                let reviewComments = el |> tryProp "review_comments" |> Option.map (fun v -> v.GetInt32()) |> Option.defaultValue 0
+                let comments = el |> tryInt "comments" |> Option.defaultValue 0
+                let reviewComments = el |> tryInt "review_comments" |> Option.defaultValue 0
 
                 Some
                     { BranchName = branchName
@@ -83,15 +88,15 @@ let internal parseActionRuns (json: string) =
 
             let conclusion =
                 if status = "completed" then
-                    run |> tryProp "conclusion" |> Option.map (fun v -> v.GetString())
+                    run |> tryString "conclusion"
                 else
                     None
 
             let name =
-                run |> tryProp "name" |> Option.map (fun v -> v.GetString()) |> Option.defaultValue "Workflow"
+                run |> tryString "name" |> Option.defaultValue "Workflow"
 
-            let runId = run |> tryProp "id" |> Option.map (fun v -> v.GetInt64())
-            let htmlUrl = run |> tryProp "html_url" |> Option.map (fun v -> v.GetString())
+            let runId = run |> tryInt64 "id"
+            let htmlUrl = run |> tryString "html_url"
 
             mapConclusion conclusion
             |> Option.map (fun buildStatus ->
@@ -112,17 +117,17 @@ let internal parseFailedJobs (json: string) =
         |> Seq.toList
         |> List.tryPick (fun job ->
             let conclusion =
-                job |> tryProp "conclusion" |> Option.map (fun v -> v.GetString())
+                job |> tryString "conclusion"
 
             if conclusion = Some "failure" then
                 job.GetProperty("steps").EnumerateArray()
                 |> Seq.toList
                 |> List.tryPick (fun step ->
                     let stepConclusion =
-                        step |> tryProp "conclusion" |> Option.map (fun v -> v.GetString())
+                        step |> tryString "conclusion"
 
                     if stepConclusion = Some "failure" then
-                        step |> tryProp "name" |> Option.map (fun v -> v.GetString())
+                        step |> tryString "name"
                     else
                         None)
             else
@@ -174,8 +179,8 @@ let private fetchActionRuns (remote: GithubRemote) (branch: string) =
 
 let internal firstPerBranch (prs: ParsedGithubPr list) =
     prs
-    |> List.sortBy (fun pr -> pr.IsMerged)
-    |> List.distinctBy (fun pr -> pr.BranchName)
+    |> List.sortBy _.IsMerged
+    |> List.distinctBy _.BranchName
 
 let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedGithubPr list) =
     prs
@@ -237,5 +242,5 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                     })
                 |> Async.Parallel
 
-            return entries |> Array.toList |> Map.ofList
+            return Map entries
     }

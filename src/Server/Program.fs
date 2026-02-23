@@ -3,6 +3,7 @@ open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Builder
 open System.Threading
+open Shared
 open Server
 
 let readAppVersion () =
@@ -63,7 +64,7 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
                   Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
         agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
-        Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{repo.RepoId}'")
+        Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
 
 [<EntryPoint>]
 let main args =

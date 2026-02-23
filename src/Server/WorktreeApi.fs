@@ -23,7 +23,7 @@ let private assembleFromState
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
     let claude = repo.ClaudeData |> Map.tryFind wt.Path |> Option.defaultValue ClaudeCodeStatus.Idle
-    let upstreamBranch = gitData |> Option.bind (fun g -> g.UpstreamBranch)
+    let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
     { Path = wt.Path
@@ -35,18 +35,19 @@ let private assembleFromState
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
-      WorkMetrics = gitData |> Option.bind (fun g -> g.WorkMetrics) }
+      WorkMetrics = gitData |> Option.bind _.WorkMetrics }
 
 let private allWorktrees (state: RefreshScheduler.DashboardState) =
     state.Repos
-    |> Map.toList
-    |> List.collect (fun (_, repo) -> repo.WorktreeList)
+    |> Map.values
+    |> Seq.collect _.WorktreeList
+    |> Seq.toList
 
 let private allKnownPaths (state: RefreshScheduler.DashboardState) =
     state.Repos
-    |> Map.toList
-    |> List.collect (fun (_, repo) -> repo.KnownPaths |> Set.toList)
-    |> Set.ofList
+    |> Map.values
+    |> Seq.collect _.KnownPaths
+    |> Set.ofSeq
 
 let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: string) =
     state.Repos
@@ -54,7 +55,7 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
         if Set.contains path repo.KnownPaths then Some repoId
         else None)
 
-let private scopedBranchKey (repoId: string) (branch: string) = $"{repoId}/{branch}"
+let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
@@ -73,7 +74,7 @@ let getWorktrees
                     |> List.map (assembleFromState repo)
 
                 { RepoId = repoId
-                  RootFolderName = Path.GetFileName(repoId)
+                  RootFolderName = Path.GetFileName(RepoId.value repoId)
                   Worktrees = statuses
                   IsReady = repo.IsReady })
 
@@ -116,7 +117,7 @@ let private openTerminal
 
 let private deleteWorktree
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (rootPaths: Map<string, string>)
+    (rootPaths: Map<RepoId, string>)
     (branch: string)
     =
     async {
@@ -250,7 +251,7 @@ let worktreeApi
                           | events ->
                               let recent =
                                   events
-                                  |> List.sortByDescending (fun e -> e.Timestamp)
+                                  |> List.sortByDescending _.Timestamp
                                   |> List.truncate 2
                                   |> List.rev
 

@@ -34,11 +34,11 @@ type ParseWorktreeListTests() =
         let result = parseWorktreeList output
 
         Assert.That(result.Length, Is.EqualTo(2))
-        Assert.That(result.[0].Path, Is.EqualTo("/repo/main"))
-        Assert.That(result.[0].Head, Is.EqualTo("abc1234567890abcdef1234567890abcdef123456"))
-        Assert.That(result.[0].Branch, Is.EqualTo(Some "main"))
-        Assert.That(result.[1].Path, Is.EqualTo("/repo/feature-branch"))
-        Assert.That(result.[1].Branch, Is.EqualTo(Some "feature-branch"))
+        Assert.That(result[0].Path, Is.EqualTo("/repo/main"))
+        Assert.That(result[0].Head, Is.EqualTo("abc1234567890abcdef1234567890abcdef123456"))
+        Assert.That(result[0].Branch, Is.EqualTo(Some "main"))
+        Assert.That(result[1].Path, Is.EqualTo("/repo/feature-branch"))
+        Assert.That(result[1].Branch, Is.EqualTo(Some "feature-branch"))
 
     [<Test>]
     member _.``Empty output returns empty list``() =
@@ -62,9 +62,9 @@ type ParseWorktreeListTests() =
         let result = parseWorktreeList output
 
         Assert.That(result.Length, Is.EqualTo(1))
-        Assert.That(result.[0].Path, Is.EqualTo("/repo/bare"))
-        Assert.That(result.[0].Head, Is.EqualTo("abc1234567890abcdef1234567890abcdef123456"))
-        Assert.That(result.[0].Branch, Is.EqualTo(None))
+        Assert.That(result[0].Path, Is.EqualTo("/repo/bare"))
+        Assert.That(result[0].Head, Is.EqualTo("abc1234567890abcdef1234567890abcdef123456"))
+        Assert.That(result[0].Branch, Is.EqualTo(None))
 
     [<Test>]
     member _.``Detached HEAD entry has Branch=None``() =
@@ -78,7 +78,7 @@ type ParseWorktreeListTests() =
         let result = parseWorktreeList output
 
         Assert.That(result.Length, Is.EqualTo(1))
-        Assert.That(result.[0].Branch, Is.EqualTo(None))
+        Assert.That(result[0].Branch, Is.EqualTo(None))
 
     [<Test>]
     member _.``Block missing worktree line is skipped``() =
@@ -118,8 +118,8 @@ type ParseWorktreeListTests() =
         let result = parseWorktreeList output
 
         Assert.That(result.Length, Is.EqualTo(2))
-        Assert.That(result.[0].Path, Is.EqualTo("/repo/main"))
-        Assert.That(result.[1].Path, Is.EqualTo("/repo/dev"))
+        Assert.That(result[0].Path, Is.EqualTo("/repo/main"))
+        Assert.That(result[1].Path, Is.EqualTo("/repo/dev"))
 
 
 [<TestFixture>]
