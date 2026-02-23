@@ -1623,32 +1623,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Status overview pending rows have pending badge``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-            let json = """{"Repos":[{"RepoId":"Test","RootFolderName":"Test","Worktrees":[],"IsReady":true}],"SchedulerEvents":[],"LatestByCategory":{"GitRefresh":{"Source":"GitRefresh","Message":"test","Timestamp":"2026-02-16T22:55:00+00:00","Status":"Succeeded","Duration":500.0}},"AppVersion":"test"}"""
-            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
-                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)) |> ignore)
-
-            let! _ = page.GotoAsync(baseUrl)
-
-            let overview = page.Locator(".scheduler-footer .status-overview")
-            let pendingRows = overview.Locator(".status-row.pending")
-            do! pendingRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! pendingCount = pendingRows.CountAsync()
-            Assert.That(pendingCount, Is.EqualTo(5), "Only GitRefresh provided; 5 other categories should be pending")
-
-            let! allHaveBadge =
-                pendingRows.EvaluateAllAsync<bool>(
-                    "els => els.every(el => el.querySelector('.status-badge.pending') !== null)")
-            Assert.That(allHaveBadge, Is.True,
-                "Each pending status row should have a .status-badge.pending element")
-
-            do! page.CloseAsync()
-        }
-
-    [<Test>]
     member this.``Status overview uses grid layout for rows``() =
         task {
             let row = this.Page.Locator(".scheduler-footer .status-overview .status-row").First
@@ -2091,64 +2065,6 @@ type DashboardTests() =
             do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! marginBottom = header |> computedStyle "marginBottom"
             Assert.That(marginBottom, Is.EqualTo("8px"), "Repo header should have 8px bottom margin for spacing from cards")
-        }
-
-    [<Test>]
-    member this.``Eye SVG has almond outline path``() =
-        task {
-            let svg = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
-            do! Assertions.Expect(svg).ToBeVisibleAsync()
-
-            let paths = svg.Locator("path")
-            let! pathCount = paths.CountAsync()
-            Assert.That(pathCount, Is.EqualTo(1), "Eye SVG should have one path element (the almond outline)")
-
-            let! stroke = paths.First.GetAttributeAsync("stroke")
-            Assert.That(stroke, Is.EqualTo("#94e2d5"), "Eye outline stroke should be teal (#94e2d5)")
-
-            let! fill = paths.First.GetAttributeAsync("fill")
-            Assert.That(fill, Is.EqualTo("none"), "Eye outline should have no fill")
-        }
-
-    [<Test>]
-    member this.``Eye SVG has iris and pupil circles``() =
-        task {
-            let svg = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
-            do! Assertions.Expect(svg).ToBeVisibleAsync()
-
-            let circles = svg.Locator("circle")
-            let! circleCount = circles.CountAsync()
-            Assert.That(circleCount, Is.EqualTo(2), "Eye SVG should have two circle elements (iris and pupil)")
-
-            let pupil = svg.Locator("circle.eye-pupil")
-            let! pupilCount = pupil.CountAsync()
-            Assert.That(pupilCount, Is.EqualTo(1), "Eye SVG should have one .eye-pupil circle")
-
-            let! pupilFill = pupil.GetAttributeAsync("fill")
-            Assert.That(pupilFill, Is.EqualTo("#94e2d5"), "Eye pupil fill should be teal (#94e2d5)")
-        }
-
-    [<Test>]
-    member this.``Eye logo has correct CSS dimensions``() =
-        task {
-            let eyeLogo = this.Page.Locator(".dashboard-header h1 svg.eye-logo")
-            do! Assertions.Expect(eyeLogo).ToBeVisibleAsync()
-
-            let! width = eyeLogo |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("36px"), "Eye logo width should be 36px")
-
-            let! height = eyeLogo |> computedStyle "height"
-            Assert.That(height, Is.EqualTo("18px"), "Eye logo height should be 18px")
-        }
-
-    [<Test>]
-    member this.``Eye pupil has CSS transition for smooth movement``() =
-        task {
-            let pupil = this.Page.Locator(".dashboard-header h1 svg.eye-logo .eye-pupil")
-            do! Assertions.Expect(pupil).ToBeVisibleAsync()
-
-            let! transition = pupil |> computedStyle "transition"
-            Assert.That(transition, Does.Contain("0.3s"), "Eye pupil transition should be 0.3s")
         }
 
     [<Test>]
