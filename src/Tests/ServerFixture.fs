@@ -16,7 +16,7 @@ let private serverProjectPath =
 let private fixturesPath =
     Path.Combine(repoRoot, "src", "Tests", "fixtures", "worktrees.json")
 
-let private worktreeRoots = [ @"Q:\code\AITestAgent"; repoRoot ]
+let private worktreeRoots = [ repoRoot ]
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None

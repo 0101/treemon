@@ -32,5 +32,8 @@ jobs:
       - name: Build
         run: dotnet build treemon.slnx
 
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
       - name: Test
         run: dotnet test src/Tests/Tests.fsproj --filter "Category!=Local" --no-build --verbosity normal
