@@ -681,7 +681,7 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
-let viewEyeLogo (dx: float, dy: float) =
+let viewEyeOpen (dx: float, dy: float) =
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
@@ -713,6 +713,64 @@ let viewEyeLogo (dx: float, dy: float) =
                         svg.cy 10
                         svg.r 3
                         svg.fill "#1a1b2e"
+                    ]
+                ]
+            ]
+            Svg.circle [
+                svg.cx 23
+                svg.cy 5
+                svg.r 2
+                svg.fill "rgba(255, 255, 255, 0.8)"
+            ]
+        ]
+    ]
+
+let viewEyeRolledBack =
+    Svg.svg [
+        svg.className "eye-logo"
+        svg.viewBox (-2, -2, 44, 24)
+        svg.children [
+            Svg.defs [
+                Svg.clipPath [
+                    svg.id "eye-shape"
+                    svg.children [
+                        Svg.path [
+                            svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
+                        ]
+                    ]
+                ]
+            ]
+            Svg.path [
+                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
+                svg.fill "#e8e8e8"
+                svg.stroke "#56b6c2"
+                svg.strokeWidth 2.5
+            ]
+            Svg.g [
+                svg.custom ("clipPath", "url(#eye-shape)")
+                svg.children [
+                    Svg.g [
+                        svg.custom ("transform", "translate(0, -9)")
+                        svg.children [
+                            Svg.circle [
+                                svg.cx 20
+                                svg.cy 10
+                                svg.r 9
+                                svg.fill "#1a1b2e"
+                            ]
+                            Svg.circle [
+                                svg.cx 20
+                                svg.cy 10
+                                svg.r 6
+                                svg.fill "#888"
+                            ]
+                            Svg.circle [
+                                svg.cx 20
+                                svg.cy 10
+                                svg.r 3
+                                svg.fill "#1a1b2e"
+                            ]
+                        ]
                     ]
                 ]
             ]
@@ -779,7 +837,8 @@ let view model dispatch =
                         prop.children [
                             Html.h1 [
                                 prop.children [
-                                    viewEyeLogo model.EyeDirection
+                                    if model.HasError then viewEyeRolledBack
+                                    else viewEyeOpen model.EyeDirection
                                 ]
                             ]
                             Html.div [
