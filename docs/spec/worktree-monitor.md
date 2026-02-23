@@ -84,9 +84,15 @@
 - `CountOnly of total` — GitHub comment count (no native resolution tracking)
 - Client renders differently per case; dimmed when all resolved / no comments
 
-### Scheduler Startup Ordering
+### Startup Burst
 
-All tasks are overdue on startup. List ordering determines initial sequence: worktree lists first (repos appear quickly), then local cheap tasks (git/beads/Claude), then network tasks (PR/fetch) last.
+On startup, a one-time parallel burst populates the dashboard in ~5-10 seconds instead of 30-60:
+
+1. **Phase 1** — `RefreshWorktreeList` for all repos in parallel
+2. **Phase 2** — `RefreshGit`, `RefreshBeads`, `RefreshClaude`, `RefreshFetch` for all repos/worktrees in parallel
+3. **Phase 3** — `RefreshPr` for all repos in parallel (needs branch names from Phase 2)
+
+After the burst, `lastRuns` is pre-populated and the normal sequential loop takes over unchanged.
 
 ## Key Files
 

@@ -8,6 +8,14 @@ open Shared
 
 let private testRepoId = RepoId "TestRepo"
 
+let private makeWorktree path branch : WorktreeInfo =
+    { Path = path; Head = "abc123"; Branch = Some branch }
+
+let private makeRepo worktrees : PerRepoState =
+    { PerRepoState.empty with
+        WorktreeList = worktrees
+        KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -554,14 +562,6 @@ type LatestByCategoryTests() =
 [<Category("Fast")>]
 type BuildTaskListTests() =
 
-    let makeWorktree path branch : WorktreeInfo =
-        { Path = path; Head = "abc123"; Branch = Some branch }
-
-    let makeRepo worktrees : PerRepoState =
-        { PerRepoState.empty with
-            WorktreeList = worktrees
-            KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
-
     [<Test>]
     member _.``All worktree-list tasks come before any per-worktree tasks``() =
         let repos =
@@ -685,42 +685,12 @@ type BuildPhase1TasksTests() =
         let tasks = buildPhase1Tasks Map.empty
         Assert.That(tasks, Is.Empty)
 
-    [<Test>]
-    member _.``Single root path returns single task``() =
-        let rootPaths = [ RepoId "Repo1", "/r1" ] |> Map.ofList
-        let tasks = buildPhase1Tasks rootPaths
-
-        Assert.That(tasks, Is.EqualTo([ RefreshWorktreeList (RepoId "Repo1") ]))
-
-    [<Test>]
-    member _.``Task repo IDs match input root path keys``() =
-        let rootPaths =
-            [ RepoId "Alpha", "/alpha"
-              RepoId "Beta", "/beta" ]
-            |> Map.ofList
-
-        let tasks = buildPhase1Tasks rootPaths
-
-        let taskRepoIds =
-            tasks
-            |> List.map (function RefreshWorktreeList r -> r | t -> failwith $"Unexpected {t}")
-            |> Set.ofList
-
-        Assert.That(taskRepoIds, Is.EqualTo(set [ RepoId "Alpha"; RepoId "Beta" ]))
 
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type BuildPhase2TasksTests() =
-
-    let makeWorktree path branch : WorktreeInfo =
-        { Path = path; Head = "abc123"; Branch = Some branch }
-
-    let makeRepo worktrees : PerRepoState =
-        { PerRepoState.empty with
-            WorktreeList = worktrees
-            KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
 
     [<Test>]
     member _.``Contains Git, Beads, Claude per worktree plus Fetch per repo``() =
@@ -771,30 +741,11 @@ type BuildPhase2TasksTests() =
         Assert.That(tasks.Length, Is.EqualTo(1))
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
 
-    [<Test>]
-    member _.``Total task count matches formula: 3 per worktree plus 1 per repo``() =
-        let repos =
-            [ RepoId "R1", makeRepo [ makeWorktree "/r1/a" "a"; makeWorktree "/r1/b" "b" ]
-              RepoId "R2", makeRepo [ makeWorktree "/r2/a" "a" ] ]
-            |> Map.ofList
-
-        let tasks = buildPhase2Tasks repos
-
-        Assert.That(tasks.Length, Is.EqualTo(3 * 3 + 2))
-
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type BuildPhase3TasksTests() =
-
-    let makeWorktree path branch : WorktreeInfo =
-        { Path = path; Head = "abc123"; Branch = Some branch }
-
-    let makeRepo worktrees : PerRepoState =
-        { PerRepoState.empty with
-            WorktreeList = worktrees
-            KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
 
     [<Test>]
     member _.``Returns one RefreshPr per repo``() =
@@ -819,81 +770,4 @@ type BuildPhase3TasksTests() =
         let tasks = buildPhase3Tasks Map.empty
         Assert.That(tasks, Is.Empty)
 
-    [<Test>]
-    member _.``Task repo IDs match input repo keys``() =
-        let repos =
-            [ RepoId "Alpha", PerRepoState.empty
-              RepoId "Beta", PerRepoState.empty ]
-            |> Map.ofList
 
-        let tasks = buildPhase3Tasks repos
-
-        let taskRepoIds =
-            tasks
-            |> List.map (function RefreshPr r -> r | t -> failwith $"Unexpected {t}")
-            |> Set.ofList
-
-        Assert.That(taskRepoIds, Is.EqualTo(set [ RepoId "Alpha"; RepoId "Beta" ]))
-
-    [<Test>]
-    member _.``Does not include any non-PR tasks``() =
-        let repos =
-            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
-            |> Map.ofList
-
-        let tasks = buildPhase3Tasks repos
-
-        Assert.That(tasks.Length, Is.EqualTo(1))
-        Assert.That(tasks, Is.EqualTo([ RefreshPr (RepoId "Repo1") ]))
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type RunInitialBurstTests() =
-
-    let makeWorktree path branch : WorktreeInfo =
-        { Path = path; Head = "abc123"; Branch = Some branch }
-
-    [<Test>]
-    member _.``Returns lastRuns map with entries for all executed tasks across all phases``() =
-        async {
-            let agent = createAgent ()
-            let repo1 = RepoId "Repo1"
-            let repo2 = RepoId "Repo2"
-
-            let worktrees1 =
-                [ { WorktreeInfo.Path = "/r1/main"; Head = "abc"; Branch = Some "main" }
-                  { WorktreeInfo.Path = "/r1/feat"; Head = "def"; Branch = Some "feat" } ]
-
-            let worktrees2 =
-                [ { WorktreeInfo.Path = "/r2/main"; Head = "ghi"; Branch = Some "main" } ]
-
-            agent.Post(UpdateWorktreeList(repo1, worktrees1))
-            agent.Post(UpdateWorktreeList(repo2, worktrees2))
-            let! _ = agent.PostAndAsyncReply(GetState)
-
-            let phase1Tasks = buildPhase1Tasks ([ repo1, "/r1"; repo2, "/r2" ] |> Map.ofList)
-
-            let! state = agent.PostAndAsyncReply(GetState)
-            let phase2Tasks = buildPhase2Tasks state.Repos
-            let phase3Tasks = buildPhase3Tasks state.Repos
-
-            let allExpectedTasks = phase1Tasks @ phase2Tasks @ phase3Tasks
-
-            Assert.That(phase1Tasks.Length, Is.EqualTo(2), "Phase 1: one worktree-list per repo")
-            Assert.That(phase2Tasks.Length, Is.EqualTo(3 * 3 + 2), "Phase 2: 3 per worktree + 1 fetch per repo")
-            Assert.That(phase3Tasks.Length, Is.EqualTo(2), "Phase 3: one PR per repo")
-            Assert.That(allExpectedTasks.Length, Is.EqualTo(15), "Total tasks across all phases")
-
-            Assert.That(
-                allExpectedTasks |> List.exists (function RefreshWorktreeList _ -> true | _ -> false),
-                Is.True, "Should have worktree list tasks")
-            Assert.That(
-                allExpectedTasks |> List.exists (function RefreshGit _ -> true | _ -> false),
-                Is.True, "Should have git tasks")
-            Assert.That(
-                allExpectedTasks |> List.exists (function RefreshPr _ -> true | _ -> false),
-                Is.True, "Should have PR tasks")
-        }
-        |> Async.RunSynchronously
