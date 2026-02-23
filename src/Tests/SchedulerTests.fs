@@ -507,7 +507,7 @@ type LatestByCategoryTests() =
             let events =
                 [ makeEvent "GitRefresh" "main" baseTime
                   makeEvent "BeadsRefresh" "feature" (baseTime.AddSeconds(1.0))
-                  makeEvent "ClaudeRefresh" "dev" (baseTime.AddSeconds(2.0))
+                  makeEvent "CodingToolRefresh" "dev" (baseTime.AddSeconds(2.0))
                   makeEvent "PrFetch" "all" (baseTime.AddSeconds(3.0))
                   makeEvent "GitRefresh" "feature" (baseTime.AddSeconds(4.0))
                   makeEvent "BeadsRefresh" "main" (baseTime.AddSeconds(5.0)) ]
@@ -520,7 +520,7 @@ type LatestByCategoryTests() =
                 "GitRefresh should have the last posted event (feature, not main)")
             Assert.That(state.LatestByCategory["BeadsRefresh"].Message, Is.EqualTo("main"),
                 "BeadsRefresh should have the last posted event (main, not feature)")
-            Assert.That(state.LatestByCategory["ClaudeRefresh"].Message, Is.EqualTo("dev"))
+            Assert.That(state.LatestByCategory["CodingToolRefresh"].Message, Is.EqualTo("dev"))
             Assert.That(state.LatestByCategory["PrFetch"].Message, Is.EqualTo("all"))
         }
         |> Async.RunSynchronously
@@ -589,7 +589,7 @@ type BuildTaskListTests() =
             |> List.min
 
         Assert.That(lastWorktreeListIdx, Is.LessThan(firstPerWorktreeIdx),
-            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads/Claude tasks")
+            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads/CodingTool tasks")
 
     [<Test>]
     member _.``All local tasks come before any network tasks``() =
@@ -618,7 +618,7 @@ type BuildTaskListTests() =
             |> List.min
 
         Assert.That(lastLocalIdx, Is.LessThan(firstNetworkIdx),
-            "All local tasks (Git/Beads/Claude) must appear before any network tasks (Pr/Fetch)")
+            "All local tasks (Git/Beads/CodingTool) must appear before any network tasks (Pr/Fetch)")
 
     [<Test>]
     member _.``Contains expected task count``() =
@@ -693,7 +693,7 @@ type BuildPhase1TasksTests() =
 type BuildPhase2TasksTests() =
 
     [<Test>]
-    member _.``Contains Git, Beads, Claude per worktree plus Fetch per repo``() =
+    member _.``Contains Git, Beads, CodingTool per worktree plus Fetch per repo``() =
         let repos =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]

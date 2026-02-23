@@ -281,8 +281,8 @@
         "Status": "Succeeded",
         "Duration": 300.0
       },
-      "ClaudeRefresh": {
-        "Source": "ClaudeRefresh",
+      "CodingToolRefresh": {
+        "Source": "CodingToolRefresh",
         "Message": "feature-active",
         "Timestamp": "2026-02-16T22:54:20+00:00",
         "Status": "Succeeded",

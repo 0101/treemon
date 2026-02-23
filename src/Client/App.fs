@@ -192,7 +192,7 @@ let relativeTime (dt: System.DateTimeOffset) =
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
 
-let ccClassName =
+let ctClassName =
     function
     | Working        -> "working"
     | WaitingForUser -> "waiting"
@@ -205,8 +205,8 @@ let isMerged (wt: WorktreeStatus) =
     | NoPr -> false
 
 let cardClassName (wt: WorktreeStatus) =
-    let cc = ccClassName wt.CodingTool
-    if isMerged wt then $"wt-card cc-{cc} merged" else $"wt-card cc-{cc}"
+    let ct = ctClassName wt.CodingTool
+    if isMerged wt then $"wt-card ct-{ct} merged" else $"wt-card ct-{ct}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
 
@@ -348,7 +348,7 @@ let eventLog (events: CardEvent list) =
         ]
 
 let knownCategories =
-    [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]
+    [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "CodingToolRefresh"; "PrFetch"; "GitFetch" ]
 
 let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string) =
     match Map.tryFind category latestBySource with
@@ -587,7 +587,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"cc-dot {ccClassName wt.CodingTool}") ]
+                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
@@ -614,7 +614,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"cc-dot {ccClassName wt.CodingTool}") ]
+                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
@@ -741,11 +741,11 @@ let repoSectionHeader dispatch (repo: RepoModel) =
             Html.span [ prop.className "repo-name"; prop.text repo.Name ]
             if repo.IsCollapsed then
                 Html.span [
-                    prop.className "repo-cc-dots"
+                    prop.className "repo-ct-dots"
                     prop.children (
                         repo.Worktrees
                         |> List.map (fun wt ->
-                            Html.span [ prop.className ($"cc-dot {ccClassName wt.CodingTool}") ]))
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
                 ]
         ]
     ]
