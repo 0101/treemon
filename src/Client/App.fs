@@ -383,13 +383,24 @@ let eventLog (events: CardEvent list) =
 let knownCategories =
     [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "CodingToolRefresh"; "PrFetch"; "GitFetch" ]
 
+let categoryDisplayName =
+    function
+    | "WorktreeList"   -> "Worktree \u2630"
+    | "GitRefresh"     -> "Git \u21BB"
+    | "BeadsRefresh"   -> "Beads \u21BB"
+    | "CodingToolRefresh" -> "Agent \u21BB"
+    | "PrFetch"        -> "PR \u2913"
+    | "GitFetch"       -> "Git \u2913"
+    | other            -> other
+
 let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string) =
+    let label = categoryDisplayName category
     match Map.tryFind category latestBySource with
     | None ->
         Html.div [
             prop.className "status-row pending"
             prop.children [
-                Html.span [ prop.className "status-category"; prop.text category ]
+                Html.span [ prop.className "status-category"; prop.text label ]
                 Html.span [ prop.className "status-target" ]
                 Html.span [ prop.className "status-duration" ]
                 Html.span [ prop.className "status-time" ]
@@ -401,7 +412,7 @@ let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string
         Html.div [
             prop.className "status-row"
             prop.children [
-                Html.span [ prop.className "status-category"; prop.text category ]
+                Html.span [ prop.className "status-category"; prop.text label ]
                 Html.span [ prop.className "status-target"; prop.text target ]
                 match evt.Duration with
                 | Some d -> Html.span [ prop.className "status-duration"; prop.text $"%.1f{d.TotalSeconds}s" ]
