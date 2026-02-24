@@ -129,7 +129,7 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
                 let newState =
                     { Processes = state.Processes |> Map.add branch finalSp
                       Events = state.Events |> Map.add branch (cancelEvent :: cleanedEvents) }
-                newState, [ CancelCts sp.CancellationTokenSource; DisposeCts sp.CancellationTokenSource ]
+                newState, [ CancelCts sp.CancellationTokenSource ]
             | _ -> state, []
         | None -> state, []
 
@@ -380,7 +380,11 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
 
             post (CompleteSync (branch, StepStatus.Succeeded))
             Log.log "SyncEngine" $"Sync pipeline completed successfully for {branch}"
-        with :? OperationCanceledException ->
+        with
+        | :? OperationCanceledException ->
             Log.log "SyncEngine" $"Sync pipeline cancelled for {branch}"
             post (CompleteSync (branch, StepStatus.Cancelled))
+        | ex ->
+            Log.log "SyncEngine" $"Sync pipeline failed for {branch}: {ex.Message}"
+            post (CompleteSync (branch, StepStatus.Failed ex.Message))
     }

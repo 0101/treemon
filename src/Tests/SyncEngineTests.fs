@@ -136,20 +136,16 @@ type ProcessMessageTests() =
         Assert.That(newState, Is.EqualTo(emptyState))
 
     [<Test>]
-    member _.``CancelSync on running branch emits CancelCts and DisposeCts``() =
-        // The spec says CancelSync should emit ONLY CancelCts (not DisposeCts).
-        // This test documents the CURRENT behavior before the bug fix in tm-sync-58a.
-        // After that fix, this test should assert effects.Length = 1 with only CancelCts.
+    member _.``CancelSync on running branch emits only CancelCts``() =
         let sp, cts = makeRunningProcess ()
         let state = makeSyncState [ "feature", sp ] []
 
         let newState, effects = processMessage state (CancelSync "feature")
 
-        Assert.That(effects.Length, Is.EqualTo(2), "Current behavior: CancelCts + DisposeCts (pre-fix)")
-
-        let hasCancelCts =
-            effects |> List.exists (function CancelCts c -> Object.ReferenceEquals(c, cts) | _ -> false)
-        Assert.That(hasCancelCts, Is.True, "Should emit CancelCts for the running CTS")
+        Assert.That(effects.Length, Is.EqualTo(1), "Should emit only CancelCts (CompleteSync owns disposal)")
+        match effects.[0] with
+        | CancelCts cancelledCts -> Assert.That(Object.ReferenceEquals(cancelledCts, cts), Is.True, "Should cancel the original CTS")
+        | other -> Assert.Fail($"Expected CancelCts but got {other}")
 
         Assert.That((newState.Processes |> Map.find "feature").State, Is.EqualTo(SyncState.Cancelled))
         Assert.That(newState.Events.ContainsKey("feature"), Is.True)
