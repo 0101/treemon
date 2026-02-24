@@ -16,11 +16,15 @@ type BeadsSummary =
 module BeadsSummary =
     let zero = { Open = 0; InProgress = 0; Closed = 0 }
 
-type ClaudeCodeStatus =
+type CodingToolStatus =
     | Working
     | WaitingForUser
     | Done
     | Idle
+
+type CodingToolProvider =
+    | Claude
+    | Copilot
 
 type BuildStatus =
     | Building
@@ -67,7 +71,8 @@ type WorktreeStatus =
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
       Beads: BeadsSummary
-      Claude: ClaudeCodeStatus
+      CodingTool: CodingToolStatus
+      CodingToolProvider: CodingToolProvider option
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool
