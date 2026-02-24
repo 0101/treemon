@@ -23,6 +23,7 @@ type Model =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
+      SyncPending: Set<string>
       AppVersion: string option
       EyeDirection: float * float }
 
@@ -68,6 +69,7 @@ let init () =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
+      SyncPending = Set.empty
       AppVersion = None
       EyeDirection = (0.0, 0.0) },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -141,10 +143,41 @@ let update msg model =
         model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
     | StartSync branch ->
-        model, Cmd.OfAsync.perform worktreeApi.startSync branch SyncStarted
+        let scopedKey =
+            model.Repos
+            |> List.tryPick (fun r ->
+                r.Worktrees
+                |> List.tryFind (fun wt -> wt.Branch = branch)
+                |> Option.map (fun _ -> $"{RepoId.value r.RepoId}/{branch}"))
+        match scopedKey with
+        | None ->
+            model, Cmd.OfAsync.perform worktreeApi.startSync branch SyncStarted
+        | Some key ->
+            let syntheticEvent =
+                { Source = "Sync"
+                  Message = "Sync starting"
+                  Timestamp = System.DateTimeOffset.Now
+                  Status = Some StepStatus.Running
+                  Duration = None }
+            let updatedEvents =
+                model.BranchEvents
+                |> Map.add key [ syntheticEvent ]
+            { model with
+                SyncPending = model.SyncPending |> Set.add key
+                BranchEvents = updatedEvents },
+            Cmd.OfAsync.perform worktreeApi.startSync branch SyncStarted
 
-    | SyncStarted _ ->
-        model, fetchSyncStatus ()
+    | SyncStarted (Ok _) ->
+        { model with SyncPending = Set.empty }, fetchSyncStatus ()
+
+    | SyncStarted (Error _) ->
+        let cleanedEvents =
+            model.SyncPending
+            |> Set.fold (fun evts key -> evts |> Map.remove key) model.BranchEvents
+        { model with
+            SyncPending = Set.empty
+            BranchEvents = cleanedEvents },
+        Cmd.none
 
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
@@ -262,26 +295,33 @@ let mainBehindIndicator (count: int) =
 let isBranchSyncing (events: CardEvent list) =
     events |> List.exists (fun e -> e.Status = Some StepStatus.Running)
 
-let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
-    let syncing = isBranchSyncing branchEvents
-    let claudeBlocked = wt.Claude = Working || wt.Claude = WaitingForUser
-    let disabled = syncing || claudeBlocked
-    if syncing then
+let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) =
+    if isPending then
         Html.button [
-            prop.className "sync-cancel-btn"
-            prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
-            prop.text "Cancel"
+            prop.className "sync-starting-btn"
+            prop.disabled true
+            prop.text "Sync starting"
         ]
     else
-        Html.button [
-            prop.className (if disabled then "sync-btn disabled" else "sync-btn")
-            prop.disabled disabled
-            prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync wt.Branch))
-            prop.title (if claudeBlocked then "Claude is active" else "Sync with main")
-            prop.text "Sync"
-        ]
+        let syncing = isBranchSyncing branchEvents
+        let claudeBlocked = wt.Claude = Working || wt.Claude = WaitingForUser
+        let disabled = syncing || claudeBlocked
+        if syncing then
+            Html.button [
+                prop.className "sync-cancel-btn"
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
+                prop.text "Cancel"
+            ]
+        else
+            Html.button [
+                prop.className (if disabled then "sync-btn disabled" else "sync-btn")
+                prop.disabled disabled
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync wt.Branch))
+                prop.title (if claudeBlocked then "Claude is active" else "Sync with main")
+                prop.text "Sync"
+            ]
 
-let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) =
+let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
@@ -292,7 +332,7 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
                         prop.className "dirty-warning"
                         prop.text "uncommitted changes"
                     ]
-                else syncButton dispatch wt branchEvents
+                else syncButton dispatch wt branchEvents isPending
         ]
     ]
 
@@ -606,7 +646,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
         ]
     ]
 
-let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt: WorktreeStatus) =
+let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (wt: WorktreeStatus) =
     Html.div [
         prop.key wt.Branch
         prop.className (cardClassName wt)
@@ -639,7 +679,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
                     ]
                 ]
 
-            mainBehindWithSync dispatch wt branchEvents
+            mainBehindWithSync dispatch wt branchEvents isPending
 
             prRow repoName wt
 
@@ -647,12 +687,13 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (wt:
         ]
     ]
 
-let renderCard dispatch isCompact repoId repoName (branchEvents: Map<string, CardEvent list>) (wt: WorktreeStatus) =
+let renderCard dispatch isCompact repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
+    let isPending = syncPending |> Set.contains scopedKey
     match isCompact with
     | true -> compactWorktreeCard dispatch repoName wt
-    | false -> worktreeCard dispatch repoName events wt
+    | false -> worktreeCard dispatch repoName events isPending wt
 
 let skeletonCard () =
     Html.div [
@@ -808,7 +849,7 @@ let repoSectionHeader dispatch (repo: RepoModel) =
         ]
     ]
 
-let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (repo: RepoModel) =
+let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -820,7 +861,7 @@ let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact (RepoId.value repo.RepoId) repo.Name branchEvents))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
                     ]
         ]
     ]
@@ -879,7 +920,7 @@ let view model dispatch =
             else
                 Html.div [
                     prop.className "repo-list"
-                    prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.BranchEvents))
+                    prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.BranchEvents model.SyncPending))
                 ]
 
             schedulerFooter model.SchedulerEvents model.LatestByCategory
