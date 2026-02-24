@@ -273,7 +273,14 @@ let private runStep
             return Ok proc
     }
 
-let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: string) (ct: CancellationToken) : Async<unit> =
+let private conflictResolutionCommand (provider: Shared.CodingToolProvider option) =
+    match provider |> Option.defaultValue Shared.CodingToolProvider.Claude with
+    | Shared.CodingToolProvider.Claude ->
+        "claude", """-p "/conflict" --dangerously-skip-permissions"""
+    | Shared.CodingToolProvider.Copilot ->
+        "copilot", """-p "Resolve all merge conflicts in this branch. Run 'git status' to find conflicted files, then resolve each conflict. After resolving, stage the files with 'git add'." --allow-all --no-ask-user -s --autopilot"""
+
+let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (ct: CancellationToken) : Async<unit> =
     async {
         try
             Log.log "SyncEngine" $"Starting sync pipeline for {branch} at {worktreePath}"
@@ -323,13 +330,15 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                 let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
                 addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) "git merge origin/main"
 
+                let fileName, arguments = conflictResolutionCommand provider
+
                 let! conflictResult =
                     runStep
                         branch
                         SyncStep.ResolveConflicts
                         worktreePath
-                        "claude"
-                        "-p \"/conflict\" --dangerously-skip-permissions"
+                        fileName
+                        arguments
                         ct
 
                 match conflictResult with

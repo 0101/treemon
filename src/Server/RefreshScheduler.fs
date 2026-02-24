@@ -12,7 +12,7 @@ type PerRepoState =
       KnownPaths: Set<string>
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
-      ClaudeData: Map<string, ClaudeCodeStatus>
+      CodingToolData: Map<string, CodingToolStatus * CodingToolProvider option>
       PrData: Map<string, PrStatus>
       IsReady: bool }
 
@@ -22,7 +22,7 @@ module PerRepoState =
           KnownPaths = Set.empty
           GitData = Map.empty
           BeadsData = Map.empty
-          ClaudeData = Map.empty
+          CodingToolData = Map.empty
           PrData = Map.empty
           IsReady = false }
 
@@ -43,7 +43,7 @@ type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
-    | UpdateClaude of repoId: RepoId * path: string * ClaudeCodeStatus
+    | UpdateCodingTool of repoId: RepoId * path: string * (CodingToolStatus * CodingToolProvider option)
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | RemoveWorktree of repoId: RepoId * path: string
     | GetState of AsyncReplyChannel<DashboardState>
@@ -76,7 +76,7 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         WorktreeList = repo.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
-        ClaudeData = repo.ClaudeData |> Map.remove path }
+        CodingToolData = repo.CodingToolData |> Map.remove path }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -111,10 +111,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         else
             state
 
-    | UpdateClaude(repoId, path, status) ->
+    | UpdateCodingTool(repoId, path, data) ->
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
-            updateRepo repoId { repo with ClaudeData = repo.ClaudeData |> Map.add path status } state
+            updateRepo repoId { repo with CodingToolData = repo.CodingToolData |> Map.add path data } state
         else
             state
 
@@ -151,7 +151,7 @@ type RefreshTask =
     | RefreshWorktreeList of repoId: RepoId
     | RefreshGit of repoId: RepoId * path: string
     | RefreshBeads of repoId: RepoId * path: string
-    | RefreshClaude of repoId: RepoId * path: string
+    | RefreshCodingTool of repoId: RepoId * path: string
     | RefreshPr of repoId: RepoId
     | RefreshFetch of repoId: RepoId
 
@@ -159,7 +159,7 @@ let private taskLabel = function
     | RefreshWorktreeList repoId -> "WorktreeList", RepoId.value repoId
     | RefreshGit(repoId, path) -> "GitRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
     | RefreshBeads(repoId, path) -> "BeadsRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
-    | RefreshClaude(repoId, path) -> "ClaudeRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
+    | RefreshCodingTool(repoId, path) -> "CodingToolRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
@@ -167,7 +167,7 @@ let private intervalOf = function
     | RefreshWorktreeList _ -> TimeSpan.FromSeconds(60.0)
     | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
     | RefreshBeads _ -> TimeSpan.FromSeconds(60.0)
-    | RefreshClaude _ -> TimeSpan.FromSeconds(15.0)
+    | RefreshCodingTool _ -> TimeSpan.FromSeconds(15.0)
     | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
     | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
 
@@ -184,7 +184,7 @@ let buildTaskList (repos: Map<RepoId, PerRepoState>) =
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
-                  RefreshClaude(repoId, wt.Path) ]))
+                  RefreshCodingTool(repoId, wt.Path) ]))
 
     let networkTasks =
         repoList
@@ -205,7 +205,7 @@ let buildPhase2Tasks (repos: Map<RepoId, PerRepoState>) =
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
-                  RefreshClaude(repoId, wt.Path) ])
+                  RefreshCodingTool(repoId, wt.Path) ])
 
         RefreshFetch repoId :: perWorktree)
 
@@ -246,9 +246,9 @@ let private executeTask
             let! beads = BeadsStatus.getBeadsSummary path
             agent.Post(UpdateBeads(repoId, path, beads))
 
-        | RefreshClaude(repoId, path) ->
-            let status = ClaudeStatus.getClaudeStatus path
-            agent.Post(UpdateClaude(repoId, path, status))
+        | RefreshCodingTool(repoId, path) ->
+            let status, provider = CodingToolStatus.getStatus path
+            agent.Post(UpdateCodingTool(repoId, path, (status, provider)))
 
         | RefreshPr repoId ->
             let root = rootPaths |> Map.find repoId

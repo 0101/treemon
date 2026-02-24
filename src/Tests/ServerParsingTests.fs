@@ -2,7 +2,7 @@ module Tests.ServerParsingTests
 
 open NUnit.Framework
 open Server.PrStatus
-open Server.ClaudeStatus
+open Server.ClaudeDetector
 
 [<TestFixture>]
 [<Category("Unit")>]

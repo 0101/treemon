@@ -80,15 +80,15 @@ type DashboardTests() =
     [<TestCase("waiting", "rgb(249, 226, 175)")>]
     [<TestCase("idle", "rgb(88, 91, 112)")>]
     [<Category("Fast")>]
-    member this.``CC dot has correct background color``(status: string, expectedColor: string) =
+    member this.``CT dot has correct background color``(status: string, expectedColor: string) =
         task {
-            let dots = this.Page.Locator($".cc-dot.{status}")
+            let dots = this.Page.Locator($".ct-dot.{status}")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} Claude worktrees; {status} dots should be present")
 
             let! bg = dots.First |> computedStyle "backgroundColor"
-            Assert.That(bg, Is.EqualTo(expectedColor), $"CC dot .{status} background color")
+            Assert.That(bg, Is.EqualTo(expectedColor), $"CT dot .{status} background color")
         }
 
     [<Test>]
@@ -151,13 +151,13 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``CC status indicators render on cards``() =
+    member this.``CT status indicators render on cards``() =
         task {
-            let ccDots = this.Page.Locator(".wt-card .cc-dot")
-            let! count = ccDots.CountAsync()
+            let ctDots = this.Page.Locator(".wt-card .ct-dot")
+            let! count = ctDots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let! cssClass = ccDots.First.GetAttributeAsync("class")
+            let! cssClass = ctDots.First.GetAttributeAsync("class")
             Assert.That(
                 cssClass,
                 Does.Contain("working")
@@ -168,7 +168,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Cards have CC status class``() =
+    member this.``Cards have CT status class``() =
         task {
             let cards = this.Page.Locator(".wt-card")
             let! count = cards.CountAsync()
@@ -177,10 +177,10 @@ type DashboardTests() =
             let! cardClass = cards.First.GetAttributeAsync("class")
             Assert.That(
                 cardClass,
-                Does.Contain("cc-working")
-                    .Or.Contain("cc-waiting")
-                    .Or.Contain("cc-done")
-                    .Or.Contain("cc-idle")
+                Does.Contain("ct-working")
+                    .Or.Contain("ct-waiting")
+                    .Or.Contain("ct-done")
+                    .Or.Contain("ct-idle")
             )
         }
 
@@ -360,13 +360,13 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Card header contains both CC dot and branch name``() =
+    member this.``Card header contains both CT dot and branch name``() =
         task {
             let header = this.Page.Locator(".wt-card .card-header").First
 
-            let ccDot = header.Locator(".cc-dot")
-            let! ccDotCount = ccDot.CountAsync()
-            Assert.That(ccDotCount, Is.EqualTo(1))
+            let ctDot = header.Locator(".ct-dot")
+            let! ctDotCount = ctDot.CountAsync()
+            Assert.That(ctDotCount, Is.EqualTo(1))
 
             let branchName = header.Locator(".branch-name")
             let! branchCount = branchName.CountAsync()
@@ -701,7 +701,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Sync button disabled when Claude is Working``() =
         task {
-            let workingCards = this.Page.Locator(".wt-card.cc-working:not(.compact)")
+            let workingCards = this.Page.Locator(".wt-card.ct-working:not(.compact)")
             do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! workingCount = workingCards.CountAsync()
             Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Claude worktrees")
@@ -727,7 +727,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Sync button disabled when Claude is WaitingForUser``() =
         task {
-            let waitingCards = this.Page.Locator(".wt-card.cc-waiting:not(.compact)")
+            let waitingCards = this.Page.Locator(".wt-card.ct-waiting:not(.compact)")
             do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! waitingCount = waitingCards.CountAsync()
             Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Claude worktrees")
@@ -1152,7 +1152,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Commit grid square count matches fixture CommitCount``() =
         task {
-            let workingCard = this.Page.Locator(".wt-card.cc-working")
+            let workingCard = this.Page.Locator(".wt-card.ct-working")
             do! workingCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let squares = workingCard.First.Locator(".commit-square")
             let! squareCount = squares.CountAsync()
@@ -1224,7 +1224,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Diff stats show correct values from fixture``() =
         task {
-            let workingCard = this.Page.Locator(".wt-card.cc-working")
+            let workingCard = this.Page.Locator(".wt-card.ct-working")
             do! workingCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let added = workingCard.First.Locator(".diff-added")
             let! addedText = added.First.TextContentAsync()
@@ -1238,7 +1238,7 @@ type DashboardTests() =
     [<Test>]
     member this.``No commit grid on branches with zero commits``() =
         task {
-            let idleCard = this.Page.Locator(".wt-card.cc-idle")
+            let idleCard = this.Page.Locator(".wt-card.ct-idle")
             do! idleCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let grids = idleCard.First.Locator(".commit-grid")
             let! count = grids.CountAsync()
@@ -1500,7 +1500,7 @@ type DashboardTests() =
     [<Category("Fast")>]
     member this.``Working dot has pulse animation``() =
         task {
-            let workingDots = this.Page.Locator(".cc-dot.working")
+            let workingDots = this.Page.Locator(".ct-dot.working")
             do! workingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! animationName = workingDots.First |> computedStyle "animationName"
@@ -1519,13 +1519,13 @@ type DashboardTests() =
     [<Test>]
     member this.``Non-working dots have no pulse animation``() =
         task {
-            let waitingDots = this.Page.Locator(".cc-dot.waiting")
+            let waitingDots = this.Page.Locator(".ct-dot.waiting")
             do! waitingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! animName = waitingDots.First |> computedStyle "animationName"
             Assert.That(animName, Is.EqualTo("none"), "Waiting dot should have no animation")
 
-            let idleDots = this.Page.Locator(".cc-dot.idle")
+            let idleDots = this.Page.Locator(".ct-dot.idle")
             do! idleDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! idleAnimName = idleDots.First |> computedStyle "animationName"
@@ -1533,21 +1533,21 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``All cc-dots are circles with 10px size``() =
+    member this.``All ct-dots are circles with 10px size``() =
         task {
-            let dots = this.Page.Locator(".wt-card .cc-dot")
+            let dots = this.Page.Locator(".wt-card .ct-dot")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
             let! width = dots.First |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("10px"), "CC dot width should be 10px")
+            Assert.That(width, Is.EqualTo("10px"), "CT dot width should be 10px")
 
             let! height = dots.First |> computedStyle "height"
-            Assert.That(height, Is.EqualTo("10px"), "CC dot height should be 10px")
+            Assert.That(height, Is.EqualTo("10px"), "CT dot height should be 10px")
 
             let! borderRadius = dots.First |> computedStyle "borderRadius"
-            Assert.That(borderRadius, Is.EqualTo("50%"), "CC dot should be circular (border-radius: 50%)")
+            Assert.That(borderRadius, Is.EqualTo("50%"), "CT dot should be circular (border-radius: 50%)")
         }
 
     [<Test>]
@@ -1574,7 +1574,7 @@ type DashboardTests() =
             let! categoryTexts =
                 overview.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
+            let expected = [ "BeadsRefresh"; "CodingToolRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
             Assert.That(
                 categoryTexts |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1659,7 +1659,7 @@ type DashboardTests() =
             let! nonPendingCategories =
                 nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "BeadsRefresh"; "ClaudeRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
+            let expected = [ "BeadsRefresh"; "CodingToolRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
             Assert.That(
                 nonPendingCategories |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1694,8 +1694,8 @@ type DashboardTests() =
                     "els => els.map(el => el.textContent.trim())")
             Assert.That(
                 categoryOrder |> Array.toList,
-                Is.EqualTo([ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "ClaudeRefresh"; "PrFetch"; "GitFetch" ]),
-                "Categories should render in known order: WorktreeList, GitRefresh, BeadsRefresh, ClaudeRefresh, PrFetch, GitFetch")
+                Is.EqualTo([ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "CodingToolRefresh"; "PrFetch"; "GitFetch" ]),
+                "Categories should render in known order: WorktreeList, GitRefresh, BeadsRefresh, CodingToolRefresh, PrFetch, GitFetch")
 
             do! page.CloseAsync()
         }
@@ -2011,7 +2011,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Collapsed repo header shows cc-dots``() =
+    member this.``Collapsed repo header shows ct-dots``() =
         task {
             let firstSection = this.Page.Locator(".repo-section").First
             let header = firstSection.Locator(".repo-header")
@@ -2019,42 +2019,42 @@ type DashboardTests() =
 
             do! header.ClickAsync()
 
-            let ccDots = header.Locator(".repo-cc-dots .cc-dot")
-            do! ccDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! dotCount = ccDots.CountAsync()
-            Assert.That(dotCount, Is.GreaterThanOrEqualTo(1), "Collapsed header should show at least one cc-dot")
+            let ctDots = header.Locator(".repo-ct-dots .ct-dot")
+            do! ctDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! dotCount = ctDots.CountAsync()
+            Assert.That(dotCount, Is.GreaterThanOrEqualTo(1), "Collapsed header should show at least one ct-dot")
         }
 
     [<Test>]
-    member this.``Expanded repo header hides cc-dots``() =
+    member this.``Expanded repo header hides ct-dots``() =
         task {
             let firstSection = this.Page.Locator(".repo-section").First
             let header = firstSection.Locator(".repo-header")
             do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let ccDotsContainer = header.Locator(".repo-cc-dots")
-            let! containerCount = ccDotsContainer.CountAsync()
-            Assert.That(containerCount, Is.EqualTo(0), "Expanded header should not have .repo-cc-dots container")
+            let ctDotsContainer = header.Locator(".repo-ct-dots")
+            let! containerCount = ctDotsContainer.CountAsync()
+            Assert.That(containerCount, Is.EqualTo(0), "Expanded header should not have .repo-ct-dots container")
         }
 
     [<Test>]
-    member this.``Cc-dots appear on collapse and disappear on expand``() =
+    member this.``Ct-dots appear on collapse and disappear on expand``() =
         task {
             let firstSection = this.Page.Locator(".repo-section").First
             let header = firstSection.Locator(".repo-header")
             do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let ccDotsContainer = header.Locator(".repo-cc-dots")
-            let! containerBefore = ccDotsContainer.CountAsync()
-            Assert.That(containerBefore, Is.EqualTo(0), "Expanded header should not show cc-dots")
+            let ctDotsContainer = header.Locator(".repo-ct-dots")
+            let! containerBefore = ctDotsContainer.CountAsync()
+            Assert.That(containerBefore, Is.EqualTo(0), "Expanded header should not show ct-dots")
 
             do! header.ClickAsync()
-            let! containerAfterCollapse = ccDotsContainer.CountAsync()
-            Assert.That(containerAfterCollapse, Is.EqualTo(1), "Collapsed header should show cc-dots container")
+            let! containerAfterCollapse = ctDotsContainer.CountAsync()
+            Assert.That(containerAfterCollapse, Is.EqualTo(1), "Collapsed header should show ct-dots container")
 
             do! header.ClickAsync()
-            let! containerAfterExpand = ccDotsContainer.CountAsync()
-            Assert.That(containerAfterExpand, Is.EqualTo(0), "Re-expanded header should hide cc-dots again")
+            let! containerAfterExpand = ctDotsContainer.CountAsync()
+            Assert.That(containerAfterExpand, Is.EqualTo(0), "Re-expanded header should hide ct-dots again")
         }
 
     [<Test>]
