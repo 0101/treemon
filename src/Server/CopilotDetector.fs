@@ -41,7 +41,7 @@ let private buildWorkspaceIndex () =
 
                 parseCwdFromYaml yamlPath
                 |> Option.iter (fun cwd ->
-                    let normalized = cwd.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    let normalized = Path.GetFullPath(cwd).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     let existing = if index.ContainsKey(normalized) then index[normalized] else []
                     index[normalized] <- sessionDir :: existing))
     with ex ->
@@ -62,7 +62,7 @@ let private refreshIndex () =
 
 let private getSessionDirsForPath (worktreePath: string) =
     let index = refreshIndex ()
-    let normalized = worktreePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+    let normalized = Path.GetFullPath(worktreePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
 
     match index.PathToSessionDirs.TryGetValue(normalized) with
     | true, dirs -> dirs
