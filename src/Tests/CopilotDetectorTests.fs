@@ -16,6 +16,10 @@ let private eventsPath (sessionName: string) =
 let private workspacePath (sessionName: string) =
     Path.Combine(fixtureDir, sessionName, "workspace.yaml")
 
+let private touchFixtures () =
+    Directory.GetFiles(fixtureDir, "events.jsonl", SearchOption.AllDirectories)
+    |> Array.iter (fun path -> File.SetLastWriteTimeUtc(path, DateTime.UtcNow))
+
 let private recentTime = DateTimeOffset.UtcNow
 
 
@@ -23,6 +27,9 @@ let private recentTime = DateTimeOffset.UtcNow
 [<Category("Unit")>]
 [<Category("Fast")>]
 type StatusParsingTests() =
+
+    [<OneTimeSetUp>]
+    member _.Setup() = touchFixtures ()
 
     [<Test>]
     member _.``Last event user.message yields Working``() =
@@ -54,6 +61,9 @@ type StatusParsingTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type StalenessTests() =
+
+    [<OneTimeSetUp>]
+    member _.Setup() = touchFixtures ()
 
     [<Test>]
     member _.``Events file older than 2 hours yields Idle``() =
