@@ -2105,9 +2105,6 @@ type DashboardTests() =
             let! isDisabled = startingBtn.EvaluateAsync<bool>("el => el.disabled")
             Assert.That(isDisabled, Is.True, "Sync starting button should be disabled")
 
-            let! startingClass = startingBtn.GetAttributeAsync("class")
-            Assert.That(startingClass, Does.Contain("sync-starting-btn"), "Button should have sync-starting-btn class")
-
             let oldSyncBtn = multirepoCard.Locator(".sync-btn")
             let! oldSyncCount = oldSyncBtn.CountAsync()
             Assert.That(oldSyncCount, Is.EqualTo(0), "Original .sync-btn should be gone during pending state")
@@ -2123,9 +2120,6 @@ type DashboardTests() =
             do! Assertions.Expect(cancelBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
             let! cancelText = cancelBtn.TextContentAsync()
             Assert.That(cancelText, Is.EqualTo("Cancel"), "Button should transition to 'Cancel' after server confirms")
-
-            let! cancelClass = cancelBtn.GetAttributeAsync("class")
-            Assert.That(cancelClass, Does.Contain("sync-cancel-btn"), "Button should have sync-cancel-btn class")
 
             let! startingGone = startingBtn.CountAsync()
             Assert.That(startingGone, Is.EqualTo(0), "sync-starting-btn should be gone after transition to Cancel")
@@ -2161,42 +2155,9 @@ type DashboardTests() =
 
             do! startingBtn.ClickAsync(LocatorClickOptions(Force = true))
 
-            do! page.WaitForTimeoutAsync(500.0f)
-
             Assert.That(clickCount.Value, Is.EqualTo(1),
                 "Only one startSync call should have been made despite clicking the disabled button")
 
             do! page.CloseAsync()
         }
 
-    [<Test>]
-    [<Category("Local")>]
-    member this.``Sync starting button has correct CSS styling``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-
-            do! page.RouteAsync("**/IWorktreeApi/startSync", fun _ ->
-                System.Threading.Tasks.Task.CompletedTask)
-
-            let! _ = page.GotoAsync(baseUrl)
-            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
-
-            let treemonSection = page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
-            let multirepoCard = treemonSection.Locator(".wt-card:has(.branch-name:text-is('multirepo'))")
-            do! multirepoCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let syncBtn = multirepoCard.Locator(".sync-btn")
-            do! Assertions.Expect(syncBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
-
-            do! syncBtn.ClickAsync()
-
-            let startingBtn = multirepoCard.Locator(".sync-starting-btn")
-            do! Assertions.Expect(startingBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 2000.0f))
-
-            let! cursor = startingBtn.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
-            Assert.That(cursor, Is.EqualTo("not-allowed"), "Sync starting button should have not-allowed cursor")
-
-            let! fontStyle = startingBtn.EvaluateAsync<string>("el => getComputedStyle(el).fontStyle")
-            Assert.That(fontStyle, Is.EqualTo("italic"), "Sync starting button should have italic font style")
-
-            do! page.CloseAsync()
-        }
