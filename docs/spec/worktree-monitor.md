@@ -3,7 +3,7 @@
 ## Goals
 
 - At-a-glance visibility into all active worktrees across multiple repositories
-- Surface activity signals from multiple sources (git, beads, Claude Code, Azure DevOps, GitHub) so stalled branches are obvious
+- Surface activity signals from multiple sources (git, beads, coding AI tools, Azure DevOps, GitHub) so stalled branches are obvious
 - Lightweight polling — no hooks or agents inside worktrees
 - Zero configuration — point at root directories, provider detection is automatic from git remotes
 
@@ -12,7 +12,7 @@
 ### Dashboard Layout
 
 - Dark theme, responsive 1-4 column card grid
-- Collapsible repo sections — header with folder name, collapse toggle, cc-dots (Claude status per worktree) when collapsed
+- Collapsible repo sections — header with folder name, collapse toggle, coding tool status dots per worktree when collapsed
 - Cards sorted by last activity (default), toggleable to alphabetical; compact mode toggle
 - Merged PRs get dimmed cards with delete button
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
@@ -28,7 +28,7 @@
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
-- Claude Code status dot (Working / WaitingForUser / Done / Idle)
+- Coding tool status dot (Working / WaitingForUser / Done / Idle) with tooltip showing provider name
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
@@ -39,8 +39,20 @@
 ### Branch Sync
 
 - Available when `MainBehindCount > 0` and worktree is clean
-- Pipeline: CheckClean -> Pull -> Merge -> ResolveConflicts (Claude) -> Test
+- Pipeline: CheckClean -> Pull -> Merge -> ResolveConflicts -> Test
+- Conflict resolution uses the detected/configured coding tool CLI (Claude or Copilot)
 - Cancellable mid-pipeline; progress shown in card event log
+
+### Coding Tool Detection
+
+- Supports multiple providers: Claude Code, Copilot CLI. Adding a new provider = one detector module + registration in orchestrator.
+- Every 15s refresh cycle checks all registered providers for each worktree
+- Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Done/Idle)
+- Orchestrator picks the most recently active non-Idle provider (by session file mtime)
+- `.treemon.json` optional `"codingTool": "claude"|"copilot"` overrides auto-detect
+- Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
+- Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
+- Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
 
 ### GitHub PRs
 
@@ -69,7 +81,7 @@
 | Category | Scope | Interval |
 |----------|-------|----------|
 | WorktreeList | per-repo | 60s |
-| Git, Beads, Claude | per-worktree | 15s |
+| Git, Beads, CodingTool | per-worktree | 15s |
 | PR, Fetch | per-repo | 120s |
 
 ### PR Provider Routing
@@ -98,15 +110,18 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 | File | Purpose |
 |------|---------|
-| `src/Shared/Types.fs` | `DashboardResponse`, `RepoWorktrees`, `CommentSummary`, shared domain types |
+| `src/Shared/Types.fs` | `DashboardResponse`, `RepoWorktrees`, `CommentSummary`, `CodingToolStatus`, shared domain types |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
+| `src/Server/ClaudeDetector.fs` | Claude Code session file scanning |
+| `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
+| `src/Server/CodingToolStatus.fs` | Coding tool orchestrator: config override, provider dispatch, winner selection |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, work metrics |
 | `src/Server/WorktreeApi.fs` | API implementation, `DashboardResponse` assembly |
-| `src/Server/SyncEngine.fs` | Branch sync pipeline |
+| `src/Server/SyncEngine.fs` | Branch sync pipeline, provider-aware conflict resolution |
 | `src/Client/App.fs` | Elmish MVU app, repo sections, card rendering |
-| `src/Tests/fixtures/` | Captured AzDo and GitHub JSON for offline parsing tests |
+| `src/Tests/fixtures/` | Captured AzDo, GitHub, and Copilot data for offline parsing tests |
 
 ## Decisions
 
@@ -119,9 +134,11 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Single API call returns all repos: client doesn't need to know repo count
 - Repo ID = folder name: simple, human-readable, no config needed
 - `CommentSummary` DU over nullable fields: cleanly models provider capability differences
+- Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 
 ## Related Specs
 
 - `docs/spec/future/llm-comment-resolution.md` — infer GitHub comment resolution via LLM, upgrade `CountOnly` to `WithResolution`
+- `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type for compile-time path safety (deferred: entry-point normalization sufficient for now)
