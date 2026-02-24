@@ -153,6 +153,7 @@ let private deleteWorktree
 
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -197,10 +198,13 @@ let worktreeApi
                   match worktreeWithRepo with
                   | None -> return Error $"No worktree found for branch '{branch}'"
                   | Some (path, repoRoot, syncKey, provider) ->
-                      match SyncEngine.beginSync syncKey with
+                      let! beginResult = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
+
+                      match beginResult with
                       | Error msg -> return Error msg
                       | Ok ct ->
-                          Async.Start(SyncEngine.executeSyncPipeline syncKey path repoRoot provider ct, ct)
+                          let post = syncAgent.Post
+                          Async.Start(SyncEngine.executeSyncPipeline post syncKey path repoRoot provider ct, ct)
                           return Ok ()
               }
           cancelSync = fun branch ->
@@ -213,7 +217,7 @@ let worktreeApi
                       repo.WorktreeList
                       |> List.tryFind (fun wt -> wt.Branch = Some branch)
                       |> Option.map (fun _ -> scopedBranchKey repoId branch))
-                  |> Option.iter SyncEngine.cancelSync
+                  |> Option.iter (fun key -> syncAgent.Post(SyncEngine.CancelSync key))
               }
           getSyncStatus = fun () ->
               async {
@@ -230,7 +234,7 @@ let worktreeApi
                                   key, wt.Path)))
                       |> Map.ofList
 
-                  let syncEvents = SyncEngine.getAllEvents ()
+                  let! syncEvents = syncAgent.PostAndAsyncReply(SyncEngine.GetAllEvents)
 
                   let allKeys =
                       [ yield! syncEvents |> Map.keys
