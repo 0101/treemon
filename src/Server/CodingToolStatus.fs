@@ -88,11 +88,13 @@ let getStatus (worktreePath: string) : CodingToolStatus * CodingToolProvider opt
 
 let getLastMessage (worktreePath: string) : CardEvent option =
     let configured = readConfiguredProvider worktreePath
-    let results = gatherResults worktreePath providers
-    let _, activeProvider = resolveStatus configured results
 
-    activeProvider
-    |> Option.bind (fun provider ->
-        providers
-        |> List.tryFind (fun entry -> entry.Provider = provider)
-        |> Option.bind (fun entry -> entry.GetLastMessage worktreePath))
+    let candidates =
+        match configured with
+        | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
+        | None -> providers
+
+    candidates
+    |> List.choose (fun entry -> entry.GetLastMessage worktreePath)
+    |> List.sortByDescending _.Timestamp
+    |> List.tryHead
