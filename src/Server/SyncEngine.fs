@@ -46,6 +46,14 @@ type SyncAgentState =
 type SideEffect =
     | CancelCts of CancellationTokenSource
     | DisposeCts of CancellationTokenSource
+    | LogMessage of string
+
+let private mkEvent source message status =
+    { Source = source
+      Message = message
+      Timestamp = DateTimeOffset.Now
+      Status = Some status
+      Duration = None }
 
 let private clearRunningEvents (events: CardEvent list) =
     events |> List.filter (fun evt -> evt.Status <> Some StepStatus.Running)
@@ -53,8 +61,7 @@ let private clearRunningEvents (events: CardEvent list) =
 let private isProcessRunning (state: SyncAgentState) (branch: string) =
     state.Processes
     |> Map.tryFind branch
-    |> Option.map (fun sp -> match sp.State with SyncState.Running _ -> true | _ -> false)
-    |> Option.defaultValue false
+    |> Option.exists (fun sp -> match sp.State with SyncState.Running _ -> true | _ -> false)
 
 let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * SideEffect list =
     match msg with
@@ -65,15 +72,9 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
         else
             let cts = new CancellationTokenSource()
             let sp = { State = SyncState.Running SyncStep.CheckClean; CancellationTokenSource = cts }
-            let initialEvent =
-                { Source = "sync"
-                  Message = "Sync starting"
-                  Timestamp = DateTimeOffset.Now
-                  Status = Some StepStatus.Running
-                  Duration = None }
             let newState =
                 { Processes = state.Processes |> Map.add branch sp
-                  Events = state.Events |> Map.add branch [ initialEvent ] }
+                  Events = state.Events |> Map.add branch [ mkEvent "sync" "Sync starting" StepStatus.Running ] }
             reply.Reply(Ok cts.Token)
             newState, []
 
@@ -95,18 +96,13 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
             | SyncState.Completed _ | SyncState.Cancelled ->
                 state, []
             | _ ->
-                let finalState =
-                    match result with
-                    | StepStatus.Cancelled -> SyncState.Cancelled
-                    | _ -> SyncState.Completed result
-                let updated = { sp with State = finalState }
                 let cleanedEvents =
                     state.Events
                     |> Map.tryFind branch
                     |> Option.defaultValue []
                     |> clearRunningEvents
                 let newState =
-                    { Processes = state.Processes |> Map.add branch updated
+                    { Processes = state.Processes |> Map.remove branch
                       Events = state.Events |> Map.add branch cleanedEvents }
                 newState, [ DisposeCts sp.CancellationTokenSource ]
         | None -> state, []
@@ -116,20 +112,13 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
         | Some sp ->
             match sp.State with
             | SyncState.Running _ ->
-                Log.log "SyncEngine" $"Cancelling sync for branch: {branch}"
-                let cancelEvent =
-                    { Source = "sync"
-                      Message = "Sync cancelled"
-                      Timestamp = DateTimeOffset.Now
-                      Status = Some StepStatus.Cancelled
-                      Duration = None }
                 let finalSp = { sp with State = SyncState.Cancelled }
                 let existing = state.Events |> Map.tryFind branch |> Option.defaultValue []
                 let cleanedEvents = clearRunningEvents existing
                 let newState =
                     { Processes = state.Processes |> Map.add branch finalSp
-                      Events = state.Events |> Map.add branch (cancelEvent :: cleanedEvents) }
-                newState, [ CancelCts sp.CancellationTokenSource ]
+                      Events = state.Events |> Map.add branch (mkEvent "sync" "Sync cancelled" StepStatus.Cancelled :: cleanedEvents) }
+                newState, [ LogMessage $"Cancelling sync for branch: {branch}"; CancelCts sp.CancellationTokenSource ]
             | _ -> state, []
         | None -> state, []
 
@@ -144,7 +133,9 @@ let private executeSideEffects (effects: SideEffect list) =
         | CancelCts cts ->
             try cts.Cancel() with _ -> ()
         | DisposeCts cts ->
-            try cts.Dispose() with _ -> ())
+            try cts.Dispose() with _ -> ()
+        | LogMessage msg ->
+            Log.log "SyncEngine" msg)
 
 let createSyncAgent () : MailboxProcessor<SyncMsg> =
     MailboxProcessor.Start(fun inbox ->
@@ -270,22 +261,22 @@ let private runStep
     async {
         let cmdString = $"{fileName} {arguments}"
         post (UpdateProcessState (branch, SyncState.Running step))
-        post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Running; Duration = None }))
+        post (PushEvent (branch, mkEvent $"{step}" cmdString StepStatus.Running))
 
         let! result = runProcess worktreePath fileName arguments ct
 
         match result with
         | Error msg ->
             let status = StepStatus.Failed msg
-            post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
+            post (PushEvent (branch, mkEvent $"{step}" cmdString status))
             return Error status
         | Ok proc when proc.ExitCode <> 0 ->
             let msg = $"exit {proc.ExitCode}: {truncateStderr proc.Stderr 200}"
             let status = StepStatus.Failed msg
-            post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
+            post (PushEvent (branch, mkEvent $"{step}" cmdString status))
             return Error status
         | Ok proc ->
-            post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Succeeded; Duration = None }))
+            post (PushEvent (branch, mkEvent $"{step}" cmdString StepStatus.Succeeded))
             return Ok proc
     }
 
@@ -302,7 +293,7 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 return ()
             | Ok proc when proc.Stdout <> "" ->
                 let status = StepStatus.Failed "Working tree is dirty"
-                post (PushEvent (branch, { Source = $"{SyncStep.CheckClean}"; Message = "git status --porcelain --untracked-files=no"; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
+                post (PushEvent (branch, mkEvent $"{SyncStep.CheckClean}" "git status --porcelain --untracked-files=no" status))
                 post (CompleteSync (branch, status))
                 return ()
             | Ok _ ->
@@ -316,24 +307,24 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
             | Ok _ ->
 
             post (UpdateProcessState (branch, SyncState.Running SyncStep.Merge))
-            post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Running; Duration = None }))
+            post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" StepStatus.Running))
 
             let! mergeResult = runProcess worktreePath "git" "merge origin/main" ct
 
             match mergeResult with
             | Error msg ->
                 let status = StepStatus.Failed msg
-                post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" status))
                 post (CompleteSync (branch, status))
                 return ()
             | Ok mergeProc ->
 
             match mergeProc.ExitCode with
             | 0 ->
-                post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Succeeded; Duration = None }))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" StepStatus.Succeeded))
             | _ ->
                 let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
-                post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some (StepStatus.Failed mergeMsg); Duration = None }))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" (StepStatus.Failed mergeMsg)))
 
                 let fileName, arguments = conflictResolutionCommand provider
 

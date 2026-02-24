@@ -98,7 +98,7 @@ type ProcessMessageTests() =
         Assert.That(effects, Is.Empty)
 
     [<Test>]
-    member _.``CompleteSync on running branch returns updated state with DisposeCts effect``() =
+    member _.``CompleteSync on running branch removes process and emits DisposeCts``() =
         let sp, cts = makeRunningProcess ()
         let state = makeSyncState [ "feature", sp ] [ "feature", [ makeEvent "sync" "running" StepStatus.Running ] ]
 
@@ -108,6 +108,8 @@ type ProcessMessageTests() =
         match effects.[0] with
         | DisposeCts disposedCts -> Assert.That(Object.ReferenceEquals(disposedCts, cts), Is.True, "Should dispose the original CTS")
         | other -> Assert.Fail($"Expected DisposeCts but got {other}")
+
+        Assert.That(newState.Processes.ContainsKey("feature"), Is.False, "Completed process should be removed from state")
 
         let runningEvents =
             newState.Events
@@ -136,14 +138,17 @@ type ProcessMessageTests() =
         Assert.That(newState, Is.EqualTo(emptyState))
 
     [<Test>]
-    member _.``CancelSync on running branch emits only CancelCts``() =
+    member _.``CancelSync on running branch emits LogMessage and CancelCts``() =
         let sp, cts = makeRunningProcess ()
         let state = makeSyncState [ "feature", sp ] []
 
         let newState, effects = processMessage state (CancelSync "feature")
 
-        Assert.That(effects.Length, Is.EqualTo(1), "Should emit only CancelCts (CompleteSync owns disposal)")
+        Assert.That(effects.Length, Is.EqualTo(2), "Should emit LogMessage and CancelCts")
         match effects.[0] with
+        | LogMessage msg -> Assert.That(msg, Does.Contain("feature"), "Log message should mention branch")
+        | other -> Assert.Fail($"Expected LogMessage but got {other}")
+        match effects.[1] with
         | CancelCts cancelledCts -> Assert.That(Object.ReferenceEquals(cancelledCts, cts), Is.True, "Should cancel the original CTS")
         | other -> Assert.Fail($"Expected CancelCts but got {other}")
 
