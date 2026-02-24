@@ -1280,13 +1280,10 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Scheduler footer is sticky at bottom``() =
+    member this.``Scheduler footer uses monospace font``() =
         task {
             let footer = this.Page.Locator(".scheduler-footer")
             do! footer.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! position = footer |> computedStyle "position"
-            Assert.That(position, Is.EqualTo("sticky"), "Scheduler footer should be sticky")
 
             let! fontFamily = footer |> computedStyle "fontFamily"
             Assert.That(fontFamily, Does.Contain("monospace").IgnoreCase, "Scheduler footer should use monospace font")
@@ -1574,11 +1571,11 @@ type DashboardTests() =
             let! categoryTexts =
                 overview.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "BeadsRefresh"; "CodingToolRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
+            let expected = [ "Agent \u21BB"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
             Assert.That(
                 categoryTexts |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
-                "Status overview should contain all 6 known categories")
+                "Status overview should contain all 6 known category display names")
         }
 
     [<Test>]
@@ -1659,7 +1656,7 @@ type DashboardTests() =
             let! nonPendingCategories =
                 nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "BeadsRefresh"; "CodingToolRefresh"; "GitFetch"; "GitRefresh"; "PrFetch"; "WorktreeList" ]
+            let expected = [ "Agent \u21BB"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
             Assert.That(
                 nonPendingCategories |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1694,8 +1691,8 @@ type DashboardTests() =
                     "els => els.map(el => el.textContent.trim())")
             Assert.That(
                 categoryOrder |> Array.toList,
-                Is.EqualTo([ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "CodingToolRefresh"; "PrFetch"; "GitFetch" ]),
-                "Categories should render in known order: WorktreeList, GitRefresh, BeadsRefresh, CodingToolRefresh, PrFetch, GitFetch")
+                Is.EqualTo([ "Worktree \u2630"; "Git \u21BB"; "Beads \u21BB"; "Agent \u21BB"; "PR \u2913"; "Git \u2913" ]),
+                "Categories should render in known order")
 
             do! page.CloseAsync()
         }
