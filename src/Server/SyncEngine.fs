@@ -1,7 +1,6 @@
 module Server.SyncEngine
 
 open System
-open System.Collections.Concurrent
 open System.Diagnostics
 open System.IO
 open System.Threading
@@ -14,6 +13,7 @@ type SyncStep =
     | Merge
     | ResolveConflicts
     | Test
+    | Commit
 
 [<RequireQualifiedAccess>]
 type SyncState =
@@ -31,45 +31,131 @@ type SyncProcess =
     { State: SyncState
       CancellationTokenSource: CancellationTokenSource }
 
-let private syncProcesses = ConcurrentDictionary<string, SyncProcess>()
+type SyncMsg =
+    | BeginSync of branch: string * AsyncReplyChannel<Result<CancellationToken, string>>
+    | PushEvent of branch: string * CardEvent
+    | UpdateProcessState of branch: string * SyncState
+    | CompleteSync of branch: string * StepStatus
+    | CancelSync of branch: string
+    | GetAllEvents of AsyncReplyChannel<Map<string, CardEvent list>>
 
-let private branchEvents = ConcurrentDictionary<string, CardEvent list>()
+type SyncAgentState =
+    { Processes: Map<string, SyncProcess>
+      Events: Map<string, CardEvent list> }
 
-let private updateProcess (branch: string) (update: SyncProcess -> SyncProcess) =
-    syncProcesses.AddOrUpdate(
-        branch,
-        (fun _ -> failwith "Cannot update non-existent sync process"),
-        fun _ existing -> update existing
-    )
-    |> ignore
+type SideEffect =
+    | CancelCts of CancellationTokenSource
+    | DisposeCts of CancellationTokenSource
 
-let pushEvent (branch: string) (event: CardEvent) =
-    branchEvents.AddOrUpdate(
-        branch,
-        [ event ],
-        fun _ existing -> event :: existing
-    )
-    |> ignore
+let private clearRunningEvents (events: CardEvent list) =
+    events |> List.filter (fun evt -> evt.Status <> Some StepStatus.Running)
 
-let getEvents (branch: string) : CardEvent list =
-    match branchEvents.TryGetValue(branch) with
-    | true, events -> events
-    | false, _ -> []
+let private isProcessRunning (state: SyncAgentState) (branch: string) =
+    state.Processes
+    |> Map.tryFind branch
+    |> Option.map (fun sp -> match sp.State with SyncState.Running _ -> true | _ -> false)
+    |> Option.defaultValue false
 
-let getAllEvents () : Map<string, CardEvent list> =
-    branchEvents
-    |> Seq.map (fun kvp -> kvp.Key, kvp.Value)
-    |> Map.ofSeq
+let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * SideEffect list =
+    match msg with
+    | BeginSync (branch, reply) ->
+        if isProcessRunning state branch then
+            reply.Reply(Error "Sync already running for this branch")
+            state, []
+        else
+            let cts = new CancellationTokenSource()
+            let sp = { State = SyncState.Running SyncStep.CheckClean; CancellationTokenSource = cts }
+            let initialEvent =
+                { Source = "sync"
+                  Message = "Sync starting"
+                  Timestamp = DateTimeOffset.Now
+                  Status = Some StepStatus.Running
+                  Duration = None }
+            let newState =
+                { Processes = state.Processes |> Map.add branch sp
+                  Events = state.Events |> Map.add branch [ initialEvent ] }
+            reply.Reply(Ok cts.Token)
+            newState, []
 
-let addStepEvent (branch: string) (step: SyncStep) (status: StepStatus) (message: string) =
-    let event =
-        { Source = $"{step}"
-          Message = message
-          Timestamp = DateTimeOffset.Now
-          Status = Some status
-          Duration = None }
+    | PushEvent (branch, event) ->
+        let existing = state.Events |> Map.tryFind branch |> Option.defaultValue []
+        { state with Events = state.Events |> Map.add branch (event :: existing) }, []
 
-    pushEvent branch event
+    | UpdateProcessState (branch, syncState) ->
+        match state.Processes |> Map.tryFind branch with
+        | Some sp ->
+            let updated = { sp with State = syncState }
+            { state with Processes = state.Processes |> Map.add branch updated }, []
+        | None -> state, []
+
+    | CompleteSync (branch, result) ->
+        match state.Processes |> Map.tryFind branch with
+        | Some sp ->
+            match sp.State with
+            | SyncState.Completed _ | SyncState.Cancelled ->
+                state, []
+            | _ ->
+                let finalState =
+                    match result with
+                    | StepStatus.Cancelled -> SyncState.Cancelled
+                    | _ -> SyncState.Completed result
+                let updated = { sp with State = finalState }
+                let cleanedEvents =
+                    state.Events
+                    |> Map.tryFind branch
+                    |> Option.defaultValue []
+                    |> clearRunningEvents
+                let newState =
+                    { Processes = state.Processes |> Map.add branch updated
+                      Events = state.Events |> Map.add branch cleanedEvents }
+                newState, [ DisposeCts sp.CancellationTokenSource ]
+        | None -> state, []
+
+    | CancelSync branch ->
+        match state.Processes |> Map.tryFind branch with
+        | Some sp ->
+            match sp.State with
+            | SyncState.Running _ ->
+                Log.log "SyncEngine" $"Cancelling sync for branch: {branch}"
+                let cancelEvent =
+                    { Source = "sync"
+                      Message = "Sync cancelled"
+                      Timestamp = DateTimeOffset.Now
+                      Status = Some StepStatus.Cancelled
+                      Duration = None }
+                let finalSp = { sp with State = SyncState.Cancelled }
+                let existing = state.Events |> Map.tryFind branch |> Option.defaultValue []
+                let cleanedEvents = clearRunningEvents existing
+                let newState =
+                    { Processes = state.Processes |> Map.add branch finalSp
+                      Events = state.Events |> Map.add branch (cancelEvent :: cleanedEvents) }
+                newState, [ CancelCts sp.CancellationTokenSource; DisposeCts sp.CancellationTokenSource ]
+            | _ -> state, []
+        | None -> state, []
+
+    | GetAllEvents reply ->
+        reply.Reply(state.Events)
+        state, []
+
+let private executeSideEffects (effects: SideEffect list) =
+    effects
+    |> List.iter (fun effect ->
+        match effect with
+        | CancelCts cts ->
+            try cts.Cancel() with _ -> ()
+        | DisposeCts cts ->
+            try cts.Dispose() with _ -> ())
+
+let createSyncAgent () : MailboxProcessor<SyncMsg> =
+    MailboxProcessor.Start(fun inbox ->
+        let rec loop (state: SyncAgentState) =
+            async {
+                let! msg = inbox.Receive()
+                let newState, sideEffects = processMessage state msg
+                executeSideEffects sideEffects
+                return! loop newState
+            }
+        loop { Processes = Map.empty; Events = Map.empty })
 
 let runProcess
     (workingDir: string)
@@ -128,84 +214,6 @@ let runProcess
             return Error $"Failed to start process: {ex.Message}"
     }
 
-let isRunning (branch: string) : bool =
-    syncProcesses.TryGetValue(branch)
-    |> function
-       | true, { State = SyncState.Running _ } -> true
-       | _ -> false
-
-let getState (branch: string) : SyncState =
-    syncProcesses.TryGetValue(branch)
-    |> function
-       | true, sp -> sp.State
-       | false, _ -> SyncState.Idle
-
-let beginSync (branch: string) : Result<CancellationToken, string> =
-    match isRunning branch with
-    | true -> Error "Sync already running for this branch"
-    | false ->
-        let cts = new CancellationTokenSource()
-
-        let sp =
-            { State = SyncState.Running SyncStep.CheckClean
-              CancellationTokenSource = cts }
-
-        syncProcesses.AddOrUpdate(branch, sp, fun _ _ -> sp) |> ignore
-        branchEvents.AddOrUpdate(branch, [], fun _ _ -> []) |> ignore
-        Ok cts.Token
-
-let updateState (branch: string) (state: SyncState) =
-    match syncProcesses.TryGetValue(branch) with
-    | true, _ -> updateProcess branch (fun sp -> { sp with State = state })
-    | false, _ -> ()
-
-let private clearRunningEvents (branch: string) =
-    branchEvents.AddOrUpdate(
-        branch,
-        [],
-        fun _ existing ->
-            existing
-            |> List.filter (fun evt -> evt.Status <> Some StepStatus.Running))
-    |> ignore
-
-let completeSync (branch: string) (result: StepStatus) =
-    match syncProcesses.TryGetValue(branch) with
-    | true, sp ->
-        let finalState =
-            match result with
-            | StepStatus.Cancelled -> SyncState.Cancelled
-            | _ -> SyncState.Completed result
-
-        clearRunningEvents branch
-
-        updateProcess branch (fun s ->
-            { s with
-                State = finalState })
-
-        sp.CancellationTokenSource.Dispose()
-    | false, _ -> ()
-
-let cancelSync (branch: string) =
-    match syncProcesses.TryGetValue(branch) with
-    | true, sp ->
-        match sp.State with
-        | SyncState.Running _ ->
-            Log.log "SyncEngine" $"Cancelling sync for branch: {branch}"
-            sp.CancellationTokenSource.Cancel()
-
-            let cancelEvent =
-                { Source = "sync"
-                  Message = "Sync cancelled"
-                  Timestamp = DateTimeOffset.Now
-                  Status = Some StepStatus.Cancelled
-                  Duration = None }
-
-            pushEvent branch cancelEvent
-
-            completeSync branch StepStatus.Cancelled
-        | _ -> ()
-    | false, _ -> ()
-
 let private isValidSolutionPath (worktreePath: string) (solutionPath: string) =
     let isSolutionExtension =
         solutionPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
@@ -243,7 +251,15 @@ let private readTreemonConfig (worktreePath: string) : string option =
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
+let private conflictResolutionCommand (provider: Shared.CodingToolProvider option) =
+    match provider |> Option.defaultValue Shared.CodingToolProvider.Claude with
+    | Shared.CodingToolProvider.Claude ->
+        "claude", """-p "/conflict" --dangerously-skip-permissions"""
+    | Shared.CodingToolProvider.Copilot ->
+        "copilot", """-p "Resolve all merge conflicts in this branch. Run 'git status' to find conflicted files, then resolve each conflict. After resolving, stage the files with 'git add'." --allow-all --no-ask-user -s --autopilot"""
+
 let private runStep
+    (post: SyncMsg -> unit)
     (branch: string)
     (step: SyncStep)
     (worktreePath: string)
@@ -253,101 +269,83 @@ let private runStep
     : Async<Result<ProcessResult, StepStatus>> =
     async {
         let cmdString = $"{fileName} {arguments}"
-        updateState branch (SyncState.Running step)
-        addStepEvent branch step StepStatus.Running cmdString
+        post (UpdateProcessState (branch, SyncState.Running step))
+        post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Running; Duration = None }))
 
         let! result = runProcess worktreePath fileName arguments ct
 
         match result with
         | Error msg ->
             let status = StepStatus.Failed msg
-            addStepEvent branch step status cmdString
+            post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
             return Error status
         | Ok proc when proc.ExitCode <> 0 ->
             let msg = $"exit {proc.ExitCode}: {truncateStderr proc.Stderr 200}"
             let status = StepStatus.Failed msg
-            addStepEvent branch step status cmdString
+            post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
             return Error status
         | Ok proc ->
-            addStepEvent branch step StepStatus.Succeeded cmdString
+            post (PushEvent (branch, { Source = $"{step}"; Message = cmdString; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Succeeded; Duration = None }))
             return Ok proc
     }
 
-let private conflictResolutionCommand (provider: Shared.CodingToolProvider option) =
-    match provider |> Option.defaultValue Shared.CodingToolProvider.Claude with
-    | Shared.CodingToolProvider.Claude ->
-        "claude", """-p "/conflict" --dangerously-skip-permissions"""
-    | Shared.CodingToolProvider.Copilot ->
-        "copilot", """-p "Resolve all merge conflicts in this branch. Run 'git status' to find conflicted files, then resolve each conflict. After resolving, stage the files with 'git add'." --allow-all --no-ask-user -s --autopilot"""
-
-let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (ct: CancellationToken) : Async<unit> =
+let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (ct: CancellationToken) : Async<unit> =
     async {
         try
             Log.log "SyncEngine" $"Starting sync pipeline for {branch} at {worktreePath}"
 
-            // Step 1: Check clean
-            let! checkResult = runStep branch SyncStep.CheckClean worktreePath "git" "status --porcelain --untracked-files=no" ct
+            let! checkResult = runStep post branch SyncStep.CheckClean worktreePath "git" "status --porcelain --untracked-files=no" ct
 
             match checkResult with
             | Error status ->
-                completeSync branch status
+                post (CompleteSync (branch, status))
                 return ()
             | Ok proc when proc.Stdout <> "" ->
                 let status = StepStatus.Failed "Working tree is dirty"
-                addStepEvent branch SyncStep.CheckClean status "git status --porcelain --untracked-files=no"
-                completeSync branch status
+                post (PushEvent (branch, { Source = $"{SyncStep.CheckClean}"; Message = "git status --porcelain --untracked-files=no"; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
+                post (CompleteSync (branch, status))
                 return ()
             | Ok _ ->
 
-            // Step 2: Pull
-            let! pullResult = runStep branch SyncStep.Pull worktreePath "git" "fetch origin" ct
+            let! pullResult = runStep post branch SyncStep.Pull worktreePath "git" "fetch origin" ct
 
             match pullResult with
             | Error status ->
-                completeSync branch status
+                post (CompleteSync (branch, status))
                 return ()
             | Ok _ ->
 
-            // Step 3: Merge
-            updateState branch (SyncState.Running SyncStep.Merge)
-            addStepEvent branch SyncStep.Merge StepStatus.Running "git merge origin/main"
+            post (UpdateProcessState (branch, SyncState.Running SyncStep.Merge))
+            post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Running; Duration = None }))
 
             let! mergeResult = runProcess worktreePath "git" "merge origin/main" ct
 
             match mergeResult with
             | Error msg ->
                 let status = StepStatus.Failed msg
-                addStepEvent branch SyncStep.Merge status "git merge origin/main"
-                completeSync branch status
+                post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some status; Duration = None }))
+                post (CompleteSync (branch, status))
                 return ()
             | Ok mergeProc ->
 
             match mergeProc.ExitCode with
             | 0 ->
-                addStepEvent branch SyncStep.Merge StepStatus.Succeeded "git merge origin/main"
+                post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some StepStatus.Succeeded; Duration = None }))
             | _ ->
-                // Step 4: Conflict resolution
                 let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
-                addStepEvent branch SyncStep.Merge (StepStatus.Failed mergeMsg) "git merge origin/main"
+                post (PushEvent (branch, { Source = $"{SyncStep.Merge}"; Message = "git merge origin/main"; Timestamp = DateTimeOffset.Now; Status = Some (StepStatus.Failed mergeMsg); Duration = None }))
 
                 let fileName, arguments = conflictResolutionCommand provider
 
                 let! conflictResult =
-                    runStep
-                        branch
-                        SyncStep.ResolveConflicts
-                        worktreePath
-                        fileName
-                        arguments
-                        ct
+                    runStep post branch SyncStep.ResolveConflicts worktreePath fileName arguments ct
 
                 match conflictResult with
                 | Error status ->
-                    completeSync branch status
+                    post (CompleteSync (branch, status))
                     return ()
                 | Ok _ -> ()
 
-            // Step 5: Test
             let testArgs =
                 match readTreemonConfig repoRoot with
                 | Some solutionPath ->
@@ -358,17 +356,31 @@ let executeSyncPipeline (branch: string) (worktreePath: string) (repoRoot: strin
                     "test"
 
             let! testResult =
-                runStep branch SyncStep.Test worktreePath "dotnet" testArgs ct
+                runStep post branch SyncStep.Test worktreePath "dotnet" testArgs ct
 
             match testResult with
             | Error status ->
-                completeSync branch status
+                post (CompleteSync (branch, status))
                 return ()
             | Ok _ -> ()
 
-            completeSync branch StepStatus.Succeeded
+            let! diffResult = runProcess worktreePath "git" "diff --cached --quiet" ct
+
+            match diffResult with
+            | Ok proc when proc.ExitCode = 1 ->
+                let! commitResult =
+                    runStep post branch SyncStep.Commit worktreePath "git" "commit --no-edit" ct
+
+                match commitResult with
+                | Error status ->
+                    post (CompleteSync (branch, status))
+                    return ()
+                | Ok _ -> ()
+            | _ -> ()
+
+            post (CompleteSync (branch, StepStatus.Succeeded))
             Log.log "SyncEngine" $"Sync pipeline completed successfully for {branch}"
         with :? OperationCanceledException ->
             Log.log "SyncEngine" $"Sync pipeline cancelled for {branch}"
-            completeSync branch StepStatus.Cancelled
+            post (CompleteSync (branch, StepStatus.Cancelled))
     }
