@@ -31,6 +31,7 @@ let private makeEvent source message status : CardEvent =
 let private processBeginSync (state: SyncAgentState) (branch: string) =
     let capturedState = ref emptyState
     let capturedEffects = ref []
+    let processed = new ManualResetEventSlim(false)
 
     let agent =
         MailboxProcessor<SyncMsg>.Start(fun inbox ->
@@ -39,12 +40,14 @@ let private processBeginSync (state: SyncAgentState) (branch: string) =
                 let newState, effects = processMessage state msg
                 capturedState.Value <- newState
                 capturedEffects.Value <- effects
+                processed.Set()
             })
 
     let replyResult =
         agent.PostAndAsyncReply(fun rc -> BeginSync(branch, rc))
         |> Async.RunSynchronously
 
+    processed.Wait()
     replyResult, capturedState.Value, capturedEffects.Value
 
 /// Processes a GetAllEvents message through a one-shot MailboxProcessor.
@@ -52,6 +55,7 @@ let private processBeginSync (state: SyncAgentState) (branch: string) =
 let private processGetAllEvents (state: SyncAgentState) =
     let capturedState = ref emptyState
     let capturedEffects = ref []
+    let processed = new ManualResetEventSlim(false)
 
     let agent =
         MailboxProcessor<SyncMsg>.Start(fun inbox ->
@@ -60,12 +64,14 @@ let private processGetAllEvents (state: SyncAgentState) =
                 let newState, effects = processMessage state msg
                 capturedState.Value <- newState
                 capturedEffects.Value <- effects
+                processed.Set()
             })
 
     let replyResult =
         agent.PostAndAsyncReply(fun rc -> GetAllEvents rc)
         |> Async.RunSynchronously
 
+    processed.Wait()
     replyResult, capturedState.Value, capturedEffects.Value
 
 [<TestFixture>]
