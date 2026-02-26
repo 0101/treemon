@@ -127,6 +127,20 @@ function Start-ProductionServer([string[]]$Roots) {
         -PassThru
 
     $process.Id | Set-Content $PidFile
+
+    Start-Sleep -Seconds 3
+
+    if ($process.HasExited) {
+        Remove-Item $PidFile -ErrorAction SilentlyContinue
+        Write-Host "Production server failed to start (exit code: $($process.ExitCode))" -ForegroundColor Red
+        $stderrFile = Join-Path $LogDir "treemon-prod-stderr.log"
+        if ((Test-Path $stderrFile) -and (Get-Item $stderrFile).Length -gt 0) {
+            Write-Host ""
+            Get-Content $stderrFile | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+        }
+        exit 1
+    }
+
     Write-Host "Production server started (PID: $($process.Id))" -ForegroundColor Green
     $Roots | ForEach-Object { Write-Host "Monitoring: $_" -ForegroundColor Gray }
     Write-Host "URL: http://localhost:$DefaultPort" -ForegroundColor Gray

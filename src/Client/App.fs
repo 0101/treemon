@@ -393,7 +393,37 @@ let categoryDisplayName =
     | "GitFetch"       -> "Git \u2913"
     | other            -> other
 
-let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string) =
+let private lastSepIndex (s: string) =
+    max (s.LastIndexOf('/')) (s.LastIndexOf('\\'))
+
+let commonPathPrefix (paths: string list) =
+    match paths with
+    | [] -> ""
+    | [ single ] ->
+        match lastSepIndex single with
+        | -1 -> ""
+        | i -> single[..i]
+    | first :: rest ->
+        let prefixLen =
+            rest |> List.fold (fun len path ->
+                let maxLen = min len path.Length
+                let rec findMismatch i =
+                    if i >= maxLen then maxLen
+                    elif System.Char.ToLowerInvariant first[i] = System.Char.ToLowerInvariant path[i] then findMismatch (i + 1)
+                    else i
+                findMismatch 0) first.Length
+        let prefix = first[..prefixLen - 1]
+        match lastSepIndex prefix with
+        | -1 -> ""
+        | i -> prefix[..i]
+
+let stripPrefix (prefix: string) (target: string) =
+    if prefix.Length > 0 && target.Length >= prefix.Length
+       && target[..prefix.Length - 1].ToLowerInvariant() = prefix.ToLowerInvariant()
+    then target[prefix.Length..]
+    else target
+
+let statusOverviewRow (prefix: string) (latestBySource: Map<string, CardEvent>) (category: string) =
     let label = categoryDisplayName category
     match Map.tryFind category latestBySource with
     | None ->
@@ -408,7 +438,7 @@ let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string
             ]
         ]
     | Some evt ->
-        let target = extractBranchName evt.Message |> Option.defaultValue ""
+        let target = extractBranchName evt.Message |> Option.defaultValue "" |> stripPrefix prefix
         Html.div [
             prop.className "status-row"
             prop.children [
@@ -428,13 +458,13 @@ let statusOverviewRow (latestBySource: Map<string, CardEvent>) (category: string
             ]
         ]
 
-let pinnedErrorEntry (evt: CardEvent) =
+let pinnedErrorEntry (prefix: string) (evt: CardEvent) =
     Html.div [
         prop.className "event-entry pinned-error"
         prop.children [
             Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
             Html.span [ prop.className "event-source"; prop.text evt.Source ]
-            Html.span [ prop.className "event-message"; prop.text evt.Message ]
+            Html.span [ prop.className "event-message"; prop.text (stripPrefix prefix evt.Message) ]
             match evt.Status with
             | Some _ ->
                 Html.span [
@@ -445,7 +475,8 @@ let pinnedErrorEntry (evt: CardEvent) =
         ]
     ]
 
-let schedulerFooter (events: CardEvent list) (latestByCategory: Map<string, CardEvent>) =
+let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCategory: Map<string, CardEvent>) =
+    let prefix = repos |> List.map (fun r -> RepoId.value r.RepoId) |> commonPathPrefix
     let errors = pinnedErrors events
     Html.div [
         prop.className "scheduler-footer"
@@ -455,11 +486,11 @@ let schedulerFooter (events: CardEvent list) (latestByCategory: Map<string, Card
             | errs ->
                 Html.div [
                     prop.className "pinned-errors"
-                    prop.children (errs |> List.map pinnedErrorEntry)
+                    prop.children (errs |> List.map (pinnedErrorEntry prefix))
                 ]
             Html.div [
                 prop.className "status-overview"
-                prop.children (knownCategories |> List.map (statusOverviewRow latestByCategory))
+                prop.children (knownCategories |> List.map (statusOverviewRow prefix latestByCategory))
             ]
         ]
     ]
@@ -926,7 +957,7 @@ let view model dispatch =
                     prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.BranchEvents model.SyncPending))
                 ]
 
-            schedulerFooter model.SchedulerEvents model.LatestByCategory
+            schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
         ]
     ]
 
