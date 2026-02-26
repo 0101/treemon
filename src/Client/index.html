@@ -233,58 +233,6 @@
 
         .wt-card.has-session { border-left: 2px solid #a6e3a1; }
 
-        .launch-btn, .focus-btn, .kill-btn {
-            flex-shrink: 0;
-            background: none; border: 1px solid #45475a; border-radius: 4px;
-            cursor: pointer; font-size: 0.78em;
-            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
-        }
-        .launch-btn { color: #a6e3a1; border-color: #45475a; }
-        .launch-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
-        .focus-btn { color: #89b4fa; border-color: #45475a; }
-        .focus-btn:hover { color: #89b4fa; border-color: #89b4fa; }
-        .kill-btn { color: #7f849c; border-color: #45475a; }
-        .kill-btn:hover { color: #f38ba8; border-color: #f38ba8; }
-
-        .modal-overlay {
-            position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-            display: flex; align-items: center; justify-content: center; z-index: 1000;
-        }
-        .launch-dialog {
-            background: #2a2a3c; border: 1px solid #45475a; border-radius: 10px;
-            padding: 20px; width: 90%; max-width: 480px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-        }
-        .launch-dialog-title {
-            font-weight: 600; font-size: 1.05em; color: #cdd6f4; margin-bottom: 12px;
-        }
-        .launch-input {
-            width: 100%; min-height: 80px; resize: vertical;
-            background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
-            color: #cdd6f4; padding: 10px; font-family: inherit; font-size: 0.92em;
-            outline: none; transition: border-color 0.15s;
-        }
-        .launch-input:focus { border-color: #89b4fa; }
-        .launch-input::placeholder { color: #585b70; }
-        .launch-dialog-actions {
-            display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;
-        }
-        .launch-cancel-btn {
-            background: #313244; border: 1px solid #45475a; border-radius: 6px;
-            color: #bac2de; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 0.88em;
-            transition: background 0.15s;
-        }
-        .launch-cancel-btn:hover { background: #45475a; }
-        .launch-submit-btn {
-            background: #2e3452; border: 1px solid #89b4fa; border-radius: 6px;
-            color: #89b4fa; padding: 6px 14px; cursor: pointer; font-family: inherit; font-size: 0.88em;
-            font-weight: 600; transition: background 0.15s, opacity 0.15s;
-        }
-        .launch-submit-btn:hover { background: #3b4068; }
-        .launch-submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-        .launch-dialog-hint {
-            color: #585b70; font-size: 0.78em; margin-top: 8px; text-align: right;
-        }
     </style>
 </head>
 <body>

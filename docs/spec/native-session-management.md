@@ -3,9 +3,9 @@
 ## Goals
 
 1. **Focus existing terminal windows** — navigate from dashboard to the correct agent window among many, by HWND
-2. **Spawn agent sessions with tasks** — launch `claude "prompt"` in a new Windows Terminal window tied to a worktree
-3. **Track spawned windows** — maintain HWND-to-worktree mapping so focus/kill work reliably
-4. **Kill and respawn** — replace an agent's session with a new task by killing the old window and spawning fresh
+2. **Track spawned windows** — maintain HWND-to-worktree mapping so focus/kill work reliably
+3. **Spawn terminal windows** — launch new Windows Terminal windows tied to worktrees, tracked by HWND
+4. **Kill and respawn** — replace a session with a new task by killing the old window and spawning fresh (future: contextual actions)
 5. **Native Windows** — all sessions run in native PowerShell with full git and Visual Studio access (no WSL)
 
 ## Non-Goals
@@ -16,18 +16,26 @@
 
 ## Expected Behavior
 
-### Spawn
-- Dashboard "launch" button spawns `wt.exe --window new -d <worktree-path> -- claude "task description"` for a worktree
+### Terminal Button (existing `>` button)
+- **No tracked session**: opens a plain PowerShell window (existing `openTerminal` behavior)
+- **Tracked session exists**: calls `focusSession` to bring the tracked window to foreground via `SetForegroundWindow`
+- This is the **single primary button** — no separate "launch" or "focus" buttons on the card
+
+### Spawn (API-level, triggered by contextual actions)
+- `launchSession` API spawns `wt.exe --window new -d <worktree-path> -- <coding-tool> "task description"`
+- Coding tool resolved from `CodingToolProvider` on `WorktreeStatus`, not hardcoded (future work — currently hardcodes `claude`)
 - Server records the mapping: worktree path → HWND
-- Window title or working directory identifies the worktree
+- If a session already exists for this worktree, kill it first (one window per worktree)
+- **Not directly exposed as a card button in this phase** — future contextual actions (e.g., "fix build", "look at PR comments") will call this API
 
 ### Focus
-- Dashboard "focus" button calls server API, which calls `SetForegroundWindow(hwnd)` on the tracked HWND
+- `focusSession` API calls `SetForegroundWindow(hwnd)` on the tracked HWND
 - Window comes to foreground immediately
+- Exposed through the terminal button when a tracked session exists
 
-### Kill + Respawn
-- Dashboard "new task" action kills the existing window (by HWND/PID), spawns a new one with the new prompt
-- Old HWND is replaced with new HWND in tracking state
+### Kill
+- `killSession` API kills the window by PID, removes HWND from tracking
+- Future: may be exposed as a button on cards with active sessions
 
 ### Status Integration
 - Existing `ClaudeDetector.fs` continues to monitor JSONL session files for Working/WaitingForUser/Done/Idle
@@ -75,8 +83,9 @@ Extend `IWorktreeApi`:
 
 ### Client Changes
 
-- New button(s) on worktree cards for launch/focus/kill
-- Visual indicator of whether a tracked session window exists
+- **Terminal button becomes context-aware**: if `HasActiveSession` is true, clicking the `>` button calls `focusSession` instead of `openTerminal`
+- Visual indicator (e.g., green border) showing whether a tracked session window exists
+- No separate launch/focus/kill buttons on cards — the `launchSession` API is infrastructure for future contextual actions (e.g., buttons next to failing builds or PR comment threads that spawn targeted Claude tasks)
 
 ## Decisions
 
