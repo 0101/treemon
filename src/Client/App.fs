@@ -25,7 +25,9 @@ type Model =
       BranchEvents: Map<string, CardEvent list>
       SyncPending: Set<string>
       AppVersion: string option
-      EyeDirection: float * float }
+      EyeDirection: float * float
+      LaunchPromptFor: string option
+      LaunchPromptText: string }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -42,6 +44,13 @@ type Msg =
     | SyncTick
     | DeleteWorktree of string
     | DeleteCompleted of Result<unit, string>
+    | ShowLaunchPrompt of path: string
+    | UpdateLaunchText of string
+    | SubmitLaunch
+    | CancelLaunch
+    | FocusSession of path: string
+    | KillSession of path: string
+    | SessionResult of Result<unit, string>
 
 let worktreeApi =
     Remoting.createApi ()
@@ -71,7 +80,9 @@ let init () =
       BranchEvents = Map.empty
       SyncPending = Set.empty
       AppVersion = None
-      EyeDirection = (0.0, 0.0) },
+      EyeDirection = (0.0, 0.0)
+      LaunchPromptFor = None
+      LaunchPromptText = "" },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -184,6 +195,33 @@ let update msg model =
     | DeleteCompleted (Error _) ->
         model, Cmd.none
 
+    | ShowLaunchPrompt path ->
+        { model with LaunchPromptFor = Some path; LaunchPromptText = "" }, Cmd.none
+
+    | UpdateLaunchText text ->
+        { model with LaunchPromptText = text }, Cmd.none
+
+    | SubmitLaunch ->
+        match model.LaunchPromptFor with
+        | Some path when model.LaunchPromptText.Trim().Length > 0 ->
+            let request = { Path = path; Prompt = model.LaunchPromptText.Trim() }
+            { model with LaunchPromptFor = None; LaunchPromptText = "" },
+            Cmd.OfAsync.perform worktreeApi.launchSession request SessionResult
+        | _ ->
+            { model with LaunchPromptFor = None; LaunchPromptText = "" }, Cmd.none
+
+    | CancelLaunch ->
+        { model with LaunchPromptFor = None; LaunchPromptText = "" }, Cmd.none
+
+    | FocusSession path ->
+        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+
+    | KillSession path ->
+        model, Cmd.OfAsync.perform worktreeApi.killSession path SessionResult
+
+    | SessionResult _ ->
+        model, fetchWorktrees ()
+
 let pollingSubscription (model: Model) : Sub<Msg> =
     let worktreePolling (dispatch: Dispatch<Msg>) =
         let intervalId =
@@ -226,7 +264,8 @@ let isMerged (wt: WorktreeStatus) =
 
 let cardClassName (wt: WorktreeStatus) =
     let ct = ctClassName wt.CodingTool
-    if isMerged wt then $"wt-card ct-{ct} merged" else $"wt-card ct-{ct}"
+    let session = if wt.HasActiveSession then " has-session" else ""
+    if isMerged wt then $"wt-card ct-{ct} merged{session}" else $"wt-card ct-{ct}{session}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
 
@@ -528,6 +567,39 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let launchButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "launch-btn"
+        prop.title "Launch Claude session"
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (ShowLaunchPrompt wt.Path))
+        prop.text "\u25B6"
+    ]
+
+let focusButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "focus-btn"
+        prop.title "Focus session window"
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (FocusSession wt.Path))
+        prop.text "\u25A3"
+    ]
+
+let killButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "kill-btn"
+        prop.title "Kill session"
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (KillSession wt.Path))
+        prop.text "\u25A0"
+    ]
+
+let sessionButtons dispatch (wt: WorktreeStatus) =
+    if wt.HasActiveSession then
+        React.fragment [
+            focusButton dispatch wt
+            killButton dispatch wt
+        ]
+    else
+        launchButton dispatch wt
+
 let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
@@ -635,6 +707,7 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    sessionButtons dispatch wt
                     terminalButton dispatch wt
                     deleteButton dispatch wt
                 ]
@@ -661,6 +734,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
+                    sessionButtons dispatch wt
                     terminalButton dispatch wt
                     deleteButton dispatch wt
                 ]
@@ -869,6 +943,57 @@ let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (
         ]
     ]
 
+let launchPromptDialog dispatch (promptText: string) =
+    Html.div [
+        prop.className "modal-overlay"
+        prop.onClick (fun _ -> dispatch CancelLaunch)
+        prop.children [
+            Html.div [
+                prop.className "launch-dialog"
+                prop.onClick (fun e -> e.stopPropagation())
+                prop.children [
+                    Html.div [
+                        prop.className "launch-dialog-title"
+                        prop.text "Launch Claude Session"
+                    ]
+                    Html.textarea [
+                        prop.className "launch-input"
+                        prop.placeholder "Describe the task..."
+                        prop.value promptText
+                        prop.autoFocus true
+                        prop.onChange (fun (v: string) -> dispatch (UpdateLaunchText v))
+                        prop.onKeyDown (fun e ->
+                            if e.key = "Enter" && e.ctrlKey then
+                                e.preventDefault()
+                                dispatch SubmitLaunch
+                            elif e.key = "Escape" then
+                                dispatch CancelLaunch)
+                    ]
+                    Html.div [
+                        prop.className "launch-dialog-actions"
+                        prop.children [
+                            Html.button [
+                                prop.className "launch-cancel-btn"
+                                prop.onClick (fun _ -> dispatch CancelLaunch)
+                                prop.text "Cancel"
+                            ]
+                            Html.button [
+                                prop.className "launch-submit-btn"
+                                prop.disabled (promptText.Trim().Length = 0)
+                                prop.onClick (fun _ -> dispatch SubmitLaunch)
+                                prop.text "Launch"
+                            ]
+                        ]
+                    ]
+                    Html.div [
+                        prop.className "launch-dialog-hint"
+                        prop.text "Ctrl+Enter to launch"
+                    ]
+                ]
+            ]
+        ]
+    ]
+
 let view model dispatch =
     Html.div [
         prop.className "dashboard"
@@ -927,6 +1052,10 @@ let view model dispatch =
                 ]
 
             schedulerFooter model.SchedulerEvents model.LatestByCategory
+
+            match model.LaunchPromptFor with
+            | Some _ -> launchPromptDialog dispatch model.LaunchPromptText
+            | None -> Html.none
         ]
     ]
 
