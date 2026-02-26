@@ -21,6 +21,7 @@
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
+    <Compile Include="Win32ExperimentTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
