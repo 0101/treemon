@@ -14,7 +14,7 @@ extern bool private SetForegroundWindow(nativeint hWnd)
 [<DllImport("user32.dll", SetLastError = true)>]
 extern uint32 private GetWindowThreadProcessId(nativeint hWnd, uint32& lpdwProcessId)
 
-[<DllImport("user32.dll")>]
+[<DllImport("user32.dll", EntryPoint = "IsWindow")>]
 extern bool private IsWindowNative(nativeint hWnd)
 
 [<DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto, EntryPoint = "GetClassNameW")>]
@@ -23,12 +23,16 @@ extern int private GetClassNameNative(nativeint hWnd, StringBuilder lpClassName,
 [<DllImport("user32.dll")>]
 extern bool private IsWindowVisible(nativeint hWnd)
 
+[<DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)>]
+extern bool private PostMessageNative(nativeint hWnd, uint32 Msg, nativeint wParam, nativeint lParam)
+
 [<DllImport("user32.dll")>]
 extern void private keybd_event(byte bVk, byte bScan, uint32 dwFlags, nativeint dwExtraInfo)
 
 let private VK_MENU = 0x12uy
 let private KEYEVENTF_EXTENDEDKEY = 0x1u
 let private KEYEVENTF_KEYUP = 0x2u
+let private WM_CLOSE = 0x0010u
 
 let listTopLevelWindows () =
     let windows = System.Collections.Generic.List<nativeint>()
@@ -62,3 +66,6 @@ let listWindowsTerminalWindows () =
     listTopLevelWindows ()
     |> List.filter (fun hwnd ->
         IsWindowVisible(hwnd) && getWindowClassName hwnd = "CASCADIA_HOSTING_WINDOW_CLASS")
+
+let closeWindow (hwnd: nativeint) =
+    PostMessageNative(hwnd, WM_CLOSE, 0n, 0n)

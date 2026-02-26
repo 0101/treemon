@@ -100,6 +100,10 @@ Extend `IWorktreeApi`:
 - **No send-keys mid-session** -- initial task is passed as CLI argument at spawn; new tasks kill and respawn
 - **Server-side Win32** -- all P/Invoke lives in the F# server; client is a pure PWA
 - **Focus approach: keybd_event ALT** -- simulated ALT keypress before SetForegroundWindow is the simplest reliable workaround for Windows foreground lock (see experiment results below)
+- **PostAndAsyncReply timeouts** -- all MailboxProcessor calls use explicit timeouts (30s for spawn, 10s for other operations) to prevent silent hangs
+- **CreateNoWindow = true for wt.exe launcher** -- the wt.exe launcher process itself is just IPC to WindowsTerminal.exe; hiding its console window avoids a flash
+- **WM_CLOSE for kill, not Process.Kill** -- all WT windows share a single WindowsTerminal.exe process; Process.Kill would terminate ALL windows. PostMessage(WM_CLOSE) closes just the target window
+- **Explicit `new-tab` subcommand** -- `wt.exe --window new new-tab -d "path"` is required; the implicit default command does not correctly parse `-d` when combined with `--window`
 
 ## Experiment Results
 
@@ -125,6 +129,28 @@ Validated in `src/Tests/Win32ExperimentTests.fs` (Category=Local, must run on ma
 - **Status: WORKS**
 - `wt.exe --window new -d <path> -- claude "prompt"` spawns correctly
 - HWND resolution works identically to plain pwsh spawn
+
+## Known Bugs (discovered during implementation)
+
+### Bug 1: `-d` flag ignored -- FIXED
+**Symptoms**: Clicking terminal button opens a new WT window but in the default profile directory, not the worktree path.
+**Root cause**: `wt.exe` argument parsing requires the explicit `new-tab` subcommand when using `-d` together with `--window new`. The implicit default command does not correctly parse `-d` from global options. Using `-w new -d "path"` silently drops the `-d` flag.
+**Fix**: Changed from `wt.exe -w new -d "path"` to `wt.exe --window new new-tab -d "path"`.
+**Verification**: Test `spawned window opens in the requested directory` writes `Get-Location` to a marker file and asserts it matches the expected worktree path.
+
+### Bug 2: Subsequent clicks do nothing after windows are closed -- FIXED
+**Symptoms**: First click spawns a window. Close it manually. Click terminal button again -- nothing happens.
+**Root cause**: Two P/Invoke declaration errors caused `processMessage` to crash, silently killing the MailboxProcessor loop:
+1. `IsWindowNative` was declared without `EntryPoint = "IsWindow"` -- the DLL export name is `IsWindow`, not `IsWindowNative`. Every `isWindowValid` call threw `EntryPointNotFoundException`.
+2. `PostMessageNative` had the same issue -- needed `EntryPoint = "PostMessageW"`.
+After the first spawn succeeded, `validateSessions` (which calls `isWindowValid`) would crash, preventing the MailboxProcessor from processing subsequent messages.
+**Fix**: Added `EntryPoint` attributes to both P/Invoke declarations. Added error handling to the MailboxProcessor loop that sends error replies and continues processing.
+**Verification**: Test `re-spawn works after killSession` spawns, kills, re-spawns and verifies different HWNDs.
+
+### Bug 3: Safety -- FIXED (kill uses WM_CLOSE instead of Process.Kill)
+**Context**: The developer's Claude Code session and the Vite dev proxy both run in WT windows. All WT windows share a single `WindowsTerminal.exe` process. `Process.Kill(entireProcessTree = true)` would kill ALL terminal windows, including the developer's active sessions and even the test runner.
+**Fix**: Replaced `Process.Kill` with `PostMessage(hwnd, WM_CLOSE, 0, 0)` via Win32 P/Invoke. This closes only the specific window, not the entire process. Added `closeWindow` to `Win32.fs`.
+**Verification**: Test `killSession closes the window` asserts that after kill, the HWND is invalid while other WT windows remain unaffected.
 
 ## Risks
 

@@ -22,6 +22,7 @@
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="Win32ExperimentTests.fs" />
+    <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 

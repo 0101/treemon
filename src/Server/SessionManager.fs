@@ -5,6 +5,7 @@ open System.Diagnostics
 type private SessionMsg =
     | Spawn of worktreePath: string * prompt: string * AsyncReplyChannel<Result<unit, string>>
     | SpawnTerminal of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
+    | SpawnTerminalCmd of worktreePath: string * command: string * AsyncReplyChannel<Result<unit, string>>
     | Focus of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | Kill of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
@@ -35,17 +36,21 @@ let private spawnAndResolve (worktreePath: string) (prompt: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
     let escapedPrompt = prompt.Replace("\"", "\\\"")
 
+    let args = $"--window new new-tab -d \"{worktreePath}\" -- claude \"{escapedPrompt}\""
+    Log.log "SessionManager" $"Spawning: wt.exe {args}"
+
     let psi =
         ProcessStartInfo(
             "wt.exe",
-            $"--window new -d \"{worktreePath}\" -- claude \"{escapedPrompt}\"",
+            args,
             UseShellExecute = false,
             CreateNoWindow = true)
 
     try
         let wtProcess = Process.Start(psi)
-        wtProcess.WaitForExit(10_000) |> ignore
-        Log.log "SessionManager" $"wt.exe launched for {worktreePath}"
+        Log.log "SessionManager" $"wt.exe started, PID={wtProcess.Id}"
+        wtProcess.WaitForExit(5_000) |> ignore
+        Log.log "SessionManager" $"wt.exe exited={wtProcess.HasExited} for {worktreePath}"
 
         match resolveNewHwnd beforeWindows 10_000 with
         | Some hwnd ->
@@ -61,17 +66,21 @@ let private spawnAndResolve (worktreePath: string) (prompt: string) =
 let private spawnTerminalAndResolve (worktreePath: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
 
+    let args = $"--window new new-tab -d \"{worktreePath}\""
+    Log.log "SessionManager" $"Spawning terminal: wt.exe {args}"
+
     let psi =
         ProcessStartInfo(
             "wt.exe",
-            $"--window new -d \"{worktreePath}\"",
+            args,
             UseShellExecute = false,
             CreateNoWindow = true)
 
     try
         let wtProcess = Process.Start(psi)
-        wtProcess.WaitForExit(10_000) |> ignore
-        Log.log "SessionManager" $"wt.exe terminal launched for {worktreePath}"
+        Log.log "SessionManager" $"wt.exe terminal started, PID={wtProcess.Id}"
+        wtProcess.WaitForExit(5_000) |> ignore
+        Log.log "SessionManager" $"wt.exe terminal exited={wtProcess.HasExited} for {worktreePath}"
 
         match resolveNewHwnd beforeWindows 10_000 with
         | Some hwnd ->
@@ -84,16 +93,42 @@ let private spawnTerminalAndResolve (worktreePath: string) =
         Log.log "SessionManager" $"Failed to spawn terminal wt.exe: {ex.Message}"
         Error $"Failed to spawn terminal: {ex.Message}"
 
+let private spawnTerminalWithCommandAndResolve (worktreePath: string) (command: string) =
+    let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
+
+    let args = $"--window new new-tab -d \"{worktreePath}\" -- pwsh -NoProfile -Command \"{command}\""
+    Log.log "SessionManager" $"Spawning terminal+cmd: wt.exe {args}"
+
+    let psi =
+        ProcessStartInfo(
+            "wt.exe",
+            args,
+            UseShellExecute = false,
+            CreateNoWindow = true)
+
+    try
+        let wtProcess = Process.Start(psi)
+        Log.log "SessionManager" $"wt.exe terminal+cmd started, PID={wtProcess.Id}"
+        wtProcess.WaitForExit(5_000) |> ignore
+        Log.log "SessionManager" $"wt.exe terminal+cmd exited={wtProcess.HasExited} for {worktreePath}"
+
+        match resolveNewHwnd beforeWindows 10_000 with
+        | Some hwnd ->
+            Log.log "SessionManager" $"Terminal+cmd HWND {hwnd} resolved for {worktreePath}"
+            Ok hwnd
+        | None ->
+            Log.log "SessionManager" $"Failed to resolve terminal+cmd HWND for {worktreePath}"
+            Error "Failed to detect new terminal window after spawn"
+    with ex ->
+        Log.log "SessionManager" $"Failed to spawn terminal+cmd wt.exe: {ex.Message}"
+        Error $"Failed to spawn terminal+cmd: {ex.Message}"
+
 let private killByHwnd (hwnd: nativeint) =
     if Win32.isWindowValid hwnd then
-        let pid = Win32.getWindowPid hwnd
-
-        try
-            let proc = Process.GetProcessById(pid)
-            proc.Kill(entireProcessTree = true)
-            Log.log "SessionManager" $"Killed process PID={pid} (HWND={hwnd})"
-        with ex ->
-            Log.log "SessionManager" $"Failed to kill PID={pid}: {ex.Message}"
+        if Win32.closeWindow hwnd then
+            Log.log "SessionManager" $"Closed window HWND={hwnd}"
+        else
+            Log.log "SessionManager" $"Failed to close window HWND={hwnd}"
 
 let private validateSessions (sessions: Map<string, nativeint>) =
     sessions
@@ -124,6 +159,21 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
         | None -> ()
 
         match spawnTerminalAndResolve path with
+        | Ok hwnd ->
+            reply.Reply(Ok())
+            validated |> Map.add path hwnd
+        | Error msg ->
+            reply.Reply(Error msg)
+            validated |> Map.remove path
+
+    | SpawnTerminalCmd(path, command, reply) ->
+        let validated = validateSessions sessions
+
+        match validated |> Map.tryFind path with
+        | Some existingHwnd -> killByHwnd existingHwnd
+        | None -> ()
+
+        match spawnTerminalWithCommandAndResolve path command with
         | Ok hwnd ->
             reply.Reply(Ok())
             validated |> Map.add path hwnd
@@ -169,25 +219,47 @@ let createAgent () =
             let rec loop (sessions: Map<string, nativeint>) =
                 async {
                     let! msg = inbox.Receive()
-                    let newSessions = processMessage sessions msg
+
+                    let newSessions =
+                        try
+                            processMessage sessions msg
+                        with ex ->
+                            Log.log "SessionManager" $"processMessage crashed: {ex}"
+
+                            match msg with
+                            | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | SpawnTerminalCmd(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | GetActiveSessions reply -> reply.Reply(sessions)
+
+                            sessions
+
                     return! loop newSessions
                 }
 
             loop Map.empty)
 
+    agent.Error.Add(fun ex ->
+        Log.log "SessionManager" $"MailboxProcessor error: {ex.Message}")
+
     { Agent = agent }
 
 let spawnSession (agent: SessionAgent) (worktreePath: string) (prompt: string) =
-    agent.Agent.PostAndAsyncReply(fun reply -> Spawn(worktreePath, prompt, reply))
+    agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, prompt, reply)), timeout = 30_000)
 
 let spawnTerminal (agent: SessionAgent) (worktreePath: string) =
-    agent.Agent.PostAndAsyncReply(fun reply -> SpawnTerminal(worktreePath, reply))
+    agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminal(worktreePath, reply)), timeout = 30_000)
+
+let spawnTerminalWithCommand (agent: SessionAgent) (worktreePath: string) (command: string) =
+    agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminalCmd(worktreePath, command, reply)), timeout = 30_000)
 
 let focusSession (agent: SessionAgent) (worktreePath: string) =
-    agent.Agent.PostAndAsyncReply(fun reply -> Focus(worktreePath, reply))
+    agent.Agent.PostAndAsyncReply((fun reply -> Focus(worktreePath, reply)), timeout = 10_000)
 
 let killSession (agent: SessionAgent) (worktreePath: string) =
-    agent.Agent.PostAndAsyncReply(fun reply -> Kill(worktreePath, reply))
+    agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 10_000)
 
 let getActiveSessions (agent: SessionAgent) =
-    agent.Agent.PostAndAsyncReply(GetActiveSessions)
+    agent.Agent.PostAndAsyncReply(GetActiveSessions, timeout = 10_000)
