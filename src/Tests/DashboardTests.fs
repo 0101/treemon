@@ -2158,3 +2158,61 @@ type DashboardTests() =
             do! page.CloseAsync()
         }
 
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``No launch-btn elements exist on any card``() =
+        task {
+            let launchBtns = this.Page.Locator(".wt-card .launch-btn")
+            let! count = launchBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "launch-btn should not exist on any card (removed per spec)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``No focus-btn elements exist on any card``() =
+        task {
+            let focusBtns = this.Page.Locator(".wt-card .focus-btn")
+            let! count = focusBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "focus-btn should not exist on any card (removed per spec)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``No kill-btn elements exist on any card``() =
+        task {
+            let killBtns = this.Page.Locator(".wt-card .kill-btn")
+            let! count = killBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "kill-btn should not exist on any card (removed per spec)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``No modal-overlay elements exist in DOM``() =
+        task {
+            let modalOverlays = this.Page.Locator(".modal-overlay")
+            let! count = modalOverlays.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "modal-overlay should not exist in DOM (removed per spec)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``No launch-dialog elements exist in DOM``() =
+        task {
+            let launchDialogs = this.Page.Locator(".launch-dialog")
+            let! count = launchDialogs.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "launch-dialog should not exist in DOM (removed per spec)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Terminal button still exists on every card``() =
+        task {
+            let cards = this.Page.Locator(".wt-card")
+            let! cardCount = cards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one worktree card")
+
+            let terminalBtns = this.Page.Locator(".wt-card .terminal-btn")
+            let! btnCount = terminalBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount), "Every card should still have a .terminal-btn")
+        }
+
