@@ -1,7 +1,6 @@
 module Server.WorktreeApi
 
 open System
-open System.Diagnostics
 open System.IO
 open Shared
 open Shared.EventUtils
@@ -97,6 +96,7 @@ let getWorktrees
 
 let private openTerminal
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (sessionAgent: SessionManager.SessionAgent)
     (path: string)
     =
     async {
@@ -106,23 +106,12 @@ let private openTerminal
         if not (Set.contains path knownPaths) then
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
-            let escapedPath = path.Replace("'", "''")
-            let startInfo =
-                ProcessStartInfo(
-                    FileName = "wt.exe",
-                    Arguments = $"""-w 0 new-tab pwsh -NoExit -Command "Set-Location -LiteralPath '{escapedPath}'" """,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                )
+            Log.log "API" $"openTerminal: launching terminal for '{path}'"
+            let! result = SessionManager.spawnTerminal sessionAgent path
 
-            try
-                Log.log "API" $"openTerminal: launching terminal for '{path}'"
-                Process.Start(startInfo) |> ignore
-            with
-            | :? System.ComponentModel.Win32Exception as ex ->
-                Log.log "API" $"openTerminal: failed to start wt.exe: {ex.Message}"
-            | ex ->
-                Log.log "API" $"openTerminal: unexpected error starting terminal: {ex.Message}"
+            match result with
+            | Ok () -> ()
+            | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
     }
 
 let private deleteWorktree
@@ -188,7 +177,7 @@ let worktreeApi
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
-          openTerminal = openTerminal agent
+          openTerminal = openTerminal agent sessionAgent
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)

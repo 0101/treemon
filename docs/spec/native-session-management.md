@@ -17,7 +17,7 @@
 ## Expected Behavior
 
 ### Terminal Button (existing `>` button)
-- **No tracked session**: opens a plain PowerShell window (existing `openTerminal` behavior)
+- **No tracked session**: opens a plain PowerShell window via `openTerminal` — spawns `wt.exe --window new -d <path>` (new window, not a tab), HWND tracked by SessionManager so subsequent clicks focus instead of spawning again
 - **Tracked session exists**: calls `focusSession` to bring the tracked window to foreground via `SetForegroundWindow`
 - This is the **single primary button** — no separate "launch" or "focus" buttons on the card
 
@@ -27,6 +27,12 @@
 - Server records the mapping: worktree path → HWND
 - If a session already exists for this worktree, kill it first (one window per worktree)
 - **Not directly exposed as a card button in this phase** — future contextual actions (e.g., "fix build", "look at PR comments") will call this API
+
+### openTerminal vs launchSession
+- `openTerminal` opens a **plain PowerShell window** — no coding tool, no prompt. Used by the terminal button.
+- `launchSession` opens a window **running a coding tool with a prompt** — used by future contextual actions.
+- Both go through SessionManager for HWND tracking. Both use `--window new` (never `-w 0 new-tab`).
+- The difference is only what command runs inside the window: pwsh vs coding-tool.
 
 ### Focus
 - `focusSession` API calls `SetForegroundWindow(hwnd)` on the tracked HWND
@@ -79,7 +85,7 @@ Extend `IWorktreeApi`:
 - `focusSession: string -> Async<Result<unit, string>>` — focus window by worktree path
 - `killSession: string -> Async<Result<unit, string>>` — kill window by worktree path
 
-`openTerminal` remains for opening a plain PowerShell window (no agent).
+`openTerminal` opens a plain PowerShell window (no agent) but goes through SessionManager for HWND tracking.
 
 ### Client Changes
 

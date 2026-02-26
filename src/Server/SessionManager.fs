@@ -4,6 +4,7 @@ open System.Diagnostics
 
 type private SessionMsg =
     | Spawn of worktreePath: string * prompt: string * AsyncReplyChannel<Result<unit, string>>
+    | SpawnTerminal of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | Focus of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | Kill of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
@@ -57,6 +58,32 @@ let private spawnAndResolve (worktreePath: string) (prompt: string) =
         Log.log "SessionManager" $"Failed to spawn wt.exe: {ex.Message}"
         Error $"Failed to spawn: {ex.Message}"
 
+let private spawnTerminalAndResolve (worktreePath: string) =
+    let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
+
+    let psi =
+        ProcessStartInfo(
+            "wt.exe",
+            $"--window new -d \"{worktreePath}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true)
+
+    try
+        let wtProcess = Process.Start(psi)
+        wtProcess.WaitForExit(10_000) |> ignore
+        Log.log "SessionManager" $"wt.exe terminal launched for {worktreePath}"
+
+        match resolveNewHwnd beforeWindows 10_000 with
+        | Some hwnd ->
+            Log.log "SessionManager" $"Terminal HWND {hwnd} resolved for {worktreePath}"
+            Ok hwnd
+        | None ->
+            Log.log "SessionManager" $"Failed to resolve terminal HWND for {worktreePath}"
+            Error "Failed to detect new terminal window after spawn"
+    with ex ->
+        Log.log "SessionManager" $"Failed to spawn terminal wt.exe: {ex.Message}"
+        Error $"Failed to spawn terminal: {ex.Message}"
+
 let private killByHwnd (hwnd: nativeint) =
     if Win32.isWindowValid hwnd then
         let pid = Win32.getWindowPid hwnd
@@ -82,6 +109,21 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
         | None -> ()
 
         match spawnAndResolve path prompt with
+        | Ok hwnd ->
+            reply.Reply(Ok())
+            validated |> Map.add path hwnd
+        | Error msg ->
+            reply.Reply(Error msg)
+            validated |> Map.remove path
+
+    | SpawnTerminal(path, reply) ->
+        let validated = validateSessions sessions
+
+        match validated |> Map.tryFind path with
+        | Some existingHwnd -> killByHwnd existingHwnd
+        | None -> ()
+
+        match spawnTerminalAndResolve path with
         | Ok hwnd ->
             reply.Reply(Ok())
             validated |> Map.add path hwnd
@@ -137,6 +179,9 @@ let createAgent () =
 
 let spawnSession (agent: SessionAgent) (worktreePath: string) (prompt: string) =
     agent.Agent.PostAndAsyncReply(fun reply -> Spawn(worktreePath, prompt, reply))
+
+let spawnTerminal (agent: SessionAgent) (worktreePath: string) =
+    agent.Agent.PostAndAsyncReply(fun reply -> SpawnTerminal(worktreePath, reply))
 
 let focusSession (agent: SessionAgent) (worktreePath: string) =
     agent.Agent.PostAndAsyncReply(fun reply -> Focus(worktreePath, reply))
