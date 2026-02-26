@@ -81,7 +81,6 @@ let getWorktrees
             |> List.map (fun (repoId, repo) ->
                 let statuses =
                     repo.WorktreeList
-                    |> List.filter (fun w -> w.Branch <> Some "main")
                     |> List.map (assembleFromState activeSessionPaths repo)
 
                 { RepoId = repoId
