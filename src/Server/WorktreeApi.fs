@@ -17,6 +17,7 @@ let loadFixtures (path: string) =
     JsonConvert.DeserializeObject<FixtureData>(json, converter)
 
 let private assembleFromState
+    (activeSessions: Set<string>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
@@ -40,7 +41,8 @@ let private assembleFromState
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
-      WorkMetrics = gitData |> Option.bind _.WorkMetrics }
+      WorkMetrics = gitData |> Option.bind _.WorkMetrics
+      HasActiveSession = Set.contains wt.Path activeSessions }
 
 let private allWorktrees (state: RefreshScheduler.DashboardState) =
     state.Repos
@@ -64,10 +66,14 @@ let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value 
 
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (sessionAgent: SessionManager.SessionAgent)
     (appVersion: string)
     : Async<DashboardResponse> =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let! activeSessions = SessionManager.getActiveSessions sessionAgent
+
+        let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
 
         let repos =
             state.Repos
@@ -76,7 +82,7 @@ let getWorktrees
                 let statuses =
                     repo.WorktreeList
                     |> List.filter (fun w -> w.Branch <> Some "main")
-                    |> List.map (assembleFromState repo)
+                    |> List.map (assembleFromState activeSessionPaths repo)
 
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)
@@ -154,6 +160,7 @@ let private deleteWorktree
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
+    (sessionAgent: SessionManager.SessionAgent)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -162,6 +169,13 @@ let worktreeApi
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
 
+    let validatePath path =
+        async {
+            let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+            let knownPaths = allKnownPaths state
+            return Set.contains path knownPaths
+        }
+
     match fixtures with
     | Some f ->
         { getWorktrees = fun () -> async { return f.Worktrees }
@@ -169,9 +183,12 @@ let worktreeApi
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
           cancelSync = fun _ -> async { return () }
           getSyncStatus = fun () -> async { return f.SyncStatus }
-          deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" } }
+          deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" }
+          launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          killSession = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent appVersion
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
           openTerminal = openTerminal agent
           startSync = fun branch ->
               async {
@@ -271,4 +288,34 @@ let worktreeApi
                               Some(key, recent))
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent rootPaths }
+          deleteWorktree = deleteWorktree agent rootPaths
+          launchSession = fun req ->
+              async {
+                  let! isValid = validatePath req.Path
+
+                  if not isValid then
+                      Log.log "API" $"launchSession: rejected unknown path '{req.Path}'"
+                      return Error $"Unknown worktree path: {req.Path}"
+                  else
+                      return! SessionManager.spawnSession sessionAgent req.Path req.Prompt
+              }
+          focusSession = fun path ->
+              async {
+                  let! isValid = validatePath path
+
+                  if not isValid then
+                      Log.log "API" $"focusSession: rejected unknown path '{path}'"
+                      return Error $"Unknown worktree path: {path}"
+                  else
+                      return! SessionManager.focusSession sessionAgent path
+              }
+          killSession = fun path ->
+              async {
+                  let! isValid = validatePath path
+
+                  if not isValid then
+                      Log.log "API" $"killSession: rejected unknown path '{path}'"
+                      return Error $"Unknown worktree path: {path}"
+                  else
+                      return! SessionManager.killSession sessionAgent path
+              } }

@@ -65,6 +65,10 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
+type LaunchRequest =
+    { Path: string
+      Prompt: string }
+
 type WorktreeStatus =
     { Path: string
       Branch: string
@@ -76,7 +80,8 @@ type WorktreeStatus =
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool
-      WorkMetrics: WorkMetrics option }
+      WorkMetrics: WorkMetrics option
+      HasActiveSession: bool }
 
 [<RequireQualifiedAccess>]
 type StepStatus =
@@ -111,4 +116,7 @@ type IWorktreeApi =
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
-      deleteWorktree: string -> Async<Result<unit, string>> }
+      deleteWorktree: string -> Async<Result<unit, string>>
+      launchSession: LaunchRequest -> Async<Result<unit, string>>
+      focusSession: string -> Async<Result<unit, string>>
+      killSession: string -> Async<Result<unit, string>> }
