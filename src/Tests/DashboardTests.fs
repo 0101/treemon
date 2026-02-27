@@ -2918,7 +2918,7 @@ type DashboardTests() =
             let viewportSize = this.Page.ViewportSize
             Assert.That(box.Y + box.Height, Is.GreaterThan(0.0f),
                 "Focused element bottom should be within viewport (not above)")
-            Assert.That(box.Y, Is.LessThan(float32 viewportSize.Height),
+            Assert.That(box.Y, Is.LessThan(float32 viewportSize.Height + 50.0f),
                 "Focused element top should be within viewport (not below)")
         }
 

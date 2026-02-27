@@ -237,33 +237,16 @@ let navigateSpatial (key: string) (cols: int) (model: Model) =
                 | Some si ->
                     let section = sections[si]
                     let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
-                    let colPos = cardIdx % cols
                     let targetIdx = cardIdx + cols
                     if targetIdx < section.Cards.Length then
                         Some section.Cards[targetIdx], Cmd.none
                     else
-                        // Cross repo boundary: find card in same column position in next repo
-                        let rec findInNextRepo idx =
-                            if idx >= sections.Length then None
-                            else
-                                let next = sections[idx]
-                                if next.Cards.Length > colPos then Some next.Cards[colPos]
-                                elif next.Cards.Length > 0 then Some (List.last next.Cards)
-                                else findInNextRepo (idx + 1)
-                        match findInNextRepo (si + 1) with
-                        | Some target -> Some target, Cmd.none
-                        | None ->
-                            // Wrap: find card in same column from first repo
-                            let rec findFromStart idx =
-                                if idx > si then None
-                                else
-                                    let sec = sections[idx]
-                                    if sec.Cards.Length > colPos then Some sec.Cards[colPos]
-                                    elif sec.Cards.Length > 0 then Some sec.Cards[0]
-                                    else findFromStart (idx + 1)
-                            match findFromStart 0 with
-                            | Some t -> Some t, Cmd.none
-                            | None -> navigateLinear 1 allTargets (Some current), Cmd.none
+                        // Cross repo boundary: go to next repo header
+                        if si + 1 < sections.Length then
+                            Some sections[si + 1].Header, Cmd.none
+                        else
+                            // Wrap to first element
+                            Some allTargets.Head, Cmd.none
 
             | Card _, "ArrowUp" ->
                 match findSection current with
@@ -271,40 +254,12 @@ let navigateSpatial (key: string) (cols: int) (model: Model) =
                 | Some si ->
                     let section = sections[si]
                     let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
-                    let colPos = cardIdx % cols
                     let targetIdx = cardIdx - cols
                     if targetIdx >= 0 then
                         Some section.Cards[targetIdx], Cmd.none
                     else
-                        // Cross repo boundary: find card in same column position in previous repo
-                        let rec findInPrevRepo idx =
-                            if idx < 0 then None
-                            else
-                                let prev = sections[idx]
-                                if prev.Cards.IsEmpty then findInPrevRepo (idx - 1)
-                                else
-                                    // Go to last row, same column
-                                    let lastRowStart = (prev.Cards.Length - 1) / cols * cols
-                                    let target = lastRowStart + colPos
-                                    if target < prev.Cards.Length then Some prev.Cards[target]
-                                    else Some (List.last prev.Cards)
-                        match findInPrevRepo (si - 1) with
-                        | Some target -> Some target, Cmd.none
-                        | None ->
-                            // Wrap: find from last repo
-                            let rec findFromEnd idx =
-                                if idx <= si then None
-                                else
-                                    let sec = sections[idx]
-                                    if sec.Cards.IsEmpty then findFromEnd (idx - 1)
-                                    else
-                                        let lastRowStart = (sec.Cards.Length - 1) / cols * cols
-                                        let target = lastRowStart + colPos
-                                        if target < sec.Cards.Length then Some sec.Cards[target]
-                                        else Some (List.last sec.Cards)
-                            match findFromEnd (sections.Length - 1) with
-                            | Some t -> Some t, Cmd.none
-                            | None -> navigateLinear -1 allTargets (Some current), Cmd.none
+                        // First row: go to this repo's header
+                        Some section.Header, Cmd.none
 
             | _ -> Some current, Cmd.none
 
