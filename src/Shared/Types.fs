@@ -120,4 +120,5 @@ type IWorktreeApi =
       deleteWorktree: string -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<unit, string>>
       focusSession: string -> Async<Result<unit, string>>
-      killSession: string -> Async<Result<unit, string>> }
+      killSession: string -> Async<Result<unit, string>>
+      openNewTab: string -> Async<Result<unit, string>> }

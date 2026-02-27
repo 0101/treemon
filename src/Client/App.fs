@@ -39,6 +39,7 @@ type Msg =
     | DeleteWorktree of string
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: string
+    | OpenNewTab of path: string
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
@@ -100,6 +101,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         match key with
         | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
         | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+        | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
         | _ -> None
     | RepoHeader repoId ->
         match key with
@@ -222,6 +224,9 @@ let update msg model =
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+
+    | OpenNewTab path ->
+        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -629,6 +634,14 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let newTabButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "new-tab-btn"
+        prop.title "Open new tab in tracked window"
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
+        prop.text "+"
+    ]
+
 let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
@@ -739,6 +752,7 @@ let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: Workt
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
                     terminalButton dispatch wt
+                    if wt.HasActiveSession then newTabButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -767,6 +781,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
+                    if wt.HasActiveSession then newTabButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
