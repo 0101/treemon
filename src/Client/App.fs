@@ -292,7 +292,7 @@ let adjustFocusForVisibility (model: Model) =
             | [] -> None
             | _ -> Some targets.Head
 
-let rec update msg model =
+let update msg model =
     match msg with
     | DataLoaded response ->
         match model.AppVersion with
@@ -429,7 +429,7 @@ let rec update msg model =
             | None -> model, Cmd.none
             | Some focused ->
                 match keyBinding focused key model with
-                | Some action -> update action model
+                | Some action -> model, Cmd.ofMsg action
                 | None -> model, Cmd.none
 
 let pollingSubscription (model: Model) : Sub<Msg> =
