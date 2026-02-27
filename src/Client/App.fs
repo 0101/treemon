@@ -771,13 +771,22 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                 ]
             ]
 
-            Html.div [
-                prop.className "commit-line"
-                prop.children [
-                    Html.text wt.LastCommitMessage
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+            match wt.LastUserMessage with
+            | Some prompt ->
+                Html.div [
+                    prop.className "commit-line user-prompt"
+                    prop.children [
+                        Html.text prompt
+                    ]
                 ]
-            ]
+            | None ->
+                Html.div [
+                    prop.className "commit-line"
+                    prop.children [
+                        Html.text wt.LastCommitMessage
+                        Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    ]
+                ]
 
             if beadsTotal wt.Beads > 0 then
                 Html.div [
@@ -789,6 +798,15 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                 ]
 
             mainBehindWithSync dispatch wt branchEvents isPending scopedKey
+
+            if wt.LastUserMessage.IsSome && not wt.IsDirty then
+                Html.div [
+                    prop.className "git-commit-msg"
+                    prop.children [
+                        Html.text wt.LastCommitMessage
+                        Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    ]
+                ]
 
             prRow repoName wt
 

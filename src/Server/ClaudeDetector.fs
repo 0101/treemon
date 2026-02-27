@@ -204,3 +204,50 @@ let getLastMessage (worktreePath: string) =
           Timestamp = timestamp
           Status = None
           Duration = None })
+
+let private tryParseUserText (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp when typeProp.GetString() = "user" ->
+            let timestamp =
+                match root.TryGetProperty("timestamp") with
+                | true, ts -> ts.GetString() |> DateTimeOffset.Parse |> Some
+                | _ -> None
+
+            let textContent =
+                match root.TryGetProperty("message") with
+                | true, msg ->
+                    match msg.TryGetProperty("content") with
+                    | true, contentArr when contentArr.ValueKind = JsonValueKind.Array ->
+                        contentArr.EnumerateArray()
+                        |> Seq.tryFind (fun block ->
+                            match block.TryGetProperty("type") with
+                            | true, t -> t.GetString() = "text"
+                            | _ -> false)
+                        |> Option.bind (fun block ->
+                            match block.TryGetProperty("text") with
+                            | true, t -> Some(t.GetString())
+                            | _ -> None)
+                    | _ -> None
+                | _ -> None
+
+            match textContent, timestamp with
+            | Some text, Some ts when not (String.IsNullOrWhiteSpace(text)) -> Some(text, ts)
+            | _ -> None
+        | _ -> None
+    with ex ->
+        Log.log "Claude" $"Failed to parse user text: {ex.Message}"
+        None
+
+let getLastUserMessage (worktreePath: string) =
+    let encoded = encodeWorktreePath worktreePath
+    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+
+    findLatestJsonl projectDir
+    |> Option.bind (fun fi ->
+        readLastLines fi.FullName 20
+        |> List.tryPick tryParseUserText)
+    |> Option.map (fun (text, _) -> truncateMessage 120 text)
