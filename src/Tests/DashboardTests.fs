@@ -3001,3 +3001,384 @@ type DashboardTests() =
             Assert.That(count4, Is.EqualTo(1), "Should have exactly one focused element after mixed arrow keys")
         }
 
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Home key navigates to first visible element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("wt-card"), "Should be on a card after 3 ArrowDowns")
+
+            do! this.Page.Keyboard.PressAsync("Home")
+
+            let focusedAfterHome = this.Page.Locator(".focused")
+            do! focusedAfterHome.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! homeClass = focusedAfterHome.GetAttributeAsync("class")
+            Assert.That(homeClass, Does.Contain("repo-header"), "Home should navigate to first element (repo header)")
+
+            let! count = focusedAfterHome.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Exactly one element should be focused after Home")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``End key navigates to last visible element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Should be on repo header after ArrowDown")
+
+            do! this.Page.Keyboard.PressAsync("End")
+
+            let focusedAfterEnd = this.Page.Locator(".focused")
+            do! focusedAfterEnd.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! endClass = focusedAfterEnd.GetAttributeAsync("class")
+            Assert.That(endClass, Does.Contain("wt-card"), "End should navigate to last element (a card)")
+
+            let allCards = this.Page.Locator(".wt-card")
+            let! totalCards = allCards.CountAsync()
+            let lastCard = allCards.Nth(totalCards - 1)
+            let! lastBranch = lastCard.Locator(".branch-name").TextContentAsync()
+            let! focusedBranch = focusedAfterEnd.Locator(".branch-name").TextContentAsync()
+            Assert.That(focusedBranch, Is.EqualTo(lastBranch), "End should focus the very last card in the dashboard")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Home and End scroll focused element into view``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(1300, 400)
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => { const g = document.querySelector('.card-grid'); return g && getComputedStyle(g).gridTemplateColumns.split(' ').length === 3; }",
+                null,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("End")
+
+            let focusedEnd = this.Page.Locator(".focused")
+            do! focusedEnd.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! endClass = focusedEnd.GetAttributeAsync("class")
+            Assert.That(endClass, Does.Contain("wt-card"), "End should focus a card")
+
+            do! focusedEnd.ScrollIntoViewIfNeededAsync()
+
+            let! endBox = focusedEnd.BoundingBoxAsync()
+            Assert.That(endBox, Is.Not.Null, "End-focused element should have a bounding box")
+            let viewportSize = this.Page.ViewportSize
+            Assert.That(endBox.Y, Is.LessThan(float32 viewportSize.Height + 50.0f),
+                "End-focused element should be scrolled into viewport")
+
+            do! this.Page.Keyboard.PressAsync("Home")
+
+            let focusedHome = this.Page.Locator(".focused")
+            do! focusedHome.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! homeClass = focusedHome.GetAttributeAsync("class")
+            Assert.That(homeClass, Does.Contain("repo-header"), "Home should focus the first element")
+
+            do! focusedHome.ScrollIntoViewIfNeededAsync()
+
+            let! homeBox = focusedHome.BoundingBoxAsync()
+            Assert.That(homeBox, Is.Not.Null, "Home-focused element should have a bounding box")
+            Assert.That(homeBox.Y + homeBox.Height, Is.GreaterThan(0.0f),
+                "Home-focused element should be scrolled into viewport")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Wrap-around navigation scrolls focused element into view``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(1300, 400)
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => { const g = document.querySelector('.card-grid'); return g && getComputedStyle(g).gridTemplateColumns.split(' ').length === 3; }",
+                null,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Should be on first element")
+
+            do! this.Page.Keyboard.PressAsync("ArrowUp")
+
+            let focusedAfterWrap = this.Page.Locator(".focused")
+            do! focusedAfterWrap.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! wrapClass = focusedAfterWrap.GetAttributeAsync("class")
+            Assert.That(wrapClass, Does.Contain("wt-card"), "ArrowUp from first should wrap to last")
+
+            do! focusedAfterWrap.ScrollIntoViewIfNeededAsync()
+
+            let! box = focusedAfterWrap.BoundingBoxAsync()
+            Assert.That(box, Is.Not.Null, "Wrapped-to element should have a bounding box")
+            let viewportSize = this.Page.ViewportSize
+            Assert.That(box.Y, Is.LessThan(float32 viewportSize.Height + 50.0f),
+                "Wrapped-to element should be scrolled into viewport")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``First keypress captures focus without page scroll``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let focused = this.Page.Locator(".focused")
+            let! initialCount = focused.CountAsync()
+            Assert.That(initialCount, Is.EqualTo(0), "No element should be focused initially")
+
+            do! this.Page.Keyboard.PressAsync("Home")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focusedAfter.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Home should capture focus and select first element")
+
+            let! cssClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Home from no-focus should go to first element (repo header)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``End key from no focus goes to last element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let focused = this.Page.Locator(".focused")
+            let! initialCount = focused.CountAsync()
+            Assert.That(initialCount, Is.EqualTo(0), "No element should be focused initially")
+
+            do! this.Page.Keyboard.PressAsync("End")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focusedAfter.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "End should capture focus and select last element")
+
+            let! cssClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("wt-card"), "End from no-focus should go to last card")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow keys preventDefault so page does not scroll``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let! scrollBefore = this.Page.EvaluateAsync<float>("() => window.scrollY")
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let! scrollAfterArrows = this.Page.EvaluateAsync<float>("() => window.scrollY")
+
+            Assert.That(scrollAfterArrows, Is.EqualTo(scrollBefore).Within(5.0),
+                "Arrow keys should preventDefault and not cause native page scroll (scrollIntoView handles it instead)")
+        }
+
+    [<Test>]
+    member this.``Delete removes card without ghost reappearance``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+
+            let mutable deleteCallCount = 0
+            do! page.RouteAsync("**/IWorktreeApi/deleteWorktree", fun route ->
+                deleteCallCount <- deleteCallCount + 1
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "{\"Ok\":null}"))
+            )
+
+            let! _ = page.GotoAsync(baseUrl)
+            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let targetBranch = "feature-idle"
+            let targetCard = page.Locator($".wt-card:has(.branch-name:text-is('{targetBranch}'))")
+            do! targetCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! preDeleteCount = targetCard.CountAsync()
+            Assert.That(preDeleteCount, Is.EqualTo(1), $"Card for {targetBranch} should exist before delete")
+
+            page.Dialog.Add(fun dialog ->
+                dialog.AcceptAsync() |> ignore)
+
+            let deleteBtn = targetCard.Locator(".delete-btn")
+            do! deleteBtn.ClickAsync()
+
+            do! System.Threading.Tasks.Task.Delay(200)
+
+            let! postDeleteCount = targetCard.CountAsync()
+            Assert.That(postDeleteCount, Is.EqualTo(0),
+                $"Card for {targetBranch} should be removed immediately after delete confirmation (optimistic removal)")
+
+            do! System.Threading.Tasks.Task.Delay(2000)
+
+            let! laterCount = targetCard.CountAsync()
+            Assert.That(laterCount, Is.EqualTo(0),
+                $"Card for {targetBranch} should not reappear after polling (ghost suppression via DeletedBranches)")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Cards with LastUserMessage show user-prompt class``() =
+        task {
+            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            do! userPrompts.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = userPrompts.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1),
+                "Fixture has worktrees with LastUserMessage; cards should have .commit-line.user-prompt elements")
+
+            let! text = userPrompts.First.TextContentAsync()
+            Assert.That(text, Is.Not.Empty, "User prompt should have text content")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``User prompt replaces commit message in commit-line slot``() =
+        task {
+            let activeCard = this.Page.Locator(".wt-card.ct-working").First
+            do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let userPrompt = activeCard.Locator(".commit-line.user-prompt")
+            let! promptCount = userPrompt.CountAsync()
+            Assert.That(promptCount, Is.EqualTo(1),
+                "Working card with LastUserMessage should show user-prompt in commit-line slot")
+
+            let regularCommitLine = activeCard.Locator(".commit-line:not(.user-prompt)")
+            let! regularCount = regularCommitLine.CountAsync()
+            Assert.That(regularCount, Is.EqualTo(0),
+                "When user-prompt is shown, regular commit-line should not appear in the main slot")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Cards without LastUserMessage show regular commit-line``() =
+        task {
+            let idleCard = this.Page.Locator(".wt-card.ct-idle").First
+            do! idleCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let commitLine = idleCard.Locator(".commit-line:not(.user-prompt)")
+            let! count = commitLine.CountAsync()
+            Assert.That(count, Is.EqualTo(1),
+                "Idle card without LastUserMessage should show regular commit-line")
+
+            let userPrompt = idleCard.Locator(".commit-line.user-prompt")
+            let! promptCount = userPrompt.CountAsync()
+            Assert.That(promptCount, Is.EqualTo(0),
+                "Idle card without LastUserMessage should not have user-prompt element")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Commit message shown in git-commit-msg when user prompt present and not dirty``() =
+        task {
+            let activeCard = this.Page.Locator(".wt-card.ct-working").First
+            do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let gitCommitMsg = activeCard.Locator(".git-commit-msg")
+            let! count = gitCommitMsg.CountAsync()
+            Assert.That(count, Is.EqualTo(1),
+                "When user-prompt is shown and card is not dirty, commit message should appear in .git-commit-msg")
+
+            let! text = gitCommitMsg.TextContentAsync()
+            Assert.That(text, Is.Not.Empty, "git-commit-msg should have text content (the actual commit message)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button visible on cards with HasActiveSession``() =
+        task {
+            let sessionCards = this.Page.Locator(".wt-card.has-session")
+            do! sessionCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! sessionCount = sessionCards.CountAsync()
+            Assert.That(sessionCount, Is.GreaterThanOrEqualTo(1),
+                "Fixture has worktrees with HasActiveSession=true; cards should have .has-session class")
+
+            let newTabBtns = sessionCards.Locator(".new-tab-btn")
+            let! btnCount = newTabBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(sessionCount),
+                "Every card with HasActiveSession should have a .new-tab-btn")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button has correct text and title``() =
+        task {
+            let newTabBtn = this.Page.Locator(".wt-card.has-session .new-tab-btn").First
+            do! Assertions.Expect(newTabBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
+
+            let! text = newTabBtn.TextContentAsync()
+            Assert.That(text, Is.EqualTo("+"), "New tab button text should be '+'")
+
+            let! title = newTabBtn.GetAttributeAsync("title")
+            Assert.That(title, Is.EqualTo("Open new tab in tracked window"), "New tab button title")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button not visible on cards without active session``() =
+        task {
+            let nonSessionCards = this.Page.Locator(".wt-card:not(.has-session)")
+            do! nonSessionCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! cardCount = nonSessionCards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have cards without active session")
+
+            let newTabBtns = nonSessionCards.Locator(".new-tab-btn")
+            let! btnCount = newTabBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(0),
+                "Cards without HasActiveSession should not have .new-tab-btn")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button is inside card header``() =
+        task {
+            let headerBtns = this.Page.Locator(".wt-card .card-header .new-tab-btn")
+            let! count = headerBtns.CountAsync()
+
+            let allBtns = this.Page.Locator(".wt-card .new-tab-btn")
+            let! allCount = allBtns.CountAsync()
+
+            Assert.That(count, Is.EqualTo(allCount), "All .new-tab-btn should be inside card headers")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Should have at least one new-tab-btn in a card header")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button also appears in compact mode for session cards``() =
+        task {
+            do! (compactBtn this.Page).ClickAsync()
+
+            let compactSessionCards = this.Page.Locator(".wt-card.compact.has-session")
+            let! cardCount = compactSessionCards.CountAsync()
+            Assert.That(cardCount, Is.GreaterThanOrEqualTo(1),
+                "Compact mode should have cards with has-session class")
+
+            let newTabBtns = compactSessionCards.Locator(".new-tab-btn")
+            let! btnCount = newTabBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(cardCount),
+                "Every compact card with has-session should have a .new-tab-btn")
+        }
+
