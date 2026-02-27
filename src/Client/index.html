@@ -236,6 +236,42 @@
         .dashboard:focus { outline: none; }
         .focused { outline: 2px solid #4a9eff; outline-offset: -2px; }
 
+        .archive-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer; font-size: 0.78em;
+            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
+        }
+        .archive-btn:hover { color: #89b4fa; border-color: #89b4fa; }
+
+        .archive-section {
+            display: flex; flex-wrap: wrap; gap: 8px;
+            margin-top: 10px; padding: 8px 0;
+            opacity: 0.5;
+        }
+        .archive-section:hover { opacity: 0.75; }
+
+        .archive-card {
+            display: flex; align-items: center; gap: 6px;
+            background: #232334; border-radius: 6px;
+            padding: 4px 10px; font-size: 0.82em;
+            max-width: 300px;
+        }
+        .archive-card .branch-name {
+            font-weight: 500; font-size: 0.9em;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            max-width: 150px; color: #9399b2;
+        }
+        .archive-card .commit-time { color: #585b70; white-space: nowrap; }
+
+        .unarchive-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer; font-size: 0.78em;
+            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
+        }
+        .unarchive-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+
     </style>
 </head>
 <body>

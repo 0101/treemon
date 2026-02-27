@@ -42,6 +42,10 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
+    | ArchiveWorktree of string
+    | ArchiveCompleted of Result<unit, string>
+    | UnarchiveWorktree of string
+    | UnarchiveCompleted of Result<unit, string>
 
 let worktreeApi =
     Remoting.createApi ()
@@ -120,9 +124,11 @@ let update msg model =
             let repos =
                 response.Repos
                 |> List.map (fun r ->
+                    let active, archived = r.Worktrees |> List.partition (fun wt -> not wt.IsArchived)
                     { RepoId = r.RepoId
                       Name = r.RootFolderName
-                      Worktrees = sortWorktrees model.SortMode r.Worktrees
+                      Worktrees = sortWorktrees model.SortMode active
+                      ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
             { model with
@@ -228,6 +234,24 @@ let update msg model =
 
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
+
+    | ArchiveWorktree branch ->
+        model, Cmd.OfAsync.perform worktreeApi.archiveWorktree branch ArchiveCompleted
+
+    | ArchiveCompleted (Ok _) ->
+        model, fetchWorktrees ()
+
+    | ArchiveCompleted (Error _) ->
+        model, Cmd.none
+
+    | UnarchiveWorktree branch ->
+        model, Cmd.OfAsync.perform worktreeApi.unarchiveWorktree branch UnarchiveCompleted
+
+    | UnarchiveCompleted (Ok _) ->
+        model, fetchWorktrees ()
+
+    | UnarchiveCompleted (Error _) ->
+        model, Cmd.none
 
     | KeyPressed (key, hasModifier) ->
         match key with
@@ -644,6 +668,14 @@ let deleteButton dispatch (wt: WorktreeStatus) =
         prop.text "\u2715"
     ]
 
+let archiveButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "archive-btn"
+        prop.title "Archive worktree"
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (ArchiveWorktree wt.Branch))
+        prop.text "\u2193\u2502"
+    ]
+
 let prBadgeContent (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
@@ -739,6 +771,7 @@ let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: Workt
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
                     terminalButton dispatch wt
+                    archiveButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -767,6 +800,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
+                    archiveButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -803,6 +837,32 @@ let renderCard dispatch isCompact (focusedElement: FocusTarget option) repoId re
     let isFocused = focusedElement = Some (Card scopedKey)
     if isCompact then compactWorktreeCard dispatch repoName isFocused wt
     else worktreeCard dispatch repoName events isPending scopedKey isFocused wt
+
+let archiveCard dispatch (wt: WorktreeStatus) =
+    Html.div [
+        prop.key wt.Branch
+        prop.className "archive-card"
+        prop.children [
+            Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+            workMetricsView wt.WorkMetrics
+            Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+            Html.button [
+                prop.className "unarchive-btn"
+                prop.title "Unarchive worktree"
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (UnarchiveWorktree wt.Branch))
+                prop.text "\u2191\u2502"
+            ]
+        ]
+    ]
+
+let archiveSection dispatch (archived: WorktreeStatus list) =
+    match archived with
+    | [] -> Html.none
+    | worktrees ->
+        Html.div [
+            prop.className "archive-section"
+            prop.children (worktrees |> List.map (archiveCard dispatch))
+        ]
 
 let skeletonCard () =
     Html.div [
@@ -1000,6 +1060,7 @@ let repoSection dispatch isCompact (focusedElement: FocusTarget option) (branchE
                         prop.className "card-grid"
                         prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
                     ]
+                    archiveSection dispatch repo.ArchivedWorktrees
         ]
     ]
 
