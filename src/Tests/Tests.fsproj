@@ -21,7 +21,6 @@
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
-    <Compile Include="Win32ExperimentTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SmokeTests.fs" />

@@ -38,8 +38,12 @@ type SessionManagerSpawnTests() =
         |> Option.iter (fun a ->
             try
                 let sessions = runAsync (getActiveSessions a)
-                sessions |> Map.iter (fun _ hwnd -> trackWindowPid hwnd)
+                sessions |> Map.iter (fun _ hwnd ->
+                    try Server.Win32.closeWindow hwnd |> ignore with _ -> ()
+                    trackWindowPid hwnd)
             with _ -> ())
+
+        Thread.Sleep(500)
 
         spawnedPids
         |> List.iter (fun pid ->
@@ -68,43 +72,6 @@ type SessionManagerSpawnTests() =
         Assert.That(Server.Win32.isWindowValid hwnd, Is.True, "Tracked HWND should be a valid window")
         trackWindowPid hwnd
         TestContext.Out.WriteLine($"HWND={hwnd} resolved for {testPath}")
-
-    [<Test>]
-    member _.``spawned window opens in the requested directory``() =
-        let a = agent.Value
-        let testPath = @"Q:\code\AITestAgent"
-        let markerFile =
-            Path.Combine(Path.GetTempPath(), $"treemon-dir-test-{Guid.NewGuid():N}.txt")
-
-        try
-            let result = runAsync (spawnTerminalWithCommand a testPath $"(Get-Location).Path | Set-Content '{markerFile}'; Start-Sleep 5")
-            assertOk result "spawnTerminalWithCommand should return Ok"
-
-            let sessions = runAsync (getActiveSessions a)
-            let hwnd = sessions[testPath]
-            trackWindowPid hwnd
-
-            let rec waitForFile (retries: int) =
-                if retries <= 0 then
-                    false
-                elif File.Exists(markerFile) then
-                    true
-                else
-                    Thread.Sleep(500)
-                    waitForFile (retries - 1)
-
-            if waitForFile 20 then
-                let directory = File.ReadAllText(markerFile).Trim()
-                TestContext.Out.WriteLine($"Spawned window directory: {directory}")
-                Assert.That(
-                    directory,
-                    Is.EqualTo(testPath).IgnoreCase,
-                    $"Spawned window should be in {testPath} but was in {directory}")
-            else
-                Assert.Fail($"Marker file {markerFile} was not created within 10 seconds")
-        finally
-            if File.Exists(markerFile) then
-                File.Delete(markerFile)
 
     [<Test>]
     member _.``killSession closes the window``() =

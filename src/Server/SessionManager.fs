@@ -35,12 +35,16 @@ let private resolveNewHwnd (beforeWindows: Set<nativeint>) (timeoutMs: int) =
 
     poll ()
 
+let private encodeCommand (command: string) =
+    let bytes = System.Text.Encoding.Unicode.GetBytes(command)
+    Convert.ToBase64String(bytes)
+
 let private spawnAndResolve (worktreePath: string) (prompt: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
-    let escapedPrompt = prompt.Replace("\"", "\\\"")
-
     let nativePath = worktreePath.Replace('/', '\\')
-    let args = $"--window new -- pwsh -NoExit -Command \"Set-Location '{nativePath}'; claude '{escapedPrompt}'\""
+    let escapedPrompt = prompt.Replace("'", "''")
+    let encoded = encodeCommand $"Set-Location '{nativePath}'; claude '{escapedPrompt}'"
+    let args = $"--window new -- pwsh -NoExit -EncodedCommand {encoded}"
     Log.log "SessionManager" $"Spawning: wt.exe {args}"
 
     let psi =
@@ -69,9 +73,9 @@ let private spawnAndResolve (worktreePath: string) (prompt: string) =
 
 let private spawnTerminalAndResolve (worktreePath: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
-
     let nativePath = worktreePath.Replace('/', '\\')
-    let args = $"--window new -- pwsh -NoExit -Command \"Set-Location '{nativePath}'\""
+    let encoded = encodeCommand $"Set-Location '{nativePath}'"
+    let args = $"--window new -- pwsh -NoExit -EncodedCommand {encoded}"
     Log.log "SessionManager" $"Spawning terminal: wt.exe {args}"
 
     let psi =
@@ -100,9 +104,9 @@ let private spawnTerminalAndResolve (worktreePath: string) =
 
 let private spawnTerminalWithCommandAndResolve (worktreePath: string) (command: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
-
     let nativePath = worktreePath.Replace('/', '\\')
-    let args = $"--window new -- pwsh -NoProfile -Command \"Set-Location '{nativePath}'; {command}\""
+    let encoded = encodeCommand $"Set-Location '{nativePath}'; {command}"
+    let args = $"--window new -- pwsh -NoProfile -NoExit -EncodedCommand {encoded}"
     Log.log "SessionManager" $"Spawning terminal+cmd: wt.exe {args}"
 
     let psi =
