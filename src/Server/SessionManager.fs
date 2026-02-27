@@ -1,6 +1,9 @@
 module Server.SessionManager
 
+open System
 open System.Diagnostics
+open System.IO
+open System.Text.Json
 
 type private SessionMsg =
     | Spawn of worktreePath: string * prompt: string * AsyncReplyChannel<Result<unit, string>>
@@ -137,6 +140,55 @@ let private validateSessions (sessions: Map<string, nativeint>) =
     sessions
     |> Map.filter (fun _ hwnd -> Win32.isWindowValid hwnd)
 
+let private sessionsFilePath =
+    Path.Combine("data", "sessions.json")
+
+let internal persistSessions (sessions: Map<string, nativeint>) =
+    try
+        let dir = Path.GetDirectoryName(sessionsFilePath)
+        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+
+        let options = JsonWriterOptions(Indented = true)
+        use stream = new MemoryStream()
+        use writer = new Utf8JsonWriter(stream, options)
+        writer.WriteStartObject()
+        writer.WritePropertyName("sessions")
+        writer.WriteStartObject()
+        sessions |> Map.iter (fun path hwnd -> writer.WriteNumber(path, int64 hwnd))
+        writer.WriteEndObject()
+        writer.WriteEndObject()
+        writer.Flush()
+
+        let json = System.Text.Encoding.UTF8.GetString(stream.ToArray())
+        let tempPath = sessionsFilePath + ".tmp"
+        File.WriteAllText(tempPath, json)
+        File.Move(tempPath, sessionsFilePath, overwrite = true)
+    with ex ->
+        Log.log "SessionManager" $"Failed to persist sessions: {ex.Message}"
+
+let internal loadSessions () =
+    try
+        if not (File.Exists(sessionsFilePath)) then
+            Map.empty
+        else
+            let json = File.ReadAllText(sessionsFilePath)
+            use doc = JsonDocument.Parse(json)
+
+            match doc.RootElement.TryGetProperty("sessions") with
+            | false, _ -> Map.empty
+            | true, sessionsElement ->
+                sessionsElement.EnumerateObject()
+                |> Seq.fold (fun acc prop ->
+                    let hwnd = nativeint (prop.Value.GetInt64())
+                    if Win32.isWindowValid hwnd then
+                        acc |> Map.add prop.Name hwnd
+                    else
+                        acc
+                ) Map.empty
+    with ex ->
+        Log.log "SessionManager" $"Failed to load sessions: {ex.Message}"
+        Map.empty
+
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     match msg with
     | Spawn(path, prompt, reply) ->
@@ -217,6 +269,9 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
         validated
 
 let createAgent () =
+    let initialSessions = loadSessions ()
+    Log.log "SessionManager" $"Loaded {initialSessions.Count} persisted session(s)"
+
     let agent =
         MailboxProcessor<SessionMsg>.Start(fun inbox ->
             let rec loop (sessions: Map<string, nativeint>) =
@@ -239,10 +294,13 @@ let createAgent () =
 
                             sessions
 
+                    if newSessions <> sessions then
+                        persistSessions newSessions
+
                     return! loop newSessions
                 }
 
-            loop Map.empty)
+            loop initialSessions)
 
     agent.Error.Add(fun ex ->
         Log.log "SessionManager" $"MailboxProcessor error: {ex.Message}")

@@ -28,3 +28,6 @@ wwwroot/
 # bv (beads viewer) local config and caches
 .bv/
 *.beads*.db
+
+# Server runtime data
+data/
