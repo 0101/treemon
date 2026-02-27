@@ -161,11 +161,13 @@ let scrollFocusedIntoView (useCenter: bool) (target: FocusTarget option) =
     match target with
     | None -> ()
     | Some _ ->
-        Dom.document.querySelector ".focused"
-        |> Option.ofObj
-        |> Option.iter (fun el ->
-            let block = if useCenter then "center" else "nearest"
-            el?scrollIntoView(createObj [ "block" ==> block; "behavior" ==> "smooth" ]))
+        // Delay DOM query until after React renders the updated .focused class
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            Dom.document.querySelector ".focused"
+            |> Option.ofObj
+            |> Option.iter (fun el ->
+                let block = if useCenter then "center" else "nearest"
+                el?scrollIntoView(createObj [ "block" ==> block; "behavior" ==> "smooth" ])))
 
 let navigateToFirst (repos: RepoModel list) =
     let targets = visibleFocusTargets repos
