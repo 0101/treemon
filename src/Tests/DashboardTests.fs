@@ -3274,20 +3274,20 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Cards without LastUserMessage show regular commit-line``() =
+    member this.``Cards without LastUserMessage have no commit-line element``() =
         task {
             let idleCard = this.Page.Locator(".wt-card.ct-idle").First
             do! idleCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let commitLine = idleCard.Locator(".commit-line:not(.user-prompt)")
+            let commitLine = idleCard.Locator(".commit-line")
             let! count = commitLine.CountAsync()
-            Assert.That(count, Is.EqualTo(1),
-                "Idle card without LastUserMessage should show regular commit-line")
+            Assert.That(count, Is.EqualTo(0),
+                "Idle card without LastUserMessage should not have commit-line (commit is in git-commit-msg)")
 
-            let userPrompt = idleCard.Locator(".commit-line.user-prompt")
-            let! promptCount = userPrompt.CountAsync()
-            Assert.That(promptCount, Is.EqualTo(0),
-                "Idle card without LastUserMessage should not have user-prompt element")
+            let gitCommitMsg = idleCard.Locator(".git-commit-msg")
+            let! msgCount = gitCommitMsg.CountAsync()
+            Assert.That(msgCount, Is.EqualTo(1),
+                "Idle card should still have git-commit-msg in main-behind-row")
         }
 
     [<Test>]

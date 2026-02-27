@@ -843,14 +843,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                         Html.text prompt
                     ]
                 ]
-            | None ->
-                Html.div [
-                    prop.className "commit-line"
-                    prop.children [
-                        Html.text wt.LastCommitMessage
-                        Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
-                    ]
-                ]
+            | None -> ()
 
             if beadsTotal wt.Beads > 0 then
                 Html.div [
