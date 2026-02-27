@@ -3382,3 +3382,194 @@ type DashboardTests() =
                 "Every compact card with has-session should have a .new-tab-btn")
         }
 
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Commit message always visible in main-behind-row``() =
+        task {
+            let gitCommitMsgs = this.Page.Locator(".wt-card:not(.compact) .main-behind-row .git-commit-msg")
+            do! gitCommitMsgs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = gitCommitMsgs.CountAsync()
+
+            let allCards = this.Page.Locator(".wt-card:not(.compact)")
+            let! cardCount = allCards.CountAsync()
+            Assert.That(count, Is.EqualTo(cardCount),
+                "Every full-view card should have .git-commit-msg in .main-behind-row (commit message always visible)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Commit message visible even when user prompt is shown``() =
+        task {
+            let activeCard = this.Page.Locator(".wt-card.ct-working").First
+            do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let userPrompt = activeCard.Locator(".commit-line.user-prompt")
+            let! promptCount = userPrompt.CountAsync()
+            Assert.That(promptCount, Is.EqualTo(1),
+                "Working card should show user prompt in commit-line slot")
+
+            let gitCommitMsg = activeCard.Locator(".main-behind-row .git-commit-msg")
+            let! commitCount = gitCommitMsg.CountAsync()
+            Assert.That(commitCount, Is.EqualTo(1),
+                "Commit message should be visible in main-behind-row even when user prompt is shown above")
+
+            let! text = gitCommitMsg.TextContentAsync()
+            Assert.That(text, Is.Not.Empty, "git-commit-msg text should not be empty")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Commit message visible on dirty cards``() =
+        task {
+            let dirtyRow = this.Page.Locator(".wt-card .main-behind-row:has(.dirty-warning)")
+            do! dirtyRow.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let gitCommitMsg = dirtyRow.First.Locator(".git-commit-msg")
+            let! count = gitCommitMsg.CountAsync()
+            Assert.That(count, Is.EqualTo(1),
+                "Commit message should be visible in main-behind-row even on dirty cards")
+
+            let! text = gitCommitMsg.TextContentAsync()
+            Assert.That(text, Is.Not.Empty, "git-commit-msg should have commit text on dirty cards")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Terminal button has box-shadow on has-session cards``() =
+        task {
+            let sessionTerminalBtns = this.Page.Locator(".wt-card.has-session .terminal-btn")
+            do! sessionTerminalBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = sessionTerminalBtns.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1),
+                "Fixture has cards with active sessions; session terminal buttons should be present")
+
+            let! boxShadow = sessionTerminalBtns.First |> computedStyle "boxShadow"
+            Assert.That(boxShadow, Is.Not.EqualTo("none"),
+                "Terminal button on has-session card should have a box-shadow glow effect")
+            Assert.That(boxShadow, Does.Contain("166, 227, 161"),
+                "Terminal button box-shadow should use green (#a6e3a1 = rgb(166, 227, 161))")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Has-session card does not have left border highlight``() =
+        task {
+            let sessionCards = this.Page.Locator(".wt-card.has-session")
+            do! sessionCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! borderLeft = sessionCards.First |> computedStyle "borderLeftWidth"
+            Assert.That(borderLeft, Is.EqualTo("0px"),
+                "has-session card should not have a left border (border-left removed per spec)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Closed eye SVG has dimmed opacity``() =
+        task {
+            let eyeClosed = this.Page.Locator(".eye-logo.eye-closed")
+            let! count = eyeClosed.CountAsync()
+            if count >= 1 then
+                let! opacity = eyeClosed.First |> computedStyle "opacity"
+                Assert.That(opacity, Is.EqualTo("0.4"),
+                    "Closed eye should have opacity 0.4 (dimmer than base .eye-logo opacity 0.7)")
+            else
+                let eyeOpen = this.Page.Locator(".eye-logo:not(.eye-closed)")
+                let! openCount = eyeOpen.CountAsync()
+                Assert.That(openCount, Is.GreaterThanOrEqualTo(1),
+                    "Eye logo should be present (either open or closed)")
+                let! openOpacity = eyeOpen.First |> computedStyle "opacity"
+                Assert.That(openOpacity, Is.EqualTo("0.7"),
+                    "Open eye should have base opacity 0.7 (confirming CSS rules are loaded)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Scroll into view works after arrow key navigation via requestAnimationFrame``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(1300, 300)
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => { const g = document.querySelector('.card-grid'); return g && getComputedStyle(g).gridTemplateColumns.split(' ').length === 3; }",
+                null,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("End")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => { const el = document.querySelector('.focused'); if (!el) return false; const r = el.getBoundingClientRect(); return r.top >= -50 && r.bottom <= window.innerHeight + 50; }",
+                null,
+                PageWaitForFunctionOptions(Timeout = 3000.0f))
+
+            let! box = focused.BoundingBoxAsync()
+            Assert.That(box, Is.Not.Null, "Focused element should have a bounding box after scroll")
+            let viewportSize = this.Page.ViewportSize
+            Assert.That(box.Y + box.Height, Is.GreaterThan(0.0f),
+                "Focused element bottom should be within viewport after requestAnimationFrame scroll")
+            Assert.That(box.Y, Is.LessThan(float32 viewportSize.Height + 50.0f),
+                "Focused element top should be within viewport after requestAnimationFrame scroll")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow key navigation scrolls card into view after focus change``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(1300, 300)
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => { const g = document.querySelector('.card-grid'); return g && getComputedStyle(g).gridTemplateColumns.split(' ').length === 3; }",
+                null,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let mutable i = 0
+            while i < 8 do
+                do! this.Page.Keyboard.PressAsync("ArrowDown")
+                i <- i + 1
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => { const el = document.querySelector('.focused'); if (!el) return false; const r = el.getBoundingClientRect(); return r.top >= -50 && r.bottom <= window.innerHeight + 50; }",
+                null,
+                PageWaitForFunctionOptions(Timeout = 3000.0f))
+
+            let! isVisible = focused.IsVisibleAsync()
+            Assert.That(isVisible, Is.True,
+                "After multiple ArrowDown presses, focused element should be scrolled into view via requestAnimationFrame")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Non-session terminal button has no box-shadow``() =
+        task {
+            let nonSessionBtns = this.Page.Locator(".wt-card:not(.has-session) .terminal-btn")
+            do! nonSessionBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! boxShadow = nonSessionBtns.First |> computedStyle "boxShadow"
+            Assert.That(boxShadow, Is.EqualTo("none"),
+                "Terminal button on non-session card should have no box-shadow")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Git commit message includes relative time in main-behind-row``() =
+        task {
+            let commitTimes = this.Page.Locator(".wt-card:not(.compact) .main-behind-row .git-commit-msg .commit-time")
+            do! commitTimes.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = commitTimes.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1),
+                "git-commit-msg in main-behind-row should include a .commit-time element")
+
+            let! timeText = commitTimes.First.TextContentAsync()
+            Assert.That(timeText, Does.Contain("ago").Or.EqualTo("just now"),
+                "Commit time should show relative time like 'Nm ago' or 'just now'")
+        }
+
