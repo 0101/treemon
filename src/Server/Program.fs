@@ -7,19 +7,24 @@ open Shared
 open Server
 
 let readAppVersion () =
-    let path = System.IO.Path.Combine("wwwroot", "version.json")
+    let serverGuid = System.Guid.NewGuid().ToString("N")
 
-    match System.IO.File.Exists(path) with
-    | false ->
-        Log.log "Startup" "No wwwroot/version.json found, using empty version"
-        ""
-    | true ->
-        let json = System.IO.File.ReadAllText(path)
-        use doc = System.Text.Json.JsonDocument.Parse(json)
+    let buildTime =
+        let path = System.IO.Path.Combine("wwwroot", "version.json")
 
-        match doc.RootElement.TryGetProperty("buildTime") with
-        | true, elem -> elem.GetString()
-        | false, _ -> ""
+        match System.IO.File.Exists(path) with
+        | false ->
+            Log.log "Startup" "No wwwroot/version.json found"
+            ""
+        | true ->
+            let json = System.IO.File.ReadAllText(path)
+            use doc = System.Text.Json.JsonDocument.Parse(json)
+
+            match doc.RootElement.TryGetProperty("buildTime") with
+            | true, elem -> elem.GetString()
+            | false, _ -> ""
+
+    $"{buildTime}|{serverGuid}"
 
 type ServerConfig =
     { WorktreeRoots: string list
