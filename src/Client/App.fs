@@ -438,6 +438,13 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
                         prop.text "uncommitted changes"
                     ]
                 else syncButton dispatch wt branchEvents isPending scopedKey
+            Html.span [
+                prop.className "git-commit-msg"
+                prop.children [
+                    Html.text wt.LastCommitMessage
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                ]
+            ]
         ]
     ]
 
@@ -855,15 +862,6 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                 ]
 
             mainBehindWithSync dispatch wt branchEvents isPending scopedKey
-
-            if wt.LastUserMessage.IsSome && not wt.IsDirty then
-                Html.div [
-                    prop.className "git-commit-msg"
-                    prop.children [
-                        Html.text wt.LastCommitMessage
-                        Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
-                    ]
-                ]
 
             prRow repoName wt
 
