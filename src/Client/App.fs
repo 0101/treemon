@@ -260,6 +260,9 @@ let update msg model =
         { model with FocusedElement = target }, Cmd.none
 
     | KeyPressed (key, hasModifier) ->
+        let scrollToFocus oldFocus newFocus =
+            let useCenter = isLargeJump model.Repos oldFocus newFocus
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -270,7 +273,15 @@ let update msg model =
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
             { model with FocusedElement = newFocus },
-            Cmd.batch [ actionCmd; Cmd.ofEffect (fun _ -> scrollFocusedIntoView newFocus) ]
+            Cmd.batch [ actionCmd; scrollToFocus model.FocusedElement newFocus ]
+        | "Home" ->
+            let newFocus = navigateToFirst model.Repos
+            { model with FocusedElement = newFocus },
+            scrollToFocus model.FocusedElement newFocus
+        | "End" ->
+            let newFocus = navigateToLast model.Repos
+            { model with FocusedElement = newFocus },
+            scrollToFocus model.FocusedElement newFocus
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -391,6 +402,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         Html.button [
             prop.className "sync-starting-btn"
             prop.disabled true
+            prop.tabIndex -1
             prop.text "Sync starting"
         ]
     else
@@ -400,6 +412,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         if syncing then
             Html.button [
                 prop.className "sync-cancel-btn"
+                prop.tabIndex -1
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
                 prop.text "Cancel"
             ]
@@ -407,6 +420,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
             Html.button [
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
+                prop.tabIndex -1
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
                 prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main")
                 prop.text "Sync"
@@ -655,6 +669,7 @@ let terminalButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "terminal-btn"
         prop.title title
+        prop.tabIndex -1
         prop.onClick (fun e -> e.stopPropagation(); dispatch action)
         prop.text ">"
     ]
@@ -663,6 +678,7 @@ let newTabButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
         prop.title "Open new tab in tracked window"
+        prop.tabIndex -1
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
         prop.text "+"
     ]
@@ -671,6 +687,7 @@ let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
         prop.title "Remove worktree"
+        prop.tabIndex -1
         prop.onClick (fun e ->
             e.stopPropagation()
             let confirmed =
@@ -1068,7 +1085,7 @@ let view model dispatch =
         prop.autoFocus true
         prop.onKeyDown (fun e ->
             match e.key with
-            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
+            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
                 e.preventDefault()
                 dispatch (KeyPressed (e.key, false))
             | key ->
@@ -1093,11 +1110,13 @@ let view model dispatch =
                                 prop.children [
                                     Html.button [
                                         prop.className "ctrl-btn"
+                                        prop.tabIndex -1
                                         prop.onClick (fun _ -> dispatch ToggleSort)
                                         prop.text ($"Sort: {sortLabel model.SortMode}")
                                     ]
                                     Html.button [
                                         prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
+                                        prop.tabIndex -1
                                         prop.onClick (fun _ -> dispatch ToggleCompact)
                                         prop.text "Compact"
                                     ]

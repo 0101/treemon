@@ -157,14 +157,37 @@ let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedEl
 
             | _ -> Some current, NoAction
 
-let scrollFocusedIntoView (target: FocusTarget option) =
+let scrollFocusedIntoView (useCenter: bool) (target: FocusTarget option) =
     match target with
     | None -> ()
     | Some _ ->
         Dom.document.querySelector ".focused"
         |> Option.ofObj
         |> Option.iter (fun el ->
-            el?scrollIntoView(createObj [ "block" ==> "nearest" ]))
+            let block = if useCenter then "center" else "nearest"
+            el?scrollIntoView(createObj [ "block" ==> block; "behavior" ==> "smooth" ]))
+
+let navigateToFirst (repos: RepoModel list) =
+    let targets = visibleFocusTargets repos
+    match targets with
+    | [] -> None
+    | _ -> Some targets.Head
+
+let navigateToLast (repos: RepoModel list) =
+    let targets = visibleFocusTargets repos
+    match targets with
+    | [] -> None
+    | _ -> Some (List.last targets)
+
+let isLargeJump (repos: RepoModel list) (oldFocus: FocusTarget option) (newFocus: FocusTarget option) =
+    let targets = visibleFocusTargets repos
+    match oldFocus, newFocus with
+    | None, _ -> true
+    | _, None -> false
+    | Some old, Some nw ->
+        let oldIdx = targets |> List.tryFindIndex ((=) old) |> Option.defaultValue 0
+        let newIdx = targets |> List.tryFindIndex ((=) nw) |> Option.defaultValue 0
+        abs (oldIdx - newIdx) > 3
 
 let adjustFocusAfterCollapse (collapsedRepoId: RepoId) (focusedElement: FocusTarget option) =
     match focusedElement with
