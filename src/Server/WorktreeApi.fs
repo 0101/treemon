@@ -95,15 +95,14 @@ let getWorktrees
     }
 
 let private openTerminal
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (validatePath: string -> Async<bool>)
     (sessionAgent: SessionManager.SessionAgent)
     (path: string)
     =
     async {
-        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-        let knownPaths = allKnownPaths state
+        let! isValid = validatePath path
 
-        if not (Set.contains path knownPaths) then
+        if not isValid then
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
@@ -164,6 +163,17 @@ let worktreeApi
             return Set.contains path knownPaths
         }
 
+    let withValidatedPath path opName (action: unit -> Async<Result<unit, string>>) =
+        async {
+            let! isValid = validatePath path
+
+            if not isValid then
+                Log.log "API" $"{opName}: rejected unknown path '{path}'"
+                return Error $"Unknown worktree path: {path}"
+            else
+                return! action ()
+        }
+
     match fixtures with
     | Some f ->
         { getWorktrees = fun () -> async { return f.Worktrees }
@@ -177,7 +187,7 @@ let worktreeApi
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
-          openTerminal = openTerminal agent sessionAgent
+          openTerminal = openTerminal validatePath sessionAgent
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
@@ -278,32 +288,11 @@ let worktreeApi
               }
           deleteWorktree = deleteWorktree agent rootPaths
           launchSession = fun req ->
-              async {
-                  let! isValid = validatePath req.Path
-
-                  if not isValid then
-                      Log.log "API" $"launchSession: rejected unknown path '{req.Path}'"
-                      return Error $"Unknown worktree path: {req.Path}"
-                  else
-                      return! SessionManager.spawnSession sessionAgent req.Path req.Prompt
-              }
+              withValidatedPath req.Path "launchSession" (fun () ->
+                  SessionManager.spawnSession sessionAgent req.Path req.Prompt)
           focusSession = fun path ->
-              async {
-                  let! isValid = validatePath path
-
-                  if not isValid then
-                      Log.log "API" $"focusSession: rejected unknown path '{path}'"
-                      return Error $"Unknown worktree path: {path}"
-                  else
-                      return! SessionManager.focusSession sessionAgent path
-              }
+              withValidatedPath path "focusSession" (fun () ->
+                  SessionManager.focusSession sessionAgent path)
           killSession = fun path ->
-              async {
-                  let! isValid = validatePath path
-
-                  if not isValid then
-                      Log.log "API" $"killSession: rejected unknown path '{path}'"
-                      return Error $"Unknown worktree path: {path}"
-                  else
-                      return! SessionManager.killSession sessionAgent path
-              } }
+              withValidatedPath path "killSession" (fun () ->
+                  SessionManager.killSession sessionAgent path) }
