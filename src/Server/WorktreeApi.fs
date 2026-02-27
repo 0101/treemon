@@ -17,6 +17,7 @@ let loadFixtures (path: string) =
 
 let private assembleFromState
     (activeSessions: Set<string>)
+    (archivedBranches: Set<string>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
@@ -42,7 +43,10 @@ let private assembleFromState
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
-      IsArchived = false }
+      IsArchived =
+        wt.Branch
+        |> Option.map (fun b -> Set.contains b archivedBranches)
+        |> Option.defaultValue false }
 
 let private allWorktrees (state: RefreshScheduler.DashboardState) =
     state.Repos
@@ -67,6 +71,7 @@ let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value 
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     : Async<DashboardResponse> =
     async {
@@ -79,9 +84,28 @@ let getWorktrees
             state.Repos
             |> Map.toList
             |> List.map (fun (repoId, repo) ->
+                let repoRoot = rootPaths |> Map.tryFind repoId
+
+                let liveBranches =
+                    repo.WorktreeList
+                    |> List.choose _.Branch
+                    |> Set.ofList
+
+                let archivedBranches =
+                    repoRoot
+                    |> Option.map TreemonConfig.readArchivedBranches
+                    |> Option.defaultValue []
+                    |> Set.ofList
+
+                let cleanedArchived = Set.intersect archivedBranches liveBranches
+
+                if cleanedArchived <> archivedBranches then
+                    repoRoot |> Option.iter (fun root ->
+                        TreemonConfig.setArchivedBranches root (Set.toList cleanedArchived))
+
                 let statuses =
                     repo.WorktreeList
-                    |> List.map (assembleFromState activeSessionPaths repo)
+                    |> List.map (assembleFromState activeSessionPaths cleanedArchived repo)
 
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)
@@ -145,6 +169,69 @@ let private deleteWorktree
                 return Error $"Could not identify repo root for worktree at '{wt.Path}'"
     }
 
+let private findRepoRootForBranch
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (rootPaths: Map<RepoId, string>)
+    (branch: string)
+    =
+    async {
+        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let worktrees = allWorktrees state
+
+        let worktree =
+            worktrees
+            |> List.tryFind (fun wt -> wt.Branch = Some branch)
+
+        match worktree with
+        | None -> return Error $"No worktree found for branch '{branch}'"
+        | Some wt ->
+            let repoRoot =
+                findRepoForPath state wt.Path
+                |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
+
+            match repoRoot with
+            | Some root -> return Ok root
+            | None -> return Error $"Could not identify repo root for worktree at '{wt.Path}'"
+    }
+
+let private archiveWorktree
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (rootPaths: Map<RepoId, string>)
+    (branch: string)
+    =
+    async {
+        let! repoRoot = findRepoRootForBranch agent rootPaths branch
+
+        match repoRoot with
+        | Error msg -> return Error msg
+        | Ok root ->
+            let existing = TreemonConfig.readArchivedBranches root |> Set.ofList
+
+            if Set.contains branch existing then
+                return Ok ()
+            else
+                let updated = Set.add branch existing |> Set.toList
+                TreemonConfig.setArchivedBranches root updated
+                return Ok ()
+    }
+
+let private unarchiveWorktree
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (rootPaths: Map<RepoId, string>)
+    (branch: string)
+    =
+    async {
+        let! repoRoot = findRepoRootForBranch agent rootPaths branch
+
+        match repoRoot with
+        | Error msg -> return Error msg
+        | Ok root ->
+            let existing = TreemonConfig.readArchivedBranches root |> Set.ofList
+            let updated = Set.remove branch existing |> Set.toList
+            TreemonConfig.setArchivedBranches root updated
+            return Ok ()
+    }
+
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
@@ -189,7 +276,7 @@ let worktreeApi
           archiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
           unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion
           openTerminal = openTerminal validatePath sessionAgent
           startSync = fun branch ->
               async {
@@ -299,5 +386,5 @@ let worktreeApi
           killSession = fun path ->
               withValidatedPath path "killSession" (fun () ->
                   SessionManager.killSession sessionAgent path)
-          archiveWorktree = fun _branch -> async { return Error "Not yet implemented" }
-          unarchiveWorktree = fun _branch -> async { return Error "Not yet implemented" } }
+          archiveWorktree = archiveWorktree agent rootPaths
+          unarchiveWorktree = unarchiveWorktree agent rootPaths }
