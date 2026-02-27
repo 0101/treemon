@@ -248,6 +248,6 @@ let getLastUserMessage (worktreePath: string) =
 
     findLatestJsonl projectDir
     |> Option.bind (fun fi ->
-        readLastLines fi.FullName 20
+        readLastLines fi.FullName 100
         |> List.tryPick tryParseUserText)
     |> Option.map (fun (text, _) -> truncateMessage 120 text)
