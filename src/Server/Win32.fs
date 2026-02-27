@@ -1,5 +1,6 @@
 module Server.Win32
 
+open System
 open System.Runtime.InteropServices
 open System.Text
 
@@ -17,7 +18,7 @@ extern uint32 private GetWindowThreadProcessId(nativeint hWnd, uint32& lpdwProce
 [<DllImport("user32.dll", EntryPoint = "IsWindow")>]
 extern bool private IsWindowNative(nativeint hWnd)
 
-[<DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto, EntryPoint = "GetClassNameW")>]
+[<DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "GetClassNameW")>]
 extern int private GetClassNameNative(nativeint hWnd, StringBuilder lpClassName, int nMaxCount)
 
 [<DllImport("user32.dll")>]
@@ -38,6 +39,7 @@ let listTopLevelWindows () =
     let windows = System.Collections.Generic.List<nativeint>()
     let callback = EnumWindowsProc(fun hwnd _ -> windows.Add(hwnd); true)
     EnumWindows(callback, 0n) |> ignore
+    GC.KeepAlive(callback)
     windows |> Seq.toList
 
 let isWindowValid (hwnd: nativeint) =

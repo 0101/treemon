@@ -36,7 +36,8 @@ let private spawnAndResolve (worktreePath: string) (prompt: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
     let escapedPrompt = prompt.Replace("\"", "\\\"")
 
-    let args = $"--window new new-tab -d \"{worktreePath}\" -- claude \"{escapedPrompt}\""
+    let nativePath = worktreePath.Replace('/', '\\')
+    let args = $"--window new -- pwsh -NoExit -Command \"Set-Location '{nativePath}'; claude '{escapedPrompt}'\""
     Log.log "SessionManager" $"Spawning: wt.exe {args}"
 
     let psi =
@@ -66,7 +67,8 @@ let private spawnAndResolve (worktreePath: string) (prompt: string) =
 let private spawnTerminalAndResolve (worktreePath: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
 
-    let args = $"--window new new-tab -d \"{worktreePath}\""
+    let nativePath = worktreePath.Replace('/', '\\')
+    let args = $"--window new -- pwsh -NoExit -Command \"Set-Location '{nativePath}'\""
     Log.log "SessionManager" $"Spawning terminal: wt.exe {args}"
 
     let psi =
@@ -96,7 +98,8 @@ let private spawnTerminalAndResolve (worktreePath: string) =
 let private spawnTerminalWithCommandAndResolve (worktreePath: string) (command: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
 
-    let args = $"--window new new-tab -d \"{worktreePath}\" -- pwsh -NoProfile -Command \"{command}\""
+    let nativePath = worktreePath.Replace('/', '\\')
+    let args = $"--window new -- pwsh -NoProfile -Command \"Set-Location '{nativePath}'; {command}\""
     Log.log "SessionManager" $"Spawning terminal+cmd: wt.exe {args}"
 
     let psi =
