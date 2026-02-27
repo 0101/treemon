@@ -67,13 +67,13 @@ let private spawnWtAndResolve (args: string) (logLabel: string) =
         Error $"Failed to spawn {logLabel}: {ex.Message}"
 
 let private spawnAndResolve (worktreePath: string) (prompt: string) =
-    let nativePath = worktreePath.Replace('/', '\\')
+    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
     let escapedPrompt = prompt.Replace("'", "''")
     let encoded = encodeCommand $"Set-Location '{nativePath}'; claude '{escapedPrompt}'"
     spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "session"
 
 let private spawnTerminalAndResolve (worktreePath: string) =
-    let nativePath = worktreePath.Replace('/', '\\')
+    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
     let encoded = encodeCommand $"Set-Location '{nativePath}'"
     spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "terminal"
 
@@ -137,37 +137,26 @@ let internal loadSessions () =
         Log.log "SessionManager" $"Failed to load sessions: {ex.Message}"
         Map.empty
 
+let private spawnAndTrack (validated: Map<string, nativeint>) path spawnFn (reply: AsyncReplyChannel<Result<unit, string>>) =
+    match validated |> Map.tryFind path with
+    | Some existingHwnd -> killByHwnd existingHwnd
+    | None -> ()
+
+    match spawnFn () with
+    | Ok hwnd ->
+        reply.Reply(Ok())
+        validated |> Map.add path hwnd
+    | Error msg ->
+        reply.Reply(Error msg)
+        validated |> Map.remove path
+
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     match msg with
     | Spawn(path, prompt, reply) ->
-        let validated = validateSessions sessions
-
-        match validated |> Map.tryFind path with
-        | Some existingHwnd -> killByHwnd existingHwnd
-        | None -> ()
-
-        match spawnAndResolve path prompt with
-        | Ok hwnd ->
-            reply.Reply(Ok())
-            validated |> Map.add path hwnd
-        | Error msg ->
-            reply.Reply(Error msg)
-            validated |> Map.remove path
+        spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path prompt) reply
 
     | SpawnTerminal(path, reply) ->
-        let validated = validateSessions sessions
-
-        match validated |> Map.tryFind path with
-        | Some existingHwnd -> killByHwnd existingHwnd
-        | None -> ()
-
-        match spawnTerminalAndResolve path with
-        | Ok hwnd ->
-            reply.Reply(Ok())
-            validated |> Map.add path hwnd
-        | Error msg ->
-            reply.Reply(Error msg)
-            validated |> Map.remove path
+        spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
 
     | Focus(path, reply) ->
         let validated = validateSessions sessions
