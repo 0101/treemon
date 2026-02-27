@@ -171,9 +171,13 @@ let navigateSpatial (key: string) (cols: int) (model: Model) =
         match model.FocusedElement with
         | None -> Some allTargets.Head, Cmd.none
         | Some current ->
-            let findSection target =
-                sections |> List.tryFindIndex (fun s ->
+            let cardPosition target =
+                sections
+                |> List.tryFindIndex (fun s ->
                     s.Header = target || s.Cards |> List.contains target)
+                |> Option.map (fun si ->
+                    let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
+                    si, cardIdx)
             match current, key with
             | RepoHeader _, "ArrowLeft" ->
                 let repoId = match current with RepoHeader rid -> rid | _ -> RepoId ""
@@ -193,36 +197,31 @@ let navigateSpatial (key: string) (cols: int) (model: Model) =
                 navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current), Cmd.none
 
             | Card _, "ArrowLeft" ->
-                match findSection current with
+                match cardPosition current with
                 | None -> Some current, Cmd.none
-                | Some si ->
-                    let section = sections[si]
-                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                | Some (si, cardIdx) ->
                     let colPos = cardIdx % cols
                     if colPos > 0 then
-                        Some section.Cards[cardIdx - 1], Cmd.none
+                        Some sections[si].Cards[cardIdx - 1], Cmd.none
                     else
-                        // First column: go to repo header above, or last card of previous repo
                         if si > 0 then
                             let prev = sections[si - 1]
                             match prev.Cards with
                             | [] -> Some prev.Header, Cmd.none
                             | cards -> Some (List.last cards), Cmd.none
                         else
-                            Some section.Header, Cmd.none
+                            Some sections[si].Header, Cmd.none
 
             | Card _, "ArrowRight" ->
-                match findSection current with
+                match cardPosition current with
                 | None -> Some current, Cmd.none
-                | Some si ->
+                | Some (si, cardIdx) ->
                     let section = sections[si]
-                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
                     let colPos = cardIdx % cols
                     let rowEnd = colPos >= cols - 1 || cardIdx >= section.Cards.Length - 1
                     if not rowEnd then
                         Some section.Cards[cardIdx + 1], Cmd.none
                     else
-                        // End of row: go to first card of next row or next repo header
                         let nextRowStart = cardIdx - colPos + cols
                         if nextRowStart < section.Cards.Length then
                             Some section.Cards[nextRowStart], Cmd.none
@@ -232,36 +231,27 @@ let navigateSpatial (key: string) (cols: int) (model: Model) =
                             navigateLinear 1 allTargets (Some current), Cmd.none
 
             | Card _, "ArrowDown" ->
-                match findSection current with
+                match cardPosition current with
                 | None -> Some current, Cmd.none
-                | Some si ->
-                    let section = sections[si]
-                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                | Some (si, cardIdx) ->
                     let targetIdx = cardIdx + cols
-                    if targetIdx < section.Cards.Length then
-                        Some section.Cards[targetIdx], Cmd.none
+                    if targetIdx < sections[si].Cards.Length then
+                        Some sections[si].Cards[targetIdx], Cmd.none
                     else
-                        // Cross repo boundary: go to next repo header
                         if si + 1 < sections.Length then
                             Some sections[si + 1].Header, Cmd.none
                         else
-                            // Wrap to first element
                             Some allTargets.Head, Cmd.none
 
             | Card _, "ArrowUp" ->
-                match findSection current with
+                match cardPosition current with
                 | None -> Some current, Cmd.none
-                | Some si ->
-                    let section = sections[si]
-                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                | Some (si, cardIdx) ->
                     let targetIdx = cardIdx - cols
                     if targetIdx >= 0 then
-                        Some section.Cards[targetIdx], Cmd.none
+                        Some sections[si].Cards[targetIdx], Cmd.none
                     else
-                        // First row: go to this repo's header
-                        Some section.Header, Cmd.none
-
-            | _ -> Some current, Cmd.none
+                        Some sections[si].Header, Cmd.none
 
 let scrollFocusedIntoView (target: FocusTarget option) =
     Cmd.ofEffect (fun _ ->
