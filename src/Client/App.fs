@@ -21,7 +21,8 @@ type Model =
       SyncPending: Set<string>
       AppVersion: string option
       EyeDirection: float * float
-      FocusedElement: FocusTarget option }
+      FocusedElement: FocusTarget option
+      DeletedBranches: Set<string> }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -73,7 +74,8 @@ let init () =
       SyncPending = Set.empty
       AppVersion = None
       EyeDirection = (0.0, 0.0)
-      FocusedElement = None },
+      FocusedElement = None
+      DeletedBranches = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -82,6 +84,13 @@ let randomEyeDirection () =
     let dx = rng.NextDouble() * 3.0 - 1.5
     let dy = rng.NextDouble() * 2.0 - 1.0
     (dx, dy)
+
+let filterDeletedBranches (deleted: Set<string>) (repos: RepoModel list) =
+    if Set.isEmpty deleted then repos
+    else
+        repos
+        |> List.map (fun r ->
+            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains wt.Branch deleted)) })
 
 let findWorktree (scopedKey: string) (model: Model) =
     let parts = scopedKey.Split('/', 2)
@@ -119,6 +128,11 @@ let update msg model =
                 model.Repos
                 |> List.map (fun r -> r.RepoId, r.IsCollapsed)
                 |> Map.ofList
+            let serverBranches =
+                response.Repos
+                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+                |> Set.ofList
+            let stillPending = Set.intersect model.DeletedBranches serverBranches
             let repos =
                 response.Repos
                 |> List.map (fun r ->
@@ -127,6 +141,7 @@ let update msg model =
                       Worktrees = sortWorktrees model.SortMode r.Worktrees
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
+                |> filterDeletedBranches stillPending
             { model with
                 Repos = repos
                 IsLoading = false
@@ -134,7 +149,8 @@ let update msg model =
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
-                EyeDirection = randomEyeDirection () }
+                EyeDirection = randomEyeDirection ()
+                DeletedBranches = stillPending }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
@@ -214,13 +230,22 @@ let update msg model =
         model, fetchSyncStatus ()
 
     | DeleteWorktree branch ->
-        model, Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+        let updatedRepos =
+            model.Repos
+            |> List.map (fun r ->
+                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
+        let updatedModel =
+            { model with
+                Repos = updatedRepos
+                DeletedBranches = model.DeletedBranches |> Set.add branch }
+        { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
+        Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error _) ->
-        model, Cmd.none
+        { model with DeletedBranches = Set.empty }, fetchWorktrees ()
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
