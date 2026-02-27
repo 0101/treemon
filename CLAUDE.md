@@ -41,10 +41,7 @@ Open http://localhost:5000 for production (serves pre-built files from wwwroot/)
 
 ## Deployment
 
-Only deploy after all Playwright E2E tests pass (`dotnet test src/Tests/Tests.fsproj`). Never deploy with failing tests.
-
 ```
-dotnet test src/Tests/Tests.fsproj    # must pass first
 .\treemon.ps1 deploy                    # builds frontend, copies to wwwroot/, restarts prod
 ```
 

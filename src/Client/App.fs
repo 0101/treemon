@@ -1104,6 +1104,31 @@ let viewEyeRolledBack =
         ]
     ]
 
+let viewEyeClosed =
+    Svg.svg [
+        svg.className "eye-logo eye-closed"
+        svg.viewBox (-2, -2, 44, 24)
+        svg.children [
+            Svg.path [
+                svg.d "M2 10 Q10 4 20 4 Q30 4 38 10 Q30 16 20 16 Q10 16 2 10 Z"
+                svg.fill "#e8e8e8"
+                svg.stroke "#56b6c2"
+                svg.strokeWidth 2.5
+            ]
+            Svg.line [
+                svg.x1 4
+                svg.y1 10
+                svg.x2 36
+                svg.y2 10
+                svg.stroke "#56b6c2"
+                svg.strokeWidth 2.0
+            ]
+        ]
+    ]
+
+let hasAnyWorking (repos: RepoModel list) =
+    repos |> List.exists (fun r -> r.Worktrees |> List.exists (fun wt -> wt.CodingTool = Working))
+
 let anyRepoReady (repos: RepoModel list) =
     repos |> List.exists _.IsReady
 
@@ -1172,7 +1197,8 @@ let view model dispatch =
                             Html.h1 [
                                 prop.children [
                                     if model.HasError then viewEyeRolledBack
-                                    else viewEyeOpen model.EyeDirection
+                                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
+                                    else viewEyeClosed
                                 ]
                             ]
                             Html.div [
