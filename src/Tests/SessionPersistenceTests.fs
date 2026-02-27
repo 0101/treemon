@@ -184,8 +184,7 @@ type LoadSessionsTests() =
 
 
 [<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
+[<Category("Local")>]
 type RoundTripTests() =
 
     [<Test>]
