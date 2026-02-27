@@ -86,10 +86,11 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) =
         if not (Win32.focusWindow hwnd) then
             Log.log "SessionManager" $"Failed to focus HWND={hwnd} for new-tab"
 
+        let encoded = encodeCommand $"Set-Location '{nativePath}'"
         let psi =
             ProcessStartInfo(
                 "wt.exe",
-                $"-w 0 new-tab -d \"{nativePath}\" -- pwsh",
+                $"-w 0 new-tab -- pwsh -NoExit -EncodedCommand {encoded}",
                 UseShellExecute = false,
                 CreateNoWindow = true)
         try
