@@ -41,7 +41,8 @@ let private assembleFromState
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
-      HasActiveSession = Set.contains wt.Path activeSessions }
+      HasActiveSession = Set.contains wt.Path activeSessions
+      IsArchived = false }
 
 let private allWorktrees (state: RefreshScheduler.DashboardState) =
     state.Repos
@@ -184,7 +185,9 @@ let worktreeApi
           deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" }
           launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
-          killSession = fun _ -> async { return Error "Session management is not available in fixture mode" } }
+          killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          archiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
+          unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
           openTerminal = openTerminal validatePath sessionAgent
@@ -295,4 +298,6 @@ let worktreeApi
                   SessionManager.focusSession sessionAgent path)
           killSession = fun path ->
               withValidatedPath path "killSession" (fun () ->
-                  SessionManager.killSession sessionAgent path) }
+                  SessionManager.killSession sessionAgent path)
+          archiveWorktree = fun _branch -> async { return Error "Not yet implemented" }
+          unarchiveWorktree = fun _branch -> async { return Error "Not yet implemented" } }
