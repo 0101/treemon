@@ -2,159 +2,80 @@
 
 ## Goals
 
-1. **Focus existing terminal windows** — navigate from dashboard to the correct agent window among many, by HWND
+1. **Focus existing terminal windows** — navigate from dashboard to the correct window among many, by HWND
 2. **Track spawned windows** — maintain HWND-to-worktree mapping so focus/kill work reliably
 3. **Spawn terminal windows** — launch new Windows Terminal windows tied to worktrees, tracked by HWND
-4. **Kill and respawn** — replace a session with a new task by killing the old window and spawning fresh (future: contextual actions)
-5. **Native Windows** — all sessions run in native PowerShell with full git and Visual Studio access (no WSL)
+4. **Kill and respawn** — replace a session by killing the old window and spawning fresh
+5. **Survive server restarts** — persist tracked sessions to disk, restore and validate on startup
+6. **Native Windows** — all sessions run in native PowerShell with full git and Visual Studio access (no WSL)
 
 ## Non-Goals
 
 - Session persistence (detach/reattach) — not achievable with Windows Terminal
-- Reading terminal output (`get-text`) — Claude status comes from JSONL session logs, already implemented
+- Reading terminal output — Claude status comes from JSONL session logs, already implemented
 - Tab-based management — each worktree gets its own WT window, not a tab
+- Cross-machine portability (HWNDs are machine-local)
 
 ## Expected Behavior
 
-### Terminal Button (existing `>` button)
-- **No tracked session**: opens a plain PowerShell window via `openTerminal` — spawns `wt.exe --window new -d <path>` (new window, not a tab), HWND tracked by SessionManager so subsequent clicks focus instead of spawning again
-- **Tracked session exists**: calls `focusSession` to bring the tracked window to foreground via `SetForegroundWindow`
-- This is the **single primary button** — no separate "launch" or "focus" buttons on the card
+### Terminal Button (`>` on card)
+- **No tracked session**: spawns `wt.exe --window new new-tab -d <path>`, HWND tracked by SessionManager
+- **Tracked session exists**: `SetForegroundWindow` to bring window to foreground
+- Single button — no separate launch/focus/kill buttons on the card
 
-### Spawn (API-level, triggered by contextual actions)
-- `launchSession` API spawns `wt.exe --window new -d <worktree-path> -- <coding-tool> "task description"`
-- Coding tool resolved from `CodingToolProvider` on `WorktreeStatus`, not hardcoded (future work — currently hardcodes `claude`)
-- Server records the mapping: worktree path → HWND
-- If a session already exists for this worktree, kill it first (one window per worktree)
-- **Not directly exposed as a card button in this phase** — future contextual actions (e.g., "fix build", "look at PR comments") will call this API
+### launchSession (API-level, for future contextual actions)
+- Spawns `wt.exe --window new new-tab -d <path> -- <coding-tool> "prompt"`
+- If session already exists for worktree, kills it first (one window per worktree)
+- Not exposed as a card button yet — future contextual actions will use this
 
-### openTerminal vs launchSession
-- `openTerminal` opens a **plain PowerShell window** — no coding tool, no prompt. Used by the terminal button.
-- `launchSession` opens a window **running a coding tool with a prompt** — used by future contextual actions.
-- Both go through SessionManager for HWND tracking. Both use `--window new` (never `-w 0 new-tab`).
-- The difference is only what command runs inside the window: pwsh vs coding-tool.
+### Focus / Kill
+- `focusSession` calls `SetForegroundWindow(hwnd)` with ALT keypress workaround for foreground lock
+- `killSession` sends `WM_CLOSE` to the specific window (not `Process.Kill`, which would kill ALL WT windows)
 
-### Focus
-- `focusSession` API calls `SetForegroundWindow(hwnd)` on the tracked HWND
-- Window comes to foreground immediately
-- Exposed through the terminal button when a tracked session exists
-
-### Kill
-- `killSession` API kills the window by PID, removes HWND from tracking
-- Future: may be exposed as a button on cards with active sessions
+### Persistence
+- On every state change (spawn, kill, validation), write `Map<string, nativeint>` to `data/sessions.json`
+- On startup, read file, validate each HWND with `IsWindow`, seed MailboxProcessor with surviving sessions
+- Missing/corrupt file → start with empty map
+- Atomic write (temp file + rename) to prevent corruption
 
 ### Status Integration
-- Existing `ClaudeDetector.fs` continues to monitor JSONL session files for Working/WaitingForUser/Done/Idle
-- `WorktreeStatus` gains `HasActiveSession: bool` field — true when a tracked HWND exists and passes `IsWindow` check
-- Dashboard shows whether a tracked window exists (spawned vs. not spawned) alongside Claude activity status
+- `WorktreeStatus.HasActiveSession: bool` — true when tracked HWND passes `IsWindow` check
+- Dashboard shows green left border on cards with active sessions
 
 ## Technical Approach
 
-### HWND Resolution (Critical Unknown)
+### HWND Resolution
+`wt.exe` is a launcher that sends IPC to `WindowsTerminal.exe` then exits. Resolution:
+1. `EnumWindows` before spawn to snapshot existing windows
+2. Spawn `wt.exe --window new new-tab -d <path>`
+3. Poll `EnumWindows` for new `CASCADIA_HOSTING_WINDOW_CLASS` windows
+4. New HWND = diff between before/after sets (200-300ms typical latency)
 
-`wt.exe` is a launcher — it sends commands to the running Windows Terminal process via IPC then exits. The actual window is owned by `WindowsTerminal.exe`. Resolution strategy:
-
-1. Enumerate all top-level windows before spawn (`EnumWindows`)
-2. Spawn `wt.exe --window new -- pwsh ...`
-3. Poll `EnumWindows` for new windows matching `WindowsTerminal.exe` class
-4. New HWND = diff between before and after sets
-
-Alternative: spawn `pwsh.exe` directly, get its PID, find its console window via `GetConsoleWindow` after attaching. This avoids the WT launcher indirection but loses WT features.
-
-If neither approach is reliable, this is a **blocker** — stop and reassess.
-
-### Win32 P/Invoke
-
-New module `Win32.fs` with:
-- `EnumWindows` + callback to list top-level windows
-- `SetForegroundWindow` to focus a window
-- `GetWindowThreadProcessId` to map HWND to PID/thread
-- `IsWindow` to check if tracked HWND is still valid
-- `GetClassName` to filter for Windows Terminal windows (class: `CASCADIA_HOSTING_WINDOW_CLASS`)
-- `keybd_event` to simulate ALT keypress before SetForegroundWindow (foreground lock workaround)
-- `GetForegroundWindow`, `IsWindowVisible`, `ShowWindow`, `BringWindowToTop` as supporting calls
+### Win32 P/Invoke (`Win32.fs`)
+`EnumWindows`, `SetForegroundWindow`, `GetWindowThreadProcessId`, `IsWindow`, `GetClassName`, `keybd_event`, `PostMessage` (WM_CLOSE), `ShowWindow`, `BringWindowToTop`
 
 ### Server State
+`Map<string, nativeint>` in a `MailboxProcessor` (`SessionManager.fs`). HWNDs validated on each API call. All PostAndAsyncReply calls use explicit timeouts (30s spawn, 10s others).
 
-In-memory `Map<string, nativeint>` mapping worktree path to HWND, managed by a dedicated `MailboxProcessor` in `SessionManager.fs`. HWNDs validated with `IsWindow` on each API call (windows can be closed by user at any time). The refresh scheduler reads this state to populate `HasActiveSession` on each `WorktreeStatus`.
-
-### API Changes
-
-Extend `IWorktreeApi`:
-- `launchSession: LaunchRequest -> Async<Result<unit, string>>` — spawn agent with prompt
-- `focusSession: string -> Async<Result<unit, string>>` — focus window by worktree path
-- `killSession: string -> Async<Result<unit, string>>` — kill window by worktree path
-
-`openTerminal` opens a plain PowerShell window (no agent) but goes through SessionManager for HWND tracking.
-
-### Client Changes
-
-- **Terminal button becomes context-aware**: if `HasActiveSession` is true, clicking the `>` button calls `focusSession` instead of `openTerminal`
-- Visual indicator (e.g., green border) showing whether a tracked session window exists
-- No separate launch/focus/kill buttons on cards — the `launchSession` API is infrastructure for future contextual actions (e.g., buttons next to failing builds or PR comment threads that spawn targeted Claude tasks)
+### Persistence Format
+```json
+{ "sessions": { "Q:\\code\\AITestAgent": 12345678 } }
+```
+`data/sessions.json`, full rewrite on every state change. `System.Text.Json` serialization.
 
 ## Decisions
 
-- **One window per worktree**, not tabs -- HWNDs are reliable identifiers, tab indices are not
-- **Experiment-first** -- validate HWND resolution and SetForegroundWindow before building features
-- **No send-keys mid-session** -- initial task is passed as CLI argument at spawn; new tasks kill and respawn
-- **Server-side Win32** -- all P/Invoke lives in the F# server; client is a pure PWA
-- **Focus approach: keybd_event ALT** -- simulated ALT keypress before SetForegroundWindow is the simplest reliable workaround for Windows foreground lock (see experiment results below)
-- **PostAndAsyncReply timeouts** -- all MailboxProcessor calls use explicit timeouts (30s for spawn, 10s for other operations) to prevent silent hangs
-- **CreateNoWindow = true for wt.exe launcher** -- the wt.exe launcher process itself is just IPC to WindowsTerminal.exe; hiding its console window avoids a flash
-- **WM_CLOSE for kill, not Process.Kill** -- all WT windows share a single WindowsTerminal.exe process; Process.Kill would terminate ALL windows. PostMessage(WM_CLOSE) closes just the target window
-- **Explicit `new-tab` subcommand** -- `wt.exe --window new new-tab -d "path"` is required; the implicit default command does not correctly parse `-d` when combined with `--window`
+- **One window per worktree** — HWNDs are reliable identifiers, tab indices are not
+- **keybd_event ALT for focus** — simplest reliable workaround for Windows foreground lock (3 lines, no thread attachment)
+- **WM_CLOSE for kill** — all WT windows share one process; `Process.Kill` would terminate ALL windows
+- **Explicit `new-tab` subcommand** — `wt.exe --window new new-tab -d "path"` required; implicit default silently drops `-d`
+- **CreateNoWindow for launcher** — wt.exe launcher is just IPC; hiding its console avoids a flash
+- **Full rewrite persistence** — map is small, atomic rewrite is simpler than incremental updates
+- **No locking beyond MailboxProcessor** — writes only inside single-threaded agent, no concurrent races
+- **P/Invoke EntryPoint attributes** — DLL export names (`IsWindow`, `PostMessageW`) differ from F# binding names; missing EntryPoint crashes the MailboxProcessor silently
 
-## Experiment Results
+## Key Files
 
-Validated in `src/Tests/Win32ExperimentTests.fs` (Category=Local, must run on machine with Windows Terminal).
-
-### HWND Resolution (Experiment 1)
-- **Status: WORKS**
-- EnumWindows diff reliably detects new CASCADIA_HOSTING_WINDOW_CLASS windows after `wt.exe --window new` spawn
-- Resolution latency: 200-300ms typical (polling at 100ms intervals)
-- Same approach works for Claude spawn (Experiment 3)
-
-### SetForegroundWindow (Experiments 2, 2b-2e)
-- **Direct SetForegroundWindow**: May be blocked by Windows foreground lock when calling process is not the foreground owner
-- **AllowSetForegroundWindow**: Does not help (caller cannot grant itself permission)
-- **AttachThreadInput workaround**: WORKS -- attach calling thread to foreground thread, call SetForegroundWindow, detach
-- **keybd_event ALT workaround**: WORKS -- simulate ALT keypress to bypass foreground lock, then SetForegroundWindow. Simplest approach (3 lines)
-- **ShowWindow + BringWindowToTop combo**: WORKS -- ShowWindow(SW_RESTORE) + BringWindowToTop + SetForegroundWindow
-- **Combined approach**: WORKS -- all techniques together (overkill but validates each)
-
-**Recommended for production**: `keybd_event ALT` approach. It is the simplest (no thread attachment/detachment needed) and reliable. Fallback to AttachThreadInput if edge cases are found.
-
-### Claude Spawn (Experiment 3)
-- **Status: WORKS**
-- `wt.exe --window new -d <path> -- claude "prompt"` spawns correctly
-- HWND resolution works identically to plain pwsh spawn
-
-## Known Bugs (discovered during implementation)
-
-### Bug 1: `-d` flag ignored -- FIXED
-**Symptoms**: Clicking terminal button opens a new WT window but in the default profile directory, not the worktree path.
-**Root cause**: `wt.exe` argument parsing requires the explicit `new-tab` subcommand when using `-d` together with `--window new`. The implicit default command does not correctly parse `-d` from global options. Using `-w new -d "path"` silently drops the `-d` flag.
-**Fix**: Changed from `wt.exe -w new -d "path"` to `wt.exe --window new new-tab -d "path"`.
-**Verification**: Test `spawned window opens in the requested directory` writes `Get-Location` to a marker file and asserts it matches the expected worktree path.
-
-### Bug 2: Subsequent clicks do nothing after windows are closed -- FIXED
-**Symptoms**: First click spawns a window. Close it manually. Click terminal button again -- nothing happens.
-**Root cause**: Two P/Invoke declaration errors caused `processMessage` to crash, silently killing the MailboxProcessor loop:
-1. `IsWindowNative` was declared without `EntryPoint = "IsWindow"` -- the DLL export name is `IsWindow`, not `IsWindowNative`. Every `isWindowValid` call threw `EntryPointNotFoundException`.
-2. `PostMessageNative` had the same issue -- needed `EntryPoint = "PostMessageW"`.
-After the first spawn succeeded, `validateSessions` (which calls `isWindowValid`) would crash, preventing the MailboxProcessor from processing subsequent messages.
-**Fix**: Added `EntryPoint` attributes to both P/Invoke declarations. Added error handling to the MailboxProcessor loop that sends error replies and continues processing.
-**Verification**: Test `re-spawn works after killSession` spawns, kills, re-spawns and verifies different HWNDs.
-
-### Bug 3: Safety -- FIXED (kill uses WM_CLOSE instead of Process.Kill)
-**Context**: The developer's Claude Code session and the Vite dev proxy both run in WT windows. All WT windows share a single `WindowsTerminal.exe` process. `Process.Kill(entireProcessTree = true)` would kill ALL terminal windows, including the developer's active sessions and even the test runner.
-**Fix**: Replaced `Process.Kill` with `PostMessage(hwnd, WM_CLOSE, 0, 0)` via Win32 P/Invoke. This closes only the specific window, not the entire process. Added `closeWindow` to `Win32.fs`.
-**Verification**: Test `killSession closes the window` asserts that after kill, the HWND is invalid while other WT windows remain unaffected.
-
-## Risks
-
-- **HWND resolution timing**: RESOLVED -- polling at 100ms with 10s timeout works reliably (200-300ms typical)
-- **SetForegroundWindow restrictions**: RESOLVED -- keybd_event ALT workaround bypasses foreground lock
-- **Window clutter**: 10+ windows in taskbar/Alt-Tab -- acceptable for now, reassess if it becomes a problem
-- **Race conditions**: User closes window between HWND capture and focus attempt (mitigated by `IsWindow` check)
+- `src/Server/Win32.fs` — P/Invoke declarations, HWND resolution, focus/kill helpers
+- `src/Server/SessionManager.fs` — MailboxProcessor state agent, spawn/focus/kill/persist logic
+- `src/Server/WorktreeApi.fs` — API wiring, `HasActiveSession` population
