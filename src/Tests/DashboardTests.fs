@@ -2216,3 +2216,349 @@ type DashboardTests() =
             Assert.That(btnCount, Is.EqualTo(cardCount), "Every card should still have a .terminal-btn")
         }
 
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Dashboard div has tabIndex 0 for keyboard events``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            let! tabIndex = dashboard.GetAttributeAsync("tabindex")
+            Assert.That(tabIndex, Is.EqualTo("0"), "Dashboard div should have tabIndex=0 to receive keyboard events")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow down focuses first visible element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focused.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Pressing ArrowDown should focus exactly one element")
+
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "First focused element should be a repo header")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow up focuses first visible element when nothing focused``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowUp")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focused.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Pressing ArrowUp with no focus should focus exactly one element")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Focus ring has correct CSS outline``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! outlineStyle = focused |> computedStyle "outlineStyle"
+            Assert.That(outlineStyle, Is.EqualTo("solid"), "Focused element should have solid outline")
+
+            let! outlineColor = focused |> computedStyle "outlineColor"
+            Assert.That(outlineColor, Is.EqualTo("rgb(74, 158, 255)"), "Focus ring should be #4a9eff blue")
+
+            let! outlineWidth = focused |> computedStyle "outlineWidth"
+            Assert.That(outlineWidth, Is.EqualTo("2px"), "Focus ring outline width should be 2px")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow down navigates from header to first card``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused1 = this.Page.Locator(".focused")
+            do! focused1.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! firstClass = focused1.GetAttributeAsync("class")
+            Assert.That(firstClass, Does.Contain("repo-header"), "First ArrowDown should focus repo header")
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused2 = this.Page.Locator(".focused")
+            do! focused2.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! secondClass = focused2.GetAttributeAsync("class")
+            Assert.That(secondClass, Does.Contain("wt-card"), "Second ArrowDown should focus a worktree card")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow up moves focus backward``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! secondClass = focused.GetAttributeAsync("class")
+            Assert.That(secondClass, Does.Contain("wt-card"), "Should be on a card after two ArrowDown presses")
+
+            do! this.Page.Keyboard.PressAsync("ArrowUp")
+
+            let focusedAfterUp = this.Page.Locator(".focused")
+            do! focusedAfterUp.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterUpClass = focusedAfterUp.GetAttributeAsync("class")
+            Assert.That(afterUpClass, Does.Contain("repo-header"), "ArrowUp should go back to repo header")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Only one element has focused class at a time``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focused.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Exactly one element should have .focused class at any time")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Enter on repo header toggles collapse``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Should be focused on repo header")
+
+            let firstSection = this.Page.Locator(".repo-section").First
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridBefore = cardGrid.CountAsync()
+            Assert.That(gridBefore, Is.EqualTo(1), "Card grid should be visible before Enter")
+
+            do! this.Page.Keyboard.PressAsync("Enter")
+
+            let! gridAfter = cardGrid.CountAsync()
+            Assert.That(gridAfter, Is.EqualTo(0), "Card grid should be removed after Enter on focused repo header")
+
+            let focusedAfterCollapse = this.Page.Locator(".focused")
+            let! postCollapseClass = focusedAfterCollapse.GetAttributeAsync("class")
+            Assert.That(postCollapseClass, Does.Contain("repo-header"),
+                "Focus should remain on repo header after collapsing")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Collapsed repo cards are skipped during navigation``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Should be focused on first repo header")
+
+            do! this.Page.Keyboard.PressAsync("Enter")
+
+            let firstSection = this.Page.Locator(".repo-section").First
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridCount = cardGrid.CountAsync()
+            Assert.That(gridCount, Is.EqualTo(0), "First section should be collapsed")
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! nextClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(nextClass, Does.Contain("repo-header").And.Contain("collapsed").Or.Contain("repo-header"),
+                "After collapsing first repo, ArrowDown should skip to second repo header")
+
+            let focusedText = focusedAfter.Locator(".repo-name")
+            let! count = focusedText.CountAsync()
+            if count > 0 then
+                let! name = focusedText.TextContentAsync()
+                let firstSectionName = firstSection.Locator(".repo-name")
+                let! firstName = firstSectionName.TextContentAsync()
+                Assert.That(name, Is.Not.EqualTo(firstName),
+                    "Focus should have moved past the collapsed first repo to the second repo")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Navigation wraps from last to first element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let repoHeaders = this.Page.Locator(".repo-header")
+            let! headerCount = repoHeaders.CountAsync()
+            let cards = this.Page.Locator(".wt-card")
+            let! cardCount = cards.CountAsync()
+            let totalElements = headerCount + cardCount
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let mutable i = 1
+            while i < totalElements do
+                do! this.Page.Keyboard.PressAsync("ArrowDown")
+                i <- i + 1
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedAfterWrap = this.Page.Locator(".focused")
+            do! focusedAfterWrap.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! wrappedClass = focusedAfterWrap.GetAttributeAsync("class")
+            Assert.That(wrappedClass, Does.Contain("repo-header"), "After wrapping, focus should be back on first repo header")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Navigation wraps from first to last element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! firstClass = focused.GetAttributeAsync("class")
+            Assert.That(firstClass, Does.Contain("repo-header"), "Should be on first repo header")
+
+            do! this.Page.Keyboard.PressAsync("ArrowUp")
+
+            let focusedAfterWrap = this.Page.Locator(".focused")
+            do! focusedAfterWrap.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! wrappedClass = focusedAfterWrap.GetAttributeAsync("class")
+            Assert.That(wrappedClass, Does.Contain("wt-card"), "ArrowUp from first element should wrap to last card")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Dashboard has no focused element initially``() =
+        task {
+            let focused = this.Page.Locator(".focused")
+            let! count = focused.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "No element should have .focused class on initial load")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modifier keys do not trigger actions on focused card``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("wt-card"), "Should be focused on a card")
+
+            do! this.Page.Keyboard.PressAsync("Control+s")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("wt-card"), "Focus should remain on the same card after Ctrl+S")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Focused card class applied to wt-card element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedCard = this.Page.Locator(".wt-card.focused")
+            do! focusedCard.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focusedCard.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Exactly one wt-card should have .focused class")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Focused repo header class applied to repo-header element``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedHeader = this.Page.Locator(".repo-header.focused")
+            do! focusedHeader.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! count = focusedHeader.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Exactly one repo-header should have .focused class")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Dashboard div does not show outline when focused``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let! outline = dashboard |> computedStyle "outlineStyle"
+            Assert.That(outline, Is.EqualTo("none"), "Dashboard div itself should have outline:none (focus ring only on cards/headers)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Collapsing repo while child card is focused moves focus to header``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("wt-card"), "Should be focused on a card")
+
+            let firstSection = this.Page.Locator(".repo-section").First
+            let header = firstSection.Locator(".repo-header")
+            do! header.ClickAsync()
+
+            let cardGrid = firstSection.Locator(".card-grid")
+            let! gridCount = cardGrid.CountAsync()
+            Assert.That(gridCount, Is.EqualTo(0), "First section should be collapsed after click")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should move to repo header when collapsing a repo while its child card is focused")
+        }
+
