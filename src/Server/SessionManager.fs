@@ -8,7 +8,6 @@ open System.Text.Json
 type private SessionMsg =
     | Spawn of worktreePath: string * prompt: string * AsyncReplyChannel<Result<unit, string>>
     | SpawnTerminal of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
-    | SpawnTerminalCmd of worktreePath: string * command: string * AsyncReplyChannel<Result<unit, string>>
     | Focus of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | Kill of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
@@ -39,99 +38,44 @@ let private encodeCommand (command: string) =
     let bytes = System.Text.Encoding.Unicode.GetBytes(command)
     Convert.ToBase64String(bytes)
 
-let private spawnAndResolve (worktreePath: string) (prompt: string) =
+let private spawnWtAndResolve (args: string) (logLabel: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
+    Log.log "SessionManager" $"Spawning {logLabel}: wt.exe {args}"
+
+    let psi =
+        ProcessStartInfo(
+            "wt.exe",
+            args,
+            UseShellExecute = false,
+            CreateNoWindow = true)
+
+    try
+        let wtProcess = Process.Start(psi)
+        Log.log "SessionManager" $"wt.exe {logLabel} started, PID={wtProcess.Id}"
+        wtProcess.WaitForExit(5_000) |> ignore
+        Log.log "SessionManager" $"wt.exe {logLabel} exited={wtProcess.HasExited}"
+
+        match resolveNewHwnd beforeWindows 10_000 with
+        | Some hwnd ->
+            Log.log "SessionManager" $"{logLabel} HWND {hwnd} resolved"
+            Ok hwnd
+        | None ->
+            Log.log "SessionManager" $"Failed to resolve {logLabel} HWND"
+            Error $"Failed to detect new window after {logLabel} spawn"
+    with ex ->
+        Log.log "SessionManager" $"Failed to spawn {logLabel} wt.exe: {ex.Message}"
+        Error $"Failed to spawn {logLabel}: {ex.Message}"
+
+let private spawnAndResolve (worktreePath: string) (prompt: string) =
     let nativePath = worktreePath.Replace('/', '\\')
     let escapedPrompt = prompt.Replace("'", "''")
     let encoded = encodeCommand $"Set-Location '{nativePath}'; claude '{escapedPrompt}'"
-    let args = $"--window new -- pwsh -NoExit -EncodedCommand {encoded}"
-    Log.log "SessionManager" $"Spawning: wt.exe {args}"
-
-    let psi =
-        ProcessStartInfo(
-            "wt.exe",
-            args,
-            UseShellExecute = false,
-            CreateNoWindow = true)
-
-    try
-        let wtProcess = Process.Start(psi)
-        Log.log "SessionManager" $"wt.exe started, PID={wtProcess.Id}"
-        wtProcess.WaitForExit(5_000) |> ignore
-        Log.log "SessionManager" $"wt.exe exited={wtProcess.HasExited} for {worktreePath}"
-
-        match resolveNewHwnd beforeWindows 10_000 with
-        | Some hwnd ->
-            Log.log "SessionManager" $"HWND {hwnd} resolved for {worktreePath}"
-            Ok hwnd
-        | None ->
-            Log.log "SessionManager" $"Failed to resolve HWND for {worktreePath}"
-            Error "Failed to detect new window after spawn"
-    with ex ->
-        Log.log "SessionManager" $"Failed to spawn wt.exe: {ex.Message}"
-        Error $"Failed to spawn: {ex.Message}"
+    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "session"
 
 let private spawnTerminalAndResolve (worktreePath: string) =
-    let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
     let nativePath = worktreePath.Replace('/', '\\')
     let encoded = encodeCommand $"Set-Location '{nativePath}'"
-    let args = $"--window new -- pwsh -NoExit -EncodedCommand {encoded}"
-    Log.log "SessionManager" $"Spawning terminal: wt.exe {args}"
-
-    let psi =
-        ProcessStartInfo(
-            "wt.exe",
-            args,
-            UseShellExecute = false,
-            CreateNoWindow = true)
-
-    try
-        let wtProcess = Process.Start(psi)
-        Log.log "SessionManager" $"wt.exe terminal started, PID={wtProcess.Id}"
-        wtProcess.WaitForExit(5_000) |> ignore
-        Log.log "SessionManager" $"wt.exe terminal exited={wtProcess.HasExited} for {worktreePath}"
-
-        match resolveNewHwnd beforeWindows 10_000 with
-        | Some hwnd ->
-            Log.log "SessionManager" $"Terminal HWND {hwnd} resolved for {worktreePath}"
-            Ok hwnd
-        | None ->
-            Log.log "SessionManager" $"Failed to resolve terminal HWND for {worktreePath}"
-            Error "Failed to detect new terminal window after spawn"
-    with ex ->
-        Log.log "SessionManager" $"Failed to spawn terminal wt.exe: {ex.Message}"
-        Error $"Failed to spawn terminal: {ex.Message}"
-
-let private spawnTerminalWithCommandAndResolve (worktreePath: string) (command: string) =
-    let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
-    let nativePath = worktreePath.Replace('/', '\\')
-    let encoded = encodeCommand $"Set-Location '{nativePath}'; {command}"
-    let args = $"--window new -- pwsh -NoProfile -NoExit -EncodedCommand {encoded}"
-    Log.log "SessionManager" $"Spawning terminal+cmd: wt.exe {args}"
-
-    let psi =
-        ProcessStartInfo(
-            "wt.exe",
-            args,
-            UseShellExecute = false,
-            CreateNoWindow = true)
-
-    try
-        let wtProcess = Process.Start(psi)
-        Log.log "SessionManager" $"wt.exe terminal+cmd started, PID={wtProcess.Id}"
-        wtProcess.WaitForExit(5_000) |> ignore
-        Log.log "SessionManager" $"wt.exe terminal+cmd exited={wtProcess.HasExited} for {worktreePath}"
-
-        match resolveNewHwnd beforeWindows 10_000 with
-        | Some hwnd ->
-            Log.log "SessionManager" $"Terminal+cmd HWND {hwnd} resolved for {worktreePath}"
-            Ok hwnd
-        | None ->
-            Log.log "SessionManager" $"Failed to resolve terminal+cmd HWND for {worktreePath}"
-            Error "Failed to detect new terminal window after spawn"
-    with ex ->
-        Log.log "SessionManager" $"Failed to spawn terminal+cmd wt.exe: {ex.Message}"
-        Error $"Failed to spawn terminal+cmd: {ex.Message}"
+    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "terminal"
 
 let private killByHwnd (hwnd: nativeint) =
     if Win32.isWindowValid hwnd then
@@ -225,21 +169,6 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
             reply.Reply(Error msg)
             validated |> Map.remove path
 
-    | SpawnTerminalCmd(path, command, reply) ->
-        let validated = validateSessions sessions
-
-        match validated |> Map.tryFind path with
-        | Some existingHwnd -> killByHwnd existingHwnd
-        | None -> ()
-
-        match spawnTerminalWithCommandAndResolve path command with
-        | Ok hwnd ->
-            reply.Reply(Ok())
-            validated |> Map.add path hwnd
-        | Error msg ->
-            reply.Reply(Error msg)
-            validated |> Map.remove path
-
     | Focus(path, reply) ->
         let validated = validateSessions sessions
 
@@ -291,7 +220,6 @@ let createAgent () =
                             match msg with
                             | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | SpawnTerminalCmd(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | GetActiveSessions reply -> reply.Reply(sessions)
@@ -316,9 +244,6 @@ let spawnSession (agent: SessionAgent) (worktreePath: string) (prompt: string) =
 
 let spawnTerminal (agent: SessionAgent) (worktreePath: string) =
     agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminal(worktreePath, reply)), timeout = 30_000)
-
-let spawnTerminalWithCommand (agent: SessionAgent) (worktreePath: string) (command: string) =
-    agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminalCmd(worktreePath, command, reply)), timeout = 30_000)
 
 let focusSession (agent: SessionAgent) (worktreePath: string) =
     agent.Agent.PostAndAsyncReply((fun reply -> Focus(worktreePath, reply)), timeout = 10_000)
