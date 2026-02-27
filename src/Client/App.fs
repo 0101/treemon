@@ -2,17 +2,12 @@ module App
 
 open Shared
 open Shared.EventUtils
+open Navigation
 open Elmish
 open Feliz
 open Fable.Remoting.Client
 open Browser
-
-type RepoModel =
-    { RepoId: RepoId
-      Name: string
-      Worktrees: WorktreeStatus list
-      IsReady: bool
-      IsCollapsed: bool }
+open Fable.Core.JsInterop
 
 type Model =
     { Repos: RepoModel list
@@ -25,7 +20,8 @@ type Model =
       BranchEvents: Map<string, CardEvent list>
       SyncPending: Set<string>
       AppVersion: string option
-      EyeDirection: float * float }
+      EyeDirection: float * float
+      FocusedElement: FocusTarget option }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -42,6 +38,10 @@ type Msg =
     | SyncTick
     | DeleteWorktree of string
     | DeleteCompleted of Result<unit, string>
+    | FocusSession of path: string
+    | SessionResult of Result<unit, string>
+    | KeyPressed of key: string * hasModifier: bool
+    | SetFocus of FocusTarget option
 
 let worktreeApi =
     Remoting.createApi ()
@@ -71,7 +71,8 @@ let init () =
       BranchEvents = Map.empty
       SyncPending = Set.empty
       AppVersion = None
-      EyeDirection = (0.0, 0.0) },
+      EyeDirection = (0.0, 0.0)
+      FocusedElement = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -80,6 +81,30 @@ let randomEyeDirection () =
     let dx = rng.NextDouble() * 3.0 - 1.5
     let dy = rng.NextDouble() * 2.0 - 1.0
     (dx, dy)
+
+let findWorktree (scopedKey: string) (model: Model) =
+    let parts = scopedKey.Split('/', 2)
+    if parts.Length < 2 then None
+    else
+        let repoId, branch = parts[0], parts[1]
+        model.Repos
+        |> List.tryFind (fun r -> RepoId.value r.RepoId = repoId)
+        |> Option.bind (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
+
+let terminalAction (wt: WorktreeStatus) =
+    if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
+
+let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
+    match focused with
+    | Card scopedKey ->
+        match key with
+        | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
+        | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+        | _ -> None
+    | RepoHeader repoId ->
+        match key with
+        | "Enter" -> Some (ToggleCollapse repoId)
+        | _ -> None
 
 let update msg model =
     match msg with
@@ -107,7 +132,8 @@ let update msg model =
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
-                EyeDirection = randomEyeDirection () },
+                EyeDirection = randomEyeDirection () }
+            |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
     | DataFailed _ ->
@@ -130,10 +156,20 @@ let update msg model =
         { model with IsCompact = not model.IsCompact }, Cmd.none
 
     | ToggleCollapse repoId ->
-        { model with
-            Repos = model.Repos |> List.map (fun r ->
-                if r.RepoId = repoId then { r with IsCollapsed = not r.IsCollapsed }
-                else r) },
+        let isCollapsing =
+            model.Repos
+            |> List.tryFind (fun r -> r.RepoId = repoId)
+            |> Option.map (fun r -> not r.IsCollapsed)
+            |> Option.defaultValue false
+        let updatedModel =
+            { model with
+                Repos = model.Repos |> List.map (fun r ->
+                    if r.RepoId = repoId then { r with IsCollapsed = not r.IsCollapsed }
+                    else r) }
+        let focusAdjusted =
+            if isCollapsing then adjustFocusAfterCollapse repoId updatedModel.FocusedElement
+            else updatedModel.FocusedElement
+        { updatedModel with FocusedElement = focusAdjusted },
         Cmd.none
 
     | OpenTerminal path ->
@@ -184,6 +220,37 @@ let update msg model =
     | DeleteCompleted (Error _) ->
         model, Cmd.none
 
+    | FocusSession path ->
+        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+
+    | SessionResult _ ->
+        model, fetchWorktrees ()
+
+    | SetFocus target ->
+        { model with FocusedElement = target }, Cmd.none
+
+    | KeyPressed (key, hasModifier) ->
+        match key with
+        | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
+            let cols = getColumnCount ()
+            let newFocus, navAction = navigateSpatial key cols model.Repos model.FocusedElement
+            let actionCmd =
+                match navAction with
+                | NoAction -> Cmd.none
+                | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
+                | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
+            { model with FocusedElement = newFocus },
+            Cmd.batch [ actionCmd; Cmd.ofEffect (fun _ -> scrollFocusedIntoView newFocus) ]
+        | _ when hasModifier ->
+            model, Cmd.none
+        | _ ->
+            match model.FocusedElement with
+            | None -> model, Cmd.none
+            | Some focused ->
+                match keyBinding focused key model with
+                | Some action -> model, Cmd.ofMsg action
+                | None -> model, Cmd.none
+
 let pollingSubscription (model: Model) : Sub<Msg> =
     let worktreePolling (dispatch: Dispatch<Msg>) =
         let intervalId =
@@ -226,7 +293,8 @@ let isMerged (wt: WorktreeStatus) =
 
 let cardClassName (wt: WorktreeStatus) =
     let ct = ctClassName wt.CodingTool
-    if isMerged wt then $"wt-card ct-{ct} merged" else $"wt-card ct-{ct}"
+    let session = if wt.HasActiveSession then " has-session" else ""
+    if isMerged wt then $"wt-card ct-{ct} merged{session}" else $"wt-card ct-{ct}{session}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
 
@@ -552,10 +620,12 @@ let buildBadges (repoName: string) (builds: BuildInfo list) =
     React.fragment (builds |> List.map (buildBadge repoName))
 
 let terminalButton dispatch (wt: WorktreeStatus) =
+    let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
+    let title = if wt.HasActiveSession then "Focus session window" else "Open terminal"
     Html.button [
         prop.className "terminal-btn"
-        prop.title "Open terminal"
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenTerminal wt.Path))
+        prop.title title
+        prop.onClick (fun e -> e.stopPropagation(); dispatch action)
         prop.text ">"
     ]
 
@@ -654,10 +724,12 @@ let workMetricsView (metrics: WorkMetrics option) =
             ]
         ]
 
-let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: WorktreeStatus) =
+    let baseClass = cardClassName wt + " compact"
+    let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.key wt.Branch
-        prop.className (cardClassName wt + " compact")
+        prop.className className
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -681,10 +753,12 @@ let compactWorktreeCard dispatch (repoName: string) (wt: WorktreeStatus) =
         ]
     ]
 
-let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (wt: WorktreeStatus) =
+let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+    let baseClass = cardClassName wt
+    let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.key wt.Branch
-        prop.className (cardClassName wt)
+        prop.className className
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -722,12 +796,13 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
         ]
     ]
 
-let renderCard dispatch isCompact repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
+let renderCard dispatch isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
-    if isCompact then compactWorktreeCard dispatch repoName wt
-    else worktreeCard dispatch repoName events isPending scopedKey wt
+    let isFocused = focusedElement = Some (Card scopedKey)
+    if isCompact then compactWorktreeCard dispatch repoName isFocused wt
+    else worktreeCard dispatch repoName events isPending scopedKey isFocused wt
 
 let skeletonCard () =
     Html.div [
@@ -889,10 +964,13 @@ let anyRepoReady (repos: RepoModel list) =
 let allWorktreesEmpty (repos: RepoModel list) =
     repos |> List.forall _.Worktrees.IsEmpty
 
-let repoSectionHeader dispatch (repo: RepoModel) =
+let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoModel) =
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
+    let isFocused = focusedElement = Some (RepoHeader repo.RepoId)
+    let baseClass = if repo.IsCollapsed then "repo-header collapsed" else "repo-header"
+    let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
-        prop.className (if repo.IsCollapsed then "repo-header collapsed" else "repo-header")
+        prop.className className
         prop.onClick (fun _ -> dispatch (ToggleCollapse repo.RepoId))
         prop.children [
             Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
@@ -908,19 +986,19 @@ let repoSectionHeader dispatch (repo: RepoModel) =
         ]
     ]
 
-let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
+let repoSection dispatch isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
         prop.children [
-            repoSectionHeader dispatch repo
+            repoSectionHeader dispatch focusedElement repo
             if not repo.IsCollapsed then
                 if not repo.IsReady && repo.Worktrees.IsEmpty then
                     skeletonGrid ()
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
                     ]
         ]
     ]
@@ -928,6 +1006,16 @@ let repoSection dispatch isCompact (branchEvents: Map<string, CardEvent list>) (
 let view model dispatch =
     Html.div [
         prop.className "dashboard"
+        prop.tabIndex 0
+        prop.autoFocus true
+        prop.onKeyDown (fun e ->
+            match e.key with
+            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
+                e.preventDefault()
+                dispatch (KeyPressed (e.key, false))
+            | key ->
+                let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                dispatch (KeyPressed (key, hasModifier)))
         prop.children [
             Html.div [
                 prop.className "dashboard-header"
@@ -980,7 +1068,7 @@ let view model dispatch =
             else
                 Html.div [
                     prop.className "repo-list"
-                    prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.BranchEvents model.SyncPending))
+                    prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
                 ]
 
             schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory

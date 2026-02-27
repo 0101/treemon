@@ -277,7 +277,8 @@ type SortWorktreesTests() =
           Pr = PrStatus.NoPr
           MainBehindCount = 0
           IsDirty = false
-          WorkMetrics = None }
+          WorkMetrics = None
+          HasActiveSession = false }
 
     let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)
 

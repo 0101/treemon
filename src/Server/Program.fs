@@ -91,6 +91,7 @@ let main args =
     let cts = new CancellationTokenSource()
     let agent = RefreshScheduler.createAgent ()
     let syncAgent = SyncEngine.createSyncAgent ()
+    let sessionAgent = SessionManager.createAgent ()
 
     match config.TestFixtures with
     | Some path ->
@@ -103,7 +104,7 @@ let main args =
 
     let remotingApi =
         Remoting.createApi ()
-        |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent config.WorktreeRoots config.TestFixtures appVersion)
+        |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion)
         |> Remoting.withErrorHandler (fun ex routeInfo ->
             Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
             Propagate ex.Message)
