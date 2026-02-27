@@ -6,6 +6,7 @@ open Elmish
 open Feliz
 open Fable.Remoting.Client
 open Browser
+open Fable.Core.JsInterop
 
 type FocusTarget =
     | RepoHeader of RepoId
@@ -124,22 +125,198 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         | "Enter" -> Some (ToggleCollapse repoId)
         | _ -> None
 
-let navigateFocus (direction: int) (model: Model) =
-    let targets = visibleFocusTargets model.Repos
+let getColumnCount () =
+    Dom.document.querySelector ".card-grid"
+    |> Option.ofObj
+    |> Option.map (fun el ->
+        let cols: string = Dom.window?getComputedStyle(el)?getPropertyValue("grid-template-columns")
+        cols.Trim().Split(' ') |> Array.length)
+    |> Option.defaultValue 1
+
+type RepoNav =
+    { RepoId: RepoId
+      Header: FocusTarget
+      Cards: FocusTarget list }
+
+let repoNavSections (repos: RepoModel list) =
+    repos
+    |> List.map (fun repo ->
+        let repoId = RepoId.value repo.RepoId
+        { RepoId = repo.RepoId
+          Header = RepoHeader repo.RepoId
+          Cards =
+            if repo.IsCollapsed then []
+            else repo.Worktrees |> List.map (fun wt -> Card $"{repoId}/{wt.Branch}") })
+
+let navigateLinear (direction: int) (targets: FocusTarget list) (current: FocusTarget option) =
     match targets with
     | [] -> None
     | _ ->
-        match model.FocusedElement with
+        match current with
         | None -> Some targets.Head
-        | Some current ->
-            let currentIdx =
+        | Some c ->
+            let idx =
                 targets
-                |> List.tryFindIndex (fun t -> t = current)
+                |> List.tryFindIndex ((=) c)
                 |> Option.defaultValue -1
-            if currentIdx < 0 then Some targets.Head
-            else
-                let nextIdx = (currentIdx + direction + targets.Length) % targets.Length
-                Some targets[nextIdx]
+            if idx < 0 then Some targets.Head
+            else Some targets[(idx + direction + targets.Length) % targets.Length]
+
+let navigateSpatial (key: string) (cols: int) (model: Model) =
+    let sections = repoNavSections model.Repos
+    let allTargets = sections |> List.collect (fun s -> s.Header :: s.Cards)
+    match allTargets with
+    | [] -> None, Cmd.none
+    | _ ->
+        match model.FocusedElement with
+        | None -> Some allTargets.Head, Cmd.none
+        | Some current ->
+            let findSection target =
+                sections |> List.tryFindIndex (fun s ->
+                    s.Header = target || s.Cards |> List.contains target)
+            match current, key with
+            | RepoHeader _, "ArrowLeft" ->
+                let repoId = match current with RepoHeader rid -> rid | _ -> RepoId ""
+                let repo = model.Repos |> List.tryFind (fun r -> r.RepoId = repoId)
+                match repo with
+                | Some r when not r.IsCollapsed -> Some current, Cmd.ofMsg (ToggleCollapse repoId)
+                | _ -> Some current, Cmd.none
+
+            | RepoHeader _, "ArrowRight" ->
+                let repoId = match current with RepoHeader rid -> rid | _ -> RepoId ""
+                let repo = model.Repos |> List.tryFind (fun r -> r.RepoId = repoId)
+                match repo with
+                | Some r when r.IsCollapsed -> Some current, Cmd.ofMsg (ToggleCollapse repoId)
+                | _ -> Some current, Cmd.none
+
+            | RepoHeader _, ("ArrowUp" | "ArrowDown") ->
+                navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current), Cmd.none
+
+            | Card _, "ArrowLeft" ->
+                match findSection current with
+                | None -> Some current, Cmd.none
+                | Some si ->
+                    let section = sections[si]
+                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                    let colPos = cardIdx % cols
+                    if colPos > 0 then
+                        Some section.Cards[cardIdx - 1], Cmd.none
+                    else
+                        // First column: go to repo header above, or last card of previous repo
+                        if si > 0 then
+                            let prev = sections[si - 1]
+                            match prev.Cards with
+                            | [] -> Some prev.Header, Cmd.none
+                            | cards -> Some (List.last cards), Cmd.none
+                        else
+                            Some section.Header, Cmd.none
+
+            | Card _, "ArrowRight" ->
+                match findSection current with
+                | None -> Some current, Cmd.none
+                | Some si ->
+                    let section = sections[si]
+                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                    let colPos = cardIdx % cols
+                    let rowEnd = colPos >= cols - 1 || cardIdx >= section.Cards.Length - 1
+                    if not rowEnd then
+                        Some section.Cards[cardIdx + 1], Cmd.none
+                    else
+                        // End of row: go to first card of next row or next repo header
+                        let nextRowStart = cardIdx - colPos + cols
+                        if nextRowStart < section.Cards.Length then
+                            Some section.Cards[nextRowStart], Cmd.none
+                        elif si + 1 < sections.Length then
+                            Some sections[si + 1].Header, Cmd.none
+                        else
+                            navigateLinear 1 allTargets (Some current), Cmd.none
+
+            | Card _, "ArrowDown" ->
+                match findSection current with
+                | None -> Some current, Cmd.none
+                | Some si ->
+                    let section = sections[si]
+                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                    let colPos = cardIdx % cols
+                    let targetIdx = cardIdx + cols
+                    if targetIdx < section.Cards.Length then
+                        Some section.Cards[targetIdx], Cmd.none
+                    else
+                        // Cross repo boundary: find card in same column position in next repo
+                        let rec findInNextRepo idx =
+                            if idx >= sections.Length then None
+                            else
+                                let next = sections[idx]
+                                if next.Cards.Length > colPos then Some next.Cards[colPos]
+                                elif next.Cards.Length > 0 then Some (List.last next.Cards)
+                                else findInNextRepo (idx + 1)
+                        match findInNextRepo (si + 1) with
+                        | Some target -> Some target, Cmd.none
+                        | None ->
+                            // Wrap: find card in same column from first repo
+                            let rec findFromStart idx =
+                                if idx > si then None
+                                else
+                                    let sec = sections[idx]
+                                    if sec.Cards.Length > colPos then Some sec.Cards[colPos]
+                                    elif sec.Cards.Length > 0 then Some sec.Cards[0]
+                                    else findFromStart (idx + 1)
+                            match findFromStart 0 with
+                            | Some t -> Some t, Cmd.none
+                            | None -> navigateLinear 1 allTargets (Some current), Cmd.none
+
+            | Card _, "ArrowUp" ->
+                match findSection current with
+                | None -> Some current, Cmd.none
+                | Some si ->
+                    let section = sections[si]
+                    let cardIdx = section.Cards |> List.tryFindIndex ((=) current) |> Option.defaultValue 0
+                    let colPos = cardIdx % cols
+                    let targetIdx = cardIdx - cols
+                    if targetIdx >= 0 then
+                        Some section.Cards[targetIdx], Cmd.none
+                    else
+                        // Cross repo boundary: find card in same column position in previous repo
+                        let rec findInPrevRepo idx =
+                            if idx < 0 then None
+                            else
+                                let prev = sections[idx]
+                                if prev.Cards.IsEmpty then findInPrevRepo (idx - 1)
+                                else
+                                    // Go to last row, same column
+                                    let lastRowStart = (prev.Cards.Length - 1) / cols * cols
+                                    let target = lastRowStart + colPos
+                                    if target < prev.Cards.Length then Some prev.Cards[target]
+                                    else Some (List.last prev.Cards)
+                        match findInPrevRepo (si - 1) with
+                        | Some target -> Some target, Cmd.none
+                        | None ->
+                            // Wrap: find from last repo
+                            let rec findFromEnd idx =
+                                if idx <= si then None
+                                else
+                                    let sec = sections[idx]
+                                    if sec.Cards.IsEmpty then findFromEnd (idx - 1)
+                                    else
+                                        let lastRowStart = (sec.Cards.Length - 1) / cols * cols
+                                        let target = lastRowStart + colPos
+                                        if target < sec.Cards.Length then Some sec.Cards[target]
+                                        else Some (List.last sec.Cards)
+                            match findFromEnd (sections.Length - 1) with
+                            | Some t -> Some t, Cmd.none
+                            | None -> navigateLinear -1 allTargets (Some current), Cmd.none
+
+            | _ -> Some current, Cmd.none
+
+let scrollFocusedIntoView (target: FocusTarget option) =
+    Cmd.ofEffect (fun _ ->
+        match target with
+        | None -> ()
+        | Some _ ->
+            Dom.document.querySelector ".focused"
+            |> Option.ofObj
+            |> Option.iter (fun el ->
+                el?scrollIntoView(createObj [ "block" ==> "nearest" ])))
 
 let adjustFocusAfterCollapse (collapsedRepoId: RepoId) (model: Model) =
     match model.FocusedElement with
@@ -285,10 +462,11 @@ let rec update msg model =
 
     | KeyPressed (key, hasModifier) ->
         match key with
-        | "ArrowDown" ->
-            { model with FocusedElement = navigateFocus 1 model }, Cmd.none
-        | "ArrowUp" ->
-            { model with FocusedElement = navigateFocus -1 model }, Cmd.none
+        | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
+            let cols = getColumnCount ()
+            let newFocus, extraCmd = navigateSpatial key cols model
+            { model with FocusedElement = newFocus },
+            Cmd.batch [ extraCmd; scrollFocusedIntoView newFocus ]
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -1033,7 +1211,7 @@ let view model dispatch =
         prop.autoFocus true
         prop.onKeyDown (fun e ->
             match e.key with
-            | "ArrowDown" | "ArrowUp" ->
+            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
                 e.preventDefault()
                 dispatch (KeyPressed (e.key, false))
             | key ->

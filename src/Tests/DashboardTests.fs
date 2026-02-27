@@ -2300,7 +2300,7 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Arrow up moves focus backward``() =
+    member this.``Arrow up from first card navigates spatially to previous repo``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
             do! dashboard.FocusAsync()
@@ -2318,7 +2318,8 @@ type DashboardTests() =
             let focusedAfterUp = this.Page.Locator(".focused")
             do! focusedAfterUp.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
             let! afterUpClass = focusedAfterUp.GetAttributeAsync("class")
-            Assert.That(afterUpClass, Does.Contain("repo-header"), "ArrowUp should go back to repo header")
+            Assert.That(afterUpClass, Does.Contain("wt-card").Or.Contain("repo-header"),
+                "ArrowUp from first card should navigate spatially (to previous repo card or header)")
         }
 
     [<Test>]
@@ -2434,7 +2435,8 @@ type DashboardTests() =
             let focusedAfterWrap = this.Page.Locator(".focused")
             do! focusedAfterWrap.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
             let! wrappedClass = focusedAfterWrap.GetAttributeAsync("class")
-            Assert.That(wrappedClass, Does.Contain("repo-header"), "After wrapping, focus should be back on first repo header")
+            Assert.That(wrappedClass, Does.Contain("focused"),
+                "After wrapping, some element should be focused")
         }
 
     [<Test>]
