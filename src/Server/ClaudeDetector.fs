@@ -135,7 +135,7 @@ let getStatus (worktreePath: string) =
                 |> Option.map statusFromEntry
                 |> Option.defaultValue Idle
                 |> fun status ->
-                    if status = Done && age < TimeSpan.FromMinutes(1.0) then Working else status
+                    if status = Done && age < TimeSpan.FromSeconds(10.0) then Working else status
         with ex ->
             Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
             Idle
