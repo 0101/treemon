@@ -224,6 +224,7 @@ let private isSystemNoise (text: string) =
     text.Contains("PRESERVE ON CONTEXT COMPACTION")
     || text.StartsWith("<local-command-")
     || text.StartsWith("<system-reminder>")
+    || text.StartsWith("<task-notification>")
 
 let private extractUserContent (text: string) =
     match tryExtractSlashCommand text with
