@@ -185,8 +185,8 @@ let worktreeApi
           launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
-          getBranches = fun _ -> async { return [] }
-          createWorktree = fun _ -> async { return Error "Not implemented" } }
+          getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
+          createWorktree = fun _ -> async { return Ok() } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
           openTerminal = openTerminal validatePath sessionAgent
@@ -298,5 +298,31 @@ let worktreeApi
           killSession = fun path ->
               withValidatedPath path "killSession" (fun () ->
                   SessionManager.killSession sessionAgent path)
-          getBranches = fun _ -> async { return [] }
-          createWorktree = fun _ -> async { return Error "Not implemented" } }
+          getBranches = fun repoIdStr ->
+              async {
+                  let repoId = RepoId.create repoIdStr
+
+                  match rootPaths |> Map.tryFind repoId with
+                  | None ->
+                      Log.log "API" $"getBranches: unknown repo '{repoIdStr}'"
+                      return []
+                  | Some root ->
+                      return! GitWorktree.listRemoteBranches root
+              }
+          createWorktree = fun req ->
+              async {
+                  let repoId = RepoId.create req.RepoId
+
+                  match rootPaths |> Map.tryFind repoId with
+                  | None ->
+                      return Error $"Unknown repo: {req.RepoId}"
+                  | Some root ->
+                      let! result = GitWorktree.createWorktree root req.BranchName req.BaseBranch
+
+                      match result with
+                      | Ok () ->
+                          agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                      | Error _ -> ()
+
+                      return result
+              } }
