@@ -13,6 +13,7 @@
     <Compile Include="Log.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="ProcessRunner.fs" />
+    <Compile Include="JsonHelpers.fs" />
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />
     <Compile Include="SessionManager.fs" />
