@@ -5,22 +5,33 @@
 <h1 align="center">Treemon</h1>
 
 <p align="center">
-  A dashboard for monitoring git worktrees across multiple repositories — git status, Claude Code and Copilot activity, beads tasks, Azure DevOps and GitHub PRs in one place.
+  <b style="font-size: 1.2em">The mission control center for the AI-assisted developer.</b><br/>
+  When you have dozens of AI agents working autonomously across various git worktrees, keeping track of them becomes impossible. Terminals get lost, PRs sit forgotten, and context is lost. Treemon solves this by giving you a unified view.
 </p>
 
 ---
 
-Point Treemon at one or more directories that contain git worktrees and it discovers all active branches, polling them in the background. Each worktree gets a card showing:
+<p align="center">
+  <img src="docs/screenshot.png" alt="Treemon dashboard" width="600" />
+</p>
 
-- **Last commit** and relative time
-- **Dirty / behind-main** indicators with one-click branch sync
-- **Coding tool** session status — Claude Code and Copilot (Working / Waiting / Done / Idle)
-- **[Beads](https://github.com/steveyegge/beads)** task counts with progress bar
-- **PR status** — Azure DevOps and GitHub: PR badges, comment counts, build results
-- **Work metrics** — commit grid and diff stats
-- **Terminal sessions** — spawn, focus, and track Windows Terminal windows per worktree
+## Why Treemon?
 
-No hooks, no agents running inside your worktrees — just a lightweight polling loop that reads git, CLI tools, and file mtimes.
+When orchestrating massive parallel work by agents (like Claude Code or Copilot), Treemon provides:
+
+- 🦅 **Bird's-eye view:** See exactly which agent is waiting for input, which PR is failing tests, and which branch has unpushed commits.
+- ⚡ **Lightning-fast context switching:** Spatial keyboard navigation lets you instantly jump to the exact Windows Terminal tab for any active worktree.
+- 🧹 **Zero configuration:** No hooks or agents to install inside your repos. Just point it at a folder and it works.
+
+### Dashboard Capabilities
+
+Point Treemon at one or more directories, and it runs a lightweight background polling loop (reading git, CLI tools, and file mtimes) to track:
+
+- **AI Agent Status:** Claude Code and Copilot session tracking (Working / Waiting / Done / Idle)
+- **Terminal Management:** Spawn, focus, and track Windows Terminal tabs per worktree
+- **Git State:** Dirty / behind-main indicators, one-click branch sync, and commit metrics
+- **PR Tracking:** Azure DevOps and GitHub PR badges, comment counts, and build results
+- **Task Tracking:** [Beads](https://github.com/steveyegge/beads) completion and progress bars
 
 ## Getting started
 
