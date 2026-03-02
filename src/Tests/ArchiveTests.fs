@@ -3,6 +3,8 @@ module Tests.ArchiveTests
 open System
 open System.IO
 open NUnit.Framework
+open Microsoft.Playwright
+open Microsoft.Playwright.NUnit
 open Server.TreemonConfig
 open Navigation
 open Shared
@@ -328,3 +330,424 @@ type NavigationArchiveTests() =
             |> List.choose (function Card key -> Some key | _ -> None)
 
         Assert.That(cardKeys, Is.EqualTo([ "Repo1/main"; "Repo2/develop" ]))
+
+
+[<TestFixture>]
+[<Category("E2E")>]
+[<Category("Fast")>]
+type ArchiveE2ETests() =
+    inherit PageTest()
+
+    let baseUrl = ServerFixture.viteUrl
+
+    let makeWorktreeJson (branch: string) (isArchived: bool) =
+        let archived = if isArchived then "true" else "false"
+        $"""{{
+            "Path":"Q:/test/{branch}","Branch":"{branch}",
+            "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
+            "Beads":{{"Open":0,"InProgress":0,"Closed":0}},
+            "CodingTool":"Idle","CodingToolProvider":null,
+            "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
+            "WorkMetrics":null,"HasActiveSession":false,"IsArchived":{archived}
+        }}"""
+
+    let makeDashboardJson (worktrees: string list) =
+        let wts = worktrees |> String.concat ","
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test"}}"""
+
+    let emptySyncStatus = "{}"
+
+    let setupMockedPage (page: IPage) (getWorktreesJson: unit -> string) (archiveCalls: System.Collections.Generic.List<string>) (unarchiveCalls: System.Collections.Generic.List<string>) =
+        task {
+            do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
+                let json = getWorktreesJson ()
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)))
+
+            do! page.RouteAsync("**/IWorktreeApi/getSyncStatus", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = emptySyncStatus)))
+
+            do! page.RouteAsync("**/IWorktreeApi/archiveWorktree", fun route ->
+                let body = route.Request.PostData
+                archiveCalls.Add(if body = null then "" else body)
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "\"Ok\"")))
+
+            do! page.RouteAsync("**/IWorktreeApi/unarchiveWorktree", fun route ->
+                let body = route.Request.PostData
+                unarchiveCalls.Add(if body = null then "" else body)
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "\"Ok\"")))
+        }
+
+    override this.ContextOptions() =
+        let opts = base.ContextOptions()
+        opts.IgnoreHTTPSErrors <- true
+        opts
+
+    [<Test>]
+    member this.``Active worktree cards have archive button``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "feature-a" false
+                makeWorktreeJson "feature-b" false
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveBtns = page.Locator(".wt-card .archive-btn")
+            do! archiveBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = archiveBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(2), "Each active card should have an archive button")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archived worktrees render in archive section``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active-branch" false
+                makeWorktreeJson "old-branch" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let activeCards = page.Locator(".card-grid .wt-card")
+            do! activeCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! activeCount = activeCards.CountAsync()
+            Assert.That(activeCount, Is.EqualTo(1), "Only non-archived worktrees appear in card grid")
+
+            let archiveSection = page.Locator(".archive-section")
+            do! archiveSection.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! sectionCount = archiveSection.CountAsync()
+            Assert.That(sectionCount, Is.EqualTo(1), "Archive section should be present when archived worktrees exist")
+
+            let archiveCards = page.Locator(".archive-section .archive-card")
+            let! archiveCardCount = archiveCards.CountAsync()
+            Assert.That(archiveCardCount, Is.EqualTo(1), "Archived worktree should appear as archive-card")
+
+            let! branchText = archiveCards.First.Locator(".branch-name").TextContentAsync()
+            Assert.That(branchText, Is.EqualTo("old-branch"), "Archive card should show the archived branch name")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive section not visible when no archived worktrees``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "feature-a" false
+                makeWorktreeJson "feature-b" false
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let cards = page.Locator(".wt-card")
+            do! cards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! archiveSectionCount = page.Locator(".archive-section").CountAsync()
+            Assert.That(archiveSectionCount, Is.EqualTo(0), "Archive section should not render when no worktrees are archived")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive card has unarchive button``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJson "archived" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let unarchiveBtns = page.Locator(".archive-card .unarchive-btn")
+            do! unarchiveBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = unarchiveBtns.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Archive card should have an unarchive button")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive card has no CT dot or PR info``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJson "archived" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveCard = page.Locator(".archive-card")
+            do! archiveCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! ctDotCount = archiveCard.Locator(".ct-dot").CountAsync()
+            Assert.That(ctDotCount, Is.EqualTo(0), "Archive card should not have a coding tool status dot")
+
+            let! prRowCount = archiveCard.Locator(".pr-row").CountAsync()
+            Assert.That(prRowCount, Is.EqualTo(0), "Archive card should not have PR info")
+
+            let! beadsCount = archiveCard.Locator(".beads-row").CountAsync()
+            Assert.That(beadsCount, Is.EqualTo(0), "Archive card should not have beads info")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Clicking archive button calls archiveWorktree API``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let archiveCalls = System.Collections.Generic.List<string>()
+
+            let json = makeDashboardJson [
+                makeWorktreeJson "feature-to-archive" false
+            ]
+
+            do! setupMockedPage page (fun () -> json) archiveCalls (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveBtn = page.Locator(".wt-card .archive-btn").First
+            do! archiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! archiveBtn.ClickAsync()
+
+            do! page.WaitForTimeoutAsync(500.0f)
+            Assert.That(archiveCalls.Count, Is.GreaterThanOrEqualTo(1), "Clicking archive should call archiveWorktree API")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Clicking unarchive button calls unarchiveWorktree API``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let unarchiveCalls = System.Collections.Generic.List<string>()
+
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJson "archived-branch" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) unarchiveCalls
+            let! _ = page.GotoAsync(baseUrl)
+
+            let unarchiveBtn = page.Locator(".archive-card .unarchive-btn").First
+            do! unarchiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! unarchiveBtn.ClickAsync()
+
+            do! page.WaitForTimeoutAsync(500.0f)
+            Assert.That(unarchiveCalls.Count, Is.GreaterThanOrEqualTo(1), "Clicking unarchive should call unarchiveWorktree API")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive round-trip moves card between sections``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let archiveCalls = System.Collections.Generic.List<string>()
+            let callCount = ref 0
+
+            let getJson () =
+                let c = System.Threading.Interlocked.Increment(callCount)
+                if c <= 2 then
+                    makeDashboardJson [
+                        makeWorktreeJson "main" false
+                        makeWorktreeJson "to-archive" false
+                    ]
+                else
+                    makeDashboardJson [
+                        makeWorktreeJson "main" false
+                        makeWorktreeJson "to-archive" true
+                    ]
+
+            do! setupMockedPage page getJson archiveCalls (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let activeCards = page.Locator(".card-grid .wt-card")
+            do! activeCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! initialActiveCount = activeCards.CountAsync()
+            Assert.That(initialActiveCount, Is.EqualTo(2), "Initially both worktrees are active cards")
+
+            let! initialArchiveCount = page.Locator(".archive-section").CountAsync()
+            Assert.That(initialArchiveCount, Is.EqualTo(0), "Initially no archive section")
+
+            let archiveBtn = page.Locator(".wt-card:has(.branch-name:text-is('to-archive')) .archive-btn")
+            do! archiveBtn.ClickAsync()
+
+            let archiveSection = page.Locator(".archive-section")
+            do! archiveSection.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! finalActiveCount = page.Locator(".card-grid .wt-card").CountAsync()
+            Assert.That(finalActiveCount, Is.EqualTo(1), "After archive, only one card in main grid")
+
+            let! archiveCardCount = page.Locator(".archive-section .archive-card").CountAsync()
+            Assert.That(archiveCardCount, Is.EqualTo(1), "Archived card appears in archive section")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Unarchive round-trip moves card back to main grid``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let unarchiveCalls = System.Collections.Generic.List<string>()
+            let callCount = ref 0
+
+            let getJson () =
+                let c = System.Threading.Interlocked.Increment(callCount)
+                if c <= 2 then
+                    makeDashboardJson [
+                        makeWorktreeJson "main" false
+                        makeWorktreeJson "was-archived" true
+                    ]
+                else
+                    makeDashboardJson [
+                        makeWorktreeJson "main" false
+                        makeWorktreeJson "was-archived" false
+                    ]
+
+            do! setupMockedPage page getJson (System.Collections.Generic.List()) unarchiveCalls
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveCard = page.Locator(".archive-section .archive-card")
+            do! archiveCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! initialArchiveCount = archiveCard.CountAsync()
+            Assert.That(initialArchiveCount, Is.EqualTo(1), "Initially one archive card")
+
+            let unarchiveBtn = page.Locator(".archive-card .unarchive-btn").First
+            do! unarchiveBtn.ClickAsync()
+
+            let activeCards = page.Locator(".card-grid .wt-card")
+            do! page.WaitForFunctionAsync("() => document.querySelectorAll('.card-grid .wt-card').length === 2", null, PageWaitForFunctionOptions(Timeout = 5000.0f))
+                |> Async.AwaitTask
+                |> Async.Ignore
+                |> Async.StartAsTask
+
+            let! finalActiveCount = activeCards.CountAsync()
+            Assert.That(finalActiveCount, Is.EqualTo(2), "After unarchive, both cards in main grid")
+
+            let! finalArchiveCount = page.Locator(".archive-section").CountAsync()
+            Assert.That(finalArchiveCount, Is.EqualTo(0), "Archive section hidden when no archived worktrees remain")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive section has dimmed opacity``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJson "archived" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveSection = page.Locator(".archive-section")
+            do! archiveSection.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! opacity = archiveSection.EvaluateAsync<string>("el => getComputedStyle(el).opacity")
+            Assert.That(float opacity, Is.LessThan(1.0), "Archive section should have dimmed opacity")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive section uses flex-wrap layout``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJson "arch-a" true
+                makeWorktreeJson "arch-b" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveSection = page.Locator(".archive-section")
+            do! archiveSection.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! display = archiveSection.EvaluateAsync<string>("el => getComputedStyle(el).display")
+            Assert.That(display, Is.EqualTo("flex"), "Archive section should use flex layout")
+
+            let! flexWrap = archiveSection.EvaluateAsync<string>("el => getComputedStyle(el).flexWrap")
+            Assert.That(flexWrap, Is.EqualTo("wrap"), "Archive section should use flex-wrap")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive card shows commit time``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJson "archived" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let commitTime = page.Locator(".archive-card .commit-time")
+            do! commitTime.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! text = commitTime.First.TextContentAsync()
+            Assert.That(text, Does.Contain("ago"), "Archive card should show relative commit time")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Keyboard navigation skips archived cards``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active-1" false
+                makeWorktreeJson "active-2" false
+                makeWorktreeJson "archived-skip" true
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let cards = page.Locator(".card-grid .wt-card")
+            do! cards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let dashboard = page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! page.Keyboard.PressAsync("ArrowDown")
+            do! page.WaitForTimeoutAsync(200.0f)
+
+            let focusedElements = System.Collections.Generic.List<string>()
+            let rec pressAndCollect remaining =
+                task {
+                    if remaining > 0 then
+                        let focused = page.Locator(".focused")
+                        let! count = focused.CountAsync()
+                        if count > 0 then
+                            let! classes = focused.First.GetAttributeAsync("class")
+                            focusedElements.Add(classes)
+                        do! page.Keyboard.PressAsync("ArrowDown")
+                        do! page.WaitForTimeoutAsync(150.0f)
+                        return! pressAndCollect (remaining - 1)
+                }
+            do! pressAndCollect 10
+
+            let hasArchiveCardFocused =
+                focusedElements
+                |> Seq.exists (fun c -> c.Contains("archive-card"))
+            Assert.That(hasArchiveCardFocused, Is.False, "Keyboard navigation should never focus an archive-card")
+
+            do! page.CloseAsync()
+        }
