@@ -238,7 +238,7 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
         match removeResult with
         | Error msg -> return Error $"git worktree remove failed: {msg}"
         | Ok _ ->
-            let! branchResult = runGitResult repoRoot $"branch -D -- {branch}"
+            let! branchResult = runGitResult repoRoot $"branch -D -- \"{branch}\""
 
             match branchResult with
             | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
@@ -286,18 +286,15 @@ let createWorktree (repoRoot: string) (branchName: string) (baseBranch: string) 
         let fileName, arguments =
             if File.Exists(scriptPath) then
                 if isWindows then
-                    "powershell", $"-File \"{scriptPath}\" {branchName} {baseBranch}"
+                    "powershell", $"-File \"{scriptPath}\" \"{branchName}\" \"{baseBranch}\""
                 else
-                    "bash", $"\"{scriptPath}\" {branchName} {baseBranch}"
+                    "bash", $"\"{scriptPath}\" \"{branchName}\" \"{baseBranch}\""
             else
                 let parentDir = Path.GetDirectoryName(repoRoot)
                 let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
-                "git", $"-C \"{repoRoot}\" worktree add -b {branchName} \"{worktreePath}\" origin/{baseBranch}"
+                "git", $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" origin/{baseBranch}"
 
         let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments
 
-        return
-            match result with
-            | Ok _ -> Ok()
-            | Error msg -> Error msg
+        return result |> Result.map ignore
     }
