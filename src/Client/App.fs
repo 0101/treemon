@@ -397,14 +397,18 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some Copilot -> "Copilot"
     | None -> "Coding tool"
 
+let noFocusProps = [
+    prop.tabIndex -1
+    prop.onMouseDown (fun e -> e.preventDefault())
+    prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+]
+
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     if isPending then
         Html.button [
             prop.className "sync-starting-btn"
             prop.disabled true
-            prop.tabIndex -1
-            prop.onMouseDown (fun e -> e.preventDefault())
-            prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+            yield! noFocusProps
             prop.text "Sync starting"
         ]
     else
@@ -414,9 +418,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         if syncing then
             Html.button [
                 prop.className "sync-cancel-btn"
-                prop.tabIndex -1
-                prop.onMouseDown (fun e -> e.preventDefault())
-                prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+                yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
                 prop.text "Cancel"
             ]
@@ -424,9 +426,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
             Html.button [
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
-                prop.tabIndex -1
-                prop.onMouseDown (fun e -> e.preventDefault())
-                prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+                yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
                 prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main")
                 prop.text "Sync"
@@ -682,9 +682,7 @@ let terminalButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "terminal-btn"
         prop.title title
-        prop.tabIndex -1
-        prop.onMouseDown (fun e -> e.preventDefault())
-        prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+        yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch action)
         prop.text ">"
     ]
@@ -693,9 +691,7 @@ let newTabButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
         prop.title "Open new tab in tracked window"
-        prop.tabIndex -1
-        prop.onMouseDown (fun e -> e.preventDefault())
-        prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+        yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
         prop.text "+"
     ]
@@ -704,9 +700,7 @@ let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
         prop.title "Remove worktree"
-        prop.tabIndex -1
-        prop.onMouseDown (fun e -> e.preventDefault())
-        prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+        yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
             let confirmed =
@@ -1113,17 +1107,13 @@ let view model dispatch =
                                 prop.children [
                                     Html.button [
                                         prop.className "ctrl-btn"
-                                        prop.tabIndex -1
-                                        prop.onMouseDown (fun e -> e.preventDefault())
-                                        prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+                                        yield! noFocusProps
                                         prop.onClick (fun _ -> dispatch ToggleSort)
                                         prop.text ($"Sort: {sortLabel model.SortMode}")
                                     ]
                                     Html.button [
                                         prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
-                                        prop.tabIndex -1
-                                        prop.onMouseDown (fun e -> e.preventDefault())
-                                        prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+                                        yield! noFocusProps
                                         prop.onClick (fun _ -> dispatch ToggleCompact)
                                         prop.text "Compact"
                                     ]

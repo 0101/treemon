@@ -272,19 +272,8 @@ let private tryParseUserText (line: string) =
         Log.log "Claude" $"Failed to parse user text: {ex.Message}"
         None
 
-let private readAllLinesReversed (filePath: string) =
-    try
-        use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-        use reader = new StreamReader(stream)
-        let content = reader.ReadToEnd()
-        content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
-        |> Array.map _.Trim()
-        |> Array.filter (fun s -> s.Length > 0)
-        |> Array.rev
-        |> Array.toList
-    with ex ->
-        Log.log "Claude" $"Failed to read JSONL {filePath}: {ex.Message}"
-        []
+let private readAllLinesNewestFirst filePath =
+    readLastLines filePath Int32.MaxValue
 
 let getLastUserMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
@@ -292,6 +281,6 @@ let getLastUserMessage (worktreePath: string) =
 
     findLatestJsonl projectDir
     |> Option.bind (fun fi ->
-        readAllLinesReversed fi.FullName
+        readAllLinesNewestFirst fi.FullName
         |> List.tryPick tryParseUserText)
     |> Option.map (fun (text, _) -> truncateMessage 120 text)
