@@ -2,6 +2,7 @@ module Server.GitWorktree
 
 open System
 open System.IO
+open System.Runtime.InteropServices
 
 type WorktreeInfo =
     { Path: string
@@ -242,4 +243,61 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
             match branchResult with
             | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
             | Ok _ -> return Ok ()
+    }
+
+let private branchSortKey (name: string) =
+    match name with
+    | "main" -> (0, name)
+    | "master" -> (1, name)
+    | "develop" -> (2, name)
+    | n when n.StartsWith("dev") -> (3, name)
+    | _ -> (4, name)
+
+let parseRemoteBranches (output: string) =
+    output.Split([| Environment.NewLine; "\n" |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.map _.Trim()
+    |> Array.filter (fun line -> not (line.StartsWith("origin/HEAD")))
+    |> Array.map (fun line ->
+        if line.StartsWith("origin/") then line["origin/".Length..] else line)
+    |> Array.distinct
+    |> Array.sortBy branchSortKey
+    |> Array.toList
+
+let listRemoteBranches (repoRoot: string) =
+    async {
+        let! output = runGit repoRoot "branch -r --format=%(refname:short)"
+
+        return
+            output
+            |> Option.map parseRemoteBranches
+            |> Option.defaultValue []
+    }
+
+let createWorktree (repoRoot: string) (branchName: string) (baseBranch: string) =
+    async {
+        let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+
+        let scriptPath =
+            if isWindows then
+                Path.Combine(repoRoot, "fork.ps1")
+            else
+                Path.Combine(repoRoot, "fork.sh")
+
+        let fileName, arguments =
+            if File.Exists(scriptPath) then
+                if isWindows then
+                    "powershell", $"-File \"{scriptPath}\" {branchName} {baseBranch}"
+                else
+                    "bash", $"\"{scriptPath}\" {branchName} {baseBranch}"
+            else
+                let parentDir = Path.GetDirectoryName(repoRoot)
+                let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
+                "git", $"-C \"{repoRoot}\" worktree add -b {branchName} \"{worktreePath}\" origin/{baseBranch}"
+
+        let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments
+
+        return
+            match result with
+            | Ok _ -> Ok()
+            | Error msg -> Error msg
     }
