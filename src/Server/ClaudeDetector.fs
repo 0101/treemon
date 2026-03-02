@@ -204,3 +204,83 @@ let getLastMessage (worktreePath: string) =
           Timestamp = timestamp
           Status = None
           Duration = None })
+
+let private tryExtractSlashCommand (text: string) =
+    let extractTag (tag: string) (s: string) =
+        let openTag = $"<{tag}>"
+        let closeTag = $"</{tag}>"
+        match s.IndexOf(openTag), s.IndexOf(closeTag) with
+        | start, finish when start >= 0 && finish > start ->
+            Some(s.Substring(start + openTag.Length, finish - start - openTag.Length).Trim())
+        | _ -> None
+
+    extractTag "command-name" text
+    |> Option.map (fun cmd ->
+        match extractTag "command-args" text with
+        | Some args when args.Length > 0 -> $"{cmd} {args}"
+        | _ -> cmd)
+
+let private isSystemNoise (text: string) =
+    text.Contains("PRESERVE ON CONTEXT COMPACTION")
+    || text.StartsWith("<local-command-")
+    || text.StartsWith("<system-reminder>")
+    || text.StartsWith("<task-notification>")
+
+let private extractUserContent (text: string) =
+    match tryExtractSlashCommand text with
+    | Some cmd -> Some cmd
+    | None when isSystemNoise text -> None
+    | None -> Some text
+
+let private tryParseUserText (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp when typeProp.GetString() = "user" ->
+            let timestamp =
+                match root.TryGetProperty("timestamp") with
+                | true, ts -> ts.GetString() |> DateTimeOffset.Parse |> Some
+                | _ -> None
+
+            let rawContent =
+                match root.TryGetProperty("message") with
+                | true, msg ->
+                    match msg.TryGetProperty("content") with
+                    | true, content when content.ValueKind = JsonValueKind.String ->
+                        Some(content.GetString())
+                    | true, contentArr when contentArr.ValueKind = JsonValueKind.Array ->
+                        contentArr.EnumerateArray()
+                        |> Seq.tryFind (fun block ->
+                            match block.TryGetProperty("type") with
+                            | true, t -> t.GetString() = "text"
+                            | _ -> false)
+                        |> Option.bind (fun block ->
+                            match block.TryGetProperty("text") with
+                            | true, t -> Some(t.GetString())
+                            | _ -> None)
+                    | _ -> None
+                | _ -> None
+
+            match rawContent |> Option.bind extractUserContent, timestamp with
+            | Some text, Some ts when not (String.IsNullOrWhiteSpace(text)) ->
+                Some(text, ts)
+            | _ -> None
+        | _ -> None
+    with ex ->
+        Log.log "Claude" $"Failed to parse user text: {ex.Message}"
+        None
+
+let private readAllLinesNewestFirst filePath =
+    readLastLines filePath Int32.MaxValue
+
+let getLastUserMessage (worktreePath: string) =
+    let encoded = encodeWorktreePath worktreePath
+    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+
+    findLatestJsonl projectDir
+    |> Option.bind (fun fi ->
+        readAllLinesNewestFirst fi.FullName
+        |> List.tryPick tryParseUserText)
+    |> Option.map (fun (text, _) -> truncateMessage 120 text)

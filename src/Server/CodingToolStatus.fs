@@ -9,16 +9,19 @@ type internal ProviderEntry =
     { Provider: CodingToolProvider
       GetStatus: string -> CodingToolStatus
       GetLastMessage: string -> CardEvent option
+      GetLastUserMessage: string -> string option
       GetSessionMtime: string -> DateTimeOffset option }
 
 let private providers =
     [ { Provider = Claude
         GetStatus = ClaudeDetector.getStatus
         GetLastMessage = ClaudeDetector.getLastMessage
+        GetLastUserMessage = ClaudeDetector.getLastUserMessage
         GetSessionMtime = ClaudeDetector.getSessionMtime }
       { Provider = Copilot
         GetStatus = CopilotDetector.getStatus
         GetLastMessage = CopilotDetector.getLastMessage
+        GetLastUserMessage = CopilotDetector.getLastUserMessage
         GetSessionMtime = CopilotDetector.getSessionMtime } ]
 
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
@@ -97,4 +100,16 @@ let getLastMessage (worktreePath: string) : CardEvent option =
     candidates
     |> List.choose (fun entry -> entry.GetLastMessage worktreePath)
     |> List.sortByDescending _.Timestamp
+    |> List.tryHead
+
+let getLastUserMessage (worktreePath: string) : string option =
+    let configured = readConfiguredProvider worktreePath
+
+    let candidates =
+        match configured with
+        | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
+        | None -> providers
+
+    candidates
+    |> List.choose (fun entry -> entry.GetLastUserMessage worktreePath)
     |> List.tryHead

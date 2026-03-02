@@ -22,11 +22,11 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let codingToolStatus, codingToolProvider =
+    let codingToolStatus, codingToolProvider, lastUserMsg =
         repo.CodingToolData
         |> Map.tryFind wt.Path
-        |> Option.map (fun (status, provider) -> status, provider)
-        |> Option.defaultValue (CodingToolStatus.Idle, None)
+        |> Option.map (fun (status, provider, userMsg) -> status, provider, userMsg)
+        |> Option.defaultValue (CodingToolStatus.Idle, None, None)
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -37,6 +37,7 @@ let private assembleFromState
       Beads = beads
       CodingTool = codingToolStatus
       CodingToolProvider = codingToolProvider
+      LastUserMessage = lastUserMsg
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -184,7 +185,8 @@ let worktreeApi
           deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" }
           launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
-          killSession = fun _ -> async { return Error "Session management is not available in fixture mode" } }
+          killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
           openTerminal = openTerminal validatePath sessionAgent
@@ -207,7 +209,7 @@ let worktreeApi
                               let provider =
                                   repo.CodingToolData
                                   |> Map.tryFind wt.Path
-                                  |> Option.bind snd
+                                  |> Option.bind (fun (_, p, _) -> p)
                               wt.Path, repoRoot, syncKey, provider))
 
                   match worktreeWithRepo with
@@ -295,4 +297,7 @@ let worktreeApi
                   SessionManager.focusSession sessionAgent path)
           killSession = fun path ->
               withValidatedPath path "killSession" (fun () ->
-                  SessionManager.killSession sessionAgent path) }
+                  SessionManager.killSession sessionAgent path)
+          openNewTab = fun path ->
+              withValidatedPath path "openNewTab" (fun () ->
+                  SessionManager.openNewTab sessionAgent path) }

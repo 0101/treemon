@@ -13,6 +13,8 @@
             "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
             "CodingTool": "Working",
             "CodingToolProvider": "Claude",
+            "HasActiveSession": true,
+            "LastUserMessage": "Add comprehensive input validation for all user-facing forms",
             "Pr": {
               "HasPr": {
                 "Id": 101,
@@ -51,6 +53,7 @@
             "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
             "CodingTool": "WaitingForUser",
             "CodingToolProvider": "Claude",
+            "LastUserMessage": "Refactor the data access layer for better separation of concerns",
             "Pr": {
               "HasPr": {
                 "Id": 102,
@@ -131,6 +134,8 @@
             "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
             "CodingTool": "Working",
             "CodingToolProvider": "Claude",
+            "HasActiveSession": true,
+            "LastUserMessage": "Wire up API endpoints for the new reporting feature",
             "Pr": {
               "HasPr": {
                 "Id": 103,

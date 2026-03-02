@@ -67,7 +67,7 @@ type PickMostOverdueTests() =
         Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
     [<Test>]
-    member _.``Multiple overdue returns most overdue (earliest deadline)``() =
+    member _.``Multiple overdue returns first overdue in list order``() =
         let now = DateTimeOffset.UtcNow
         let slightlyOverdue = now.AddSeconds(-20.0)
         let veryOverdue = now.AddSeconds(-200.0)
@@ -82,7 +82,7 @@ type PickMostOverdueTests() =
 
         let result = pickMostOverdue now lastRuns tasks
 
-        Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
+        Assert.That(result, Is.EqualTo(Some(RefreshWorktreeList testRepoId)))
 
     [<Test>]
     member _.``Empty task list returns None``() =

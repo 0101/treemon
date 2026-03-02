@@ -8,6 +8,7 @@ open System.Text.Json
 type private SessionMsg =
     | Spawn of worktreePath: string * prompt: string * AsyncReplyChannel<Result<unit, string>>
     | SpawnTerminal of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
+    | OpenNewTab of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | Focus of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | Kill of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
@@ -76,6 +77,30 @@ let private spawnTerminalAndResolve (worktreePath: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
     let encoded = encodeCommand $"Set-Location '{nativePath}'"
     spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "terminal"
+
+let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) =
+    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
+    if not (Win32.isWindowValid hwnd) then
+        Error "Tracked window is no longer valid"
+    else
+        if not (Win32.focusWindow hwnd) then
+            Log.log "SessionManager" $"Failed to focus HWND={hwnd} for new-tab"
+
+        let encoded = encodeCommand $"Set-Location '{nativePath}'"
+        let psi =
+            ProcessStartInfo(
+                "wt.exe",
+                $"-w 0 new-tab -- pwsh -NoExit -EncodedCommand {encoded}",
+                UseShellExecute = false,
+                CreateNoWindow = true)
+        try
+            let p = Process.Start(psi)
+            Log.log "SessionManager" $"wt.exe new-tab started, PID={p.Id}, dir={nativePath}"
+            p.WaitForExit(5_000) |> ignore
+            Ok ()
+        with ex ->
+            Log.log "SessionManager" $"Failed to open new tab: {ex.Message}"
+            Error $"Failed to open new tab: {ex.Message}"
 
 let private killByHwnd (hwnd: nativeint) =
     if Win32.isWindowValid hwnd then
@@ -158,6 +183,18 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
     | SpawnTerminal(path, reply) ->
         spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
 
+    | OpenNewTab(path, reply) ->
+        let validated = validateSessions sessions
+
+        match validated |> Map.tryFind path with
+        | Some hwnd ->
+            let result = openNewTabInWindow hwnd path
+            reply.Reply(result)
+            validated
+        | None ->
+            reply.Reply(Error "No active session for this worktree")
+            validated
+
     | Focus(path, reply) ->
         let validated = validateSessions sessions
 
@@ -209,6 +246,7 @@ let createAgent () =
                             match msg with
                             | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | OpenNewTab(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | GetActiveSessions reply -> reply.Reply(sessions)
@@ -239,6 +277,9 @@ let focusSession (agent: SessionAgent) (worktreePath: string) =
 
 let killSession (agent: SessionAgent) (worktreePath: string) =
     agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 10_000)
+
+let openNewTab (agent: SessionAgent) (worktreePath: string) =
+    agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)
 
 let getActiveSessions (agent: SessionAgent) =
     agent.Agent.PostAndAsyncReply(GetActiveSessions, timeout = 10_000)

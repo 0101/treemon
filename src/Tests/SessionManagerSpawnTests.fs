@@ -17,6 +17,7 @@ let private assertOk (result: Result<unit, string>) (message: string) =
 
 [<TestFixture>]
 [<Category("Local")>]
+[<Explicit("Spawns terminal windows - run manually during session management development")>]
 [<NonParallelizable>]
 type SessionManagerSpawnTests() =
 

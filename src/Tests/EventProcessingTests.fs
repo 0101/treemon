@@ -274,6 +274,7 @@ type SortWorktreesTests() =
           Beads = BeadsSummary.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          LastUserMessage = None
           Pr = PrStatus.NoPr
           MainBehindCount = 0
           IsDirty = false
