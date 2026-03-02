@@ -14,6 +14,7 @@
         .dashboard-header { margin-bottom: 16px; }
         .dashboard-header h1 { margin: 0 0 4px; font-size: 1.4em; font-weight: 600; color: #cdd6f4; }
         .eye-logo { width: 54px; height: 28px; display: block; opacity: 0.7; margin-top: 6px; }
+        .eye-closed { opacity: 0.4; }
         .eye-iris { transition: transform 0.3s ease; }
         .header-top { display: flex; align-items: center; justify-content: center; position: relative; }
         .header-controls { position: absolute; right: 0; display: flex; gap: 6px; }
@@ -59,6 +60,15 @@
             padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
         }
         .terminal-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); }
+
+        .new-tab-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer; font-family: monospace; font-size: 0.78em;
+            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
+        }
+        .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
 
         .delete-btn {
             flex-shrink: 0;
@@ -80,7 +90,9 @@
         }
 
         .commit-line { font-size: 0.85em; color: #a6adc8; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .commit-line.user-prompt { color: #cdd6f4; font-style: italic; }
         .commit-time { color: #7f849c; margin-left: 6px; }
+        .git-commit-msg { font-size: 0.78em; color: #7f849c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 
         .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.82em; }
         .beads-counts { display: flex; gap: 4px; align-items: center; }
@@ -230,7 +242,7 @@
         .repo-ct-dots { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
         .repo-ct-dots .ct-dot { width: 8px; height: 8px; }
 
-        .wt-card.has-session { border-left: 2px solid #a6e3a1; }
+        .has-session .terminal-btn { box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
 
         .dashboard:focus { outline: none; }
         .focused { outline: 2px solid #4a9eff; outline-offset: -2px; }

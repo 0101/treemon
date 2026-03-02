@@ -22,7 +22,8 @@ let private defaultModel : Model =
       AppVersion = Some "1.0"
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
-      CreateModal = Closed }
+      CreateModal = Closed
+      DeletedBranches = Set.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the
