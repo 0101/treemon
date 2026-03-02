@@ -589,7 +589,7 @@ type DashboardTests() =
             Assert.That(count, Is.EqualTo(allCount), $"All .{btnClass} should be inside card headers")
         }
 
-    [<TestCase("terminal-btn", ">", "Open terminal")>]
+    [<TestCase("terminal-btn", ">", "Focus session window")>]
     [<TestCase("delete-btn", "\u2715", "Remove worktree")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
