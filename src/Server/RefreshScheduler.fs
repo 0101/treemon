@@ -164,7 +164,7 @@ let private taskLabel = function
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
 let private intervalOf = function
-    | RefreshWorktreeList _ -> TimeSpan.FromSeconds(60.0)
+    | RefreshWorktreeList _ -> TimeSpan.FromSeconds(15.0)
     | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
     | RefreshBeads _ -> TimeSpan.FromSeconds(60.0)
     | RefreshCodingTool _ -> TimeSpan.FromSeconds(15.0)
