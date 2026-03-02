@@ -228,6 +228,38 @@ let getLastMessage (worktreePath: string) =
           Status = None
           Duration = None })
 
+let private tryParseUserContent (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp when typeProp.GetString() = "user.message" ->
+            let textContent =
+                match root.TryGetProperty("data") with
+                | true, data ->
+                    match data.TryGetProperty("content") with
+                    | true, content when content.ValueKind = JsonValueKind.String ->
+                        let text = content.GetString()
+                        if String.IsNullOrWhiteSpace(text) then None else Some text
+                    | _ -> None
+                | _ -> None
+
+            textContent
+        | _ -> None
+    with ex ->
+        Log.log "Copilot" $"Failed to parse user content: {ex.Message}"
+        None
+
+let getLastUserMessage (worktreePath: string) =
+    let sessionDirs = getSessionDirsForPath worktreePath
+
+    findMostRecentEventsFile sessionDirs
+    |> Option.bind (fun fi ->
+        readLastLines fi.FullName 20
+        |> List.tryPick tryParseUserContent)
+    |> Option.map (truncateMessage 120)
+
 /// For testing: parse events from a specific directory (bypasses workspace index)
 let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
     try

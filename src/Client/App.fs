@@ -21,7 +21,8 @@ type Model =
       SyncPending: Set<string>
       AppVersion: string option
       EyeDirection: float * float
-      FocusedElement: FocusTarget option }
+      FocusedElement: FocusTarget option
+      DeletedBranches: Set<string> }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -39,6 +40,7 @@ type Msg =
     | DeleteWorktree of string
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: string
+    | OpenNewTab of path: string
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
@@ -76,7 +78,8 @@ let init () =
       SyncPending = Set.empty
       AppVersion = None
       EyeDirection = (0.0, 0.0)
-      FocusedElement = None },
+      FocusedElement = None
+      DeletedBranches = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -85,6 +88,13 @@ let randomEyeDirection () =
     let dx = rng.NextDouble() * 3.0 - 1.5
     let dy = rng.NextDouble() * 2.0 - 1.0
     (dx, dy)
+
+let filterDeletedBranches (deleted: Set<string>) (repos: RepoModel list) =
+    if Set.isEmpty deleted then repos
+    else
+        repos
+        |> List.map (fun r ->
+            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains wt.Branch deleted)) })
 
 let findWorktree (scopedKey: string) (model: Model) =
     let parts = scopedKey.Split('/', 2)
@@ -104,6 +114,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         match key with
         | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
         | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+        | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
         | _ -> None
     | RepoHeader repoId ->
         match key with
@@ -121,6 +132,11 @@ let update msg model =
                 model.Repos
                 |> List.map (fun r -> r.RepoId, r.IsCollapsed)
                 |> Map.ofList
+            let serverBranches =
+                response.Repos
+                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+                |> Set.ofList
+            let stillPending = Set.intersect model.DeletedBranches serverBranches
             let repos =
                 response.Repos
                 |> List.map (fun r ->
@@ -131,6 +147,7 @@ let update msg model =
                       ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
+                |> filterDeletedBranches stillPending
             { model with
                 Repos = repos
                 IsLoading = false
@@ -138,7 +155,8 @@ let update msg model =
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
-                EyeDirection = randomEyeDirection () }
+                EyeDirection = randomEyeDirection ()
+                DeletedBranches = stillPending }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
@@ -218,16 +236,28 @@ let update msg model =
         model, fetchSyncStatus ()
 
     | DeleteWorktree branch ->
-        model, Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+        let updatedRepos =
+            model.Repos
+            |> List.map (fun r ->
+                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
+        let updatedModel =
+            { model with
+                Repos = updatedRepos
+                DeletedBranches = model.DeletedBranches |> Set.add branch }
+        { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
+        Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error _) ->
-        model, Cmd.none
+        { model with DeletedBranches = Set.empty }, fetchWorktrees ()
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+
+    | OpenNewTab path ->
+        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -254,6 +284,9 @@ let update msg model =
         model, Cmd.none
 
     | KeyPressed (key, hasModifier) ->
+        let scrollToFocus oldFocus newFocus =
+            let useCenter = isLargeJump model.Repos oldFocus newFocus
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -264,7 +297,15 @@ let update msg model =
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
             { model with FocusedElement = newFocus },
-            Cmd.batch [ actionCmd; Cmd.ofEffect (fun _ -> scrollFocusedIntoView newFocus) ]
+            Cmd.batch [ actionCmd; scrollToFocus model.FocusedElement newFocus ]
+        | "Home" ->
+            let newFocus = navigateToFirst model.Repos
+            { model with FocusedElement = newFocus },
+            scrollToFocus model.FocusedElement newFocus
+        | "End" ->
+            let newFocus = navigateToLast model.Repos
+            { model with FocusedElement = newFocus },
+            scrollToFocus model.FocusedElement newFocus
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -380,11 +421,18 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some Copilot -> "Copilot"
     | None -> "Coding tool"
 
+let noFocusProps = [
+    prop.tabIndex -1
+    prop.onMouseDown (fun e -> e.preventDefault())
+    prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
+]
+
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     if isPending then
         Html.button [
             prop.className "sync-starting-btn"
             prop.disabled true
+            yield! noFocusProps
             prop.text "Sync starting"
         ]
     else
@@ -394,6 +442,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         if syncing then
             Html.button [
                 prop.className "sync-cancel-btn"
+                yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
                 prop.text "Cancel"
             ]
@@ -401,6 +450,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
             Html.button [
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
+                yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
                 prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main")
                 prop.text "Sync"
@@ -418,6 +468,13 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
                         prop.text "uncommitted changes"
                     ]
                 else syncButton dispatch wt branchEvents isPending scopedKey
+            Html.span [
+                prop.className "git-commit-msg"
+                prop.children [
+                    Html.text wt.LastCommitMessage
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                ]
+            ]
         ]
     ]
 
@@ -649,14 +706,25 @@ let terminalButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "terminal-btn"
         prop.title title
+        yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch action)
         prop.text ">"
+    ]
+
+let newTabButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "new-tab-btn"
+        prop.title "Open new tab in tracked window"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
+        prop.text "+"
     ]
 
 let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
         prop.title "Remove worktree"
+        yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
             let confirmed =
@@ -772,6 +840,7 @@ let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: Workt
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     archiveButton dispatch wt
+                    if wt.HasActiveSession then newTabButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -801,17 +870,20 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                     workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
                     archiveButton dispatch wt
+                    if wt.HasActiveSession then newTabButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
 
-            Html.div [
-                prop.className "commit-line"
-                prop.children [
-                    Html.text wt.LastCommitMessage
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+            match wt.LastUserMessage with
+            | Some prompt ->
+                Html.div [
+                    prop.className "commit-line user-prompt"
+                    prop.children [
+                        Html.text prompt
+                    ]
                 ]
-            ]
+            | None -> ()
 
             if beadsTotal wt.Beads > 0 then
                 Html.div [
@@ -1071,7 +1143,7 @@ let view model dispatch =
         prop.autoFocus true
         prop.onKeyDown (fun e ->
             match e.key with
-            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
+            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
                 e.preventDefault()
                 dispatch (KeyPressed (e.key, false))
             | key ->
@@ -1096,11 +1168,13 @@ let view model dispatch =
                                 prop.children [
                                     Html.button [
                                         prop.className "ctrl-btn"
+                                        yield! noFocusProps
                                         prop.onClick (fun _ -> dispatch ToggleSort)
                                         prop.text ($"Sort: {sortLabel model.SortMode}")
                                     ]
                                     Html.button [
                                         prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
+                                        yield! noFocusProps
                                         prop.onClick (fun _ -> dispatch ToggleCompact)
                                         prop.text "Compact"
                                     ]

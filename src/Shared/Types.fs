@@ -77,6 +77,7 @@ type WorktreeStatus =
       Beads: BeadsSummary
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      LastUserMessage: string option
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool
@@ -122,4 +123,5 @@ type IWorktreeApi =
       focusSession: string -> Async<Result<unit, string>>
       killSession: string -> Async<Result<unit, string>>
       archiveWorktree: string -> Async<Result<unit, string>>
-      unarchiveWorktree: string -> Async<Result<unit, string>> }
+      unarchiveWorktree: string -> Async<Result<unit, string>>
+      openNewTab: string -> Async<Result<unit, string>> }

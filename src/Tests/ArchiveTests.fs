@@ -245,6 +245,7 @@ type NavigationArchiveTests() =
           Beads = BeadsSummary.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          LastUserMessage = None
           Pr = NoPr
           MainBehindCount = 0
           IsDirty = false
