@@ -10,6 +10,10 @@
 
 ---
 
+<p align="center">
+  <img src="docs/screenshot.png" alt="Treemon dashboard" width="600" />
+</p>
+
 Point Treemon at one or more directories that contain git worktrees and it discovers all active branches, polling them in the background. Each worktree gets a card showing:
 
 - **Last commit** and relative time
