@@ -1,8 +1,6 @@
 module Server.CodingToolStatus
 
 open System
-open System.IO
-open System.Text.Json
 open Shared
 
 type internal ProviderEntry =
@@ -25,27 +23,7 @@ let private providers =
         GetSessionMtime = CopilotDetector.getSessionMtime } ]
 
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
-    let configPath = Path.Combine(worktreePath, ".treemon.json")
-
-    if not (File.Exists(configPath)) then
-        None
-    else
-        try
-            let json = File.ReadAllText(configPath)
-            use doc = JsonDocument.Parse(json)
-
-            match doc.RootElement.TryGetProperty("codingTool") with
-            | true, elem ->
-                match elem.GetString().ToLowerInvariant() with
-                | "claude" -> Some Claude
-                | "copilot" -> Some Copilot
-                | other ->
-                    Log.log "CodingTool" $"Unknown codingTool value '{other}' in {configPath}"
-                    None
-            | false, _ -> None
-        with ex ->
-            Log.log "CodingTool" $"Failed to read .treemon.json: {ex.Message}"
-            None
+    (TreemonConfig.read worktreePath).CodingTool
 
 type internal ProviderResult =
     { Provider: CodingToolProvider

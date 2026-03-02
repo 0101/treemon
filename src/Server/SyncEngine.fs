@@ -205,39 +205,8 @@ let runProcess
             return Error $"Failed to start process: {ex.Message}"
     }
 
-let private isValidSolutionPath (worktreePath: string) (solutionPath: string) =
-    let isSolutionExtension =
-        solutionPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
-        || solutionPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
-
-    let fullPath = Path.Combine(worktreePath, solutionPath) |> Path.GetFullPath
-    let normalizedRoot = Path.GetFullPath(worktreePath)
-
-    isSolutionExtension && fullPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(fullPath)
-
 let private readTreemonConfig (worktreePath: string) : string option =
-    let configPath = Path.Combine(worktreePath, ".treemon.json")
-
-    match File.Exists(configPath) with
-    | false -> None
-    | true ->
-        try
-            let json = File.ReadAllText(configPath)
-            use doc = System.Text.Json.JsonDocument.Parse(json)
-
-            match doc.RootElement.TryGetProperty("testSolution") with
-            | true, elem ->
-                let solutionPath = elem.GetString()
-
-                match isValidSolutionPath worktreePath solutionPath with
-                | true -> Some solutionPath
-                | false ->
-                    Log.log "SyncEngine" $"testSolution '{solutionPath}' rejected: must be a .sln/.slnx file within {worktreePath}"
-                    None
-            | false, _ -> None
-        with ex ->
-            Log.log "SyncEngine" $"Failed to read .treemon.json: {ex.Message}"
-            None
+    (TreemonConfig.read worktreePath).TestSolution
 
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]

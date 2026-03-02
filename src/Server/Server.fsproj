@@ -21,6 +21,7 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeDetector.fs" />
     <Compile Include="CopilotDetector.fs" />
+    <Compile Include="TreemonConfig.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
