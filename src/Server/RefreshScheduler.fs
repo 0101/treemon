@@ -30,14 +30,16 @@ type DashboardState =
     { Repos: Map<RepoId, PerRepoState>
       SchedulerEvents: CardEvent list
       PinnedErrors: Map<string * string, CardEvent>
-      LatestByCategory: Map<string, CardEvent> }
+      LatestByCategory: Map<string, CardEvent>
+      ExpeditedRepos: Set<RepoId> }
 
 module DashboardState =
     let empty =
         { Repos = Map.empty
           SchedulerEvents = []
           PinnedErrors = Map.empty
-          LatestByCategory = Map.empty }
+          LatestByCategory = Map.empty
+          ExpeditedRepos = Set.empty }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
@@ -48,6 +50,8 @@ type StateMsg =
     | RemoveWorktree of repoId: RepoId * path: string
     | GetState of AsyncReplyChannel<DashboardState>
     | LogSchedulerEvent of CardEvent
+    | ExpediteRefresh of RepoId
+    | ClearExpedite of RepoId
 
 let private maxEvents = 50
 
@@ -135,6 +139,12 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             SchedulerEvents = trimEvents (event :: state.SchedulerEvents)
             PinnedErrors = updatePinnedErrors state.PinnedErrors event
             LatestByCategory = state.LatestByCategory |> Map.add event.Source event }
+
+    | ExpediteRefresh repoId ->
+        { state with ExpeditedRepos = state.ExpeditedRepos |> Set.add repoId }
+
+    | ClearExpedite repoId ->
+        { state with ExpeditedRepos = state.ExpeditedRepos |> Set.remove repoId }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
@@ -406,14 +416,28 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
             let tasks = buildTaskList repos
             let now = DateTimeOffset.UtcNow
 
-            match pickMostOverdue now lastRuns tasks with
+            let effectiveLastRuns =
+                tasks
+                |> List.fold (fun runs task ->
+                    match task with
+                    | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                        runs |> Map.remove task
+                    | _ -> runs) lastRuns
+
+            match pickMostOverdue now effectiveLastRuns tasks with
             | Some task ->
                 let! result = executeWithTimeout agent rootPaths task
                 logTaskResult agent task result
+
+                match task with
+                | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                    agent.Post(ClearExpedite repoId)
+                | _ -> ()
+
                 let updatedRuns = lastRuns |> Map.add task now
                 return! loop updatedRuns
             | None ->
-                let sleepMs = computeSleepMs now lastRuns tasks
+                let sleepMs = computeSleepMs now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
                 return! loop lastRuns
         }

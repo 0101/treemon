@@ -771,3 +771,79 @@ type BuildPhase3TasksTests() =
         Assert.That(tasks, Is.Empty)
 
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ExpediteRefreshTests() =
+
+    let waitForAgent (agent: MailboxProcessor<StateMsg>) =
+        agent.PostAndAsyncReply(GetState) |> Async.Ignore
+
+    [<Test>]
+    member _.``ExpeditedRepos is empty in initial state``() =
+        async {
+            let agent = createAgent ()
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.ExpeditedRepos, Is.Empty)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``ExpediteRefresh adds repo to ExpeditedRepos``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(ExpediteRefresh testRepoId)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.ExpeditedRepos |> Set.contains testRepoId, Is.True)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``ClearExpedite removes repo from ExpeditedRepos``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(ExpediteRefresh testRepoId)
+            do! waitForAgent agent
+            agent.Post(ClearExpedite testRepoId)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.ExpeditedRepos |> Set.contains testRepoId, Is.False)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``ClearExpedite on absent repo is a no-op``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(ClearExpedite testRepoId)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.ExpeditedRepos, Is.Empty)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Multiple repos can be expedited independently``() =
+        async {
+            let agent = createAgent ()
+            let repo1 = RepoId "Repo1"
+            let repo2 = RepoId "Repo2"
+
+            agent.Post(ExpediteRefresh repo1)
+            agent.Post(ExpediteRefresh repo2)
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state.ExpeditedRepos |> Set.count, Is.EqualTo(2))
+            Assert.That(state.ExpeditedRepos |> Set.contains repo1, Is.True)
+            Assert.That(state.ExpeditedRepos |> Set.contains repo2, Is.True)
+
+            agent.Post(ClearExpedite repo1)
+            let! state2 = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(state2.ExpeditedRepos |> Set.count, Is.EqualTo(1))
+            Assert.That(state2.ExpeditedRepos |> Set.contains repo1, Is.False)
+            Assert.That(state2.ExpeditedRepos |> Set.contains repo2, Is.True)
+        }
+        |> Async.RunSynchronously
