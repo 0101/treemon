@@ -144,7 +144,7 @@ Key DUs: `ClaudeCodeStatus` (Working|WaitingForUser|Done|Idle), `PrStatus` (NoPr
 - Multi-repo state stored as `Map<string, PerRepoState>`, tasks scoped per repo
 - API responses are instant — pure reads from in-memory state, no process spawning
 - Client polls every 1s; data updates stream in as each worktree completes
-- Refresh intervals: worktree list 60s, git/beads/claude 15s, PRs/fetch 120s
+- Refresh intervals: worktree list 15s, git/beads/claude 15s, PRs/fetch 120s
 - Client renders responsive card grid (1-4 columns by viewport width)
 - Merged PRs get dimmed cards (actionable: delete the worktree)
 

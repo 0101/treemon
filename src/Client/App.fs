@@ -1118,12 +1118,6 @@ let view model dispatch =
                 ]
             ]
 
-            if model.HasError then
-                Html.div [
-                    prop.className "error-bar"
-                    prop.text "Failed to fetch data. Showing last known state."
-                ]
-
             if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                 skeletonGrid ()
             else
