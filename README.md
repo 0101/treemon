@@ -5,7 +5,7 @@
 <h1 align="center">Treemon</h1>
 
 <p align="center">
-  A dashboard for monitoring git worktrees across multiple repositories — git status, Claude Code activity, beads tasks, Azure DevOps and GitHub PRs in one place.
+  A dashboard for monitoring git worktrees across multiple repositories — git status, Claude Code and Copilot activity, beads tasks, Azure DevOps and GitHub PRs in one place.
 </p>
 
 ---
@@ -14,16 +14,17 @@ Point Treemon at one or more directories that contain git worktrees and it disco
 
 - **Last commit** and relative time
 - **Dirty / behind-main** indicators with one-click branch sync
-- **Claude Code** session status (Working / Waiting / Done / Idle)
-- **Beads** task counts with progress bar
+- **Coding tool** session status — Claude Code and Copilot (Working / Waiting / Done / Idle)
+- **[Beads](https://github.com/steveyegge/beads)** task counts with progress bar
 - **PR status** — Azure DevOps and GitHub: PR badges, comment counts, build results
 - **Work metrics** — commit grid and diff stats
+- **Terminal sessions** — spawn, focus, and track Windows Terminal windows per worktree
 
 No hooks, no agents running inside your worktrees — just a lightweight polling loop that reads git, CLI tools, and file mtimes.
 
 ## Getting started
 
-Prerequisites: [.NET SDK 9](https://dotnet.microsoft.com/download), [Node.js](https://nodejs.org), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for beads counts).
+Prerequisites: [.NET SDK 9](https://dotnet.microsoft.com/download), [Node.js](https://nodejs.org), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts).
 
 ```
 npm install
