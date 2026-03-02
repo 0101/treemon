@@ -2187,11 +2187,11 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``No modal-overlay elements exist in DOM``() =
+    member this.``No modal-overlay on initial page load``() =
         task {
             let modalOverlays = this.Page.Locator(".modal-overlay")
             let! count = modalOverlays.CountAsync()
-            Assert.That(count, Is.EqualTo(0), "modal-overlay should not exist in DOM (removed per spec)")
+            Assert.That(count, Is.EqualTo(0), "modal-overlay should not exist on initial page load (create modal starts Closed)")
         }
 
     [<Test>]
@@ -2999,5 +2999,265 @@ type DashboardTests() =
             do! focused4.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
             let! count4 = focused4.CountAsync()
             Assert.That(count4, Is.EqualTo(1), "Should have exactly one focused element after mixed arrow keys")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button visible on every repo header``() =
+        task {
+            let repoHeaders = this.Page.Locator(".repo-header")
+            do! repoHeaders.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! headerCount = repoHeaders.CountAsync()
+            Assert.That(headerCount, Is.GreaterThanOrEqualTo(1), "Should have at least one repo header")
+
+            let plusBtns = this.Page.Locator(".repo-header .create-wt-btn")
+            let! btnCount = plusBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(headerCount), "Every repo header should have a .create-wt-btn")
+
+            let! text = plusBtns.First.TextContentAsync()
+            Assert.That(text.Trim(), Is.EqualTo("+"), "Plus button text should be '+'")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button click opens modal with name input focused``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! overlayCount = overlay.CountAsync()
+            Assert.That(overlayCount, Is.EqualTo(1), "Clicking plus button should show exactly one modal overlay")
+
+            let dialog = this.Page.Locator(".modal-dialog")
+            let! dialogCount = dialog.CountAsync()
+            Assert.That(dialogCount, Is.EqualTo(1), "Modal should contain exactly one dialog")
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! isFocused = nameInput.EvaluateAsync<bool>("el => document.activeElement === el")
+            Assert.That(isFocused, Is.True, "Name input should be auto-focused when modal opens")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal has base branch dropdown populated and pre-selected``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let select = this.Page.Locator(".modal-select")
+            do! select.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let options = select.Locator("option")
+            let! optionCount = options.CountAsync()
+            Assert.That(optionCount, Is.GreaterThanOrEqualTo(1), "Base branch dropdown should have at least one option")
+
+            let! selectedValue = select.InputValueAsync()
+            Assert.That(selectedValue, Is.Not.Empty, "A base branch should be pre-selected")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal has header, Cancel and Create buttons``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let header = this.Page.Locator(".modal-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! headerText = header.TextContentAsync()
+            Assert.That(headerText, Does.Contain("Create worktree"), "Modal header should say 'Create worktree'")
+
+            let cancelBtn = this.Page.Locator(".modal-btn.cancel")
+            let! cancelCount = cancelBtn.CountAsync()
+            Assert.That(cancelCount, Is.EqualTo(1), "Modal should have a cancel button")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            let! submitCount = submitBtn.CountAsync()
+            Assert.That(submitCount, Is.EqualTo(1), "Modal should have a submit button")
+
+            let! submitText = submitBtn.TextContentAsync()
+            Assert.That(submitText.Trim(), Is.EqualTo("Create"), "Submit button text should be 'Create'")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Submit button disabled when name is empty``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! isDisabled = submitBtn.IsDisabledAsync()
+            Assert.That(isDisabled, Is.True, "Submit button should be disabled when name input is empty")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Submit button enabled after typing a name``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            do! nameInput.FillAsync("test-branch")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            let! isDisabled = submitBtn.IsDisabledAsync()
+            Assert.That(isDisabled, Is.False, "Submit button should be enabled after typing a name")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Escape key closes modal``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should be removed from DOM after pressing Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Cancel button closes modal``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cancelBtn = this.Page.Locator(".modal-btn.cancel")
+            do! cancelBtn.ClickAsync()
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should be removed from DOM after clicking Cancel")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Clicking overlay background closes modal``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! overlay.ClickAsync(LocatorClickOptions(Position = Microsoft.Playwright.Position(X = 5.0f, Y = 5.0f)))
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should close when clicking overlay background")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button click does not toggle repo collapse``() =
+        task {
+            let repoSection = this.Page.Locator(".repo-section").First
+            let cardGrid = repoSection.Locator(".card-grid")
+            do! cardGrid.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! gridVisible = cardGrid.IsVisibleAsync()
+            Assert.That(gridVisible, Is.True, "Card grid should be visible before clicking plus")
+
+            let plusBtn = repoSection.Locator(".create-wt-btn")
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! gridStillVisible = cardGrid.IsVisibleAsync()
+            Assert.That(gridStillVisible, Is.True, "Card grid should still be visible after clicking plus (collapse should not toggle)")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Full roundtrip: submit form, modal closes on success``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("e2e-test-branch")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should close after successful worktree creation")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Full roundtrip via Enter key: type name, press Enter, modal closes``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("e2e-enter-test")
+            do! nameInput.PressAsync("Enter")
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should close after pressing Enter with a valid name")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal re-opens correctly after previous submission``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("first-submit")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+
+            do! plusBtn.ClickAsync()
+
+            let newInput = this.Page.Locator(".modal-input")
+            do! newInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! inputValue = newInput.InputValueAsync()
+            Assert.That(inputValue, Is.EqualTo(""), "Name input should be empty when re-opening modal after previous submission")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
         }
 
