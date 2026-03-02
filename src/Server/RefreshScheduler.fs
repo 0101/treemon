@@ -369,6 +369,7 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
 let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.filter (fun task -> deadlineOf lastRuns task <= now)
+    |> List.sortBy (deadlineOf lastRuns)
     |> List.tryHead
 
 let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
