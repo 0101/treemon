@@ -69,6 +69,11 @@ type LaunchRequest =
     { Path: string
       Prompt: string }
 
+type CreateWorktreeRequest =
+    { RepoId: string
+      BranchName: string
+      BaseBranch: string }
+
 type WorktreeStatus =
     { Path: string
       Branch: string
@@ -119,4 +124,6 @@ type IWorktreeApi =
       deleteWorktree: string -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<unit, string>>
       focusSession: string -> Async<Result<unit, string>>
-      killSession: string -> Async<Result<unit, string>> }
+      killSession: string -> Async<Result<unit, string>>
+      getBranches: string -> Async<string list>
+      createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>> }
