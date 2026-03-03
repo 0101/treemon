@@ -65,20 +65,9 @@ let run (context: string) (fileName: string) (arguments: string) =
             | _ -> None
     }
 
-let runResult (context: string) (fileName: string) (arguments: string) =
+let runResult (context: string) (fileName: string) (arguments: string) (workingDirectory: string option) =
     async {
-        let! result = startAndCapture context fileName arguments None
-
-        return
-            match result with
-            | Ok(0, stdout, _) -> Ok stdout
-            | Ok(_, _, stderr) -> Error stderr
-            | Error msg -> Error msg
-    }
-
-let runResultInDir (context: string) (fileName: string) (arguments: string) (workingDirectory: string) =
-    async {
-        let! result = startAndCapture context fileName arguments (Some workingDirectory)
+        let! result = startAndCapture context fileName arguments workingDirectory
 
         return
             match result with
