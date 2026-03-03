@@ -445,7 +445,7 @@ type MultiRepoSmokeTests() =
                         "No active Claude session cards visible. This test requires at least one " +
                         "worktree with an active Claude session (Working or WaitingForUser).")
 
-            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            let userPrompts = this.Page.Locator(".wt-card .user-prompt")
             let! promptCount = userPrompts.CountAsync()
             TestContext.Out.WriteLine($"User prompt elements found: {promptCount}")
 
@@ -466,7 +466,7 @@ type MultiRepoSmokeTests() =
     [<Test>]
     member this.``User prompts do not contain skill prompt text``() =
         task {
-            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            let userPrompts = this.Page.Locator(".wt-card .user-prompt")
             let! count = userPrompts.CountAsync()
             TestContext.Out.WriteLine($"User prompt elements to check for skill noise: {count}")
 
