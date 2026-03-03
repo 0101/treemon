@@ -32,6 +32,7 @@ type Msg =
     | ToggleCollapse of repoId: RepoId
     | Tick
     | OpenTerminal of string
+    | OpenVsCode of string
     | StartSync of branch: string * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
@@ -198,6 +199,8 @@ let update msg model =
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
+    | OpenVsCode path ->
+        model, Cmd.OfAsync.attempt worktreeApi.openVsCode path (fun _ -> Tick)
 
     | Tick ->
         model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -711,6 +714,15 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let vsCodeButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "vscode-btn"
+        prop.title "Open in VS Code"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenVsCode wt.Path))
+        prop.text "{⋯}"
+    ]
+
 let newTabButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
@@ -841,6 +853,7 @@ let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: Workt
                     terminalButton dispatch wt
                     archiveButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
+                    vsCodeButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -871,6 +884,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                     terminalButton dispatch wt
                     archiveButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
+                    vsCodeButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
