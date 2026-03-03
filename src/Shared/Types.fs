@@ -119,6 +119,7 @@ type DashboardResponse =
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: string -> Async<unit>
+      openVsCode: string -> Async<unit>
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
