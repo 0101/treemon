@@ -29,6 +29,27 @@ try {
     }
 }
 
+Write-Host "Creating data symlink..."
+$dataTarget = Join-Path $repoRoot "data"
+if (Test-Path $dataTarget) {
+    try {
+        New-Item -ItemType SymbolicLink -Path "data" -Target $dataTarget -ErrorAction Stop | Out-Null
+        Write-Host "  Symlink created successfully."
+    } catch {
+        Write-Host "  Symlink creation failed (needs admin). Requesting elevation..."
+        $escapedDest = (Join-Path $worktreePath "data") -replace "'", "''"
+        $escapedTarget = $dataTarget -replace "'", "''"
+        Start-Process powershell -Verb RunAs -Wait -ArgumentList "-Command", "New-Item -ItemType SymbolicLink -Path '$escapedDest' -Target '$escapedTarget'"
+        if (Test-Path "data") {
+            Write-Host "  Symlink created with elevation."
+        } else {
+            Write-Host "  Warning: Failed to create symlink. Copy manually or enable developer mode."
+        }
+    }
+} else {
+    Write-Host "  No data folder found in source worktree, skipping."
+}
+
 Write-Host "Initializing beads..."
 bd init --skip-hooks --skip-merge-driver --no-daemon --quiet
 

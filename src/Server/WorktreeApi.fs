@@ -26,7 +26,6 @@ let private assembleFromState
     let codingToolStatus, codingToolProvider, lastUserMsg =
         repo.CodingToolData
         |> Map.tryFind wt.Path
-        |> Option.map (fun (status, provider, userMsg) -> status, provider, userMsg)
         |> Option.defaultValue (CodingToolStatus.Idle, None, None)
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
