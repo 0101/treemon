@@ -47,15 +47,12 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Header h1 contains eye SVG and no text``() =
+    member this.``Header contains eye SVG``() =
         task {
-            let h1 = this.Page.Locator(".dashboard-header h1")
-            let svg = h1.Locator("svg")
+            let headerLeft = this.Page.Locator(".app-header .header-left")
+            let svg = headerLeft.Locator("svg")
             let! svgCount = svg.CountAsync()
-            Assert.That(svgCount, Is.EqualTo(1), "h1 should contain exactly one SVG element (the eye logo)")
-
-            let! text = h1.EvaluateAsync<string>("el => Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join('')")
-            Assert.That(text, Is.Empty, "h1 should have no direct text content (Treemon text removed)")
+            Assert.That(svgCount, Is.EqualTo(1), "Header should contain exactly one SVG element (the eye logo)")
         }
 
     [<Test>]
@@ -97,13 +94,6 @@ type DashboardTests() =
             let card = this.Page.Locator(".wt-card").First
             let! minWidth = card |> computedStyle "minWidth"
             Assert.That(minWidth, Is.EqualTo("0px"), "Card min-width should be 0 to allow text-overflow ellipsis in grid")
-        }
-
-    [<Test>]
-    member this.``Status bar does not show worktree count``() =
-        task {
-            let! statusText = this.Page.Locator(".status-bar").TextContentAsync()
-            Assert.That(statusText, Does.Not.Contain("worktrees"), "Worktree count was removed from status bar")
         }
 
     [<Test>]

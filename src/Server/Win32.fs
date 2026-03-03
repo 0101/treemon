@@ -87,7 +87,7 @@ type MEMORYSTATUSEX =
     val mutable ullAvailExtendedVirtual: uint64
 
 [<DllImport("kernel32.dll", SetLastError = true)>]
-extern bool GlobalMemoryStatusEx(MEMORYSTATUSEX& lpBuffer)
+extern bool private GlobalMemoryStatusEx(MEMORYSTATUSEX& lpBuffer)
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
 type FILETIME =
@@ -95,4 +95,15 @@ type FILETIME =
     val mutable dwHighDateTime: uint32
 
 [<DllImport("kernel32.dll", SetLastError = true)>]
-extern bool GetSystemTimes(FILETIME& lpIdleTime, FILETIME& lpKernelTime, FILETIME& lpUserTime)
+extern bool private GetSystemTimes(FILETIME& lpIdleTime, FILETIME& lpKernelTime, FILETIME& lpUserTime)
+
+let readMemoryStatus () =
+    let mutable status = MEMORYSTATUSEX()
+    status.dwLength <- uint32 (Marshal.SizeOf<MEMORYSTATUSEX>())
+    if GlobalMemoryStatusEx(&status) then Some status else None
+
+let readSystemTimes () =
+    let mutable idle = FILETIME()
+    let mutable kernel = FILETIME()
+    let mutable user = FILETIME()
+    if GetSystemTimes(&idle, &kernel, &user) then Some (idle, kernel, user) else None

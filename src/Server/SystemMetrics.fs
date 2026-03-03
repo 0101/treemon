@@ -9,23 +9,16 @@ type private CpuSample =
     { Idle: uint64; Kernel: uint64; User: uint64 }
 
 let private readCpuTimes () =
-    let mutable idle = Win32.FILETIME()
-    let mutable kernel = Win32.FILETIME()
-    let mutable user = Win32.FILETIME()
-    if Win32.GetSystemTimes(&idle, &kernel, &user) then
-        Some { Idle = fileTimeToUint64 idle; Kernel = fileTimeToUint64 kernel; User = fileTimeToUint64 user }
-    else
-        None
+    Win32.readSystemTimes ()
+    |> Option.map (fun (idle, kernel, user) ->
+        { Idle = fileTimeToUint64 idle; Kernel = fileTimeToUint64 kernel; User = fileTimeToUint64 user })
 
 let private readMemory () =
-    let mutable status = Win32.MEMORYSTATUSEX()
-    status.dwLength <- uint32 (System.Runtime.InteropServices.Marshal.SizeOf<Win32.MEMORYSTATUSEX>())
-    if Win32.GlobalMemoryStatusEx(&status) then
+    Win32.readMemoryStatus ()
+    |> Option.map (fun status ->
         let totalMb = int (status.ullTotalPhys / 1048576UL)
         let usedMb = totalMb - int (status.ullAvailPhys / 1048576UL)
-        Some (usedMb, totalMb)
-    else
-        None
+        (usedMb, totalMb))
 
 let private cpuState = ref Option<CpuSample>.None
 
@@ -46,7 +39,7 @@ let getSystemMetrics () : SystemMetrics option =
         | Some curr ->
             let prev = System.Threading.Interlocked.Exchange(cpuState, Some curr)
             match prev with
-            | None -> Some 0.0
+            | None -> None
             | Some prev -> Some (computeCpuPercent prev curr)
 
     match cpuPercent, readMemory () with
