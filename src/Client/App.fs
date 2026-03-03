@@ -40,6 +40,7 @@ type Msg =
     | SyncStatusUpdate of Map<string, CardEvent list>
     | CancelSync of string
     | SyncTick
+    | ConfirmDeleteWorktree of branch: string
     | DeleteWorktree of string
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: string
@@ -118,6 +119,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
         | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
         | "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
+        | "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
         | _ -> None
     | RepoHeader repoId ->
         match key with
@@ -240,6 +242,11 @@ let update msg model =
 
     | SyncTick ->
         model, fetchSyncStatus ()
+
+    | ConfirmDeleteWorktree branch ->
+        model, Cmd.ofEffect (fun dispatch ->
+            if Dom.window.confirm $"Remove worktree {branch}? This will delete the worktree folder and local branch." then
+                dispatch (DeleteWorktree branch))
 
     | DeleteWorktree branch ->
         let updatedRepos =
@@ -742,12 +749,7 @@ let deleteButton dispatch (wt: WorktreeStatus) =
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
-            let confirmed =
-                Dom.window.confirm (
-                    $"Remove worktree {wt.Branch}? This will delete the worktree folder and local branch.")
-            match confirmed with
-            | true -> dispatch (DeleteWorktree wt.Branch)
-            | false -> ())
+            dispatch (ConfirmDeleteWorktree wt.Branch))
         prop.text "\u2715"
     ]
 
