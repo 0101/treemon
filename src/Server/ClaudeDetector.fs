@@ -65,13 +65,15 @@ type private EntryKind =
     | AssistantToolUse of hasAskUserQuestion: bool
     | AssistantDone
 
-let private isStatusNoise (text: string) =
+let isSystemNoise (text: string) =
     text.Contains("PRESERVE ON CONTEXT COMPACTION")
     || text.StartsWith("<local-command-")
     || text.StartsWith("<system-reminder>")
     || text.StartsWith("<task-notification>")
     || text.Contains("<command-name>")
     || text.Contains("[Request interrupted by user]")
+    || (text.StartsWith("# ") && text.Length > 200)
+    || (text.StartsWith("**") && text.Length > 200)
 
 let private extractTextFromMessage (root: JsonElement) =
     match root.TryGetProperty("message") with
@@ -111,7 +113,7 @@ let private tryParseEntryKind (line: string) =
             | "user" ->
                 let text = extractTextFromMessage root
                 match text with
-                | Some t when isStatusNoise t -> None
+                | Some t when isSystemNoise t -> None
                 | _ -> Some(UserEntry, timestamp)
             | "assistant" ->
                 match root.TryGetProperty("message") with
@@ -272,14 +274,6 @@ let private tryExtractSlashCommand (text: string) =
         | Some args when args.Length > 0 -> $"{cmd} {args}"
         | _ -> cmd)
 
-let isSystemNoise (text: string) =
-    text.Contains("PRESERVE ON CONTEXT COMPACTION")
-    || text.StartsWith("<local-command-")
-    || text.StartsWith("<system-reminder>")
-    || text.StartsWith("<task-notification>")
-    || (text.StartsWith("# ") && text.Length > 200)
-    || (text.StartsWith("**") && text.Length > 200)
-
 let private extractUserContent (text: string) =
     match tryExtractSlashCommand text with
     | Some cmd -> Some cmd
@@ -339,9 +333,8 @@ let scanForUserMessage (filePath: string) =
         let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
         let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
 
-        if isAtFileStart then lines
-        else if lines.Length > 0 then lines[1..]
-        else lines
+        if isAtFileStart || lines.Length = 0 then lines
+        else lines[1..]
 
     try
         use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)

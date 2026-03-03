@@ -85,6 +85,28 @@ type ScanForUserMessageTests() =
             let text, _ = result.Value
             Assert.That(text, Is.EqualTo("boundary message")))
 
+    [<Test>]
+    member _.``Returns None for empty file``() =
+        withTempJsonl "" (fun path ->
+            let result = scanForUserMessage path
+            Assert.That(result, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``Skips skill prompt noise and returns real user message behind it``() =
+        let longSkillPrompt = "# " + String.replicate 250 "x"
+        let content =
+            [ makeUserEntry "real user question" "2025-01-01T00:00:01Z"
+              makeAssistantEntry "assistant reply" "2025-01-01T00:00:02Z"
+              makeUserEntry longSkillPrompt "2025-01-01T00:00:03Z"
+              makeAssistantEntry "working on it" "2025-01-01T00:00:04Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempJsonl content (fun path ->
+            let result = scanForUserMessage path
+            Assert.That(result.IsSome, Is.True)
+            let text, _ = result.Value
+            Assert.That(text, Is.EqualTo("real user question")))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -114,6 +136,14 @@ type IsSystemNoiseTests() =
     [<Test>]
     member _.``Catches PRESERVE ON CONTEXT COMPACTION``() =
         Assert.That(isSystemNoise "PRESERVE ON CONTEXT COMPACTION", Is.True)
+
+    [<Test>]
+    member _.``Catches command-name tag``() =
+        Assert.That(isSystemNoise "Some text with <command-name>/review</command-name>", Is.True)
+
+    [<Test>]
+    member _.``Catches Request interrupted by user``() =
+        Assert.That(isSystemNoise "[Request interrupted by user]", Is.True)
 
     [<Test>]
     member _.``Does not filter normal user message``() =
