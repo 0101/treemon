@@ -258,7 +258,7 @@ let private executeTask
 
         | RefreshCodingTool(repoId, path) ->
             let status, provider = CodingToolStatus.getStatus path
-            let lastUserMsg = CodingToolStatus.getLastUserMessage path
+            let lastUserMsg = CodingToolStatus.getLastUserMessage path provider
             agent.Post(UpdateCodingTool(repoId, path, (status, provider, lastUserMsg)))
 
         | RefreshPr repoId ->

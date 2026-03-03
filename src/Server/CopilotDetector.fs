@@ -250,9 +250,9 @@ let private tryParseUserContent (line: string) =
                     | _ -> None
                 | _ -> None
 
-            match textContent, timestamp with
-            | Some text, Some ts -> Some(text, ts)
-            | _ -> None
+            match textContent with
+            | Some text -> Some(text, timestamp |> Option.defaultValue DateTimeOffset.MinValue)
+            | None -> None
         | _ -> None
     with ex ->
         Log.log "Copilot" $"Failed to parse user content: {ex.Message}"
