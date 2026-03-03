@@ -164,7 +164,7 @@ let private openTerminal
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
-            let! result = SessionManager.spawnTerminal sessionAgent path
+            let! result = SessionManager.spawnTerminal sessionAgent wtPath
 
             match result with
             | Ok () -> ()
@@ -354,13 +354,13 @@ let worktreeApi
           deleteWorktree = deleteWorktree agent rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
-                  SessionManager.spawnSession sessionAgent (WorktreePath.value req.Path) req.Prompt)
+                  SessionManager.spawnSession sessionAgent req.Path req.Prompt)
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
-                  SessionManager.focusSession sessionAgent (WorktreePath.value wtPath))
+                  SessionManager.focusSession sessionAgent wtPath)
           killSession = fun wtPath ->
               withValidatedPath wtPath "killSession" (fun () ->
-                  SessionManager.killSession sessionAgent (WorktreePath.value wtPath))
+                  SessionManager.killSession sessionAgent wtPath)
           getBranches = fun repoIdStr ->
               async {
                   let repoId = RepoId.create repoIdStr
@@ -408,4 +408,4 @@ let worktreeApi
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
-                  SessionManager.openNewTab sessionAgent (WorktreePath.value wtPath)) }
+                  SessionManager.openNewTab sessionAgent wtPath) }

@@ -6,7 +6,7 @@
         "RootFolderName": "TestProject",
         "Worktrees": [
           {
-            "Path": "Q:/code/TestProject/feature-active",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-active"},
             "Branch": "feature-active",
             "LastCommitMessage": "Add comprehensive input validation",
             "LastCommitTime": "2026-02-16T22:30:00+00:00",
@@ -46,7 +46,7 @@
             "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 }
           },
           {
-            "Path": "Q:/code/TestProject/feature-recent",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-recent"},
             "Branch": "feature-recent",
             "LastCommitMessage": "Refactor data access layer for clarity",
             "LastCommitTime": "2026-02-16T22:00:00+00:00",
@@ -76,7 +76,7 @@
             "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 }
           },
           {
-            "Path": "Q:/code/TestProject/feature-idle",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-idle"},
             "Branch": "feature-idle",
             "LastCommitMessage": "Complete logging improvements",
             "LastCommitTime": "2026-02-16T20:00:00+00:00",
@@ -87,7 +87,7 @@
             "MainBehindCount": 0
           },
           {
-            "Path": "Q:/code/TestProject/feature-stale",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-stale"},
             "Branch": "feature-stale",
             "LastCommitMessage": "Initial experiment with caching",
             "LastCommitTime": "2026-02-10T08:00:00+00:00",
@@ -99,7 +99,7 @@
             "IsDirty": true
           },
           {
-            "Path": "Q:/code/TestProject/feature-merged",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-merged"},
             "Branch": "feature-merged",
             "LastCommitMessage": "Final cleanup before merge",
             "LastCommitTime": "2026-02-15T16:00:00+00:00",
@@ -127,7 +127,7 @@
             "MainBehindCount": 0
           },
           {
-            "Path": "Q:/code/TestProject/feature-draft",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-draft"},
             "Branch": "feature-draft",
             "LastCommitMessage": "Wire up API endpoints for new feature",
             "LastCommitTime": "2026-02-16T21:00:00+00:00",
@@ -164,7 +164,7 @@
             "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 }
           },
           {
-            "Path": "Q:/code/TestProject/feature-unknown",
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-unknown"},
             "Branch": "feature-unknown",
             "LastCommitMessage": "Update configuration defaults",
             "LastCommitTime": "2026-02-16T18:00:00+00:00",
@@ -182,7 +182,7 @@
         "RootFolderName": "treemon",
         "Worktrees": [
           {
-            "Path": "Q:/code/treemon/test-add-health-endpoint",
+            "Path": {"WorktreePath": "Q:/code/treemon/test-add-health-endpoint"},
             "Branch": "test/add-health-endpoint",
             "LastCommitMessage": "Add CI workflow and contributing guide",
             "LastCommitTime": "2026-02-22T15:12:00+00:00",
@@ -213,7 +213,7 @@
             "MainBehindCount": 0
           },
           {
-            "Path": "Q:/code/treemon/test-add-editorconfig",
+            "Path": {"WorktreePath": "Q:/code/treemon/test-add-editorconfig"},
             "Branch": "test/add-editorconfig",
             "LastCommitMessage": "Add editorconfig for consistent formatting",
             "LastCommitTime": "2026-02-22T15:10:00+00:00",
@@ -244,7 +244,7 @@
             "MainBehindCount": 0
           },
           {
-            "Path": "Q:/code/treemon/multirepo",
+            "Path": {"WorktreePath": "Q:/code/treemon/multirepo"},
             "Branch": "multirepo",
             "LastCommitMessage": "Multi-repo support implementation",
             "LastCommitTime": "2026-02-22T14:00:00+00:00",
