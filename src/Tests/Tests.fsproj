@@ -20,6 +20,7 @@
     <Compile Include="CopilotDetectorTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
+    <Compile Include="CreateWorktreeTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
@@ -40,6 +41,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Server\Server.fsproj" />
+    <ProjectReference Include="..\Client\Client.fsproj" />
   </ItemGroup>
 
 </Project>

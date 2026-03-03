@@ -2187,11 +2187,11 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``No modal-overlay elements exist in DOM``() =
+    member this.``No modal-overlay on initial page load``() =
         task {
             let modalOverlays = this.Page.Locator(".modal-overlay")
             let! count = modalOverlays.CountAsync()
-            Assert.That(count, Is.EqualTo(0), "modal-overlay should not exist in DOM (removed per spec)")
+            Assert.That(count, Is.EqualTo(0), "modal-overlay should not exist on initial page load (create modal starts Closed)")
         }
 
     [<Test>]
@@ -3003,6 +3003,23 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Plus button visible on every repo header``() =
+        task {
+            let repoHeaders = this.Page.Locator(".repo-header")
+            do! repoHeaders.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! headerCount = repoHeaders.CountAsync()
+            Assert.That(headerCount, Is.GreaterThanOrEqualTo(1), "Should have at least one repo header")
+
+            let plusBtns = this.Page.Locator(".repo-header .create-wt-btn")
+            let! btnCount = plusBtns.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(headerCount), "Every repo header should have a .create-wt-btn")
+
+            let! text = plusBtns.First.TextContentAsync()
+            Assert.That(text.Trim(), Is.EqualTo("+"), "Plus button text should be '+'")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Home key navigates to first visible element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3026,6 +3043,29 @@ type DashboardTests() =
 
             let! count = focusedAfterHome.CountAsync()
             Assert.That(count, Is.EqualTo(1), "Exactly one element should be focused after Home")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Plus button click opens modal with name input focused``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! overlayCount = overlay.CountAsync()
+            Assert.That(overlayCount, Is.EqualTo(1), "Clicking plus button should show exactly one modal overlay")
+
+            let dialog = this.Page.Locator(".modal-dialog")
+            let! dialogCount = dialog.CountAsync()
+            Assert.That(dialogCount, Is.EqualTo(1), "Modal should contain exactly one dialog")
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! isFocused = nameInput.EvaluateAsync<bool>("el => document.activeElement === el")
+            Assert.That(isFocused, Is.True, "Name input should be auto-focused when modal opens")
         }
 
     [<Test>]
@@ -3055,6 +3095,25 @@ type DashboardTests() =
             let! lastBranch = lastCard.Locator(".branch-name").TextContentAsync()
             let! focusedBranch = focusedAfterEnd.Locator(".branch-name").TextContentAsync()
             Assert.That(focusedBranch, Is.EqualTo(lastBranch), "End should focus the very last card in the dashboard")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal has base branch dropdown populated and pre-selected``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let select = this.Page.Locator(".modal-select")
+            do! select.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let options = select.Locator("option")
+            let! optionCount = options.CountAsync()
+            Assert.That(optionCount, Is.GreaterThanOrEqualTo(1), "Base branch dropdown should have at least one option")
+
+            let! selectedValue = select.InputValueAsync()
+            Assert.That(selectedValue, Is.Not.Empty, "A base branch should be pre-selected")
         }
 
     [<Test>]
@@ -3102,6 +3161,31 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Modal has header, Cancel and Create buttons``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let header = this.Page.Locator(".modal-header")
+            do! header.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! headerText = header.TextContentAsync()
+            Assert.That(headerText, Does.Contain("Create worktree"), "Modal header should say 'Create worktree'")
+
+            let cancelBtn = this.Page.Locator(".modal-btn.cancel")
+            let! cancelCount = cancelBtn.CountAsync()
+            Assert.That(cancelCount, Is.EqualTo(1), "Modal should have a cancel button")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            let! submitCount = submitBtn.CountAsync()
+            Assert.That(submitCount, Is.EqualTo(1), "Modal should have a submit button")
+
+            let! submitText = submitBtn.TextContentAsync()
+            Assert.That(submitText.Trim(), Is.EqualTo("Create"), "Submit button text should be 'Create'")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Wrap-around navigation scrolls focused element into view``() =
         task {
             do! this.Page.SetViewportSizeAsync(1300, 400)
@@ -3138,6 +3222,20 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Submit button disabled when name is empty``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! isDisabled = submitBtn.IsDisabledAsync()
+            Assert.That(isDisabled, Is.True, "Submit button should be disabled when name input is empty")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``First keypress captures focus without page scroll``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3160,6 +3258,23 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Submit button enabled after typing a name``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            do! nameInput.FillAsync("test-branch")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            let! isDisabled = submitBtn.IsDisabledAsync()
+            Assert.That(isDisabled, Is.False, "Submit button should be enabled after typing a name")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``End key from no focus goes to last element``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -3178,6 +3293,24 @@ type DashboardTests() =
 
             let! cssClass = focusedAfter.GetAttributeAsync("class")
             Assert.That(cssClass, Does.Contain("wt-card"), "End from no-focus should go to last card")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Escape key closes modal``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should be removed from DOM after pressing Escape")
         }
 
     [<Test>]
@@ -3242,6 +3375,25 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Cancel button closes modal``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cancelBtn = this.Page.Locator(".modal-btn.cancel")
+            do! cancelBtn.ClickAsync()
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should be removed from DOM after clicking Cancel")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Cards with LastUserMessage show user-prompt class``() =
         task {
             let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
@@ -3252,6 +3404,24 @@ type DashboardTests() =
 
             let! text = userPrompts.First.TextContentAsync()
             Assert.That(text, Is.Not.Empty, "User prompt should have text content")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Clicking overlay background closes modal``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! overlay.ClickAsync(LocatorClickOptions(Position = Microsoft.Playwright.Position(X = 5.0f, Y = 5.0f)))
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should close when clicking overlay background")
         }
 
     [<Test>]
@@ -3274,6 +3444,28 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Plus button click does not toggle repo collapse``() =
+        task {
+            let repoSection = this.Page.Locator(".repo-section").First
+            let cardGrid = repoSection.Locator(".card-grid")
+            do! cardGrid.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! gridVisible = cardGrid.IsVisibleAsync()
+            Assert.That(gridVisible, Is.True, "Card grid should be visible before clicking plus")
+
+            let plusBtn = repoSection.Locator(".create-wt-btn")
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! gridStillVisible = cardGrid.IsVisibleAsync()
+            Assert.That(gridStillVisible, Is.True, "Card grid should still be visible after clicking plus (collapse should not toggle)")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Cards without LastUserMessage have no commit-line element``() =
         task {
             let idleCard = this.Page.Locator(".wt-card.ct-idle").First
@@ -3288,6 +3480,27 @@ type DashboardTests() =
             let! msgCount = gitCommitMsg.CountAsync()
             Assert.That(msgCount, Is.EqualTo(1),
                 "Idle card should still have git-commit-msg in main-behind-row")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Full roundtrip: submit form, modal closes on success``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("e2e-test-branch")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should close after successful worktree creation")
         }
 
     [<Test>]
@@ -3308,6 +3521,25 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Full roundtrip via Enter key: type name, press Enter, modal closes``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("e2e-enter-test")
+            do! nameInput.PressAsync("Enter")
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+            let! count = overlay.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Modal should close after pressing Enter with a valid name")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Plus button visible on cards with HasActiveSession``() =
         task {
             let sessionCards = this.Page.Locator(".wt-card.has-session")
@@ -3320,6 +3552,34 @@ type DashboardTests() =
             let! btnCount = newTabBtns.CountAsync()
             Assert.That(btnCount, Is.EqualTo(sessionCount),
                 "Every card with HasActiveSession should have a .new-tab-btn")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal re-opens correctly after previous submission``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("first-submit")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 10000.0f))
+
+            do! plusBtn.ClickAsync()
+
+            let newInput = this.Page.Locator(".modal-input")
+            do! newInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! inputValue = newInput.InputValueAsync()
+            Assert.That(inputValue, Is.EqualTo(""), "Name input should be empty when re-opening modal after previous submission")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
         }
 
     [<Test>]
@@ -3592,6 +3852,31 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Enter key in modal input does not collapse repo``() =
+        task {
+            let repoSection = this.Page.Locator(".repo-section").First
+            let cardGrid = repoSection.Locator(".card-grid")
+            do! cardGrid.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! gridVisibleBefore = cardGrid.IsVisibleAsync()
+            Assert.That(gridVisibleBefore, Is.True, "Card grid should be visible before opening modal")
+
+            let plusBtn = repoSection.Locator(".create-wt-btn")
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("test-branch")
+            do! nameInput.PressAsync("Enter")
+
+            do! System.Threading.Tasks.Task.Delay(500)
+
+            let! gridVisibleAfter = cardGrid.IsVisibleAsync()
+            Assert.That(gridVisibleAfter, Is.True,
+                "Card grid should still be visible after pressing Enter in modal input (Enter must not propagate to ToggleCollapse)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Provider icon SVG has valid viewBox for GitHub or AzDo``() =
         task {
             let icons = this.Page.Locator(".repo-header .provider-icon")
@@ -3609,6 +3894,156 @@ type DashboardTests() =
                 checkedAny <- true
 
             Assert.That(checkedAny, Is.True, "Should have checked at least one provider icon viewBox")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Escape closes modal and restores focus to repo header for arrow key nav``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Should be on repo header after ArrowDown")
+
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should be restored to repo header after Escape closes modal")
+
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedNav = this.Page.Locator(".focused")
+            do! focusedNav.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! navClass = focusedNav.GetAttributeAsync("class")
+            Assert.That(navClass, Does.Contain("wt-card"),
+                "Arrow key navigation should work after re-focusing dashboard post-Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Cancel button closes modal and restores focus for arrow key nav``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cancelBtn = this.Page.Locator(".modal-btn.cancel")
+            do! cancelBtn.ClickAsync()
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should be restored to repo header after Cancel closes modal")
+
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedNav = this.Page.Locator(".focused")
+            do! focusedNav.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! navClass = focusedNav.GetAttributeAsync("class")
+            Assert.That(navClass, Does.Contain("wt-card"),
+                "Arrow key navigation should work after re-focusing dashboard post-Cancel")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal shows loading state with spinner text``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let loadingText = this.Page.Locator(".modal-loading")
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal creating state shows creating text and dots``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("e2e-creating-test")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.ClickAsync()
+
+            let creatingText = this.Page.Locator(".creating-text")
+            let creatingDots = this.Page.Locator(".creating-dots")
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 15000.0f))
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow keys suppressed while modal is open``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! beforeClass = focused.GetAttributeAsync("class")
+            Assert.That(beforeClass, Does.Contain("repo-header"), "Should be on repo header")
+
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowUp")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should remain on repo header (arrow keys while modal open should not have changed it)")
         }
 
 

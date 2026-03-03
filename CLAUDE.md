@@ -71,22 +71,30 @@ src/
     Log.fs                 — diagnostic logging to logs/server.log
     GitWorktree.fs         — git worktree enumeration, commit data, dirty detection, work metrics
     BeadsStatus.fs         — beads task counts via `bd` CLI
-    ClaudeStatus.fs        — Claude Code activity + last assistant message parsing
+    ClaudeDetector.fs      — Claude Code session file scanning + last message parsing
+    CopilotDetector.fs     — Copilot CLI session scanning, workspace index
+    CodingToolStatus.fs    — coding tool orchestrator: config override, provider dispatch
     PrStatus.fs            — Azure DevOps PR, threads, build status, failure extraction
     GithubPrStatus.fs      — GitHub PR, Actions status via `gh` CLI
     ProcessRunner.fs       — shared process execution utilities
     RefreshScheduler.fs    — background refresh loop, MailboxProcessor state agent
     SyncEngine.fs          — branch sync pipeline orchestration
+    SessionManager.fs      — Windows Terminal session spawn/focus/kill, persistence
+    Win32.fs               — P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE
     WorktreeApi.fs         — API implementation, state reads, event merging
     Program.fs             — Saturn app entry point, CLI arg parsing, scheduler wiring
   Client/
-    App.fs                 — entire Elmish app (Model, Msg, update, view)
+    Navigation.fs          — keyboard navigation: spatial arrow keys, key bindings
+    CreateWorktreeModal.fs — create worktree modal: types, update, view (extracted from App.fs)
+    App.fs                 — Elmish MVU app (Model, Msg, update, view)
     index.html             — entry point with inline CSS
     output/                — Fable compilation output (gitignored)
   Tests/
     fixtures/
       azdo/                — Azure DevOps fixture data for tests
       github/              — GitHub fixture data for tests
+      copilot/             — Copilot session fixture data for tests
+    TestUtils.fs           — shared test helpers
     ServerFixture.fs       — starts server + Vite for tests
     DashboardTests.fs      — Playwright E2E tests
     EventProcessingTests.fs — unit tests for event processing
@@ -95,12 +103,19 @@ src/
     GithubParsingTests.fs  — GitHub URL/JSON parsing tests
     GithubFixtureTests.fs  — GitHub fixture-based tests
     AzDoFixtureTests.fs    — Azure DevOps fixture-based tests
+    CodingToolOrchestratorTests.fs — coding tool orchestrator tests
+    CopilotDetectorTests.fs — Copilot detector tests
+    SessionManagerSpawnTests.fs — session manager spawn tests
+    SessionPersistenceTests.fs — session persistence tests
+    SyncEngineTests.fs     — sync engine tests
     MultiRepoApiTests.fs   — multi-repo API integration tests
     PrFilteringTests.fs    — PR filtering unit tests
     SchedulerTests.fs      — unit tests for scheduler logic
     SmokeTests.fs          — smoke tests against live data
 docs/spec/
   worktree-monitor.md     — full specification
+  keyboard-navigation.md  — keyboard navigation spec
+  native-session-management.md — Windows Terminal session management spec
 treemon.ps1                — production lifecycle + dev mode + deploy
 vite.config.js            — Vite config with API proxy (ports via env vars)
 treemon.slnx               — .NET 9 solution file (.slnx format)
@@ -109,18 +124,19 @@ treemon.slnx               — .NET 9 solution file (.slnx format)
 ## Domain Types (src/Shared/Types.fs)
 
 ```fsharp
-type CommentSummary =
-    | WithResolution of unresolved: int * total: int
-    | CountOnly of total: int
+type CodingToolStatus = Working | WaitingForUser | Done | Idle
+type CodingToolProvider = Claude | Copilot
 
 type WorktreeStatus =
     { Path: string; Branch: string; LastCommitMessage: string
       LastCommitTime: DateTimeOffset; Beads: BeadsSummary
-      Claude: ClaudeCodeStatus; Pr: PrStatus
-      MainBehindCount: int; IsDirty: bool; WorkMetrics: WorkMetrics option }
+      CodingTool: CodingToolStatus; CodingToolProvider: CodingToolProvider option
+      LastUserMessage: string option; Pr: PrStatus
+      MainBehindCount: int; IsDirty: bool; WorkMetrics: WorkMetrics option
+      HasActiveSession: bool }
 
 type RepoWorktrees =
-    { RepoId: string; RootFolderName: string
+    { RepoId: RepoId; RootFolderName: string
       Worktrees: WorktreeStatus list; IsReady: bool }
 
 type DashboardResponse =
@@ -133,10 +149,14 @@ type IWorktreeApi =
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
-      deleteWorktree: string -> Async<Result<unit, string>> }
+      deleteWorktree: string -> Async<Result<unit, string>>
+      launchSession: LaunchRequest -> Async<Result<unit, string>>
+      focusSession: string -> Async<Result<unit, string>>
+      killSession: string -> Async<Result<unit, string>>
+      openNewTab: string -> Async<Result<unit, string>> }
 ```
 
-Key DUs: `ClaudeCodeStatus` (Working|WaitingForUser|Done|Idle), `PrStatus` (NoPr|HasPr of PrInfo), `BuildStatus` (Building|Succeeded|Failed|PartiallySucceeded|Canceled), `StepStatus` (Pending|Running|Succeeded|Failed|Cancelled), `CommentSummary` (WithResolution|CountOnly). `PrInfo` includes `Comments: CommentSummary`, `IsMerged`, and `Builds: BuildInfo list`. `BuildInfo` includes optional `Failure: BuildFailure`.
+Key DUs: `CodingToolStatus` (Working|WaitingForUser|Done|Idle), `CodingToolProvider` (Claude|Copilot), `PrStatus` (NoPr|HasPr of PrInfo), `BuildStatus` (Building|Succeeded|Failed|PartiallySucceeded|Canceled), `StepStatus` (Pending|Running|Succeeded|Failed|Cancelled), `CommentSummary` (WithResolution|CountOnly). `PrInfo` includes `Comments: CommentSummary`, `IsMerged`, and `Builds: BuildInfo list`. `BuildInfo` includes optional `Failure: BuildFailure`.
 
 ## Architecture
 
@@ -155,6 +175,8 @@ Key DUs: `ClaudeCodeStatus` (Working|WaitingForUser|Done|Idle), `PrStatus` (NoPr
 - **az** (Azure CLI) — `az repos pr list`, `az devops invoke` (PR threads), `az pipelines runs list`
 - **gh** (GitHub CLI) — `gh api` for PRs, comments, Actions workflow runs
 - **Claude session files** — reads `~/.claude/projects/<encoded-path>/*.jsonl` mtimes
+- **Copilot session files** — reads `~/.copilot/session-state/{uuid}/workspace.yaml` + `events.jsonl`
+- **wt.exe** (Windows Terminal) — session spawn/focus via HWND tracking
 - **.NET SDK 9.0.205** — pinned in global.json (Fable 4.28.0 has issues with .NET 10)
 - **Node.js** — for Vite and npm
 
@@ -178,7 +200,9 @@ dotnet test src/Tests/Tests.fsproj    # starts server + Vite automatically via S
 - Fable.Remoting routes use `/{TypeName}/{MethodName}` format — Vite proxy matches `/IWorktreeApi`
 - Claude path encoding: replace `:`, `\`, `/` with `-` (e.g., `Q:\code\foo` -> `Q--code-foo`)
 - PR provider auto-detected from git remote URL — `RemoteInfo` DU routes to AzDo or GitHub fetcher
-- Client is a single file (App.fs) with Elmish MVU pattern
+- Coding tool provider auto-detected from session files; `.treemon.json` `"codingTool"` overrides
+- Client split into App.fs (MVU) + Navigation.fs (keyboard handling)
+- Native session management: `SessionManager.fs` tracks Windows Terminal HWNDs, persists to `data/sessions.json`
 - Server logs to `logs/server.log` — truncated on startup
 - Solution uses .slnx format (new in .NET 9)
 - Branch sync configured via `.treemon.json` in worktree root

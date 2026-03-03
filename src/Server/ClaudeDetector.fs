@@ -65,15 +65,54 @@ type private EntryKind =
     | AssistantToolUse of hasAskUserQuestion: bool
     | AssistantDone
 
+let private isStatusNoise (text: string) =
+    text.Contains("PRESERVE ON CONTEXT COMPACTION")
+    || text.StartsWith("<local-command-")
+    || text.StartsWith("<system-reminder>")
+    || text.StartsWith("<task-notification>")
+    || text.Contains("<command-name>")
+    || text.Contains("[Request interrupted by user]")
+
+let private extractTextFromMessage (root: JsonElement) =
+    match root.TryGetProperty("message") with
+    | true, msg ->
+        match msg.TryGetProperty("content") with
+        | true, c when c.ValueKind = JsonValueKind.String -> Some(c.GetString())
+        | true, c when c.ValueKind = JsonValueKind.Array ->
+            c.EnumerateArray()
+            |> Seq.tryFind (fun b ->
+                match b.TryGetProperty("type") with
+                | true, t -> t.GetString() = "text"
+                | _ -> false)
+            |> Option.bind (fun b ->
+                match b.TryGetProperty("text") with
+                | true, t -> Some(t.GetString())
+                | _ -> None)
+        | _ -> None
+    | _ -> None
+
+let private tryParseTimestamp (root: JsonElement) =
+    match root.TryGetProperty("timestamp") with
+    | true, ts ->
+        match DateTimeOffset.TryParse(ts.GetString()) with
+        | true, dto -> Some dto
+        | _ -> None
+    | _ -> None
+
 let private tryParseEntryKind (line: string) =
     try
         use doc = JsonDocument.Parse(line)
         let root = doc.RootElement
+        let timestamp = tryParseTimestamp root
 
         match root.TryGetProperty("type") with
         | true, typeProp ->
             match typeProp.GetString() with
-            | "user" -> Some UserEntry
+            | "user" ->
+                let text = extractTextFromMessage root
+                match text with
+                | Some t when isStatusNoise t -> None
+                | _ -> Some(UserEntry, timestamp)
             | "assistant" ->
                 match root.TryGetProperty("message") with
                 | true, msg ->
@@ -103,9 +142,9 @@ let private tryParseEntryKind (line: string) =
                                 | true, n -> n.GetString() = "AskUserQuestion"
                                 | _ -> false)
 
-                        Some(AssistantToolUse hasAskUser)
-                    | _ -> Some AssistantDone
-                | _ -> Some AssistantDone
+                        Some(AssistantToolUse hasAskUser, timestamp)
+                    | _ -> Some(AssistantDone, timestamp)
+                | _ -> Some(AssistantDone, timestamp)
             | _ -> None
         | _ -> None
     with ex ->
@@ -119,6 +158,8 @@ let private statusFromEntry entryKind =
     | AssistantToolUse false -> Working
     | AssistantDone -> Done
 
+let private stalenessTimeout = TimeSpan.FromMinutes(30.0)
+
 let getStatus (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
@@ -126,16 +167,27 @@ let getStatus (worktreePath: string) =
     match findLatestJsonl projectDir with
     | Some fi ->
         try
-            let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if age > TimeSpan.FromHours(2.0) then
+            let fileAge = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+            if fileAge > TimeSpan.FromHours(2.0) then
                 Idle
             else
-                readLastLines fi.FullName 20
-                |> List.tryPick tryParseEntryKind
-                |> Option.map statusFromEntry
-                |> Option.defaultValue Idle
-                |> fun status ->
-                    if status = Done && age < TimeSpan.FromSeconds(10.0) then Working else status
+                let entry =
+                    readLastLines fi.FullName 20
+                    |> List.tryPick tryParseEntryKind
+
+                match entry with
+                | Some(kind, timestamp) ->
+                    let status = statusFromEntry kind
+                    let entryAge =
+                        timestamp
+                        |> Option.map (fun ts -> DateTimeOffset.UtcNow - ts)
+                        |> Option.defaultValue fileAge
+
+                    match status with
+                    | Done when fileAge < TimeSpan.FromSeconds(10.0) -> Working
+                    | Working when entryAge > stalenessTimeout -> Idle
+                    | other -> other
+                | None -> Idle
         with ex ->
             Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
             Idle

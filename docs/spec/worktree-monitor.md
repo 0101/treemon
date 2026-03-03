@@ -17,6 +17,7 @@
 - Merged PRs get dimmed cards with delete button
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
+- Keyboard navigation: arrow keys move focus spatially across cards and repo headers (see `docs/spec/keyboard-navigation.md`)
 
 ### Multi-Repo
 
@@ -35,6 +36,7 @@
 - PR badge linking to PR page; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (last 3 events), sync/cancel/terminal/delete actions
+- Green left border on cards with active terminal sessions
 
 ### Branch Sync
 
@@ -53,6 +55,19 @@
 - Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
 - Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
+
+### Create Worktree
+
+A "+" button on each repo header opens a modal to create new worktrees without leaving the dashboard.
+
+- **Name input** (auto-focused) + **source branch dropdown** (sorted: main > master > develop > dev* > alphabetical from dashboard worktrees)
+- If `fork.ps1` (Windows) or `fork.sh` (Unix) exists in repo root, delegates to it with branch name as sole argument (runs from source worktree directory). Otherwise falls back to `git worktree add -b {name} {parentDir}/tm-{name}`.
+- Modal shows creating animation, then auto-closes on success or displays error
+- Server expedites worktree list refresh for the repo so the new card appears quickly
+
+### Native Session Management
+
+Windows Terminal integration for spawning, tracking, and focusing terminal windows per worktree. See `docs/spec/native-session-management.md` for full details.
 
 ### GitHub PRs
 
@@ -110,7 +125,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 | File | Purpose |
 |------|---------|
-| `src/Shared/Types.fs` | `DashboardResponse`, `RepoWorktrees`, `CommentSummary`, `CodingToolStatus`, shared domain types |
+| `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
+| `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
 | `src/Server/ClaudeDetector.fs` | Claude Code session file scanning |
 | `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
@@ -120,7 +136,10 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, work metrics |
 | `src/Server/WorktreeApi.fs` | API implementation, `DashboardResponse` assembly |
 | `src/Server/SyncEngine.fs` | Branch sync pipeline, provider-aware conflict resolution |
+| `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
+| `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app, repo sections, card rendering |
+| `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
 | `src/Tests/fixtures/` | Captured AzDo, GitHub, and Copilot data for offline parsing tests |
 
 ## Decisions
@@ -137,8 +156,10 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
+- Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 
 ## Related Specs
 
-- `docs/spec/future/llm-comment-resolution.md` — infer GitHub comment resolution via LLM, upgrade `CountOnly` to `WithResolution`
-- `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type for compile-time path safety (deferred: entry-point normalization sufficient for now)
+- `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
+- `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
+- `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)

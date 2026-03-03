@@ -20,8 +20,10 @@ type Model =
       BranchEvents: Map<string, CardEvent list>
       SyncPending: Set<string>
       AppVersion: string option
+      EditorName: string
       EyeDirection: float * float
       FocusedElement: FocusTarget option
+      CreateModal: CreateWorktreeModal.ModalState
       DeletedBranches: Set<string> }
 
 type Msg =
@@ -32,6 +34,7 @@ type Msg =
     | ToggleCollapse of repoId: RepoId
     | Tick
     | OpenTerminal of string
+    | OpenEditor of string
     | StartSync of branch: string * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
@@ -44,6 +47,7 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
+    | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
     Remoting.createApi ()
@@ -73,8 +77,10 @@ let init () =
       BranchEvents = Map.empty
       SyncPending = Set.empty
       AppVersion = None
+      EditorName = "VS Code"
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
+      CreateModal = CreateWorktreeModal.Closed
       DeletedBranches = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
@@ -111,10 +117,12 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
         | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
         | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
+        | "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
         | _ -> None
     | RepoHeader repoId ->
         match key with
         | "Enter" -> Some (ToggleCollapse repoId)
+        | "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
         | _ -> None
 
 let update msg model =
@@ -150,6 +158,7 @@ let update msg model =
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
+                EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
                 DeletedBranches = stillPending }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
@@ -193,6 +202,8 @@ let update msg model =
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
+    | OpenEditor path ->
+        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick)
 
     | Tick ->
         model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -260,10 +271,28 @@ let update msg model =
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
 
+    | ModalMsg modalMsg ->
+        let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
+        let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
+        let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+        { model with CreateModal = result.Modal; FocusedElement = focus },
+        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
+
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus oldFocus newFocus =
             let useCenter = isLargeJump model.Repos oldFocus newFocus
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
+        if CreateWorktreeModal.isOpen model.CreateModal then
+            match key with
+            | "Escape" ->
+                let restoredFocus =
+                    CreateWorktreeModal.repoId model.CreateModal
+                    |> Option.map RepoHeader
+                    |> Option.orElse model.FocusedElement
+                { model with CreateModal = CreateWorktreeModal.Closed; FocusedElement = restoredFocus },
+                Cmd.none
+            | _ -> model, Cmd.none
+        else
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -688,6 +717,15 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let editorButton dispatch editorName (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "editor-btn"
+        prop.title $"Open in {editorName}"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
+        prop.text "{⋯}"
+    ]
+
 let newTabButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
@@ -793,12 +831,13 @@ let workMetricsView (metrics: WorkMetrics option) =
             ]
         ]
 
-let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.key wt.Branch
         prop.className className
+        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -809,6 +848,7 @@ let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: Workt
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
+                    editorButton dispatch editorName wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -823,12 +863,13 @@ let compactWorktreeCard dispatch (repoName: string) (isFocused: bool) (wt: Workt
         ]
     ]
 
-let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.key wt.Branch
         prop.className className
+        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -838,6 +879,7 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
                     workMetricsView wt.WorkMetrics
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
+                    editorButton dispatch editorName wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -869,13 +911,13 @@ let worktreeCard dispatch (repoName: string) (branchEvents: CardEvent list) (isP
         ]
     ]
 
-let renderCard dispatch isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch repoName isFocused wt
-    else worktreeCard dispatch repoName events isPending scopedKey isFocused wt
+    if isCompact then compactWorktreeCard dispatch editorName repoName scopedKey isFocused wt
+    else worktreeCard dispatch editorName repoName events isPending scopedKey isFocused wt
 
 let skeletonCard () =
     Html.div [
@@ -1083,10 +1125,16 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
                         |> List.map (fun wt ->
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
                 ]
+            Html.button [
+                prop.className "create-wt-btn"
+                prop.title "Create worktree"
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repo.RepoId)))
+                prop.text "+"
+            ]
         ]
     ]
 
-let repoSection dispatch isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
+let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -1098,7 +1146,7 @@ let repoSection dispatch isCompact (focusedElement: FocusTarget option) (branchE
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
                     ]
         ]
     ]
@@ -1164,10 +1212,12 @@ let view model dispatch =
             else
                 Html.div [
                     prop.className "repo-list"
-                    prop.children (model.Repos |> List.map (repoSection dispatch model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+                    prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
                 ]
 
             schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+
+            CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
         ]
     ]
 
