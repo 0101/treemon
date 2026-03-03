@@ -120,11 +120,11 @@ type DashboardTests() =
     [<Test>]
     member this.``Worktree cards display commit info``() =
         task {
-            let commitLines = this.Page.Locator(".wt-card .commit-line")
-            let! count = commitLines.CountAsync()
+            let commitMsgs = this.Page.Locator(".wt-card .git-commit-msg")
+            let! count = commitMsgs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
-            let! commitText = commitLines.First.TextContentAsync()
+            let! commitText = commitMsgs.First.TextContentAsync()
             Assert.That(commitText, Is.Not.Empty)
         }
 
@@ -527,12 +527,12 @@ type DashboardTests() =
     [<Test>]
     member this.``Last commit message does not show merge commits``() =
         task {
-            let commitLines = this.Page.Locator(".wt-card .commit-line")
-            let! count = commitLines.CountAsync()
+            let commitMsgs = this.Page.Locator(".wt-card .git-commit-msg")
+            let! count = commitMsgs.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
             let! allNonMerge =
-                commitLines.EvaluateAllAsync<bool>(
+                commitMsgs.EvaluateAllAsync<bool>(
                     "els => els.every(el => !el.textContent.startsWith('Merge branch') && !el.textContent.startsWith('Merge pull request'))"
                 )
             Assert.That(allNonMerge, Is.True, "Commit messages should not show merge commits (using --first-parent --no-merges)")
@@ -3386,11 +3386,11 @@ type DashboardTests() =
     [<Category("Fast")>]
     member this.``Cards with LastUserMessage show user-prompt class``() =
         task {
-            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            let userPrompts = this.Page.Locator(".wt-card .card-footer .user-prompt")
             do! userPrompts.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = userPrompts.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1),
-                "Fixture has worktrees with LastUserMessage; cards should have .commit-line.user-prompt elements")
+                "Fixture has worktrees with LastUserMessage; cards should have .user-prompt elements in .card-footer")
 
             let! text = userPrompts.First.TextContentAsync()
             Assert.That(text, Is.Not.Empty, "User prompt should have text content")
@@ -3416,20 +3416,15 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``User prompt replaces commit message in commit-line slot``() =
+    member this.``User prompt shown in card-footer for working card``() =
         task {
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
             do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let userPrompt = activeCard.Locator(".commit-line.user-prompt")
+            let userPrompt = activeCard.Locator(".card-footer .user-prompt")
             let! promptCount = userPrompt.CountAsync()
             Assert.That(promptCount, Is.EqualTo(1),
-                "Working card with LastUserMessage should show user-prompt in commit-line slot")
-
-            let regularCommitLine = activeCard.Locator(".commit-line:not(.user-prompt)")
-            let! regularCount = regularCommitLine.CountAsync()
-            Assert.That(regularCount, Is.EqualTo(0),
-                "When user-prompt is shown, regular commit-line should not appear in the main slot")
+                "Working card with LastUserMessage should show user-prompt in card-footer")
         }
 
     [<Test>]
@@ -3456,15 +3451,15 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Cards without LastUserMessage have no commit-line element``() =
+    member this.``Idle cards have no user-prompt but have git-commit-msg``() =
         task {
             let idleCard = this.Page.Locator(".wt-card.ct-idle").First
             do! idleCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let commitLine = idleCard.Locator(".commit-line")
-            let! count = commitLine.CountAsync()
-            Assert.That(count, Is.EqualTo(0),
-                "Idle card without LastUserMessage should not have commit-line (commit is in git-commit-msg)")
+            let userPrompt = idleCard.Locator(".user-prompt")
+            let! promptCount = userPrompt.CountAsync()
+            Assert.That(promptCount, Is.EqualTo(0),
+                "Idle card without LastUserMessage should not have user-prompt")
 
             let gitCommitMsg = idleCard.Locator(".git-commit-msg")
             let! msgCount = gitCommitMsg.CountAsync()
@@ -3653,10 +3648,10 @@ type DashboardTests() =
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
             do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let userPrompt = activeCard.Locator(".commit-line.user-prompt")
+            let userPrompt = activeCard.Locator(".card-footer .user-prompt")
             let! promptCount = userPrompt.CountAsync()
             Assert.That(promptCount, Is.EqualTo(1),
-                "Working card should show user prompt in commit-line slot")
+                "Working card should show user prompt in card-footer")
 
             let gitCommitMsg = activeCard.Locator(".main-behind-row .git-commit-msg")
             let! commitCount = gitCommitMsg.CountAsync()

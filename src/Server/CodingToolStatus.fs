@@ -9,7 +9,7 @@ type internal ProviderEntry =
     { Provider: CodingToolProvider
       GetStatus: string -> CodingToolStatus
       GetLastMessage: string -> CardEvent option
-      GetLastUserMessage: string -> string option
+      GetLastUserMessage: string -> (string * DateTimeOffset) option
       GetSessionMtime: string -> DateTimeOffset option }
 
 let private providers =
@@ -102,11 +102,12 @@ let getLastMessage (worktreePath: string) : CardEvent option =
     |> List.sortByDescending _.Timestamp
     |> List.tryHead
 
-let getLastUserMessage (worktreePath: string) : string option =
+let getLastUserMessage (worktreePath: string) (activeProvider: CodingToolProvider option) : (string * DateTimeOffset) option =
     let configured = readConfiguredProvider worktreePath
+    let target = configured |> Option.orElse activeProvider
 
     let candidates =
-        match configured with
+        match target with
         | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
         | None -> providers
 

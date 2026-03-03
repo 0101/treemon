@@ -136,7 +136,7 @@ type SmokeTests() =
 
     [<Test>]
     member _.``At least one worktree has LastUserMessage populated``() =
-        let hasUserMessage = readyBody.Contains("\"LastUserMessage\":\"")
+        let hasUserMessage = readyBody.Contains("\"LastUserMessage\":[\"")
         TestContext.Out.WriteLine($"Response contains LastUserMessage: {hasUserMessage}")
 
         if not hasUserMessage then
@@ -144,7 +144,7 @@ type SmokeTests() =
                 "No worktree has LastUserMessage populated. This can happen when all Claude sessions " +
                 "are older than 2h (Idle status) or no user messages found within 1MB scan limit.")
         else
-            Assert.That(readyBody, Does.Not.Contain("\"LastUserMessage\":\"\""),
+            Assert.That(readyBody, Does.Not.Contain("\"LastUserMessage\":[\"\"]"),
                 "LastUserMessage should not be empty string when present")
 
     [<Test>]
@@ -445,7 +445,7 @@ type MultiRepoSmokeTests() =
                         "No active Claude session cards visible. This test requires at least one " +
                         "worktree with an active Claude session (Working or WaitingForUser).")
 
-            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            let userPrompts = this.Page.Locator(".wt-card .user-prompt")
             let! promptCount = userPrompts.CountAsync()
             TestContext.Out.WriteLine($"User prompt elements found: {promptCount}")
 
@@ -466,7 +466,7 @@ type MultiRepoSmokeTests() =
     [<Test>]
     member this.``User prompts do not contain skill prompt text``() =
         task {
-            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            let userPrompts = this.Page.Locator(".wt-card .user-prompt")
             let! count = userPrompts.CountAsync()
             TestContext.Out.WriteLine($"User prompt elements to check for skill noise: {count}")
 
