@@ -3396,11 +3396,11 @@ type DashboardTests() =
     [<Category("Fast")>]
     member this.``Cards with LastUserMessage show user-prompt class``() =
         task {
-            let userPrompts = this.Page.Locator(".wt-card .commit-line.user-prompt")
+            let userPrompts = this.Page.Locator(".wt-card .card-footer .user-prompt")
             do! userPrompts.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = userPrompts.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1),
-                "Fixture has worktrees with LastUserMessage; cards should have .commit-line.user-prompt elements")
+                "Fixture has worktrees with LastUserMessage; cards should have .user-prompt elements in .card-footer")
 
             let! text = userPrompts.First.TextContentAsync()
             Assert.That(text, Is.Not.Empty, "User prompt should have text content")
@@ -3431,10 +3431,10 @@ type DashboardTests() =
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
             do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let userPrompt = activeCard.Locator(".commit-line.user-prompt")
+            let userPrompt = activeCard.Locator(".card-footer .user-prompt")
             let! promptCount = userPrompt.CountAsync()
             Assert.That(promptCount, Is.EqualTo(1),
-                "Working card with LastUserMessage should show user-prompt in commit-line slot")
+                "Working card with LastUserMessage should show user-prompt in card-footer")
 
             let regularCommitLine = activeCard.Locator(".commit-line:not(.user-prompt)")
             let! regularCount = regularCommitLine.CountAsync()
@@ -3663,10 +3663,10 @@ type DashboardTests() =
             let activeCard = this.Page.Locator(".wt-card.ct-working").First
             do! activeCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let userPrompt = activeCard.Locator(".commit-line.user-prompt")
+            let userPrompt = activeCard.Locator(".card-footer .user-prompt")
             let! promptCount = userPrompt.CountAsync()
             Assert.That(promptCount, Is.EqualTo(1),
-                "Working card should show user prompt in commit-line slot")
+                "Working card should show user prompt in card-footer")
 
             let gitCommitMsg = activeCard.Locator(".main-behind-row .git-commit-msg")
             let! commitCount = gitCommitMsg.CountAsync()
