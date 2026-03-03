@@ -253,7 +253,6 @@ let branchSortKey (name: string) =
     | n when n.StartsWith("dev") -> (3, name)
     | _ -> (4, name)
 
-
 let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9._/-]+$")
 
 let validateBranchName (branchName: string) =
@@ -262,20 +261,15 @@ let validateBranchName (branchName: string) =
     else
         Error $"Invalid branch name: '{branchName}'"
 
-let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (branchName: string) (hasForkScript: bool) =
-    let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-
-    if hasForkScript then
-        let scriptPath =
-            if isWindows then Path.Combine(repoRoot, "fork.ps1")
-            else Path.Combine(repoRoot, "fork.sh")
-
+let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (branchName: string) (forkScript: string option) =
+    match forkScript with
+    | Some scriptPath ->
         let fileName, arguments =
-            if isWindows then "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
             else "bash", $"\"{scriptPath}\" \"{branchName}\""
 
         fileName, arguments, Some sourceWorktreePath
-    else
+    | None ->
         let parentDir = Path.GetDirectoryName(repoRoot)
         let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
         "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\"", None
@@ -289,8 +283,8 @@ let createWorktree (repoRoot: string) (sourceWorktreePath: string) (branchName: 
                 if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then Path.Combine(repoRoot, "fork.ps1")
                 else Path.Combine(repoRoot, "fork.sh")
 
-            let fileName, arguments, workingDir =
-                resolveWorktreeCommand repoRoot sourceWorktreePath name (File.Exists(scriptPath))
+            let forkScript = if File.Exists(scriptPath) then Some scriptPath else None
+            let fileName, arguments, workingDir = resolveWorktreeCommand repoRoot sourceWorktreePath name forkScript
 
             let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments workingDir
             return result |> Result.map ignore
