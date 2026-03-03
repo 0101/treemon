@@ -47,7 +47,8 @@ let private tryUpdateModel msg model =
                 { model with CreateModal = Modal.Creating form.RepoId }
             | _ -> model
         | ModalMsg (Modal.CreateWorktreeCompleted (Ok _)) ->
-            { model with CreateModal = Modal.Closed }
+            let restored = Modal.repoId model.CreateModal |> Option.map RepoHeader
+            { model with CreateModal = Modal.Closed; FocusedElement = restored |> Option.orElse model.FocusedElement }
         | _ -> reraise ()
 
 
@@ -553,3 +554,149 @@ type FullStateMachineRoundtripTests() =
 
         let mEsc, _ = update (KeyPressed ("Escape", false)) m3
         Assert.That(mEsc.CreateModal, Is.EqualTo(Modal.Closed))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type EnterKeySuppressedWhileModalOpenTests() =
+
+    let repoId = testRepoId
+
+    let repoModel : RepoModel =
+        { RepoId = repoId
+          Name = "TestRepo"
+          Worktrees = []
+          IsReady = true
+          IsCollapsed = false }
+
+    let openForm =
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+
+    let modelWithRepoAndModal =
+        { defaultModel with
+            Repos = [ repoModel ]
+            FocusedElement = Some (RepoHeader repoId)
+            CreateModal = openForm }
+
+    [<Test>]
+    member _.``Enter key while modal is open does not toggle repo collapse``() =
+        let model, _ = update (KeyPressed ("Enter", false)) modelWithRepoAndModal
+
+        Assert.That(model.CreateModal, Is.Not.EqualTo(Modal.Closed),
+            "Enter should not close the modal")
+        Assert.That(model.Repos.Head.IsCollapsed, Is.False,
+            "Enter in modal should not toggle collapse on the focused RepoHeader")
+
+    [<Test>]
+    member _.``ArrowDown while modal is open does not change focus``() =
+        let model, _ = update (KeyPressed ("ArrowDown", false)) modelWithRepoAndModal
+
+        Assert.That(model.FocusedElement, Is.EqualTo(modelWithRepoAndModal.FocusedElement),
+            "ArrowDown should be suppressed while modal is open")
+
+    [<Test>]
+    member _.``Letter keys while modal is open are suppressed``() =
+        let model, _ = update (KeyPressed ("s", false)) modelWithRepoAndModal
+
+        Assert.That(model, Is.EqualTo(modelWithRepoAndModal),
+            "Letter keys should be suppressed while modal is open")
+
+    [<Test>]
+    member _.``Plus key while modal is open does not open another modal``() =
+        let model, _ = update (KeyPressed ("+", false)) modelWithRepoAndModal
+
+        Assert.That(model.CreateModal, Is.EqualTo(openForm),
+            "Plus key should be suppressed while modal is already open")
+
+    [<Test>]
+    member _.``Home key while modal is open is suppressed``() =
+        let model, _ = update (KeyPressed ("Home", false)) modelWithRepoAndModal
+
+        Assert.That(model.FocusedElement, Is.EqualTo(modelWithRepoAndModal.FocusedElement),
+            "Home key should be suppressed while modal is open")
+
+    [<Test>]
+    member _.``End key while modal is open is suppressed``() =
+        let model, _ = update (KeyPressed ("End", false)) modelWithRepoAndModal
+
+        Assert.That(model.FocusedElement, Is.EqualTo(modelWithRepoAndModal.FocusedElement),
+            "End key should be suppressed while modal is open")
+
+    [<Test>]
+    member _.``Enter key suppressed even from LoadingBranches state``() =
+        let loading = { modelWithRepoAndModal with CreateModal = Modal.LoadingBranches repoId }
+        let model, _ = update (KeyPressed ("Enter", false)) loading
+
+        Assert.That(model.Repos.Head.IsCollapsed, Is.False,
+            "Enter should not toggle collapse while modal is in LoadingBranches state")
+
+    [<Test>]
+    member _.``Enter key suppressed even from Creating state``() =
+        let creating = { modelWithRepoAndModal with CreateModal = Modal.Creating repoId }
+        let model, _ = update (KeyPressed ("Enter", false)) creating
+
+        Assert.That(model.Repos.Head.IsCollapsed, Is.False,
+            "Enter should not toggle collapse while modal is in Creating state")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FocusRestorationTests() =
+
+    let repoId = testRepoId
+
+    let openForm =
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+
+    let modelWithFocusAndModal =
+        { defaultModel with
+            FocusedElement = Some (Card "other/branch")
+            CreateModal = openForm }
+
+    [<Test>]
+    member _.``Escape restores focus to RepoHeader of the modal's repoId``() =
+        let model, _ = update (KeyPressed ("Escape", false)) modelWithFocusAndModal
+
+        Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
+            "Escape should restore focus to the RepoHeader that triggered the modal")
+
+    [<Test>]
+    member _.``Escape restores focus from LoadingBranches state``() =
+        let loading = { modelWithFocusAndModal with CreateModal = Modal.LoadingBranches repoId }
+        let model, _ = update (KeyPressed ("Escape", false)) loading
+
+        Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
+            "Escape from LoadingBranches should restore focus to RepoHeader")
+
+    [<Test>]
+    member _.``Escape restores focus from Creating state``() =
+        let creating = { modelWithFocusAndModal with CreateModal = Modal.Creating repoId }
+        let model, _ = update (KeyPressed ("Escape", false)) creating
+
+        Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
+            "Escape from Creating should restore focus to RepoHeader")
+
+    [<Test>]
+    member _.``Escape restores focus from CreateError state``() =
+        let error = { modelWithFocusAndModal with CreateModal = Modal.CreateError (repoId, "err") }
+        let model, _ = update (KeyPressed ("Escape", false)) error
+
+        Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
+            "Escape from CreateError should restore focus to RepoHeader")
+
+    [<Test>]
+    member _.``CloseCreateModal restores focus to RepoHeader``() =
+        let model, _ = update (ModalMsg Modal.CloseCreateModal) modelWithFocusAndModal
+
+        Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
+            "CloseCreateModal should restore focus to RepoHeader")
+
+    [<Test>]
+    member _.``CreateWorktreeCompleted Ok restores focus to RepoHeader``() =
+        let creating = { modelWithFocusAndModal with CreateModal = Modal.Creating repoId }
+        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok ()))) creating
+
+        Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
+            "Successful creation should restore focus to RepoHeader")

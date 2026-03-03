@@ -3833,3 +3833,178 @@ type DashboardTests() =
                 "Commit time should show relative time like 'Nm ago' or 'just now'")
         }
 
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Enter key in modal input does not collapse repo``() =
+        task {
+            let repoSection = this.Page.Locator(".repo-section").First
+            let cardGrid = repoSection.Locator(".card-grid")
+            do! cardGrid.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! gridVisibleBefore = cardGrid.IsVisibleAsync()
+            Assert.That(gridVisibleBefore, Is.True, "Card grid should be visible before opening modal")
+
+            let plusBtn = repoSection.Locator(".create-wt-btn")
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("test-branch")
+            do! nameInput.PressAsync("Enter")
+
+            do! System.Threading.Tasks.Task.Delay(500)
+
+            let! gridVisibleAfter = cardGrid.IsVisibleAsync()
+            Assert.That(gridVisibleAfter, Is.True,
+                "Card grid should still be visible after pressing Enter in modal input (Enter must not propagate to ToggleCollapse)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Escape closes modal and restores focus to repo header for arrow key nav``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! cssClass = focused.GetAttributeAsync("class")
+            Assert.That(cssClass, Does.Contain("repo-header"), "Should be on repo header after ArrowDown")
+
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should be restored to repo header after Escape closes modal")
+
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedNav = this.Page.Locator(".focused")
+            do! focusedNav.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! navClass = focusedNav.GetAttributeAsync("class")
+            Assert.That(navClass, Does.Contain("wt-card"),
+                "Arrow key navigation should work after re-focusing dashboard post-Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Cancel button closes modal and restores focus for arrow key nav``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let cancelBtn = this.Page.Locator(".modal-btn.cancel")
+            do! cancelBtn.ClickAsync()
+
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should be restored to repo header after Cancel closes modal")
+
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+
+            let focusedNav = this.Page.Locator(".focused")
+            do! focusedNav.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! navClass = focusedNav.GetAttributeAsync("class")
+            Assert.That(navClass, Does.Contain("wt-card"),
+                "Arrow key navigation should work after re-focusing dashboard post-Cancel")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal shows loading state with spinner text``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let loadingText = this.Page.Locator(".modal-loading")
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Modal creating state shows creating text and dots``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! plusBtn.ClickAsync()
+
+            let nameInput = this.Page.Locator(".modal-input")
+            do! nameInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! nameInput.FillAsync("e2e-creating-test")
+
+            let submitBtn = this.Page.Locator(".modal-btn.submit")
+            do! submitBtn.ClickAsync()
+
+            let creatingText = this.Page.Locator(".creating-text")
+            let creatingDots = this.Page.Locator(".creating-dots")
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 15000.0f))
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Arrow keys suppressed while modal is open``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! beforeClass = focused.GetAttributeAsync("class")
+            Assert.That(beforeClass, Does.Contain("repo-header"), "Should be on repo header")
+
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Page.Keyboard.PressAsync("ArrowUp")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Hidden, Timeout = 3000.0f))
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! afterClass = focusedAfter.GetAttributeAsync("class")
+            Assert.That(afterClass, Does.Contain("repo-header"),
+                "Focus should remain on repo header (arrow keys while modal open should not have changed it)")
+        }
+
