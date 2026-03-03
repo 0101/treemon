@@ -53,37 +53,19 @@
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
-        .terminal-btn {
-            margin-left: auto; flex-shrink: 0;
-            background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-family: monospace; font-size: 0.78em;
-            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
-        }
-        .terminal-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
-        .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); }
-
-        .new-tab-btn {
+        .terminal-btn, .new-tab-btn, .editor-btn, .delete-btn {
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-family: monospace; font-size: 0.78em;
+            color: #7f849c; cursor: pointer; font-family: monospace;
             padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
         }
-        .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
-
-        .vscode-btn {
-            flex-shrink: 0;
-            background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-size: 0.78em;
-            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
-        }
-        .vscode-btn:hover { color: #89b4fa; border-color: #89b4fa; }
-
-        .delete-btn {
-            flex-shrink: 0;
-            background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-size: 0.78em;
-            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
-        }
+        .terminal-btn { margin-left: auto; font-size: 0.78em; }
+        .new-tab-btn { font-size: 1em; }
+        .editor-btn { font-family: inherit; font-size: 0.78em; padding: 1px 1px 2px; }
+        .delete-btn { font-size: 0.65em; padding-top: 3px; padding-bottom: 3px; }
+        .terminal-btn:hover, .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
+        .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
 
         .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
@@ -250,7 +232,6 @@
         .repo-ct-dots { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
         .repo-ct-dots .ct-dot { width: 8px; height: 8px; }
 
-        .has-session .terminal-btn { box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
 
         .dashboard:focus { outline: none; }
         .focused { outline: 2px solid #4a9eff; outline-offset: -2px; }
@@ -290,6 +271,77 @@
             padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
         }
         .unarchive-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+
+        .create-wt-btn {
+            margin-left: auto; flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer; font-size: 1em; font-weight: 600;
+            padding: 0 7px; line-height: 1.3; transition: color 0.15s, border-color 0.15s;
+        }
+        .create-wt-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+
+        .modal-overlay {
+            position: fixed; inset: 0; z-index: 1000;
+            background: rgba(0, 0, 0, 0.6);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .modal-dialog {
+            background: #2a2a3c; border: 1px solid #45475a; border-radius: 10px;
+            width: 360px; max-width: 90vw;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        .modal-header {
+            padding: 14px 18px 0; font-weight: 600; font-size: 1.05em; color: #cdd6f4;
+        }
+        .modal-header.error { color: #f38ba8; }
+        .modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+        .modal-body.creating {
+            flex-direction: row; align-items: center; justify-content: center;
+            gap: 4px; padding: 28px 18px; font-size: 0.95em; color: #a6adc8;
+        }
+        .modal-loading { color: #a6adc8; font-size: 0.95em; text-align: center; padding: 18px 0; }
+        .modal-input {
+            background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
+            padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
+            outline: none; transition: border-color 0.15s;
+        }
+        .modal-input:focus { border-color: #89b4fa; }
+        .modal-input::placeholder { color: #585b70; }
+        .modal-select {
+            background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
+            padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
+            outline: none; cursor: pointer;
+        }
+        .modal-select:focus { border-color: #89b4fa; }
+        .modal-footer { padding: 0 18px 14px; display: flex; justify-content: flex-end; gap: 8px; }
+        .modal-btn {
+            border-radius: 6px; padding: 6px 14px; cursor: pointer;
+            font-family: inherit; font-size: 0.88em; transition: background 0.15s;
+        }
+        .modal-btn.cancel {
+            background: #313244; border: 1px solid #45475a; color: #bac2de;
+        }
+        .modal-btn.cancel:hover { background: #45475a; }
+        .modal-btn.submit {
+            background: #2e3452; border: 1px solid #89b4fa; color: #89b4fa; font-weight: 600;
+        }
+        .modal-btn.submit:hover { background: #3b4068; }
+        .modal-btn.submit:disabled { opacity: 0.4; cursor: not-allowed; }
+        .modal-error-message {
+            color: #f38ba8; font-size: 0.9em; white-space: pre-wrap; word-break: break-word;
+            background: #1e1e2e; padding: 10px; border-radius: 6px;
+        }
+
+        .creating-dots::after {
+            content: '';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+        @keyframes dots {
+            0%  { content: ''; }
+            25% { content: '.'; }
+            50% { content: '..'; }
+            75% { content: '...'; }
+        }
 
     </style>
 </head>

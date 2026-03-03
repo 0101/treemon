@@ -69,6 +69,11 @@ type LaunchRequest =
     { Path: string
       Prompt: string }
 
+type CreateWorktreeRequest =
+    { RepoId: string
+      BranchName: string
+      BaseBranch: string }
+
 type WorktreeStatus =
     { Path: string
       Branch: string
@@ -110,12 +115,13 @@ type DashboardResponse =
     { Repos: RepoWorktrees list
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
-      AppVersion: string }
+      AppVersion: string
+      EditorName: string }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: string -> Async<unit>
-      openVsCode: string -> Async<unit>
+      openEditor: string -> Async<unit>
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
@@ -125,4 +131,6 @@ type IWorktreeApi =
       killSession: string -> Async<Result<unit, string>>
       archiveWorktree: string -> Async<Result<unit, string>>
       unarchiveWorktree: string -> Async<Result<unit, string>>
+      getBranches: string -> Async<string list>
+      createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: string -> Async<Result<unit, string>> }

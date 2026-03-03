@@ -85,6 +85,7 @@ src/
     Program.fs             — Saturn app entry point, CLI arg parsing, scheduler wiring
   Client/
     Navigation.fs          — keyboard navigation: spatial arrow keys, key bindings
+    CreateWorktreeModal.fs — create worktree modal: types, update, view (extracted from App.fs)
     App.fs                 — Elmish MVU app (Model, Msg, update, view)
     index.html             — entry point with inline CSS
     output/                — Fable compilation output (gitignored)

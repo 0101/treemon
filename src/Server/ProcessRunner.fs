@@ -8,7 +8,7 @@ let private processTimeoutMs = 60_000
 let private truncate (s: string) =
     if s.Length > 200 then s[..199] + "..." else s
 
-let private startAndCapture (context: string) (fileName: string) (arguments: string) =
+let private startAndCapture (context: string) (fileName: string) (arguments: string) (workingDirectory: string option) =
     async {
         let cmdString = $"{fileName} {arguments}"
 
@@ -22,6 +22,8 @@ let private startAndCapture (context: string) (fileName: string) (arguments: str
                     UseShellExecute = false,
                     CreateNoWindow = true
                 )
+
+            workingDirectory |> Option.iter (fun dir -> psi.WorkingDirectory <- dir)
 
             use proc = Process.Start(psi)
             use cts = new CancellationTokenSource(processTimeoutMs)
@@ -55,7 +57,7 @@ let private startAndCapture (context: string) (fileName: string) (arguments: str
 
 let run (context: string) (fileName: string) (arguments: string) =
     async {
-        let! result = startAndCapture context fileName arguments
+        let! result = startAndCapture context fileName arguments None
 
         return
             match result with
@@ -63,9 +65,9 @@ let run (context: string) (fileName: string) (arguments: string) =
             | _ -> None
     }
 
-let runResult (context: string) (fileName: string) (arguments: string) =
+let runResult (context: string) (fileName: string) (arguments: string) (workingDirectory: string option) =
     async {
-        let! result = startAndCapture context fileName arguments
+        let! result = startAndCapture context fileName arguments workingDirectory
 
         return
             match result with
