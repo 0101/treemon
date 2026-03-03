@@ -277,15 +277,14 @@ let worktreeApi
                   match worktreeWithRepo with
                   | None -> return Error $"No worktree found for branch '{branch}'"
                   | Some (path, repoRoot, syncKey, provider) ->
+                      let! beginResult = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
 
-                  let! beginResult = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
-
-                  match beginResult with
-                  | Error msg -> return Error msg
-                  | Ok ct ->
-                      let post = syncAgent.Post
-                      Async.Start(SyncEngine.executeSyncPipeline post syncKey path repoRoot provider ct, ct)
-                      return Ok ()
+                      match beginResult with
+                      | Error msg -> return Error msg
+                      | Ok ct ->
+                          let post = syncAgent.Post
+                          Async.Start(SyncEngine.executeSyncPipeline post syncKey path repoRoot provider ct, ct)
+                          return Ok ()
               }
           cancelSync = fun branch ->
               async {
@@ -334,10 +333,7 @@ let worktreeApi
                               |> Map.tryFind key
                               |> Option.bind CodingToolStatus.getLastMessage
 
-                          let merged =
-                              claudeEvt
-                              |> Option.map (fun evt -> evt :: syncEvts)
-                              |> Option.defaultValue syncEvts
+                          let merged = (claudeEvt |> Option.toList) @ syncEvts
 
                           match merged with
                           | [] -> None
@@ -396,15 +392,14 @@ let worktreeApi
                       | None ->
                           return Error $"No worktree found for branch '{BranchName.value req.BaseBranch}'"
                       | Some wt ->
+                          let! result = GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
 
-                      let! result = GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
+                          match result with
+                          | Ok () ->
+                              agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                          | Error _ -> ()
 
-                      match result with
-                      | Ok () ->
-                          agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
-                      | Error _ -> ()
-
-                      return result
+                          return result
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->

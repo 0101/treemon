@@ -70,23 +70,25 @@ let listWorktrees (repoRoot: string) =
 let parseCommitOutput (worktreePath: string) (output: string option) =
     output
     |> Option.bind (fun raw ->
-        let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
+        if raw = "" then
+            None
+        else
+            let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
 
-        match raw, lines with
-        | "", _ -> None
-        | _, [| hash; message; timeStr |] ->
-            match DateTimeOffset.TryParse(timeStr) with
-            | true, time ->
-                Some
-                    { Hash = hash
-                      Message = message
-                      Time = time }
+            match lines with
+            | [| hash; message; timeStr |] ->
+                match DateTimeOffset.TryParse(timeStr) with
+                | true, time ->
+                    Some
+                        { Hash = hash
+                          Message = message
+                          Time = time }
+                | _ ->
+                    Log.log "Git" $"getLastCommit({worktreePath}): failed to parse time '{timeStr}'"
+                    None
             | _ ->
-                Log.log "Git" $"getLastCommit({worktreePath}): failed to parse time '{timeStr}'"
-                None
-        | _ ->
-            Log.log "Git" $"getLastCommit({worktreePath}): expected 3 lines (hash/message/time), got {lines.Length}"
-            None)
+                Log.log "Git" $"getLastCommit({worktreePath}): expected 3 lines (hash/message/time), got {lines.Length}"
+                None)
 
 let getLastCommit (worktreePath: string) =
     async {
