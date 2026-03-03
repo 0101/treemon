@@ -13,7 +13,8 @@ type RepoModel =
       Name: string
       Worktrees: WorktreeStatus list
       IsReady: bool
-      IsCollapsed: bool }
+      IsCollapsed: bool
+      Provider: RepoProvider option }
 
 type NavAction =
     | NoAction

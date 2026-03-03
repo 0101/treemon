@@ -99,11 +99,16 @@ type CardEvent =
       Status: StepStatus option
       Duration: TimeSpan option }
 
+type RepoProvider =
+    | GitHubProvider
+    | AzDoProvider
+
 type RepoWorktrees =
     { RepoId: RepoId
       RootFolderName: string
       Worktrees: WorktreeStatus list
-      IsReady: bool }
+      IsReady: bool
+      Provider: RepoProvider option }
 
 type DashboardResponse =
     { Repos: RepoWorktrees list

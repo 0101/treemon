@@ -57,6 +57,10 @@ let detectProvider (url: string) =
         GithubPrStatus.parseGithubUrl url
         |> Option.map GitHub)
 
+let toRepoProvider = function
+    | AzureDevOps _ -> AzDoProvider
+    | GitHub _ -> GitHubProvider
+
 let private azPythonExe =
     lazy
         let azCmd =

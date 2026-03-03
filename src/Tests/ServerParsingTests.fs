@@ -99,3 +99,43 @@ type EncodeWorktreePathTests() =
     member _.``Empty string returns empty``() =
         let result = encodeWorktreePath ""
         Assert.That(result, Is.EqualTo(""))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DetectProviderTests() =
+
+    [<Test>]
+    member _.``detectProvider with GitHub HTTPS URL returns GitHub remote``() =
+        let result = detectProvider "https://github.com/octocat/hello-world"
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.GitHubProvider))
+
+    [<Test>]
+    member _.``detectProvider with GitHub SSH URL returns GitHub remote``() =
+        let result = detectProvider "git@github.com:octocat/hello-world.git"
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.GitHubProvider))
+
+    [<Test>]
+    member _.``detectProvider with AzDo HTTPS URL returns AzDo remote``() =
+        let result = detectProvider "https://dev.azure.com/myorg/myproject/_git/myrepo"
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.AzDoProvider))
+
+    [<Test>]
+    member _.``detectProvider with AzDo SSH URL returns AzDo remote``() =
+        let result = detectProvider "git@ssh.dev.azure.com:v3/myorg/myproject/myrepo"
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.AzDoProvider))
+
+    [<Test>]
+    member _.``detectProvider with unknown URL returns None``() =
+        let result = detectProvider "https://gitlab.com/user/repo"
+        Assert.That(result, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``detectProvider with empty string returns None``() =
+        let result = detectProvider ""
+        Assert.That(result, Is.EqualTo(None))
