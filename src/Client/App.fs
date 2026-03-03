@@ -9,19 +9,6 @@ open Fable.Remoting.Client
 open Browser
 open Fable.Core.JsInterop
 
-type CreateWorktreeForm =
-    { RepoId: RepoId
-      Branches: string list
-      Name: string
-      BaseBranch: string }
-
-type CreateWorktreeModal =
-    | Closed
-    | LoadingBranches of RepoId
-    | Open of CreateWorktreeForm
-    | Creating of RepoId
-    | CreateError of repoId: RepoId * message: string
-
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -35,7 +22,7 @@ type Model =
       AppVersion: string option
       EyeDirection: float * float
       FocusedElement: FocusTarget option
-      CreateModal: CreateWorktreeModal
+      CreateModal: CreateWorktreeModal.ModalState
       DeletedBranches: Set<string> }
 
 type Msg =
@@ -59,13 +46,7 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
-    | OpenCreateWorktree of RepoId
-    | BranchesLoaded of Result<string list, exn>
-    | SetNewWorktreeName of string
-    | SetBaseBranch of string
-    | SubmitCreateWorktree
-    | CreateWorktreeCompleted of Result<unit, string>
-    | CloseCreateModal
+    | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
     Remoting.createApi ()
@@ -84,14 +65,6 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
 
-let modalRepoId =
-    function
-    | Closed -> None
-    | LoadingBranches repoId -> Some repoId
-    | Open form -> Some form.RepoId
-    | Creating repoId -> Some repoId
-    | CreateError (repoId, _) -> Some repoId
-
 let init () =
     { Repos = []
       IsLoading = true
@@ -105,7 +78,7 @@ let init () =
       AppVersion = None
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
-      CreateModal = Closed
+      CreateModal = CreateWorktreeModal.Closed
       DeletedBranches = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
@@ -147,7 +120,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId ->
         match key with
         | "Enter" -> Some (ToggleCollapse repoId)
-        | "+" -> Some (OpenCreateWorktree repoId)
+        | "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
         | _ -> None
 
 let rec update msg model =
@@ -294,70 +267,25 @@ let rec update msg model =
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
 
-    | OpenCreateWorktree repoId ->
-        { model with CreateModal = LoadingBranches repoId },
-        Cmd.OfAsync.either worktreeApi.getBranches (RepoId.value repoId) (Ok >> BranchesLoaded) (Error >> BranchesLoaded)
-
-    | BranchesLoaded (Ok branches) ->
-        match model.CreateModal with
-        | LoadingBranches repoId ->
-            let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
-            { model with
-                CreateModal = Open { RepoId = repoId; Branches = branches; Name = ""; BaseBranch = baseBranch } },
-            Cmd.none
-        | _ -> model, Cmd.none
-
-    | BranchesLoaded (Error _) ->
-        match model.CreateModal with
-        | LoadingBranches repoId ->
-            { model with CreateModal = CreateError (repoId, "Failed to load branches") }, Cmd.none
-        | _ -> model, Cmd.none
-
-    | SetNewWorktreeName name ->
-        match model.CreateModal with
-        | Open form -> { model with CreateModal = Open { form with Name = name } }, Cmd.none
-        | _ -> model, Cmd.none
-
-    | SetBaseBranch branch ->
-        match model.CreateModal with
-        | Open form -> { model with CreateModal = Open { form with BaseBranch = branch } }, Cmd.none
-        | _ -> model, Cmd.none
-
-    | SubmitCreateWorktree ->
-        match model.CreateModal with
-        | Open form when form.Name.Trim().Length > 0 ->
-            let request: CreateWorktreeRequest =
-                { RepoId = RepoId.value form.RepoId
-                  BranchName = form.Name.Trim()
-                  BaseBranch = form.BaseBranch }
-            { model with CreateModal = Creating form.RepoId },
-            Cmd.OfAsync.perform worktreeApi.createWorktree request CreateWorktreeCompleted
-        | _ -> model, Cmd.none
-
-    | CreateWorktreeCompleted (Ok _) ->
-        let restoredFocus = modalRepoId model.CreateModal |> Option.map RepoHeader
-        { model with CreateModal = Closed; FocusedElement = restoredFocus |> Option.orElse model.FocusedElement }, fetchWorktrees ()
-
-    | CreateWorktreeCompleted (Error msg) ->
-        match model.CreateModal with
-        | Creating repoId ->
-            { model with CreateModal = CreateError (repoId, msg) }, Cmd.none
-        | _ -> model, Cmd.none
-
-    | CloseCreateModal ->
-        let restoredFocus = modalRepoId model.CreateModal |> Option.map RepoHeader
-        { model with CreateModal = Closed; FocusedElement = restoredFocus |> Option.orElse model.FocusedElement }, Cmd.none
+    | ModalMsg modalMsg ->
+        let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
+        let focus =
+            match result.RestoredFocus with
+            | Some _ -> result.RestoredFocus |> Option.orElse model.FocusedElement
+            | None -> model.FocusedElement
+        let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+        { model with CreateModal = result.Modal; FocusedElement = focus },
+        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
 
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus oldFocus newFocus =
             let useCenter = isLargeJump model.Repos oldFocus newFocus
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
-        match model.CreateModal, key with
-        | (Open _ | Creating _ | CreateError _ | LoadingBranches _), "Escape" ->
-            update CloseCreateModal model
-        | (Open _ | Creating _ | CreateError _ | LoadingBranches _), _ ->
-            model, Cmd.none
-        | _ ->
+        if CreateWorktreeModal.isOpen model.CreateModal then
+            match key with
+            | "Escape" -> update (ModalMsg CreateWorktreeModal.CloseCreateModal) model
+            | _ -> model, Cmd.none
+        else
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -1164,7 +1092,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
             Html.button [
                 prop.className "create-wt-btn"
                 prop.title "Create worktree"
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenCreateWorktree repo.RepoId))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repo.RepoId)))
                 prop.text "+"
             ]
         ]
@@ -1186,136 +1114,6 @@ let repoSection dispatch isCompact (focusedElement: FocusTarget option) (branchE
                     ]
         ]
     ]
-
-let createWorktreeModal dispatch (modal: CreateWorktreeModal) =
-    match modal with
-    | Closed -> Html.none
-    | LoadingBranches _ ->
-        Html.div [
-            prop.className "modal-overlay"
-            prop.onClick (fun _ -> dispatch CloseCreateModal)
-            prop.children [
-                Html.div [
-                    prop.className "modal-dialog"
-                    prop.onClick (fun e -> e.stopPropagation())
-                    prop.children [
-                        Html.div [
-                            prop.className "modal-body"
-                            prop.children [ Html.span [ prop.className "modal-loading"; prop.text "Loading branches..." ] ]
-                        ]
-                    ]
-                ]
-            ]
-        ]
-    | Open form ->
-        Html.div [
-            prop.className "modal-overlay"
-            prop.onClick (fun _ -> dispatch CloseCreateModal)
-            prop.children [
-                Html.div [
-                    prop.className "modal-dialog"
-                    prop.onClick (fun e -> e.stopPropagation())
-                    prop.children [
-                        Html.div [
-                            prop.className "modal-header"
-                            prop.text "Create worktree"
-                        ]
-                        Html.div [
-                            prop.className "modal-body"
-                            prop.children [
-                                Html.input [
-                                    prop.className "modal-input"
-                                    prop.type'.text
-                                    prop.placeholder "Branch name"
-                                    prop.value form.Name
-                                    prop.autoFocus true
-                                    prop.onChange (fun (v: string) -> dispatch (SetNewWorktreeName v))
-                                    prop.onKeyDown (fun e ->
-                                        if e.key = "Enter" then dispatch SubmitCreateWorktree
-                                        elif e.key = "Escape" then dispatch CloseCreateModal)
-                                ]
-                                Html.select [
-                                    prop.className "modal-select"
-                                    prop.value form.BaseBranch
-                                    prop.onChange (fun (v: string) -> dispatch (SetBaseBranch v))
-                                    prop.children (
-                                        form.Branches
-                                        |> List.map (fun b ->
-                                            Html.option [ prop.value b; prop.text b ]))
-                                ]
-                            ]
-                        ]
-                        Html.div [
-                            prop.className "modal-footer"
-                            prop.children [
-                                Html.button [
-                                    prop.className "modal-btn cancel"
-                                    prop.onClick (fun _ -> dispatch CloseCreateModal)
-                                    prop.text "Cancel"
-                                ]
-                                Html.button [
-                                    prop.className "modal-btn submit"
-                                    prop.disabled (form.Name.Trim().Length = 0)
-                                    prop.onClick (fun _ -> dispatch SubmitCreateWorktree)
-                                    prop.text "Create"
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]
-    | Creating _ ->
-        Html.div [
-            prop.className "modal-overlay"
-            prop.children [
-                Html.div [
-                    prop.className "modal-dialog"
-                    prop.children [
-                        Html.div [
-                            prop.className "modal-body creating"
-                            prop.children [
-                                Html.span [ prop.className "creating-text"; prop.text "Creating worktree" ]
-                                Html.span [ prop.className "creating-dots" ]
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]
-    | CreateError (_, message) ->
-        Html.div [
-            prop.className "modal-overlay"
-            prop.onClick (fun _ -> dispatch CloseCreateModal)
-            prop.children [
-                Html.div [
-                    prop.className "modal-dialog"
-                    prop.onClick (fun e -> e.stopPropagation())
-                    prop.children [
-                        Html.div [
-                            prop.className "modal-header error"
-                            prop.text "Error"
-                        ]
-                        Html.div [
-                            prop.className "modal-body"
-                            prop.children [
-                                Html.div [ prop.className "modal-error-message"; prop.text message ]
-                            ]
-                        ]
-                        Html.div [
-                            prop.className "modal-footer"
-                            prop.children [
-                                Html.button [
-                                    prop.className "modal-btn cancel"
-                                    prop.onClick (fun _ -> dispatch CloseCreateModal)
-                                    prop.text "Close"
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]
 
 let view model dispatch =
     Html.div [
@@ -1383,7 +1181,7 @@ let view model dispatch =
 
             schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
-            createWorktreeModal dispatch model.CreateModal
+            CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
         ]
     ]
 

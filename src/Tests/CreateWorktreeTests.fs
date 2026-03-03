@@ -7,6 +7,8 @@ open Shared.EventUtils
 open App
 open Navigation
 
+module Modal = CreateWorktreeModal
+
 let private testRepoId = RepoId.create "TestRepo"
 
 let private defaultModel : Model =
@@ -22,7 +24,7 @@ let private defaultModel : Model =
       AppVersion = Some "1.0"
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
-      CreateModal = Closed
+      CreateModal = Modal.Closed
       DeletedBranches = Set.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
@@ -37,15 +39,15 @@ let private tryUpdateModel msg model =
     with
     | :? TypeInitializationException ->
         match msg with
-        | OpenCreateWorktree repoId ->
-            { model with CreateModal = LoadingBranches repoId }
-        | SubmitCreateWorktree ->
+        | ModalMsg (Modal.OpenCreateWorktree repoId) ->
+            { model with CreateModal = Modal.LoadingBranches repoId }
+        | ModalMsg Modal.SubmitCreateWorktree ->
             match model.CreateModal with
-            | Open form when form.Name.Trim().Length > 0 ->
-                { model with CreateModal = Creating form.RepoId }
+            | Modal.Open form when form.Name.Trim().Length > 0 ->
+                { model with CreateModal = Modal.Creating form.RepoId }
             | _ -> model
-        | CreateWorktreeCompleted (Ok _) ->
-            { model with CreateModal = Closed }
+        | ModalMsg (Modal.CreateWorktreeCompleted (Ok _)) ->
+            { model with CreateModal = Modal.Closed }
         | _ -> reraise ()
 
 
@@ -56,17 +58,17 @@ type OpenCreateWorktreeTests() =
 
     [<Test>]
     member _.``OpenCreateWorktree transitions to LoadingBranches``() =
-        let model = tryUpdateModel (OpenCreateWorktree testRepoId) defaultModel
+        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
 
         match model.CreateModal with
-        | LoadingBranches repoId ->
+        | Modal.LoadingBranches repoId ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
         | other ->
             Assert.Fail($"Expected LoadingBranches but got {other}")
 
     [<Test>]
     member _.``OpenCreateWorktree does not change other model fields``() =
-        let model = tryUpdateModel (OpenCreateWorktree testRepoId) defaultModel
+        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
 
         Assert.That(model.IsLoading, Is.EqualTo(defaultModel.IsLoading))
         Assert.That(model.HasError, Is.EqualTo(defaultModel.HasError))
@@ -79,15 +81,15 @@ type OpenCreateWorktreeTests() =
 type BranchesLoadedTests() =
 
     let loadingModel =
-        { defaultModel with CreateModal = LoadingBranches testRepoId }
+        { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
 
     [<Test>]
     member _.``BranchesLoaded Ok transitions to Open with branches``() =
         let branches = [ "main"; "develop"; "feature/x" ]
-        let model, _ = update (BranchesLoaded (Ok branches)) loadingModel
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok branches))) loadingModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.Branches, Is.EqualTo(branches))
             Assert.That(form.RepoId, Is.EqualTo(testRepoId))
         | other ->
@@ -96,10 +98,10 @@ type BranchesLoadedTests() =
     [<Test>]
     member _.``BranchesLoaded Ok pre-selects first branch as BaseBranch``() =
         let branches = [ "main"; "develop"; "feature/x" ]
-        let model, _ = update (BranchesLoaded (Ok branches)) loadingModel
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok branches))) loadingModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.BaseBranch, Is.EqualTo("main"))
         | other ->
             Assert.Fail($"Expected Open but got {other}")
@@ -107,20 +109,20 @@ type BranchesLoadedTests() =
     [<Test>]
     member _.``BranchesLoaded Ok sets empty Name``() =
         let branches = [ "main" ]
-        let model, _ = update (BranchesLoaded (Ok branches)) loadingModel
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok branches))) loadingModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.Name, Is.EqualTo(""))
         | other ->
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
     member _.``BranchesLoaded Ok with empty list sets empty BaseBranch``() =
-        let model, _ = update (BranchesLoaded (Ok [])) loadingModel
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok []))) loadingModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.BaseBranch, Is.EqualTo(""))
             Assert.That(form.Branches, Is.Empty)
         | other ->
@@ -128,16 +130,16 @@ type BranchesLoadedTests() =
 
     [<Test>]
     member _.``BranchesLoaded Ok produces no command``() =
-        let _, cmd = update (BranchesLoaded (Ok [ "main" ])) loadingModel
+        let _, cmd = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) loadingModel
 
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``BranchesLoaded Error transitions to CreateError``() =
-        let model, _ = update (BranchesLoaded (Error (exn "network error"))) loadingModel
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Error (exn "network error")))) loadingModel
 
         match model.CreateModal with
-        | CreateError (repoId, message) ->
+        | Modal.CreateError (repoId, message) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
             Assert.That(message, Is.EqualTo("Failed to load branches"))
         | other ->
@@ -145,31 +147,31 @@ type BranchesLoadedTests() =
 
     [<Test>]
     member _.``BranchesLoaded Error produces no command``() =
-        let _, cmd = update (BranchesLoaded (Error (exn "network error"))) loadingModel
+        let _, cmd = update (ModalMsg (Modal.BranchesLoaded (Error (exn "network error")))) loadingModel
 
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``BranchesLoaded Ok ignored when modal is not LoadingBranches``() =
-        let closedModel = { defaultModel with CreateModal = Closed }
-        let model, _ = update (BranchesLoaded (Ok [ "main" ])) closedModel
+        let closedModel = { defaultModel with CreateModal = Modal.Closed }
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) closedModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``BranchesLoaded Error ignored when modal is not LoadingBranches``() =
-        let closedModel = { defaultModel with CreateModal = Closed }
-        let model, _ = update (BranchesLoaded (Error (exn "fail"))) closedModel
+        let closedModel = { defaultModel with CreateModal = Modal.Closed }
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Error (exn "fail")))) closedModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``BranchesLoaded Ok ignored when modal is Open``() =
-        let openForm = Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old" }
-        let model, _ = update (BranchesLoaded (Ok [ "new-branch" ])) { defaultModel with CreateModal = openForm }
+        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old" }
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "new-branch" ]))) { defaultModel with CreateModal = openForm }
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.Branches, Is.EqualTo([ "old" ]), "Should not replace branches when already Open")
         | other ->
             Assert.Fail($"Expected Open (unchanged) but got {other}")
@@ -181,26 +183,26 @@ type BranchesLoadedTests() =
 type FormStateTests() =
 
     let openForm =
-        Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main" }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
     [<Test>]
     member _.``SetNewWorktreeName updates Name in Open form``() =
-        let model, _ = update (SetNewWorktreeName "my-feature") openModel
+        let model, _ = update (ModalMsg (Modal.SetNewWorktreeName "my-feature")) openModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.Name, Is.EqualTo("my-feature"))
         | other ->
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
     member _.``SetNewWorktreeName preserves other form fields``() =
-        let model, _ = update (SetNewWorktreeName "my-feature") openModel
+        let model, _ = update (ModalMsg (Modal.SetNewWorktreeName "my-feature")) openModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.BaseBranch, Is.EqualTo("main"))
             Assert.That(form.RepoId, Is.EqualTo(testRepoId))
             Assert.That(form.Branches, Is.EqualTo([ "main"; "develop" ]))
@@ -209,20 +211,20 @@ type FormStateTests() =
 
     [<Test>]
     member _.``SetBaseBranch updates BaseBranch in Open form``() =
-        let model, _ = update (SetBaseBranch "develop") openModel
+        let model, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) openModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.BaseBranch, Is.EqualTo("develop"))
         | other ->
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
     member _.``SetBaseBranch preserves other form fields``() =
-        let model, _ = update (SetBaseBranch "develop") openModel
+        let model, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) openModel
 
         match model.CreateModal with
-        | Open form ->
+        | Modal.Open form ->
             Assert.That(form.Name, Is.EqualTo(""))
             Assert.That(form.RepoId, Is.EqualTo(testRepoId))
         | other ->
@@ -230,49 +232,49 @@ type FormStateTests() =
 
     [<Test>]
     member _.``SetNewWorktreeName ignored when modal is Closed``() =
-        let model, _ = update (SetNewWorktreeName "test") defaultModel
+        let model, _ = update (ModalMsg (Modal.SetNewWorktreeName "test")) defaultModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``SetBaseBranch ignored when modal is Closed``() =
-        let model, _ = update (SetBaseBranch "test") defaultModel
+        let model, _ = update (ModalMsg (Modal.SetBaseBranch "test")) defaultModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``SetNewWorktreeName ignored when modal is Creating``() =
-        let creating = { defaultModel with CreateModal = Creating testRepoId }
-        let model, _ = update (SetNewWorktreeName "test") creating
+        let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
+        let model, _ = update (ModalMsg (Modal.SetNewWorktreeName "test")) creating
 
-        Assert.That(model.CreateModal, Is.EqualTo(Creating testRepoId))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Creating testRepoId))
 
     [<Test>]
     member _.``SetBaseBranch ignored when modal is Creating``() =
-        let creating = { defaultModel with CreateModal = Creating testRepoId }
-        let model, _ = update (SetBaseBranch "test") creating
+        let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
+        let model, _ = update (ModalMsg (Modal.SetBaseBranch "test")) creating
 
-        Assert.That(model.CreateModal, Is.EqualTo(Creating testRepoId))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Creating testRepoId))
 
     [<Test>]
     member _.``SetNewWorktreeName produces no command``() =
-        let _, cmd = update (SetNewWorktreeName "test") openModel
+        let _, cmd = update (ModalMsg (Modal.SetNewWorktreeName "test")) openModel
 
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``SetBaseBranch produces no command``() =
-        let _, cmd = update (SetBaseBranch "test") openModel
+        let _, cmd = update (ModalMsg (Modal.SetBaseBranch "test")) openModel
 
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``Multiple SetNewWorktreeName calls update correctly``() =
-        let m1, _ = update (SetNewWorktreeName "first") openModel
-        let m2, _ = update (SetNewWorktreeName "second") m1
+        let m1, _ = update (ModalMsg (Modal.SetNewWorktreeName "first")) openModel
+        let m2, _ = update (ModalMsg (Modal.SetNewWorktreeName "second")) m1
 
         match m2.CreateModal with
-        | Open form -> Assert.That(form.Name, Is.EqualTo("second"))
+        | Modal.Open form -> Assert.That(form.Name, Is.EqualTo("second"))
         | other -> Assert.Fail($"Expected Open but got {other}")
 
 
@@ -282,16 +284,16 @@ type FormStateTests() =
 type SubmitCreateWorktreeTests() =
 
     let openForm =
-        Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main" }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
     [<Test>]
     member _.``SubmitCreateWorktree transitions to Creating``() =
-        let model = tryUpdateModel SubmitCreateWorktree openModel
+        let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) openModel
 
         match model.CreateModal with
-        | Creating repoId ->
+        | Modal.Creating repoId ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
         | other ->
             Assert.Fail($"Expected Creating but got {other}")
@@ -299,47 +301,47 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with empty name is ignored``() =
         let emptyName =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main" }
-        let model, cmd = update SubmitCreateWorktree { defaultModel with CreateModal = emptyName }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main" }
+        let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = emptyName }
 
         match model.CreateModal with
-        | Open _ -> ()
+        | Modal.Open _ -> ()
         | other -> Assert.Fail($"Expected Open (unchanged) but got {other}")
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``SubmitCreateWorktree with whitespace-only name is ignored``() =
         let wsName =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main" }
-        let model, cmd = update SubmitCreateWorktree { defaultModel with CreateModal = wsName }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main" }
+        let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = wsName }
 
         match model.CreateModal with
-        | Open _ -> ()
+        | Modal.Open _ -> ()
         | other -> Assert.Fail($"Expected Open (unchanged) but got {other}")
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``SubmitCreateWorktree when modal is Closed is ignored``() =
-        let model, cmd = update SubmitCreateWorktree defaultModel
+        let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) defaultModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``SubmitCreateWorktree trims name with leading and trailing spaces``() =
         let spacedName =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main" }
-        let model = tryUpdateModel SubmitCreateWorktree { defaultModel with CreateModal = spacedName }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main" }
+        let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = spacedName }
 
         match model.CreateModal with
-        | Creating _ -> ()
+        | Modal.Creating _ -> ()
         | other -> Assert.Fail($"Expected Creating but got {other}")
 
     [<Test>]
     member _.``SubmitCreateWorktree when modal is LoadingBranches is ignored``() =
-        let model, cmd = update SubmitCreateWorktree { defaultModel with CreateModal = LoadingBranches testRepoId }
+        let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
 
-        Assert.That(model.CreateModal, Is.EqualTo(LoadingBranches testRepoId))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.LoadingBranches testRepoId))
         Assert.That(cmd, Is.Empty)
 
 
@@ -350,18 +352,18 @@ type CreateWorktreeCompletedTests() =
 
     [<Test>]
     member _.``CreateWorktreeCompleted Ok closes modal``() =
-        let creating = { defaultModel with CreateModal = Creating testRepoId }
-        let model = tryUpdateModel (CreateWorktreeCompleted (Ok ())) creating
+        let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
+        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok ()))) creating
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``CreateWorktreeCompleted Error transitions to CreateError``() =
-        let creating = { defaultModel with CreateModal = Creating testRepoId }
-        let model, _ = update (CreateWorktreeCompleted (Error "git failed")) creating
+        let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
+        let model, _ = update (ModalMsg (Modal.CreateWorktreeCompleted (Error "git failed"))) creating
 
         match model.CreateModal with
-        | CreateError (repoId, message) ->
+        | Modal.CreateError (repoId, message) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
             Assert.That(message, Is.EqualTo("git failed"))
         | other ->
@@ -369,22 +371,22 @@ type CreateWorktreeCompletedTests() =
 
     [<Test>]
     member _.``CreateWorktreeCompleted Error produces no command``() =
-        let creating = { defaultModel with CreateModal = Creating testRepoId }
-        let _, cmd = update (CreateWorktreeCompleted (Error "git failed")) creating
+        let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
+        let _, cmd = update (ModalMsg (Modal.CreateWorktreeCompleted (Error "git failed"))) creating
 
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``CreateWorktreeCompleted Error ignored when not in Creating state``() =
-        let model, _ = update (CreateWorktreeCompleted (Error "git failed")) defaultModel
+        let model, _ = update (ModalMsg (Modal.CreateWorktreeCompleted (Error "git failed"))) defaultModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``CreateWorktreeCompleted Error from Closed stays Closed``() =
-        let model, cmd = update (CreateWorktreeCompleted (Error "oops")) defaultModel
+        let model, cmd = update (ModalMsg (Modal.CreateWorktreeCompleted (Error "oops"))) defaultModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
         Assert.That(cmd, Is.Empty)
 
 
@@ -396,44 +398,44 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal resets to Closed from Open``() =
         let openForm =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
-        let model, _ = update CloseCreateModal { defaultModel with CreateModal = openForm }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+        let model, _ = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``CloseCreateModal resets to Closed from CreateError``() =
-        let errorState = CreateError (testRepoId, "some error")
-        let model, _ = update CloseCreateModal { defaultModel with CreateModal = errorState }
+        let errorState = Modal.CreateError (testRepoId, "some error")
+        let model, _ = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = errorState }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``CloseCreateModal from LoadingBranches resets to Closed``() =
-        let loading = { defaultModel with CreateModal = LoadingBranches testRepoId }
-        let model, _ = update CloseCreateModal loading
+        let loading = { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
+        let model, _ = update (ModalMsg Modal.CloseCreateModal) loading
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``CloseCreateModal when already Closed stays Closed``() =
-        let model, _ = update CloseCreateModal defaultModel
+        let model, _ = update (ModalMsg Modal.CloseCreateModal) defaultModel
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``CloseCreateModal produces no command``() =
         let openForm =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
-        let _, cmd = update CloseCreateModal { defaultModel with CreateModal = openForm }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+        let _, cmd = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``CloseCreateModal from Creating resets to Closed``() =
-        let model, _ = update CloseCreateModal { defaultModel with CreateModal = Creating testRepoId }
+        let model, _ = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = Modal.Creating testRepoId }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
 
 [<TestFixture>]
@@ -444,34 +446,34 @@ type EscapeKeyClosesModalTests() =
     [<Test>]
     member _.``Escape key closes modal from Open state``() =
         let openForm =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
         let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Escape key closes modal from Creating state``() =
-        let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = Creating testRepoId }
+        let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = Modal.Creating testRepoId }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Escape key closes modal from CreateError state``() =
-        let errorState = CreateError (testRepoId, "error")
+        let errorState = Modal.CreateError (testRepoId, "error")
         let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = errorState }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Escape key closes modal from LoadingBranches state``() =
-        let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = LoadingBranches testRepoId }
+        let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Closed))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Escape key produces no command when modal is open``() =
         let openForm =
-            Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
         let _, cmd = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Empty)
@@ -486,68 +488,68 @@ type FullStateMachineRoundtripTests() =
     member _.``Full happy path: Open, load branches, fill form, submit, complete``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (OpenCreateWorktree testRepoId) m0
-        Assert.That((match m1.CreateModal with LoadingBranches _ -> true | _ -> false), Is.True)
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) m0
+        Assert.That((match m1.CreateModal with Modal.LoadingBranches _ -> true | _ -> false), Is.True)
 
-        let m2, _ = update (BranchesLoaded (Ok [ "main"; "develop" ])) m1
-        Assert.That((match m2.CreateModal with Open _ -> true | _ -> false), Is.True)
+        let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main"; "develop" ]))) m1
+        Assert.That((match m2.CreateModal with Modal.Open _ -> true | _ -> false), Is.True)
 
-        let m3, _ = update (SetNewWorktreeName "my-feature") m2
+        let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "my-feature")) m2
         match m3.CreateModal with
-        | Open form -> Assert.That(form.Name, Is.EqualTo("my-feature"))
+        | Modal.Open form -> Assert.That(form.Name, Is.EqualTo("my-feature"))
         | _ -> Assert.Fail("Expected Open")
 
-        let m4, _ = update (SetBaseBranch "develop") m3
+        let m4, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) m3
         match m4.CreateModal with
-        | Open form -> Assert.That(form.BaseBranch, Is.EqualTo("develop"))
+        | Modal.Open form -> Assert.That(form.BaseBranch, Is.EqualTo("develop"))
         | _ -> Assert.Fail("Expected Open")
 
-        let m5 = tryUpdateModel SubmitCreateWorktree m4
-        Assert.That((match m5.CreateModal with Creating _ -> true | _ -> false), Is.True)
+        let m5 = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) m4
+        Assert.That((match m5.CreateModal with Modal.Creating _ -> true | _ -> false), Is.True)
 
-        let m6 = tryUpdateModel (CreateWorktreeCompleted (Ok ())) m5
-        Assert.That(m6.CreateModal, Is.EqualTo(Closed))
+        let m6 = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok ()))) m5
+        Assert.That(m6.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Error path: Open, load branches, submit, error, close``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (OpenCreateWorktree testRepoId) m0
-        let m2, _ = update (BranchesLoaded (Ok [ "main" ])) m1
-        let m3, _ = update (SetNewWorktreeName "bad-name") m2
-        let m4 = tryUpdateModel SubmitCreateWorktree m3
-        let m5, _ = update (CreateWorktreeCompleted (Error "branch already exists")) m4
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) m0
+        let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) m1
+        let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "bad-name")) m2
+        let m4 = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) m3
+        let m5, _ = update (ModalMsg (Modal.CreateWorktreeCompleted (Error "branch already exists"))) m4
 
         match m5.CreateModal with
-        | CreateError (_, msg) ->
+        | Modal.CreateError (_, msg) ->
             Assert.That(msg, Is.EqualTo("branch already exists"))
         | other ->
             Assert.Fail($"Expected CreateError but got {other}")
 
-        let m6, _ = update CloseCreateModal m5
-        Assert.That(m6.CreateModal, Is.EqualTo(Closed))
+        let m6, _ = update (ModalMsg Modal.CloseCreateModal) m5
+        Assert.That(m6.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Branch load failure path: Open, load error, close``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (OpenCreateWorktree testRepoId) m0
-        let m2, _ = update (BranchesLoaded (Error (exn "timeout"))) m1
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) m0
+        let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Error (exn "timeout")))) m1
 
         match m2.CreateModal with
-        | CreateError (_, msg) ->
+        | Modal.CreateError (_, msg) ->
             Assert.That(msg, Is.EqualTo("Failed to load branches"))
         | other ->
             Assert.Fail($"Expected CreateError but got {other}")
 
-        let m3, _ = update CloseCreateModal m2
-        Assert.That(m3.CreateModal, Is.EqualTo(Closed))
+        let m3, _ = update (ModalMsg Modal.CloseCreateModal) m2
+        Assert.That(m3.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Cancel via Escape during any state returns to Closed``() =
-        let m1 = tryUpdateModel (OpenCreateWorktree testRepoId) defaultModel
-        let m2, _ = update (BranchesLoaded (Ok [ "main" ])) m1
-        let m3, _ = update (SetNewWorktreeName "test") m2
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
+        let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) m1
+        let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "test")) m2
 
         let mEsc, _ = update (KeyPressed ("Escape", false)) m3
-        Assert.That(mEsc.CreateModal, Is.EqualTo(Closed))
+        Assert.That(mEsc.CreateModal, Is.EqualTo(Modal.Closed))
