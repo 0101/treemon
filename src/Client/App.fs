@@ -123,7 +123,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         | "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
         | _ -> None
 
-let rec update msg model =
+let update msg model =
     match msg with
     | DataLoaded response ->
         match model.AppVersion with
@@ -269,10 +269,7 @@ let rec update msg model =
 
     | ModalMsg modalMsg ->
         let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
-        let focus =
-            match result.RestoredFocus with
-            | Some _ -> result.RestoredFocus |> Option.orElse model.FocusedElement
-            | None -> model.FocusedElement
+        let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
@@ -283,7 +280,13 @@ let rec update msg model =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
         if CreateWorktreeModal.isOpen model.CreateModal then
             match key with
-            | "Escape" -> update (ModalMsg CreateWorktreeModal.CloseCreateModal) model
+            | "Escape" ->
+                let restoredFocus =
+                    CreateWorktreeModal.repoId model.CreateModal
+                    |> Option.map RepoHeader
+                    |> Option.orElse model.FocusedElement
+                { model with CreateModal = CreateWorktreeModal.Closed; FocusedElement = restoredFocus },
+                Cmd.none
             | _ -> model, Cmd.none
         else
         match key with
