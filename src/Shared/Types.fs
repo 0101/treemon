@@ -8,6 +8,24 @@ module RepoId =
     let create (path: string) = RepoId path
     let value (RepoId id) = id
 
+type WorktreePath = WorktreePath of string
+
+module WorktreePath =
+    let create (path: string) = WorktreePath path
+    let value (WorktreePath p) = p
+
+type BranchName = BranchName of string
+
+module BranchName =
+    let create (name: string) = BranchName name
+    let value (BranchName b) = b
+
+type BaseBranch = BaseBranch of string
+
+module BaseBranch =
+    let create (name: string) = BaseBranch name
+    let value (BaseBranch b) = b
+
 type BeadsSummary =
     { Open: int
       InProgress: int
@@ -66,16 +84,16 @@ type WorkMetrics =
       LinesRemoved: int }
 
 type LaunchRequest =
-    { Path: string
+    { Path: WorktreePath
       Prompt: string }
 
 type CreateWorktreeRequest =
     { RepoId: string
-      BranchName: string
-      BaseBranch: string }
+      BranchName: BranchName
+      BaseBranch: BaseBranch }
 
 type WorktreeStatus =
-    { Path: string
+    { Path: WorktreePath
       Branch: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
@@ -119,15 +137,15 @@ type DashboardResponse =
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
-      openTerminal: string -> Async<unit>
-      openEditor: string -> Async<unit>
+      openTerminal: WorktreePath -> Async<unit>
+      openEditor: WorktreePath -> Async<unit>
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
       deleteWorktree: string -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<unit, string>>
-      focusSession: string -> Async<Result<unit, string>>
-      killSession: string -> Async<Result<unit, string>>
+      focusSession: WorktreePath -> Async<Result<unit, string>>
+      killSession: WorktreePath -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
-      openNewTab: string -> Async<Result<unit, string>> }
+      openNewTab: WorktreePath -> Async<Result<unit, string>> }

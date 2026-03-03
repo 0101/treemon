@@ -70,25 +70,23 @@ let listWorktrees (repoRoot: string) =
 let parseCommitOutput (worktreePath: string) (output: string option) =
     output
     |> Option.bind (fun raw ->
-        match raw with
-        | "" -> None
-        | _ ->
-            let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
+        let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
 
-            match lines with
-            | [| hash; message; timeStr |] ->
-                match DateTimeOffset.TryParse(timeStr) with
-                | true, time ->
-                    Some
-                        { Hash = hash
-                          Message = message
-                          Time = time }
-                | _ ->
-                    Log.log "Git" $"getLastCommit({worktreePath}): failed to parse time '{timeStr}'"
-                    None
+        match raw, lines with
+        | "", _ -> None
+        | _, [| hash; message; timeStr |] ->
+            match DateTimeOffset.TryParse(timeStr) with
+            | true, time ->
+                Some
+                    { Hash = hash
+                      Message = message
+                      Time = time }
             | _ ->
-                Log.log "Git" $"getLastCommit({worktreePath}): expected 3 lines (hash/message/time), got {lines.Length}"
-                None)
+                Log.log "Git" $"getLastCommit({worktreePath}): failed to parse time '{timeStr}'"
+                None
+        | _ ->
+            Log.log "Git" $"getLastCommit({worktreePath}): expected 3 lines (hash/message/time), got {lines.Length}"
+            None)
 
 let getLastCommit (worktreePath: string) =
     async {
@@ -234,15 +232,15 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
     async {
         let! removeResult = runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
+        let! branchResult =
+            match removeResult with
+            | Ok _ -> runGitResult repoRoot $"branch -D -- \"{branch}\""
+            | Error _ -> async { return removeResult }
 
-        match removeResult with
-        | Error msg -> return Error $"git worktree remove failed: {msg}"
-        | Ok _ ->
-            let! branchResult = runGitResult repoRoot $"branch -D -- \"{branch}\""
-
-            match branchResult with
-            | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
-            | Ok _ -> return Ok ()
+        match removeResult, branchResult with
+        | Error msg, _ -> return Error $"git worktree remove failed: {msg}"
+        | Ok _, Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
+        | Ok _, Ok _ -> return Ok ()
     }
 
 let branchSortKey (name: string) =
