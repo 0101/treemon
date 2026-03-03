@@ -272,7 +272,7 @@ let private tryExtractSlashCommand (text: string) =
         | Some args when args.Length > 0 -> $"{cmd} {args}"
         | _ -> cmd)
 
-let private isSystemNoise (text: string) =
+let isSystemNoise (text: string) =
     text.Contains("PRESERVE ON CONTEXT COMPACTION")
     || text.StartsWith("<local-command-")
     || text.StartsWith("<system-reminder>")
@@ -326,7 +326,7 @@ let private tryParseUserText (line: string) =
         Log.log "Claude" $"Failed to parse user text: {ex.Message}"
         None
 
-let private scanForUserMessage (filePath: string) =
+let scanForUserMessage (filePath: string) =
     let chunkSize = 64L * 1024L
     let overlap = 1024L
     let stepSize = chunkSize - overlap
