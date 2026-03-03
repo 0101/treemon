@@ -53,29 +53,19 @@
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
-        .terminal-btn, .new-tab-btn {
+        .terminal-btn, .new-tab-btn, .editor-btn, .delete-btn {
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-family: monospace; font-size: 0.78em;
+            color: #7f849c; cursor: pointer; font-family: monospace;
             padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
         }
+        .terminal-btn { margin-left: auto; font-size: 0.78em; }
+        .new-tab-btn { font-size: 1em; }
+        .editor-btn { font-family: inherit; font-size: 0.78em; padding: 1px 1px 2px; }
+        .delete-btn { font-size: 0.65em; padding-top: 3px; padding-bottom: 3px; }
         .terminal-btn:hover, .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
-        .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
-
-        .editor-btn {
-            flex-shrink: 0;
-            background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-size: 0.78em;
-            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
-        }
         .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
-
-        .delete-btn {
-            flex-shrink: 0;
-            background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-size: 0.78em;
-            padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
-        }
+        .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
 
         .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
