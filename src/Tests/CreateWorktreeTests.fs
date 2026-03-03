@@ -25,7 +25,8 @@ let private defaultModel : Model =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = Modal.Closed
-      DeletedBranches = Set.empty }
+      DeletedBranches = Set.empty
+      EditorName = "VS Code" }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the

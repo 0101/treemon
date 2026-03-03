@@ -114,12 +114,13 @@ type DashboardResponse =
     { Repos: RepoWorktrees list
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
-      AppVersion: string }
+      AppVersion: string
+      EditorName: string }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: string -> Async<unit>
-      openVsCode: string -> Async<unit>
+      openEditor: string -> Async<unit>
       startSync: string -> Async<Result<unit, string>>
       cancelSync: string -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>

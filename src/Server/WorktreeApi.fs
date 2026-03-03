@@ -64,6 +64,36 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
 
 let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
+let private readGlobalConfig () =
+    let configPath =
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".treemon",
+            "config.json")
+
+    if not (File.Exists(configPath)) then
+        Map.empty
+    else
+        try
+            let json = File.ReadAllText(configPath)
+            use doc = System.Text.Json.JsonDocument.Parse(json)
+            doc.RootElement.EnumerateObject()
+            |> Seq.map (fun prop -> prop.Name, prop.Value.GetString())
+            |> Map.ofSeq
+        with ex ->
+            Log.log "Config" $"Failed to read global config: {ex.Message}"
+            Map.empty
+
+let private getEditorConfig () =
+    let config = readGlobalConfig ()
+    let command = config |> Map.tryFind "editor" |> Option.defaultValue "code"
+    let name =
+        match config |> Map.tryFind "editorName", command with
+        | Some n, _ -> n
+        | None, "code" -> "VS Code"
+        | None, cmd -> cmd
+    command, name
+
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -92,30 +122,32 @@ let getWorktrees
             { Repos = repos
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
-              AppVersion = appVersion }
+              AppVersion = appVersion
+              EditorName = getEditorConfig () |> snd }
     }
 
-let private openVsCode (validatePath: string -> Async<bool>) (path: string) =
+let private openEditor (validatePath: string -> Async<bool>) (path: string) =
     async {
         let! isValid = validatePath path
 
         if not isValid then
-            Log.log "API" $"openVsCode: rejected unknown path '{path}'"
+            Log.log "API" $"openEditor: rejected unknown path '{path}'"
         else
-            Log.log "API" $"openVsCode: opening VS Code for '{path}'"
+            let editor, _ = getEditorConfig ()
+            Log.log "API" $"openEditor: opening '{editor}' for '{path}'"
 
             try
                 let psi =
                     System.Diagnostics.ProcessStartInfo(
                         "cmd.exe",
-                        $"/c code \"{path}\"",
+                        $"/c {editor} \"{path}\"",
                         UseShellExecute = false,
                         CreateNoWindow = true
                     )
 
                 System.Diagnostics.Process.Start(psi) |> ignore
             with ex ->
-                Log.log "API" $"openVsCode: failed for '{path}': {ex.Message}"
+                Log.log "API" $"openEditor: failed for '{path}': {ex.Message}"
     }
 
 let private openTerminal
@@ -200,9 +232,9 @@ let worktreeApi
 
     match fixtures with
     | Some f ->
-        { getWorktrees = fun () -> async { return f.Worktrees }
+        { getWorktrees = fun () -> async { return { f.Worktrees with EditorName = getEditorConfig () |> snd } }
           openTerminal = fun _ -> async { return () }
-          openVsCode = fun _ -> async { return () }
+          openEditor = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
           cancelSync = fun _ -> async { return () }
           getSyncStatus = fun () -> async { return f.SyncStatus }
@@ -216,7 +248,7 @@ let worktreeApi
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
           openTerminal = openTerminal validatePath sessionAgent
-          openVsCode = openVsCode validatePath
+          openEditor = openEditor validatePath
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
