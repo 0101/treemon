@@ -909,10 +909,13 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                 prop.className footerClass
                 prop.children [
                     match wt.LastUserMessage with
-                    | Some prompt ->
+                    | Some (prompt, ts) ->
                         Html.div [
                             prop.className "user-prompt"
-                            prop.text prompt
+                            prop.children [
+                                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                                Html.span [ prop.text prompt ]
+                            ]
                         ]
                     | None -> ()
 

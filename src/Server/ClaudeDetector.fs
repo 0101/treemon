@@ -373,4 +373,4 @@ let getLastUserMessage (worktreePath: string) =
 
     findLatestJsonl projectDir
     |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
-    |> Option.map (fun (text, _) -> truncateMessage 120 text)
+    |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)

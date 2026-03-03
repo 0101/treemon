@@ -43,7 +43,7 @@
             overflow: hidden;
             display: flex; flex-direction: column;
         }
-        .card-body { padding: 12px 14px; }
+        .card-body { padding: 12px 14px 6px; }
         .wt-card.merged      { opacity: 0.5; }
         .wt-card.merged .delete-btn { color: #f38ba8; border-color: #f38ba8; }
         .wt-card.compact     { padding: 6px 10px; }
@@ -52,7 +52,7 @@
         .compact-detail { display: flex; align-items: center; gap: 6px; font-size: 0.8em; flex-wrap: wrap; }
         .beads-inline { display: flex; gap: 4px; align-items: center; color: #a6adc8; }
 
-        .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
         .terminal-btn, .new-tab-btn, .editor-btn, .delete-btn {
@@ -83,6 +83,7 @@
 
         .commit-line { font-size: 0.85em; color: #a6adc8; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .commit-time { color: #7f849c; margin-left: 6px; }
+        .wt-card.compact .commit-time { font-size: 10px; }
         .git-commit-msg { font-size: 0.78em; color: #7f849c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 
         .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.82em; }
@@ -185,11 +186,15 @@
         }
         .card-footer.has-content { padding: 10px 14px; background: #11111b; }
         .card-footer .user-prompt {
-            color: #9399b2; font-style: italic;
+            color: #89b4fa; font-style: italic;
             font-family: 'Consolas', 'Cascadia Mono', 'Fira Code', monospace;
             font-size: 0.78em;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            display: flex; align-items: center; gap: 6px;
+            overflow: hidden;
             margin: 0;
+        }
+        .card-footer .user-prompt > span:last-child {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
         }
 
         .event-log {
@@ -197,7 +202,7 @@
             display: flex; flex-direction: column; gap: 3px; font-size: 0.78em;
         }
         .event-entry { display: flex; align-items: center; gap: 6px; overflow: hidden; }
-        .event-time { color: #585b70; white-space: nowrap; flex-shrink: 0; width: 52px; text-align: right; }
+        .event-time { color: #585b70; white-space: nowrap; flex-shrink: 0; width: 52px; text-align: right; font-style: normal; }
         .event-source { color: #6c7086; white-space: nowrap; flex-shrink: 0; }
         .event-message { color: #9399b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
         .event-status { padding: 0 4px; border-radius: 3px; font-size: 0.9em; white-space: nowrap; flex-shrink: 0; }
