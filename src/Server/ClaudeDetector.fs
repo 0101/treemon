@@ -320,21 +320,18 @@ let private tryParseUserText (line: string) =
         Log.log "Claude" $"Failed to parse user text: {ex.Message}"
         None
 
+let private findUserMessageInLines (lines: string array) =
+    lines
+    |> Array.map _.Trim()
+    |> Array.filter (fun s -> s.Length > 0)
+    |> Array.rev
+    |> Array.tryPick tryParseUserText
+
 let scanForUserMessage (filePath: string) =
     let chunkSize = 64L * 1024L
     let overlap = 1024L
     let stepSize = chunkSize - overlap
     let maxChunks = 16
-
-    let readChunkLines (stream: FileStream) (chunkStart: int64) (readLength: int) (isAtFileStart: bool) =
-        stream.Seek(chunkStart, SeekOrigin.Begin) |> ignore
-        let buffer = Array.zeroCreate readLength
-        let bytesRead = stream.Read(buffer, 0, readLength)
-        let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
-        let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
-
-        if isAtFileStart || lines.Length = 0 then lines
-        else lines[1..]
 
     try
         use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
@@ -350,17 +347,18 @@ let scanForUserMessage (filePath: string) =
                     if readLength <= 0 then None
                     else
                         let isAtFileStart = chunkStart = 0L
-                        let lines = readChunkLines stream chunkStart readLength isAtFileStart
+                        stream.Seek(chunkStart, SeekOrigin.Begin) |> ignore
+                        let buffer = Array.zeroCreate readLength
+                        let bytesRead = stream.Read(buffer, 0, readLength)
+                        let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
+                        let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
 
-                        let result =
-                            lines
-                            |> Array.map _.Trim()
-                            |> Array.filter (fun s -> s.Length > 0)
-                            |> Array.rev
-                            |> Array.tryPick tryParseUserText
+                        let trimmedLines =
+                            if isAtFileStart || lines.Length = 0 then lines
+                            else lines[1..]
 
-                        match result with
-                        | Some _ -> result
+                        match findUserMessageInLines trimmedLines with
+                        | Some _ as result -> result
                         | None when isAtFileStart -> None
                         | None -> scanChunk (chunkIndex + 1)
 
