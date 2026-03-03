@@ -114,6 +114,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
         | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
         | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
+        | "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
         | _ -> None
     | RepoHeader repoId ->
         match key with
@@ -807,12 +808,13 @@ let workMetricsView (metrics: WorkMetrics option) =
             ]
         ]
 
-let compactWorktreeCard dispatch editorName (repoName: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.key wt.Branch
         prop.className className
+        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -844,6 +846,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
     Html.div [
         prop.key wt.Branch
         prop.className className
+        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -890,7 +893,7 @@ let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName isFocused wt
+    if isCompact then compactWorktreeCard dispatch editorName repoName scopedKey isFocused wt
     else worktreeCard dispatch editorName repoName events isPending scopedKey isFocused wt
 
 let skeletonCard () =
