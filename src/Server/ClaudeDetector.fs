@@ -277,6 +277,8 @@ let private isSystemNoise (text: string) =
     || text.StartsWith("<local-command-")
     || text.StartsWith("<system-reminder>")
     || text.StartsWith("<task-notification>")
+    || (text.StartsWith("# ") && text.Length > 200)
+    || (text.StartsWith("**") && text.Length > 200)
 
 let private extractUserContent (text: string) =
     match tryExtractSlashCommand text with
@@ -324,15 +326,60 @@ let private tryParseUserText (line: string) =
         Log.log "Claude" $"Failed to parse user text: {ex.Message}"
         None
 
-let private readAllLinesNewestFirst filePath =
-    readLastLines filePath Int32.MaxValue
+let private scanForUserMessage (filePath: string) =
+    let chunkSize = 64L * 1024L
+    let overlap = 1024L
+    let stepSize = chunkSize - overlap
+    let maxChunks = 16
+
+    let readChunkLines (stream: FileStream) (chunkStart: int64) (readLength: int) (isAtFileStart: bool) =
+        stream.Seek(chunkStart, SeekOrigin.Begin) |> ignore
+        let buffer = Array.zeroCreate readLength
+        let bytesRead = stream.Read(buffer, 0, readLength)
+        let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
+        let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+
+        if isAtFileStart then lines
+        else if lines.Length > 0 then lines[1..]
+        else lines
+
+    try
+        use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+        let fileLength = stream.Length
+        if fileLength = 0L then None
+        else
+            let rec scanChunk chunkIndex =
+                if chunkIndex >= maxChunks then None
+                else
+                    let rawStart = fileLength - chunkSize - (int64 chunkIndex) * stepSize
+                    let chunkStart = Math.Max(0L, rawStart)
+                    let readLength = int (Math.Min(chunkSize, fileLength - chunkStart))
+                    if readLength <= 0 then None
+                    else
+                        let isAtFileStart = chunkStart = 0L
+                        let lines = readChunkLines stream chunkStart readLength isAtFileStart
+
+                        let result =
+                            lines
+                            |> Array.map _.Trim()
+                            |> Array.filter (fun s -> s.Length > 0)
+                            |> Array.rev
+                            |> Array.tryPick tryParseUserText
+
+                        match result with
+                        | Some _ -> result
+                        | None when isAtFileStart -> None
+                        | None -> scanChunk (chunkIndex + 1)
+
+            scanChunk 0
+    with ex ->
+        Log.log "Claude" $"Failed to scan JSONL {filePath}: {ex.Message}"
+        None
 
 let getLastUserMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
     findLatestJsonl projectDir
-    |> Option.bind (fun fi ->
-        readAllLinesNewestFirst fi.FullName
-        |> List.tryPick tryParseUserText)
+    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
     |> Option.map (fun (text, _) -> truncateMessage 120 text)
