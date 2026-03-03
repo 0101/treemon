@@ -20,12 +20,6 @@ module BranchName =
     let create (name: string) = BranchName name
     let value (BranchName b) = b
 
-type BaseBranch = BaseBranch of string
-
-module BaseBranch =
-    let create (name: string) = BaseBranch name
-    let value (BaseBranch b) = b
-
 type BeadsSummary =
     { Open: int
       InProgress: int
@@ -90,7 +84,7 @@ type LaunchRequest =
 type CreateWorktreeRequest =
     { RepoId: string
       BranchName: BranchName
-      BaseBranch: BaseBranch }
+      BaseBranch: BranchName }
 
 type WorktreeStatus =
     { Path: WorktreePath

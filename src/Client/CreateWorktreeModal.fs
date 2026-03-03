@@ -82,7 +82,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
             let request: CreateWorktreeRequest =
                 { RepoId = RepoId.value form.RepoId
                   BranchName = BranchName.create (form.Name.Trim())
-                  BaseBranch = BaseBranch.create form.BaseBranch }
+                  BaseBranch = BranchName.create form.BaseBranch }
             { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
             Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
         | _ -> just modal

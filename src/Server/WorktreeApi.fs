@@ -390,11 +390,11 @@ let worktreeApi
                           |> Map.tryFind repoId
                           |> Option.bind (fun repo ->
                               repo.WorktreeList
-                              |> List.tryFind (fun wt -> wt.Branch = Some (BaseBranch.value req.BaseBranch)))
+                              |> List.tryFind (fun wt -> wt.Branch = Some (BranchName.value req.BaseBranch)))
 
                       match sourceWorktree with
                       | None ->
-                          return Error $"No worktree found for branch '{BaseBranch.value req.BaseBranch}'"
+                          return Error $"No worktree found for branch '{BranchName.value req.BaseBranch}'"
                       | Some wt ->
 
                       let! result = GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
