@@ -95,6 +95,29 @@ let getWorktrees
               AppVersion = appVersion }
     }
 
+let private openVsCode (validatePath: string -> Async<bool>) (path: string) =
+    async {
+        let! isValid = validatePath path
+
+        if not isValid then
+            Log.log "API" $"openVsCode: rejected unknown path '{path}'"
+        else
+            Log.log "API" $"openVsCode: opening VS Code for '{path}'"
+
+            try
+                let psi =
+                    System.Diagnostics.ProcessStartInfo(
+                        "cmd.exe",
+                        $"/c code \"{path}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    )
+
+                System.Diagnostics.Process.Start(psi) |> ignore
+            with ex ->
+                Log.log "API" $"openVsCode: failed for '{path}': {ex.Message}"
+    }
+
 let private openTerminal
     (validatePath: string -> Async<bool>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -179,6 +202,7 @@ let worktreeApi
     | Some f ->
         { getWorktrees = fun () -> async { return f.Worktrees }
           openTerminal = fun _ -> async { return () }
+          openVsCode = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
           cancelSync = fun _ -> async { return () }
           getSyncStatus = fun () -> async { return f.SyncStatus }
@@ -190,6 +214,7 @@ let worktreeApi
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
           openTerminal = openTerminal validatePath sessionAgent
+          openVsCode = openVsCode validatePath
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
