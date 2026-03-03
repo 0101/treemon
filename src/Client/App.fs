@@ -867,48 +867,61 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
 let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
+    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
+    let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key wt.Branch
         prop.className className
         prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
             Html.div [
-                prop.className "card-header"
+                prop.className "card-body"
                 prop.children [
-                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
-                    Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
-                    workMetricsView wt.WorkMetrics
-                    terminalButton dispatch wt
-                    if wt.HasActiveSession then newTabButton dispatch wt
-                    editorButton dispatch editorName wt
-                    deleteButton dispatch wt
+                    Html.div [
+                        prop.className "card-header"
+                        prop.children [
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
+                            Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                            workMetricsView wt.WorkMetrics
+                            terminalButton dispatch wt
+                            if wt.HasActiveSession then newTabButton dispatch wt
+                            editorButton dispatch editorName wt
+                            deleteButton dispatch wt
+                        ]
+                    ]
+
+                    if beadsTotal wt.Beads > 0 then
+                        Html.div [
+                            prop.className "beads-row"
+                            prop.children [
+                                beadsCounts "beads-counts" wt.Beads
+                                beadsProgressBar wt.Beads
+                            ]
+                        ]
+
+                    mainBehindWithSync dispatch wt branchEvents isPending scopedKey
+
+                    prRow repoName wt
                 ]
             ]
 
-            match wt.LastUserMessage with
-            | Some prompt ->
-                Html.div [
-                    prop.className "commit-line user-prompt"
-                    prop.children [
-                        Html.text prompt
-                    ]
+            Html.div [
+                prop.className footerClass
+                prop.children [
+                    match wt.LastUserMessage with
+                    | Some (prompt, ts) ->
+                        Html.div [
+                            prop.className "user-prompt"
+                            prop.children [
+                                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                                Html.span [ prop.text prompt ]
+                            ]
+                        ]
+                    | None -> ()
+
+                    eventLog branchEvents
                 ]
-            | None -> ()
-
-            if beadsTotal wt.Beads > 0 then
-                Html.div [
-                    prop.className "beads-row"
-                    prop.children [
-                        beadsCounts "beads-counts" wt.Beads
-                        beadsProgressBar wt.Beads
-                    ]
-                ]
-
-            mainBehindWithSync dispatch wt branchEvents isPending scopedKey
-
-            prRow repoName wt
-
-            eventLog branchEvents
+            ]
         ]
     ]
 
