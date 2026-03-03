@@ -12,7 +12,7 @@ type PerRepoState =
       KnownPaths: Set<string>
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
-      CodingToolData: Map<string, CodingToolStatus * CodingToolProvider option * string option>
+      CodingToolData: Map<string, CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option>
       PrData: Map<string, PrStatus>
       Provider: RepoProvider option
       IsReady: bool }
@@ -47,7 +47,7 @@ type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
-    | UpdateCodingTool of repoId: RepoId * path: string * (CodingToolStatus * CodingToolProvider option * string option)
+    | UpdateCodingTool of repoId: RepoId * path: string * (CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option)
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
     | RemoveWorktree of repoId: RepoId * path: string
@@ -271,7 +271,7 @@ let private executeTask
 
         | RefreshCodingTool(repoId, path) ->
             let status, provider = CodingToolStatus.getStatus path
-            let lastUserMsg = CodingToolStatus.getLastUserMessage path
+            let lastUserMsg = CodingToolStatus.getLastUserMessage path provider
             agent.Post(UpdateCodingTool(repoId, path, (status, provider, lastUserMsg)))
 
         | RefreshPr repoId ->
