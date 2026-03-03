@@ -105,11 +105,18 @@ type RepoWorktrees =
       Worktrees: WorktreeStatus list
       IsReady: bool }
 
+type SystemMetrics =
+    { CpuPercent: float
+      MemoryUsedMb: int
+      MemoryTotalMb: int }
+
 type DashboardResponse =
     { Repos: RepoWorktrees list
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
-      AppVersion: string }
+      AppVersion: string
+      DeployBranch: string option
+      SystemMetrics: SystemMetrics option }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>

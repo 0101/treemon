@@ -71,3 +71,28 @@ let listWindowsTerminalWindows () =
 
 let closeWindow (hwnd: nativeint) =
     PostMessageNative(hwnd, WM_CLOSE, 0n, 0n)
+
+// System metrics P/Invoke
+
+[<Struct; StructLayout(LayoutKind.Sequential)>]
+type MEMORYSTATUSEX =
+    val mutable dwLength: uint32
+    val mutable dwMemoryLoad: uint32
+    val mutable ullTotalPhys: uint64
+    val mutable ullAvailPhys: uint64
+    val mutable ullTotalPageFile: uint64
+    val mutable ullAvailPageFile: uint64
+    val mutable ullTotalVirtual: uint64
+    val mutable ullAvailVirtual: uint64
+    val mutable ullAvailExtendedVirtual: uint64
+
+[<DllImport("kernel32.dll", SetLastError = true)>]
+extern bool GlobalMemoryStatusEx(MEMORYSTATUSEX& lpBuffer)
+
+[<Struct; StructLayout(LayoutKind.Sequential)>]
+type FILETIME =
+    val mutable dwLowDateTime: uint32
+    val mutable dwHighDateTime: uint32
+
+[<DllImport("kernel32.dll", SetLastError = true)>]
+extern bool GetSystemTimes(FILETIME& lpIdleTime, FILETIME& lpKernelTime, FILETIME& lpUserTime)

@@ -68,6 +68,7 @@ let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (appVersion: string)
+    (deployBranch: string option)
     : Async<DashboardResponse> =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
@@ -92,7 +93,9 @@ let getWorktrees
             { Repos = repos
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
-              AppVersion = appVersion }
+              AppVersion = appVersion
+              DeployBranch = deployBranch
+              SystemMetrics = SystemMetrics.getSystemMetrics () }
     }
 
 let private openTerminal
@@ -152,6 +155,7 @@ let worktreeApi
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
+    (deployBranch: string option)
     : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
@@ -188,7 +192,7 @@ let worktreeApi
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           startSync = fun branch ->
               async {

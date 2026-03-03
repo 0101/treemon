@@ -6,6 +6,14 @@ open System.Threading
 open Shared
 open Server
 
+let readDeployBranch () =
+    ProcessRunner.run "Startup" "git" "rev-parse --abbrev-ref HEAD"
+    |> Async.RunSynchronously
+    |> Option.bind (fun branch ->
+        match branch with
+        | "main" | "master" -> None
+        | name -> Some name)
+
 let readAppVersion () =
     let serverGuid = System.Guid.NewGuid().ToString("N")
 
@@ -84,6 +92,10 @@ let main args =
     let appVersion = readAppVersion ()
     Log.log "Startup" $"App version: {appVersion}"
 
+    let deployBranch = readDeployBranch ()
+    let deployBranchDisplay = deployBranch |> Option.defaultValue "(main)"
+    Log.log "Startup" $"Deploy branch: {deployBranchDisplay}"
+
     config.TestFixtures |> Option.iter (fun path -> Log.log "Startup" $"Test fixtures: {path}")
 
     config.WorktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
@@ -104,7 +116,7 @@ let main args =
 
     let remotingApi =
         Remoting.createApi ()
-        |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion)
+        |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch)
         |> Remoting.withErrorHandler (fun ex routeInfo ->
             Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
             Propagate ex.Message)
