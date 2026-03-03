@@ -56,6 +56,15 @@
 - Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
 
+### Create Worktree
+
+A "+" button on each repo header opens a modal to create new worktrees without leaving the dashboard.
+
+- **Name input** (auto-focused) + **source branch dropdown** (sorted: main > master > develop > dev* > alphabetical from dashboard worktrees)
+- If `fork.ps1` (Windows) or `fork.sh` (Unix) exists in repo root, delegates to it with branch name as sole argument (runs from source worktree directory). Otherwise falls back to `git worktree add -b {name} {parentDir}/tm-{name}`.
+- Modal shows creating animation, then auto-closes on success or displays error
+- Server expedites worktree list refresh for the repo so the new card appears quickly
+
 ### Native Session Management
 
 Windows Terminal integration for spawning, tracking, and focusing terminal windows per worktree. See `docs/spec/native-session-management.md` for full details.

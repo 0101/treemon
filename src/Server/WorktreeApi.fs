@@ -242,6 +242,8 @@ let worktreeApi
           launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
+          createWorktree = fun _ -> async { return Ok() }
           openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
@@ -355,6 +357,50 @@ let worktreeApi
           killSession = fun path ->
               withValidatedPath path "killSession" (fun () ->
                   SessionManager.killSession sessionAgent path)
+          getBranches = fun repoIdStr ->
+              async {
+                  let repoId = RepoId.create repoIdStr
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                  return
+                      state.Repos
+                      |> Map.tryFind repoId
+                      |> Option.map (fun repo ->
+                          repo.WorktreeList
+                          |> List.choose _.Branch
+                          |> List.sortBy GitWorktree.branchSortKey)
+                      |> Option.defaultValue []
+              }
+          createWorktree = fun req ->
+              async {
+                  let repoId = RepoId.create req.RepoId
+
+                  match rootPaths |> Map.tryFind repoId with
+                  | None ->
+                      return Error $"Unknown repo: {req.RepoId}"
+                  | Some root ->
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                      let sourceWorktree =
+                          state.Repos
+                          |> Map.tryFind repoId
+                          |> Option.bind (fun repo ->
+                              repo.WorktreeList
+                              |> List.tryFind (fun wt -> wt.Branch = Some req.BaseBranch))
+
+                      match sourceWorktree with
+                      | None ->
+                          return Error $"No worktree found for branch '{req.BaseBranch}'"
+                      | Some wt ->
+                          let! result = GitWorktree.createWorktree root wt.Path req.BranchName
+
+                          match result with
+                          | Ok () ->
+                              agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                          | Error _ -> ()
+
+                          return result
+              }
           openNewTab = fun path ->
               withValidatedPath path "openNewTab" (fun () ->
                   SessionManager.openNewTab sessionAgent path) }

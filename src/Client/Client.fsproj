@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="Navigation.fs" />
+    <Compile Include="CreateWorktreeModal.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 

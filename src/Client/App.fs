@@ -23,6 +23,7 @@ type Model =
       EditorName: string
       EyeDirection: float * float
       FocusedElement: FocusTarget option
+      CreateModal: CreateWorktreeModal.ModalState
       DeletedBranches: Set<string> }
 
 type Msg =
@@ -46,6 +47,7 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
+    | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
     Remoting.createApi ()
@@ -78,6 +80,7 @@ let init () =
       EditorName = "VS Code"
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
+      CreateModal = CreateWorktreeModal.Closed
       DeletedBranches = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
@@ -119,6 +122,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId ->
         match key with
         | "Enter" -> Some (ToggleCollapse repoId)
+        | "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
         | _ -> None
 
 let update msg model =
@@ -266,10 +270,28 @@ let update msg model =
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
 
+    | ModalMsg modalMsg ->
+        let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
+        let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
+        let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+        { model with CreateModal = result.Modal; FocusedElement = focus },
+        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
+
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus oldFocus newFocus =
             let useCenter = isLargeJump model.Repos oldFocus newFocus
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
+        if CreateWorktreeModal.isOpen model.CreateModal then
+            match key with
+            | "Escape" ->
+                let restoredFocus =
+                    CreateWorktreeModal.repoId model.CreateModal
+                    |> Option.map RepoHeader
+                    |> Option.orElse model.FocusedElement
+                { model with CreateModal = CreateWorktreeModal.Closed; FocusedElement = restoredFocus },
+                Cmd.none
+            | _ -> model, Cmd.none
+        else
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -1075,6 +1097,12 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
                         |> List.map (fun wt ->
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
                 ]
+            Html.button [
+                prop.className "create-wt-btn"
+                prop.title "Create worktree"
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repo.RepoId)))
+                prop.text "+"
+            ]
         ]
     ]
 
@@ -1160,6 +1188,8 @@ let view model dispatch =
                 ]
 
             schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+
+            CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
         ]
     ]
 
