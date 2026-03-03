@@ -16,7 +16,7 @@ A "+" button appears on each repo header (right side, next to repo name). Clicki
 ### Modal Contents
 
 1. **Name input** (text field, focused on open) — the new worktree/branch name
-2. **Base branch select** — dropdown of remote branches to branch from, pre-selected by priority:
+2. **Source branch select** — dropdown of branches currently visible on the dashboard for this repo, sorted by priority:
    - `main`
    - `master`
    - `develop`
@@ -29,8 +29,9 @@ A "+" button appears on each repo header (right side, next to repo name). Clicki
 On submit:
 1. Modal replaces its content with "Creating worktree" and animated dots (`. .. ...` cycling)
 2. Server creates the worktree using this strategy:
-   - **If `fork.ps1` (Windows) or `fork.sh` (Unix) exists in repo root**: run it with the branch name as the first argument. The script is responsible for all setup (npm install, symlinks, etc). The server passes the base branch as a second argument.
-   - **If no fork script exists**: fall back to bare `git worktree add -b {name} {parentDir}/tm-{name} origin/{baseBranch}`
+   - Resolves the selected source branch to its worktree path from scheduler state
+   - **If `fork.ps1` (Windows) or `fork.sh` (Unix) exists in repo root**: run it from the source worktree directory with the branch name as the sole argument. The script is responsible for all setup (npm install, symlinks, etc).
+   - **If no fork script exists**: fall back to `git -C {sourceWorktreePath} worktree add -b {name} {parentDir}/tm-{name}` — this branches from HEAD of the source worktree
 3. Server expedites the worktree list refresh for that repo so the new card appears quickly
 4. On success: modal closes automatically
 5. On error: modal shows error message with a close button
@@ -46,17 +47,17 @@ When using the fallback (no fork script), the worktree directory is placed as a 
 New types for the API:
 - `CreateWorktreeRequest = { RepoId: string; BranchName: string; BaseBranch: string }`
 - New API method: `createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>`
-- New API method: `getBranches: string -> Async<string list>` — takes repo ID string, returns remote branch names sorted by priority for the base branch selector
+- New API method: `getBranches: string -> Async<string list>` — takes repo ID string, returns branch names of worktrees currently on the dashboard, sorted by priority for the source branch selector
 
 ### Server (GitWorktree.fs + WorktreeApi.fs)
 
-- `GitWorktree.listRemoteBranches`: run `git branch -r --format='%(refname:short)'` on repo root, strip `origin/` prefix, filter out the bare `origin` entry (HEAD symbolic ref), return sorted by priority
+- `WorktreeApi.getBranches`: reads worktree branches from scheduler state (no git call needed), sorts by priority using `branchSortKey`
 - `GitWorktree.createWorktree`:
   1. Detect OS via `System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform`
   2. Check if `fork.ps1` (Windows) or `fork.sh` (Unix) exists in repo root
-  3. If fork script exists: run it (`powershell -File fork.ps1 {name} {baseBranch}` on Windows, `bash fork.sh {name} {baseBranch}` on Unix), capture stdout+stderr, return Ok/Error based on exit code
-  4. If no fork script: run `git worktree add -b {name} {parentDir}/tm-{name} origin/{baseBranch}`
-- `WorktreeApi`: wire up new endpoints, post `ExpediteRefresh` to scheduler after creation
+  3. If fork script exists: run it (`powershell -File fork.ps1 {name}` on Windows, `bash fork.sh {name}` on Unix) from the source worktree directory, capture stdout+stderr, return Ok/Error based on exit code
+  4. If no fork script: run `git -C {sourceWorktreePath} worktree add -b {name} {parentDir}/tm-{name}`
+- `WorktreeApi.createWorktree`: resolves `BaseBranch` to a worktree path from scheduler state, then calls `GitWorktree.createWorktree`; posts `ExpediteRefresh` to scheduler after creation
 
 ### Scheduler (RefreshScheduler.fs) — done as part of API wiring
 
@@ -100,7 +101,7 @@ CreateWorktreeModal =
 
 ## Decisions
 
-- **Delegate to fork script if present**: repos have different setup needs (npm install, symlinks, bd init, etc). The server shouldn't hardcode any of that — it calls `fork.ps1`/`fork.sh` if it exists, otherwise does bare `git worktree add`.
+- **Delegate to fork script if present**: repos have different setup needs (npm install, symlinks, bd init, etc). The server shouldn't hardcode any of that — it calls `fork.ps1`/`fork.sh` if it exists, otherwise does bare `git worktree add`. The fork script receives only the branch name; no base branch argument since it runs from the source worktree directory.
 - **OS detection for script extension**: `.ps1` on Windows, `.sh` on Unix. Uses `RuntimeInformation.IsOSPlatform`.
-- **Branch list from remotes, not locals**: remote branches (`git branch -r`) cover the common case better; users branch off of origin/main, not local tracking branches
+- **Branch list from dashboard worktrees, not remotes**: the dropdown only shows branches that already have worktrees on the dashboard. This avoids showing branches with no local worktree and keeps the UI consistent with what the user sees. The new branch forks from HEAD of the selected worktree.
 - **No validation beyond git**: if the branch name is invalid, git (or the fork script) will report the error which bubbles up to the modal

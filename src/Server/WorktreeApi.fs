@@ -303,13 +303,16 @@ let worktreeApi
           getBranches = fun repoIdStr ->
               async {
                   let repoId = RepoId.create repoIdStr
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  match rootPaths |> Map.tryFind repoId with
-                  | None ->
-                      Log.log "API" $"getBranches: unknown repo '{repoIdStr}'"
-                      return []
-                  | Some root ->
-                      return! GitWorktree.listRemoteBranches root
+                  return
+                      state.Repos
+                      |> Map.tryFind repoId
+                      |> Option.map (fun repo ->
+                          repo.WorktreeList
+                          |> List.choose _.Branch
+                          |> List.sortBy GitWorktree.branchSortKey)
+                      |> Option.defaultValue []
               }
           createWorktree = fun req ->
               async {
@@ -319,14 +322,27 @@ let worktreeApi
                   | None ->
                       return Error $"Unknown repo: {req.RepoId}"
                   | Some root ->
-                      let! result = GitWorktree.createWorktree root req.BranchName req.BaseBranch
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                      match result with
-                      | Ok () ->
-                          agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
-                      | Error _ -> ()
+                      let sourceWorktree =
+                          state.Repos
+                          |> Map.tryFind repoId
+                          |> Option.bind (fun repo ->
+                              repo.WorktreeList
+                              |> List.tryFind (fun wt -> wt.Branch = Some req.BaseBranch))
 
-                      return result
+                      match sourceWorktree with
+                      | None ->
+                          return Error $"No worktree found for branch '{req.BaseBranch}'"
+                      | Some wt ->
+                          let! result = GitWorktree.createWorktree root wt.Path req.BranchName
+
+                          match result with
+                          | Ok () ->
+                              agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                          | Error _ -> ()
+
+                          return result
               }
           openNewTab = fun path ->
               withValidatedPath path "openNewTab" (fun () ->

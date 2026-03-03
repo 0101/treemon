@@ -137,6 +137,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId ->
         match key with
         | "Enter" -> Some (ToggleCollapse repoId)
+        | "+" -> Some (OpenCreateWorktree repoId)
         | _ -> None
 
 let update msg model =

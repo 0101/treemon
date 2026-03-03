@@ -245,7 +245,7 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
             | Ok _ -> return Ok ()
     }
 
-let private branchSortKey (name: string) =
+let branchSortKey (name: string) =
     match name with
     | "main" -> (0, name)
     | "master" -> (1, name)
@@ -263,17 +263,7 @@ let parseRemoteBranches (output: string) =
     |> Array.sortBy branchSortKey
     |> Array.toList
 
-let listRemoteBranches (repoRoot: string) =
-    async {
-        let! output = runGit repoRoot "branch -r --format=%(refname:short)"
-
-        return
-            output
-            |> Option.map parseRemoteBranches
-            |> Option.defaultValue []
-    }
-
-let createWorktree (repoRoot: string) (branchName: string) (baseBranch: string) =
+let createWorktree (repoRoot: string) (sourceWorktreePath: string) (branchName: string) =
     async {
         let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
 
@@ -286,15 +276,19 @@ let createWorktree (repoRoot: string) (branchName: string) (baseBranch: string) 
         let fileName, arguments =
             if File.Exists(scriptPath) then
                 if isWindows then
-                    "powershell", $"-File \"{scriptPath}\" \"{branchName}\" \"{baseBranch}\""
+                    "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
                 else
-                    "bash", $"\"{scriptPath}\" \"{branchName}\" \"{baseBranch}\""
+                    "bash", $"\"{scriptPath}\" \"{branchName}\""
             else
                 let parentDir = Path.GetDirectoryName(repoRoot)
                 let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
-                "git", $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" origin/{baseBranch}"
+                "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\""
 
-        let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments
+        let! result =
+            if File.Exists(scriptPath) then
+                ProcessRunner.runResultInDir "CreateWorktree" fileName arguments sourceWorktreePath
+            else
+                ProcessRunner.runResult "CreateWorktree" fileName arguments
 
         return result |> Result.map ignore
     }
