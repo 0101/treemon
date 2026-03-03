@@ -84,6 +84,14 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
 
+let modalRepoId =
+    function
+    | Closed -> None
+    | LoadingBranches repoId -> Some repoId
+    | Open form -> Some form.RepoId
+    | Creating repoId -> Some repoId
+    | CreateError (repoId, _) -> Some repoId
+
 let init () =
     { Repos = []
       IsLoading = true
@@ -133,6 +141,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         match key with
         | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
         | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+        | "c" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenVsCode wt.Path)
         | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
         | _ -> None
     | RepoHeader repoId ->
@@ -141,7 +150,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
         | "+" -> Some (OpenCreateWorktree repoId)
         | _ -> None
 
-let update msg model =
+let rec update msg model =
     match msg with
     | DataLoaded response ->
         match model.AppVersion with
@@ -326,7 +335,8 @@ let update msg model =
         | _ -> model, Cmd.none
 
     | CreateWorktreeCompleted (Ok _) ->
-        { model with CreateModal = Closed }, fetchWorktrees ()
+        let restoredFocus = modalRepoId model.CreateModal |> Option.map RepoHeader
+        { model with CreateModal = Closed; FocusedElement = restoredFocus |> Option.orElse model.FocusedElement }, fetchWorktrees ()
 
     | CreateWorktreeCompleted (Error msg) ->
         match model.CreateModal with
@@ -335,7 +345,8 @@ let update msg model =
         | _ -> model, Cmd.none
 
     | CloseCreateModal ->
-        { model with CreateModal = Closed }, Cmd.none
+        let restoredFocus = modalRepoId model.CreateModal |> Option.map RepoHeader
+        { model with CreateModal = Closed; FocusedElement = restoredFocus |> Option.orElse model.FocusedElement }, Cmd.none
 
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus oldFocus newFocus =
@@ -343,7 +354,9 @@ let update msg model =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
         match model.CreateModal, key with
         | (Open _ | Creating _ | CreateError _ | LoadingBranches _), "Escape" ->
-            { model with CreateModal = Closed }, Cmd.none
+            update CloseCreateModal model
+        | (Open _ | Creating _ | CreateError _ | LoadingBranches _), _ ->
+            model, Cmd.none
         | _ ->
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
