@@ -64,6 +64,36 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
 
 let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
+let private readGlobalConfig () =
+    let configPath =
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".treemon",
+            "config.json")
+
+    if not (File.Exists(configPath)) then
+        Map.empty
+    else
+        try
+            let json = File.ReadAllText(configPath)
+            use doc = System.Text.Json.JsonDocument.Parse(json)
+            doc.RootElement.EnumerateObject()
+            |> Seq.map (fun prop -> prop.Name, prop.Value.GetString())
+            |> Map.ofSeq
+        with ex ->
+            Log.log "Config" $"Failed to read global config: {ex.Message}"
+            Map.empty
+
+let private getEditorConfig () =
+    let config = readGlobalConfig ()
+    let command = config |> Map.tryFind "editor" |> Option.defaultValue "code"
+    let name =
+        match config |> Map.tryFind "editorName", command with
+        | Some n, _ -> n
+        | None, "code" -> "VS Code"
+        | None, cmd -> cmd
+    command, name
+
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -95,30 +125,32 @@ let getWorktrees
               LatestByCategory = state.LatestByCategory
               AppVersion = appVersion
               DeployBranch = deployBranch
-              SystemMetrics = SystemMetrics.getSystemMetrics () }
+              SystemMetrics = SystemMetrics.getSystemMetrics ()
+              EditorName = getEditorConfig () |> snd }
     }
 
-let private openVsCode (validatePath: string -> Async<bool>) (path: string) =
+let private openEditor (validatePath: string -> Async<bool>) (path: string) =
     async {
         let! isValid = validatePath path
 
         if not isValid then
-            Log.log "API" $"openVsCode: rejected unknown path '{path}'"
+            Log.log "API" $"openEditor: rejected unknown path '{path}'"
         else
-            Log.log "API" $"openVsCode: opening VS Code for '{path}'"
+            let editor, _ = getEditorConfig ()
+            Log.log "API" $"openEditor: opening '{editor}' for '{path}'"
 
             try
                 let psi =
                     System.Diagnostics.ProcessStartInfo(
                         "cmd.exe",
-                        $"/c code \"{path}\"",
+                        $"/c {editor} \"{path}\"",
                         UseShellExecute = false,
                         CreateNoWindow = true
                     )
 
                 System.Diagnostics.Process.Start(psi) |> ignore
             with ex ->
-                Log.log "API" $"openVsCode: failed for '{path}': {ex.Message}"
+                Log.log "API" $"openEditor: failed for '{path}': {ex.Message}"
     }
 
 let private openTerminal
@@ -204,9 +236,9 @@ let worktreeApi
 
     match fixtures with
     | Some f ->
-        { getWorktrees = fun () -> async { return f.Worktrees }
+        { getWorktrees = fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } }
           openTerminal = fun _ -> async { return () }
-          openVsCode = fun _ -> async { return () }
+          openEditor = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
           cancelSync = fun _ -> async { return () }
           getSyncStatus = fun () -> async { return f.SyncStatus }
@@ -214,11 +246,13 @@ let worktreeApi
           launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
+          createWorktree = fun _ -> async { return Ok() }
           openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
-          openVsCode = openVsCode validatePath
+          openEditor = openEditor validatePath
           startSync = fun branch ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
@@ -327,6 +361,50 @@ let worktreeApi
           killSession = fun path ->
               withValidatedPath path "killSession" (fun () ->
                   SessionManager.killSession sessionAgent path)
+          getBranches = fun repoIdStr ->
+              async {
+                  let repoId = RepoId.create repoIdStr
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                  return
+                      state.Repos
+                      |> Map.tryFind repoId
+                      |> Option.map (fun repo ->
+                          repo.WorktreeList
+                          |> List.choose _.Branch
+                          |> List.sortBy GitWorktree.branchSortKey)
+                      |> Option.defaultValue []
+              }
+          createWorktree = fun req ->
+              async {
+                  let repoId = RepoId.create req.RepoId
+
+                  match rootPaths |> Map.tryFind repoId with
+                  | None ->
+                      return Error $"Unknown repo: {req.RepoId}"
+                  | Some root ->
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                      let sourceWorktree =
+                          state.Repos
+                          |> Map.tryFind repoId
+                          |> Option.bind (fun repo ->
+                              repo.WorktreeList
+                              |> List.tryFind (fun wt -> wt.Branch = Some req.BaseBranch))
+
+                      match sourceWorktree with
+                      | None ->
+                          return Error $"No worktree found for branch '{req.BaseBranch}'"
+                      | Some wt ->
+                          let! result = GitWorktree.createWorktree root wt.Path req.BranchName
+
+                          match result with
+                          | Ok () ->
+                              agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                          | Error _ -> ()
+
+                          return result
+              }
           openNewTab = fun path ->
               withValidatedPath path "openNewTab" (fun () ->
                   SessionManager.openNewTab sessionAgent path) }

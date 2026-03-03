@@ -2,6 +2,7 @@ module Server.GitWorktree
 
 open System
 open System.IO
+open System.Runtime.InteropServices
 
 type WorktreeInfo =
     { Path: string
@@ -27,7 +28,7 @@ let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
 
 let private runGitResult (workingDir: string) (arguments: string) =
-    ProcessRunner.runResult "Git" "git" $"-C \"{workingDir}\" {arguments}"
+    ProcessRunner.runResult "Git" "git" $"-C \"{workingDir}\" {arguments}" None
 
 let parseWorktreeList (porcelainOutput: string) =
     porcelainOutput.Split(
@@ -237,9 +238,54 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
         match removeResult with
         | Error msg -> return Error $"git worktree remove failed: {msg}"
         | Ok _ ->
-            let! branchResult = runGitResult repoRoot $"branch -D -- {branch}"
+            let! branchResult = runGitResult repoRoot $"branch -D -- \"{branch}\""
 
             match branchResult with
             | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
             | Ok _ -> return Ok ()
+    }
+
+let branchSortKey (name: string) =
+    match name with
+    | "main" -> (0, name)
+    | "master" -> (1, name)
+    | "develop" -> (2, name)
+    | n when n.StartsWith("dev") -> (3, name)
+    | _ -> (4, name)
+
+let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9._/-]+$")
+
+let validateBranchName (branchName: string) =
+    if validBranchNamePattern.IsMatch(branchName) then
+        Ok branchName
+    else
+        Error $"Invalid branch name: '{branchName}'"
+
+let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (branchName: string) (forkScript: string option) =
+    match forkScript with
+    | Some scriptPath ->
+        let fileName, arguments =
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
+            else "bash", $"\"{scriptPath}\" \"{branchName}\""
+
+        fileName, arguments, Some sourceWorktreePath
+    | None ->
+        let parentDir = Path.GetDirectoryName(repoRoot)
+        let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
+        "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\"", None
+
+let createWorktree (repoRoot: string) (sourceWorktreePath: string) (branchName: string) =
+    async {
+        match validateBranchName branchName with
+        | Error msg -> return Error msg
+        | Ok name ->
+            let scriptPath =
+                if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then Path.Combine(repoRoot, "fork.ps1")
+                else Path.Combine(repoRoot, "fork.sh")
+
+            let forkScript = if File.Exists(scriptPath) then Some scriptPath else None
+            let fileName, arguments, workingDir = resolveWorktreeCommand repoRoot sourceWorktreePath name forkScript
+
+            let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments workingDir
+            return result |> Result.map ignore
     }
