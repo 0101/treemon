@@ -114,7 +114,7 @@ function Start-ProductionServer([string[]]$Roots) {
 
     Save-Config $Roots
 
-    $rootArgs = ($Roots | ForEach-Object { "`"$_`"" }) -join " "
+    $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath "dotnet" `
@@ -209,7 +209,7 @@ function Start-DevMode([string[]]$Roots) {
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
 
-    $rootArgs = ($Roots | ForEach-Object { "`"$_`"" }) -join " "
+    $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
 
     $serverProcess = $null
     $viteProcess = $null
