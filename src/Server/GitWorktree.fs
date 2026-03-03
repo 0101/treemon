@@ -254,36 +254,44 @@ let branchSortKey (name: string) =
     | _ -> (4, name)
 
 
-let private validBranchName = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9._/-]+$")
+let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9._/-]+$")
+
+let validateBranchName (branchName: string) =
+    if validBranchNamePattern.IsMatch(branchName) then
+        Ok branchName
+    else
+        Error $"Invalid branch name: '{branchName}'"
+
+let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (branchName: string) (hasForkScript: bool) =
+    let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+
+    if hasForkScript then
+        let scriptPath =
+            if isWindows then Path.Combine(repoRoot, "fork.ps1")
+            else Path.Combine(repoRoot, "fork.sh")
+
+        let fileName, arguments =
+            if isWindows then "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
+            else "bash", $"\"{scriptPath}\" \"{branchName}\""
+
+        fileName, arguments, Some sourceWorktreePath
+    else
+        let parentDir = Path.GetDirectoryName(repoRoot)
+        let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
+        "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\"", None
 
 let createWorktree (repoRoot: string) (sourceWorktreePath: string) (branchName: string) =
     async {
-        if not (validBranchName.IsMatch(branchName)) then
-            return Error $"Invalid branch name: '{branchName}'"
-        else
-            let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-
+        match validateBranchName branchName with
+        | Error msg -> return Error msg
+        | Ok name ->
             let scriptPath =
-                if isWindows then
-                    Path.Combine(repoRoot, "fork.ps1")
-                else
-                    Path.Combine(repoRoot, "fork.sh")
+                if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then Path.Combine(repoRoot, "fork.ps1")
+                else Path.Combine(repoRoot, "fork.sh")
 
-            let hasForkScript = File.Exists(scriptPath)
+            let fileName, arguments, workingDir =
+                resolveWorktreeCommand repoRoot sourceWorktreePath name (File.Exists(scriptPath))
 
-            let fileName, arguments =
-                if hasForkScript then
-                    if isWindows then
-                        "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
-                    else
-                        "bash", $"\"{scriptPath}\" \"{branchName}\""
-                else
-                    let parentDir = Path.GetDirectoryName(repoRoot)
-                    let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
-                    "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\""
-
-            let workingDir = if hasForkScript then Some sourceWorktreePath else None
             let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments workingDir
-
             return result |> Result.map ignore
     }
