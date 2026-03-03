@@ -45,6 +45,9 @@ type UpdateResult =
       RestoredFocus: FocusTarget option
       RefreshWorktrees: bool }
 
+let private just modal =
+    { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+
 let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResult * Cmd<Msg> =
     match msg with
     | OpenCreateWorktree rid ->
@@ -55,33 +58,23 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
         match modal with
         | LoadingBranches rid ->
             let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
-            { Modal = Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch }
-              RestoredFocus = None; RefreshWorktrees = false },
-            Cmd.none
-        | _ ->
-            { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+            just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch })
+        | _ -> just modal
 
     | BranchesLoaded (Error _) ->
         match modal with
-        | LoadingBranches rid ->
-            { Modal = CreateError (rid, "Failed to load branches"); RestoredFocus = None; RefreshWorktrees = false },
-            Cmd.none
-        | _ ->
-            { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+        | LoadingBranches rid -> just (CreateError (rid, "Failed to load branches"))
+        | _ -> just modal
 
     | SetNewWorktreeName name ->
         match modal with
-        | Open form ->
-            { Modal = Open { form with Name = name }; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
-        | _ ->
-            { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+        | Open form -> just (Open { form with Name = name })
+        | _ -> just modal
 
     | SetBaseBranch branch ->
         match modal with
-        | Open form ->
-            { Modal = Open { form with BaseBranch = branch }; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
-        | _ ->
-            { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+        | Open form -> just (Open { form with BaseBranch = branch })
+        | _ -> just modal
 
     | SubmitCreateWorktree ->
         match modal with
@@ -92,8 +85,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
                   BaseBranch = form.BaseBranch }
             { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
             Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
-        | _ ->
-            { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+        | _ -> just modal
 
     | CreateWorktreeCompleted (Ok _) ->
         let restored = repoId modal |> Option.map RepoHeader
@@ -101,10 +93,8 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
 
     | CreateWorktreeCompleted (Error errorMsg) ->
         match modal with
-        | Creating rid ->
-            { Modal = CreateError (rid, errorMsg); RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
-        | _ ->
-            { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
+        | Creating rid -> just (CreateError (rid, errorMsg))
+        | _ -> just modal
 
     | CloseCreateModal ->
         let restored = repoId modal |> Option.map RepoHeader
