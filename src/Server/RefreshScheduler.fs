@@ -198,23 +198,23 @@ let resolveArchivedPaths (rootPaths: Map<RepoId, string>) (repos: Map<RepoId, Pe
             |> Option.map (fun _ -> wt.Path))
         |> Set.ofList)
 
+let private isPathArchived (archivedPaths: Map<RepoId, Set<string>>) repoId path =
+    archivedPaths
+    |> Map.tryFind repoId
+    |> Option.map (Set.contains path)
+    |> Option.defaultValue false
+
 let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
 
     let worktreeLists =
         repoList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
 
-    let isArchived repoId path =
-        archivedPaths
-        |> Map.tryFind repoId
-        |> Option.map (Set.contains path)
-        |> Option.defaultValue false
-
     let localTasks =
         repoList
         |> List.collect (fun (repoId, repo) ->
             repo.WorktreeList
-            |> List.filter (fun wt -> not (isArchived repoId wt.Path))
+            |> List.filter (fun wt -> not (isPathArchived archivedPaths repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
@@ -231,18 +231,12 @@ let buildPhase1Tasks (rootPaths: Map<RepoId, string>) =
     rootPaths |> Map.toList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
 
 let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
-    let isArchived repoId path =
-        archivedPaths
-        |> Map.tryFind repoId
-        |> Option.map (Set.contains path)
-        |> Option.defaultValue false
-
     repos
     |> Map.toList
     |> List.collect (fun (repoId, repo) ->
         let perWorktree =
             repo.WorktreeList
-            |> List.filter (fun wt -> not (isArchived repoId wt.Path))
+            |> List.filter (fun wt -> not (isPathArchived archivedPaths repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
