@@ -5,8 +5,8 @@ open Elmish
 open Feliz
 
 type Msg =
-    | Archive of string
-    | Unarchive of string
+    | Archive of BranchName
+    | Unarchive of BranchName
     | OpCompleted of Result<unit, string>
 
 type UpdateResult = { RefreshWorktrees: bool }
@@ -24,8 +24,7 @@ let update (api: Lazy<IWorktreeApi>) msg : UpdateResult * Cmd<Msg> =
     | OpCompleted (Error _) ->
         { RefreshWorktrees = false }, Cmd.none
 
-let relativeTime (dt: System.DateTimeOffset) =
-    let now = System.DateTimeOffset.Now
+let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
     let diff = now - dt
     match diff with
     | d when d.TotalMinutes < 1.0 -> "just now"
@@ -87,7 +86,7 @@ let archiveButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "archive-btn"
         prop.title "Archive worktree (A)"
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (Archive wt.Branch))
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (Archive (BranchName.create wt.Branch)))
         prop.children [ archiveIcon ]
     ]
 
@@ -98,11 +97,11 @@ let archiveCard dispatch (wt: WorktreeStatus) =
         prop.children [
             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
             workMetricsView wt.WorkMetrics
-            Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+            Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
             Html.button [
                 prop.className "unarchive-btn"
                 prop.title "Unarchive worktree"
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (Unarchive wt.Branch))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (Unarchive (BranchName.create wt.Branch)))
                 prop.children [ archiveIcon ]
             ]
         ]

@@ -218,8 +218,9 @@ let private updateArchivedBranches
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (setOp: string -> Set<string> -> Set<string>)
-    (branch: string)
+    (branchName: BranchName)
     =
+    let branch = BranchName.value branchName
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
         let worktrees = allWorktrees state

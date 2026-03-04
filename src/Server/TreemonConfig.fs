@@ -6,79 +6,54 @@ open System.Text.Json.Nodes
 
 let private configLock = obj ()
 
-let readArchivedBranches (repoRoot: string) : string list =
-    let configPath = Path.Combine(repoRoot, ".treemon.json")
+let private configPath repoRoot = Path.Combine(repoRoot, ".treemon.json")
 
-    lock configLock (fun () ->
-        if not (File.Exists(configPath)) then
+let private readBranchesCore (path: string) : string list =
+    if not (File.Exists(path)) then
+        []
+    else
+        try
+            let json = File.ReadAllText(path)
+            use doc = JsonDocument.Parse(json)
+
+            match doc.RootElement.TryGetProperty("archivedBranches") with
+            | true, elem when elem.ValueKind = JsonValueKind.Array ->
+                elem.EnumerateArray()
+                |> Seq.choose (fun v ->
+                    if v.ValueKind = JsonValueKind.String then Some(v.GetString())
+                    else None)
+                |> Seq.toList
+            | _ -> []
+        with ex ->
+            Log.log "TreemonConfig" $"Failed to read archivedBranches from {path}: {ex.Message}"
             []
-        else
-            try
-                let json = File.ReadAllText(configPath)
-                use doc = JsonDocument.Parse(json)
 
-                match doc.RootElement.TryGetProperty("archivedBranches") with
-                | true, elem when elem.ValueKind = JsonValueKind.Array ->
-                    elem.EnumerateArray()
-                    |> Seq.choose (fun v ->
-                        if v.ValueKind = JsonValueKind.String then Some(v.GetString())
-                        else None)
-                    |> Seq.toList
-                | _ -> []
+let private writeBranchesCore (path: string) (branches: string list) : unit =
+    let root =
+        if File.Exists(path) then
+            try
+                File.ReadAllText(path) |> JsonNode.Parse :?> JsonObject
             with ex ->
-                Log.log "TreemonConfig" $"Failed to read archivedBranches from {configPath}: {ex.Message}"
-                [])
+                Log.log "TreemonConfig" $"Failed to parse existing {path}, overwriting: {ex.Message}"
+                JsonObject()
+        else
+            JsonObject()
+
+    let branchArray = JsonArray(branches |> List.map (fun s -> JsonValue.Create(s) :> JsonNode) |> List.toArray)
+    root["archivedBranches"] <- branchArray
+
+    let options = JsonSerializerOptions(WriteIndented = true)
+    File.WriteAllText(path, root.ToJsonString(options))
+
+let readArchivedBranches (repoRoot: string) : string list =
+    lock configLock (fun () -> configPath repoRoot |> readBranchesCore)
 
 let setArchivedBranches (repoRoot: string) (branches: string list) : unit =
-    let configPath = Path.Combine(repoRoot, ".treemon.json")
-
-    lock configLock (fun () ->
-        let root =
-            if File.Exists(configPath) then
-                try
-                    File.ReadAllText(configPath) |> JsonNode.Parse :?> JsonObject
-                with ex ->
-                    Log.log "TreemonConfig" $"Failed to parse existing {configPath}, overwriting: {ex.Message}"
-                    JsonObject()
-            else
-                JsonObject()
-
-        let branchArray = JsonArray(branches |> List.map (fun s -> JsonValue.Create(s) :> JsonNode) |> List.toArray)
-        root["archivedBranches"] <- branchArray
-
-        let options = JsonSerializerOptions(WriteIndented = true)
-        File.WriteAllText(configPath, root.ToJsonString(options)))
+    lock configLock (fun () -> configPath repoRoot |> writeBranchesCore <| branches)
 
 let modifyArchivedBranches (repoRoot: string) (modify: string list -> string list) : unit =
-    let configPath = Path.Combine(repoRoot, ".treemon.json")
-
+    let path = configPath repoRoot
     lock configLock (fun () ->
-        let root, existing =
-            if File.Exists(configPath) then
-                try
-                    let json = File.ReadAllText(configPath)
-                    let root = json |> JsonNode.Parse :?> JsonObject
-
-                    let branches =
-                        match root.TryGetPropertyValue("archivedBranches") with
-                        | true, node when node <> null && node.GetValueKind() = JsonValueKind.Array ->
-                            node.AsArray()
-                            |> Seq.choose (fun v ->
-                                if v <> null && v.GetValueKind() = JsonValueKind.String then Some(v.GetValue<string>())
-                                else None)
-                            |> Seq.toList
-                        | _ -> []
-
-                    root, branches
-                with ex ->
-                    Log.log "TreemonConfig" $"Failed to parse existing {configPath}, overwriting: {ex.Message}"
-                    JsonObject(), []
-            else
-                JsonObject(), []
-
-        let updated = modify existing
-        let branchArray = JsonArray(updated |> List.map (fun s -> JsonValue.Create(s) :> JsonNode) |> List.toArray)
-        root["archivedBranches"] <- branchArray
-
-        let options = JsonSerializerOptions(WriteIndented = true)
-        File.WriteAllText(configPath, root.ToJsonString(options)))
+        readBranchesCore path
+        |> modify
+        |> writeBranchesCore path)

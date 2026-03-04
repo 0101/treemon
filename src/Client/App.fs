@@ -118,7 +118,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
-    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive wt.Branch))
+    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive (BranchName.create wt.Branch)))
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
@@ -481,7 +481,7 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
                 prop.className "git-commit-msg"
                 prop.children [
                     Html.text wt.LastCommitMessage
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                 ]
             ]
         ]
@@ -834,7 +834,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
                     editorButton dispatch editorName wt
