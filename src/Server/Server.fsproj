@@ -25,6 +25,7 @@
     <Compile Include="PrStatus.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="SyncEngine.fs" />
+    <Compile Include="TreemonConfig.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

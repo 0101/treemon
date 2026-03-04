@@ -74,14 +74,15 @@
             color: #7f849c; cursor: pointer; font-family: monospace;
             padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
         }
-        .terminal-btn { margin-left: auto; font-size: 0.78em; }
+        .terminal-btn { margin-left: auto; font-size: 0.78em; padding-top: 2px; padding-bottom: 2px; }
         .new-tab-btn { font-size: 1em; }
         .editor-btn { font-family: inherit; font-size: 0.78em; padding: 1px 1px 2px; }
-        .delete-btn { font-size: 0.65em; padding-top: 3px; padding-bottom: 3px; }
+        .delete-btn { padding: 3px 4px; }
         .terminal-btn:hover, .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
         .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
         .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
+        .btn-icon { width: 13px; height: 13px; display: block; }
 
         .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .ct-dot.working  { background: #ff0000; animation: pulse 2s ease-in-out infinite; }
@@ -265,6 +266,42 @@
 
         .dashboard:focus { outline: none; }
         .focused { outline: 2px solid #4a9eff; outline-offset: -2px; }
+
+        .archive-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer;
+            padding: 3px 4px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
+        }
+        .archive-btn:hover { color: #89b4fa; border-color: #89b4fa; }
+
+        .archive-section {
+            display: flex; flex-wrap: wrap; gap: 8px;
+            margin-top: 10px; padding: 8px 0;
+            opacity: 0.5;
+        }
+        .archive-section:hover { opacity: 0.75; }
+
+        .archive-card {
+            display: flex; align-items: center; gap: 6px;
+            background: #232334; border-radius: 6px;
+            padding: 4px 10px; font-size: 0.82em;
+            max-width: 300px;
+        }
+        .archive-card .branch-name {
+            font-weight: 500; font-size: 0.9em;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            max-width: 150px; color: #9399b2;
+        }
+        .archive-card .commit-time { color: #585b70; white-space: nowrap; }
+
+        .unarchive-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer;
+            padding: 3px 4px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
+        }
+        .unarchive-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
 
         .create-wt-btn {
             margin-left: auto; flex-shrink: 0;

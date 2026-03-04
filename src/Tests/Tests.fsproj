@@ -23,6 +23,7 @@
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
+    <Compile Include="ArchiveTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SerializationTests.fs" />

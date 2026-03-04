@@ -570,6 +570,7 @@ type EnterKeySuppressedWhileModalOpenTests() =
         { RepoId = repoId
           Name = "TestRepo"
           Worktrees = []
+          ArchivedWorktrees = []
           IsReady = true
           IsCollapsed = false }
 

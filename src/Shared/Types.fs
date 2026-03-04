@@ -99,7 +99,8 @@ type WorktreeStatus =
       MainBehindCount: int
       IsDirty: bool
       WorkMetrics: WorkMetrics option
-      HasActiveSession: bool }
+      HasActiveSession: bool
+      IsArchived: bool }
 
 [<RequireQualifiedAccess>]
 type StepStatus =
@@ -147,6 +148,8 @@ type IWorktreeApi =
       launchSession: LaunchRequest -> Async<Result<unit, string>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>
+      archiveWorktree: BranchName -> Async<Result<unit, string>>
+      unarchiveWorktree: BranchName -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>> }
