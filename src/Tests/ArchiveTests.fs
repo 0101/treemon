@@ -347,14 +347,14 @@ type ArchiveE2ETests() =
             "Path":"Q:/test/{branch}","Branch":"{branch}",
             "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
             "Beads":{{"Open":0,"InProgress":0,"Closed":0}},
-            "CodingTool":"Idle","CodingToolProvider":null,
+            "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
             "WorkMetrics":null,"HasActiveSession":false,"IsArchived":{archived}
         }}"""
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test"}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":""}}"""
 
     let emptySyncStatus = "{}"
 
