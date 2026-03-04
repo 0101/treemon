@@ -459,7 +459,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.disabled disabled
                 yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
-                prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main")
+                prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
                 prop.text "Sync"
             ]
 
@@ -709,7 +709,7 @@ let buildBadges (repoName: string) (builds: BuildInfo list) =
 
 let terminalButton dispatch (wt: WorktreeStatus) =
     let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
-    let title = if wt.HasActiveSession then "Focus session window" else "Open terminal"
+    let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
     Html.button [
         prop.className "terminal-btn"
         prop.title title
@@ -721,7 +721,7 @@ let terminalButton dispatch (wt: WorktreeStatus) =
 let editorButton dispatch editorName (wt: WorktreeStatus) =
     Html.button [
         prop.className "editor-btn"
-        prop.title $"Open in {editorName}"
+        prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
         prop.text "{⋯}"
@@ -730,7 +730,7 @@ let editorButton dispatch editorName (wt: WorktreeStatus) =
 let newTabButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
-        prop.title "Open new tab in tracked window"
+        prop.title "Open new tab in tracked window (+)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
         prop.text "+"
@@ -739,7 +739,7 @@ let newTabButton dispatch (wt: WorktreeStatus) =
 let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
-        prop.title "Remove worktree"
+        prop.title "Remove worktree (Del)"
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
