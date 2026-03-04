@@ -1159,19 +1159,24 @@ let viewAppHeader model dispatch =
             Html.div [
                 prop.className "header-left"
                 prop.children [
+                    viewSystemMetrics model.SystemMetrics
+                ]
+            ]
+            Html.div [
+                prop.className "header-center"
+                prop.children [
                     if model.HasError then viewEyeRolledBack
                     elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
                     else viewEyeClosed
-                    match model.DeployBranch with
-                    | Some branch ->
-                        Html.span [ prop.className "deploy-branch"; prop.text branch ]
-                    | None -> ()
                 ]
             ]
             Html.div [
                 prop.className "header-right"
                 prop.children [
-                    viewSystemMetrics model.SystemMetrics
+                    match model.DeployBranch with
+                    | Some branch ->
+                        Html.span [ prop.className "deploy-branch"; prop.text branch ]
+                    | None -> ()
                     Html.div [
                         prop.className "header-controls"
                         prop.children [
