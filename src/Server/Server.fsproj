@@ -20,6 +20,7 @@
     <Compile Include="ClaudeDetector.fs" />
     <Compile Include="CopilotDetector.fs" />
     <Compile Include="CodingToolStatus.fs" />
+    <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="RefreshScheduler.fs" />

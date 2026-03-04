@@ -4,6 +4,7 @@ open System
 open System.Text.Json
 open System.Text.RegularExpressions
 open Shared
+open Server.JsonHelpers
 
 type GithubRemote = { Owner: string; Repo: string }
 
@@ -19,16 +20,6 @@ let parseGithubUrl (url: string) =
             Some { Owner = m.Groups[1].Value; Repo = m.Groups[2].Value }
         else
             None)
-
-let private tryProp (name: string) (el: JsonElement) =
-    match el.TryGetProperty(name) with
-    | true, v when v.ValueKind <> JsonValueKind.Null && v.ValueKind <> JsonValueKind.Undefined -> Some v
-    | _ -> None
-
-let private tryString name el = tryProp name el |> Option.map _.GetString()
-let private tryInt name el = tryProp name el |> Option.map _.GetInt32()
-let private tryInt64 name el = tryProp name el |> Option.map _.GetInt64()
-let private tryBool name el = tryProp name el |> Option.map _.GetBoolean()
 
 let private runGh (arguments: string) =
     ProcessRunner.run "GH" "gh" arguments
