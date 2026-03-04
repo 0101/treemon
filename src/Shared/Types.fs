@@ -94,7 +94,7 @@ type WorktreeStatus =
       Beads: BeadsSummary
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
-      LastUserMessage: string option
+      LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool

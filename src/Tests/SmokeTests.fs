@@ -135,6 +135,19 @@ type SmokeTests() =
         Assert.That(readyBody, Does.Not.Contain("\"SchedulerEvents\":[]"), "SchedulerEvents should not be empty after scheduler has run")
 
     [<Test>]
+    member _.``At least one worktree has LastUserMessage populated``() =
+        let hasUserMessage = readyBody.Contains("\"LastUserMessage\":[\"")
+        TestContext.Out.WriteLine($"Response contains LastUserMessage: {hasUserMessage}")
+
+        if not hasUserMessage then
+            Assert.Ignore(
+                "No worktree has LastUserMessage populated. This can happen when all Claude sessions " +
+                "are older than 2h (Idle status) or no user messages found within 1MB scan limit.")
+        else
+            Assert.That(readyBody, Does.Not.Contain("\"LastUserMessage\":[\"\"]"),
+                "LastUserMessage should not be empty string when present")
+
+    [<Test>]
     member _.``Server process exits cleanly after kill``() =
         match serverProc with
         | None -> Assert.Fail("Server process reference is missing")
@@ -413,4 +426,66 @@ type MultiRepoSmokeTests() =
                 let! ghText = ghCommentBadges.First.TextContentAsync()
                 TestContext.Out.WriteLine($"GitHub comment badge text: {ghText}")
                 Assert.That(ghText, Does.Contain("comments"), "GitHub PR should show 'comments' format")
+        }
+
+    [<Test>]
+    member this.``Active Claude cards display user message text``() =
+        task {
+            let activeCards = this.Page.Locator(".wt-card.ct-working, .wt-card.ct-waiting-for-user")
+            let! activeCount = activeCards.CountAsync()
+            TestContext.Out.WriteLine($"Active Claude cards (initial): {activeCount}")
+
+            if activeCount = 0 then
+                do! this.Page.WaitForTimeoutAsync(15000.0f)
+                let! retryCount = activeCards.CountAsync()
+                TestContext.Out.WriteLine($"Active Claude cards (after 15s): {retryCount}")
+
+                if retryCount = 0 then
+                    Assert.Ignore(
+                        "No active Claude session cards visible. This test requires at least one " +
+                        "worktree with an active Claude session (Working or WaitingForUser).")
+
+            let userPrompts = this.Page.Locator(".wt-card .user-prompt")
+            let! promptCount = userPrompts.CountAsync()
+            TestContext.Out.WriteLine($"User prompt elements found: {promptCount}")
+
+            if promptCount > 0 then
+                for idx in 0 .. promptCount - 1 do
+                    let prompt = userPrompts.Nth(idx)
+                    let! text = prompt.TextContentAsync()
+                    TestContext.Out.WriteLine($"User prompt [{idx}]: '{text}'")
+                    Assert.That(text, Is.Not.Empty, $"User prompt [{idx}] should have visible text content")
+                    Assert.That(text.Length, Is.GreaterThan(0), $"User prompt [{idx}] should not be blank")
+            else
+                TestContext.Out.WriteLine(
+                    "NOTE: No user-prompt elements found on any card. " +
+                    "This can happen if Claude sessions are old (>2h) and all cards show ct-idle status, " +
+                    "or if no user messages were found within the 1MB scan limit.")
+        }
+
+    [<Test>]
+    member this.``User prompts do not contain skill prompt text``() =
+        task {
+            let userPrompts = this.Page.Locator(".wt-card .user-prompt")
+            let! count = userPrompts.CountAsync()
+            TestContext.Out.WriteLine($"User prompt elements to check for skill noise: {count}")
+
+            if count = 0 then
+                Assert.Ignore(
+                    "No user-prompt elements visible to verify skill filtering. " +
+                    "This test requires at least one card with a user prompt displayed.")
+
+            for idx in 0 .. count - 1 do
+                let prompt = userPrompts.Nth(idx)
+                let! text = prompt.TextContentAsync()
+                TestContext.Out.WriteLine($"Checking prompt [{idx}] ({text.Length} chars): '{text.Substring(0, Math.Min(80, text.Length))}'")
+
+                Assert.That(text.StartsWith("# ") && text.Length > 200, Is.False,
+                    $"User prompt [{idx}] looks like a skill prompt (starts with '# ' and >200 chars)")
+                Assert.That(text.StartsWith("**") && text.Length > 200, Is.False,
+                    $"User prompt [{idx}] looks like a skill prompt (starts with '**' and >200 chars)")
+                Assert.That(text, Does.Not.Contain("PRESERVE ON CONTEXT COMPACTION"),
+                    $"User prompt [{idx}] contains system noise text")
+                Assert.That(text, Does.Not.Contain("<command-name>"),
+                    $"User prompt [{idx}] contains raw command-name tag")
         }

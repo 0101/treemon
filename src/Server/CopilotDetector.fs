@@ -235,6 +235,11 @@ let private tryParseUserContent (line: string) =
 
         match root.TryGetProperty("type") with
         | true, typeProp when typeProp.GetString() = "user.message" ->
+            let timestamp =
+                match root.TryGetProperty("timestamp") with
+                | true, ts -> ts.GetString() |> DateTimeOffset.Parse |> Some
+                | _ -> None
+
             let textContent =
                 match root.TryGetProperty("data") with
                 | true, data ->
@@ -245,7 +250,9 @@ let private tryParseUserContent (line: string) =
                     | _ -> None
                 | _ -> None
 
-            textContent
+            match textContent with
+            | Some text -> Some(text, timestamp |> Option.defaultValue DateTimeOffset.MinValue)
+            | None -> None
         | _ -> None
     with ex ->
         Log.log "Copilot" $"Failed to parse user content: {ex.Message}"
@@ -258,7 +265,7 @@ let getLastUserMessage (worktreePath: string) =
     |> Option.bind (fun fi ->
         readLastLines fi.FullName 20
         |> List.tryPick tryParseUserContent)
-    |> Option.map (truncateMessage 120)
+    |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
 
 /// For testing: parse events from a specific directory (bypasses workspace index)
 let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =

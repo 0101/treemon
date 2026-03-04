@@ -65,13 +65,15 @@ type private EntryKind =
     | AssistantToolUse of hasAskUserQuestion: bool
     | AssistantDone
 
-let private isStatusNoise (text: string) =
+let isSystemNoise (text: string) =
     text.Contains("PRESERVE ON CONTEXT COMPACTION")
     || text.StartsWith("<local-command-")
     || text.StartsWith("<system-reminder>")
     || text.StartsWith("<task-notification>")
     || text.Contains("<command-name>")
     || text.Contains("[Request interrupted by user]")
+    || (text.StartsWith("# ") && text.Length > 200)
+    || (text.StartsWith("**") && text.Length > 200)
 
 let private extractTextFromMessage (root: JsonElement) =
     match root.TryGetProperty("message") with
@@ -111,7 +113,7 @@ let private tryParseEntryKind (line: string) =
             | "user" ->
                 let text = extractTextFromMessage root
                 match text with
-                | Some t when isStatusNoise t -> None
+                | Some t when isSystemNoise t -> None
                 | _ -> Some(UserEntry, timestamp)
             | "assistant" ->
                 match root.TryGetProperty("message") with
@@ -270,12 +272,6 @@ let private tryExtractSlashCommand (text: string) =
         | Some args when args.Length > 0 -> $"{cmd} {args}"
         | _ -> cmd)
 
-let private isSystemNoise (text: string) =
-    text.Contains("PRESERVE ON CONTEXT COMPACTION")
-    || text.StartsWith("<local-command-")
-    || text.StartsWith("<system-reminder>")
-    || text.StartsWith("<task-notification>")
-
 let private extractUserContent (text: string) =
     match tryExtractSlashCommand text with
     | Some cmd -> Some cmd
@@ -322,15 +318,57 @@ let private tryParseUserText (line: string) =
         Log.log "Claude" $"Failed to parse user text: {ex.Message}"
         None
 
-let private readAllLinesNewestFirst filePath =
-    readLastLines filePath Int32.MaxValue
+let private findUserMessageInLines (lines: string array) =
+    lines
+    |> Array.map _.Trim()
+    |> Array.filter (fun s -> s.Length > 0)
+    |> Array.rev
+    |> Array.tryPick tryParseUserText
+
+let scanForUserMessage (filePath: string) =
+    let chunkSize = 64L * 1024L
+    let overlap = 1024L
+    let stepSize = chunkSize - overlap
+    let maxChunks = 16
+
+    try
+        use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+        let fileLength = stream.Length
+        if fileLength = 0L then None
+        else
+            let rec scanChunk chunkIndex =
+                if chunkIndex >= maxChunks then None
+                else
+                    let rawStart = fileLength - chunkSize - (int64 chunkIndex) * stepSize
+                    let chunkStart = Math.Max(0L, rawStart)
+                    let readLength = int (Math.Min(chunkSize, fileLength - chunkStart))
+                    if readLength <= 0 then None
+                    else
+                        let isAtFileStart = chunkStart = 0L
+                        stream.Seek(chunkStart, SeekOrigin.Begin) |> ignore
+                        let buffer = Array.zeroCreate readLength
+                        let bytesRead = stream.Read(buffer, 0, readLength)
+                        let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
+                        let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+
+                        let trimmedLines =
+                            if isAtFileStart || lines.Length = 0 then lines
+                            else lines[1..]
+
+                        match findUserMessageInLines trimmedLines with
+                        | Some _ as result -> result
+                        | None when isAtFileStart -> None
+                        | None -> scanChunk (chunkIndex + 1)
+
+            scanChunk 0
+    with ex ->
+        Log.log "Claude" $"Failed to scan JSONL {filePath}: {ex.Message}"
+        None
 
 let getLastUserMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
     findLatestJsonl projectDir
-    |> Option.bind (fun fi ->
-        readAllLinesNewestFirst fi.FullName
-        |> List.tryPick tryParseUserText)
-    |> Option.map (fun (text, _) -> truncateMessage 120 text)
+    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
+    |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)

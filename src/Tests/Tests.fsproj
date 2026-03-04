@@ -13,6 +13,7 @@
     <Compile Include="GitParsingTests.fs" />
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
+    <Compile Include="ClaudeDetectorTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
     <Compile Include="GithubParsingTests.fs" />
     <Compile Include="GithubFixtureTests.fs" />
