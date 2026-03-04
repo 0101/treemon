@@ -238,11 +238,12 @@ let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoI
     |> List.collect (fun (repoId, repo) ->
         let perWorktree =
             repo.WorktreeList
-            |> List.filter (fun wt -> not (isPathArchived archivedPaths repoId wt.Path))
             |> List.collect (fun wt ->
+                let archived = isPathArchived archivedPaths repoId wt.Path
                 [ RefreshGit(repoId, wt.Path)
-                  RefreshBeads(repoId, wt.Path)
-                  RefreshCodingTool(repoId, wt.Path) ])
+                  if not archived then
+                      RefreshBeads(repoId, wt.Path)
+                      RefreshCodingTool(repoId, wt.Path) ])
 
         RefreshFetch repoId :: perWorktree)
 
