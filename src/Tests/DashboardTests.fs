@@ -49,7 +49,7 @@ type DashboardTests() =
     [<Test>]
     member this.``Header contains eye SVG``() =
         task {
-            let headerLeft = this.Page.Locator(".app-header .header-left")
+            let headerLeft = this.Page.Locator(".app-header .header-center")
             let svg = headerLeft.Locator("svg")
             let! svgCount = svg.CountAsync()
             Assert.That(svgCount, Is.EqualTo(1), "Header should contain exactly one SVG element (the eye logo)")
