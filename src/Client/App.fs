@@ -33,8 +33,8 @@ type Msg =
     | ToggleCompact
     | ToggleCollapse of repoId: RepoId
     | Tick
-    | OpenTerminal of string
-    | OpenEditor of string
+    | OpenTerminal of WorktreePath
+    | OpenEditor of WorktreePath
     | StartSync of branch: string * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
@@ -43,8 +43,8 @@ type Msg =
     | ConfirmDeleteWorktree of branch: string
     | DeleteWorktree of string
     | DeleteCompleted of Result<unit, string>
-    | FocusSession of path: string
-    | OpenNewTab of path: string
+    | FocusSession of path: WorktreePath
+    | OpenNewTab of path: WorktreePath
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
@@ -116,20 +116,15 @@ let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
-    match focused with
-    | Card scopedKey ->
-        match key with
-        | "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-        | "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
-        | "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
-        | "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
-        | "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
-        | _ -> None
-    | RepoHeader repoId ->
-        match key with
-        | "Enter" -> Some (ToggleCollapse repoId)
-        | "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
-        | _ -> None
+    match focused, key with
+    | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+    | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
+    | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
+    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
+    | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
+    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+    | _ -> None
 
 let update msg model =
     match msg with

@@ -317,12 +317,9 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" status))
                 post (CompleteSync (branch, status))
                 return ()
-            | Ok mergeProc ->
-
-            match mergeProc.ExitCode with
-            | 0 ->
+            | Ok mergeProc when mergeProc.ExitCode = 0 ->
                 post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" StepStatus.Succeeded))
-            | _ ->
+            | Ok mergeProc ->
                 let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
                 post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" (StepStatus.Failed mergeMsg)))
 

@@ -267,7 +267,7 @@ type MergeWithPinnedErrorsTests() =
 type SortWorktreesTests() =
 
     let makeWorktree branch commitTime =
-        { Path = $"/repo/{branch}"
+        { Path = WorktreePath.create $"/repo/{branch}"
           Branch = branch
           LastCommitMessage = "msg"
           LastCommitTime = commitTime

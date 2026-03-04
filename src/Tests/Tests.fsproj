@@ -26,6 +26,7 @@
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
+    <Compile Include="SerializationTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
