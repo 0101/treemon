@@ -117,9 +117,7 @@ let getWorktrees
                 let archivedBranches =
                     rootPaths
                     |> Map.tryFind repoId
-                    |> Option.map TreemonConfig.readArchivedBranches
-                    |> Option.defaultValue []
-                    |> Set.ofList
+                    |> TreemonConfig.readArchivedBranchSet
 
                 let statuses =
                     repo.WorktreeList

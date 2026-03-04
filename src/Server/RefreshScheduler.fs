@@ -181,15 +181,17 @@ let private intervalOf = function
     | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
     | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
 
-let resolveArchivedPaths (rootPaths: Map<RepoId, string>) (repos: Map<RepoId, PerRepoState>) =
+let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
+    rootPaths
+    |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root))
+
+let resolveArchivedPaths (archivedBranchSets: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.map (fun repoId repo ->
         let archivedBranches =
-            rootPaths
+            archivedBranchSets
             |> Map.tryFind repoId
-            |> Option.map TreemonConfig.readArchivedBranches
-            |> Option.defaultValue []
-            |> Set.ofList
+            |> Option.defaultValue Set.empty
 
         repo.WorktreeList
         |> List.choose (fun wt ->
@@ -385,7 +387,8 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let! phase1Runs = runPhase agent rootPaths phase1Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
-        let archivedPaths = resolveArchivedPaths rootPaths state.Repos
+        let archivedBranchSets = readArchivedBranchSets rootPaths
+        let archivedPaths = resolveArchivedPaths archivedBranchSets state.Repos
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
         let phase2Tasks = buildPhase2Tasks archivedPaths state.Repos
         let! phase2Runs = runPhase agent rootPaths phase2Tasks
@@ -441,7 +444,8 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 if Map.isEmpty state.Repos then initialRepos
                 else state.Repos
 
-            let archivedPaths = resolveArchivedPaths rootPaths repos
+            let archivedBranchSets = readArchivedBranchSets rootPaths
+            let archivedPaths = resolveArchivedPaths archivedBranchSets repos
             let tasks = buildTaskList archivedPaths repos
             let now = DateTimeOffset.UtcNow
 

@@ -51,6 +51,12 @@ let readArchivedBranches (repoRoot: string) : string list =
 let setArchivedBranches (repoRoot: string) (branches: string list) : unit =
     lock configLock (fun () -> configPath repoRoot |> writeBranchesCore <| branches)
 
+let readArchivedBranchSet (repoRoot: string option) : Set<string> =
+    repoRoot
+    |> Option.map readArchivedBranches
+    |> Option.defaultValue []
+    |> Set.ofList
+
 let modifyArchivedBranches (repoRoot: string) (modify: string list -> string list) : unit =
     let path = configPath repoRoot
     lock configLock (fun () ->
