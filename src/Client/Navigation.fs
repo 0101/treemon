@@ -12,6 +12,7 @@ type RepoModel =
     { RepoId: RepoId
       Name: string
       Worktrees: WorktreeStatus list
+      ArchivedWorktrees: WorktreeStatus list
       IsReady: bool
       IsCollapsed: bool }
 

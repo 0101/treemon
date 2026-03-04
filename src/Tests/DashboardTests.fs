@@ -589,8 +589,8 @@ type DashboardTests() =
             Assert.That(count, Is.EqualTo(allCount), $"All .{btnClass} should be inside card headers")
         }
 
-    [<TestCase("terminal-btn", ">", "Focus session window")>]
-    [<TestCase("delete-btn", "\u2715", "Remove worktree")>]
+    [<TestCase("terminal-btn", ">", "Focus session window (Enter)")>]
+    [<TestCase("delete-btn", "", "Remove worktree (Del)")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
             let btn = this.Page.Locator($".wt-card .{btnClass}").First
@@ -3588,7 +3588,7 @@ type DashboardTests() =
             Assert.That(text, Is.EqualTo("+"), "New tab button text should be '+'")
 
             let! title = newTabBtn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Open new tab in tracked window"), "New tab button title")
+            Assert.That(title, Is.EqualTo("Open new tab in tracked window (+)"), "New tab button title")
         }
 
     [<Test>]
