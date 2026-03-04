@@ -29,7 +29,7 @@ let private assembleFromState
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
-    { Path = wt.Path
+    { Path = WorktreePath.create wt.Path
       Branch = wt.Branch |> Option.defaultValue "(detached)"
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
@@ -126,7 +126,8 @@ let getWorktrees
               EditorName = getEditorConfig () |> snd }
     }
 
-let private openEditor (validatePath: string -> Async<bool>) (path: string) =
+let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
+    let path = WorktreePath.value wtPath
     async {
         let! isValid = validatePath path
 
@@ -153,8 +154,9 @@ let private openEditor (validatePath: string -> Async<bool>) (path: string) =
 let private openTerminal
     (validatePath: string -> Async<bool>)
     (sessionAgent: SessionManager.SessionAgent)
-    (path: string)
+    (wtPath: WorktreePath)
     =
+    let path = WorktreePath.value wtPath
     async {
         let! isValid = validatePath path
 
@@ -162,7 +164,7 @@ let private openTerminal
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
-            let! result = SessionManager.spawnTerminal sessionAgent path
+            let! result = SessionManager.spawnTerminal sessionAgent wtPath
 
             match result with
             | Ok () -> ()
@@ -219,7 +221,8 @@ let worktreeApi
             return Set.contains path knownPaths
         }
 
-    let withValidatedPath path opName (action: unit -> Async<Result<unit, string>>) =
+    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
+        let path = WorktreePath.value wtPath
         async {
             let! isValid = validatePath path
 
@@ -330,10 +333,7 @@ let worktreeApi
                               |> Map.tryFind key
                               |> Option.bind CodingToolStatus.getLastMessage
 
-                          let merged =
-                              match claudeEvt with
-                              | Some evt -> evt :: syncEvts
-                              | None -> syncEvts
+                          let merged = (claudeEvt |> Option.toList) @ syncEvts
 
                           match merged with
                           | [] -> None
@@ -351,12 +351,12 @@ let worktreeApi
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   SessionManager.spawnSession sessionAgent req.Path req.Prompt)
-          focusSession = fun path ->
-              withValidatedPath path "focusSession" (fun () ->
-                  SessionManager.focusSession sessionAgent path)
-          killSession = fun path ->
-              withValidatedPath path "killSession" (fun () ->
-                  SessionManager.killSession sessionAgent path)
+          focusSession = fun wtPath ->
+              withValidatedPath wtPath "focusSession" (fun () ->
+                  SessionManager.focusSession sessionAgent wtPath)
+          killSession = fun wtPath ->
+              withValidatedPath wtPath "killSession" (fun () ->
+                  SessionManager.killSession sessionAgent wtPath)
           getBranches = fun repoIdStr ->
               async {
                   let repoId = RepoId.create repoIdStr
@@ -386,13 +386,13 @@ let worktreeApi
                           |> Map.tryFind repoId
                           |> Option.bind (fun repo ->
                               repo.WorktreeList
-                              |> List.tryFind (fun wt -> wt.Branch = Some req.BaseBranch))
+                              |> List.tryFind (fun wt -> wt.Branch = Some (BranchName.value req.BaseBranch)))
 
                       match sourceWorktree with
                       | None ->
-                          return Error $"No worktree found for branch '{req.BaseBranch}'"
+                          return Error $"No worktree found for branch '{BranchName.value req.BaseBranch}'"
                       | Some wt ->
-                          let! result = GitWorktree.createWorktree root wt.Path req.BranchName
+                          let! result = GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
 
                           match result with
                           | Ok () ->
@@ -401,6 +401,6 @@ let worktreeApi
 
                           return result
               }
-          openNewTab = fun path ->
-              withValidatedPath path "openNewTab" (fun () ->
-                  SessionManager.openNewTab sessionAgent path) }
+          openNewTab = fun wtPath ->
+              withValidatedPath wtPath "openNewTab" (fun () ->
+                  SessionManager.openNewTab sessionAgent wtPath) }
