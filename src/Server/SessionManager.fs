@@ -4,13 +4,14 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Text.Json
+open Shared
 
 type private SessionMsg =
-    | Spawn of worktreePath: string * prompt: string * AsyncReplyChannel<Result<unit, string>>
-    | SpawnTerminal of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
-    | OpenNewTab of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
-    | Focus of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
-    | Kill of worktreePath: string * AsyncReplyChannel<Result<unit, string>>
+    | Spawn of worktreePath: WorktreePath * prompt: string * AsyncReplyChannel<Result<unit, string>>
+    | SpawnTerminal of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
+    | OpenNewTab of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
+    | Focus of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
+    | Kill of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
 
 type SessionAgent = private { Agent: MailboxProcessor<SessionMsg> }
@@ -177,13 +178,16 @@ let private spawnAndTrack (validated: Map<string, nativeint>) path spawnFn (repl
 
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     match msg with
-    | Spawn(path, prompt, reply) ->
+    | Spawn(wtPath, prompt, reply) ->
+        let path = WorktreePath.value wtPath
         spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path prompt) reply
 
-    | SpawnTerminal(path, reply) ->
+    | SpawnTerminal(wtPath, reply) ->
+        let path = WorktreePath.value wtPath
         spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
 
-    | OpenNewTab(path, reply) ->
+    | OpenNewTab(wtPath, reply) ->
+        let path = WorktreePath.value wtPath
         let validated = validateSessions sessions
 
         match validated |> Map.tryFind path with
@@ -195,7 +199,8 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
             reply.Reply(Error "No active session for this worktree")
             validated
 
-    | Focus(path, reply) ->
+    | Focus(wtPath, reply) ->
+        let path = WorktreePath.value wtPath
         let validated = validateSessions sessions
 
         match validated |> Map.tryFind path with
@@ -210,7 +215,8 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
             reply.Reply(Error "No active session for this worktree")
             validated
 
-    | Kill(path, reply) ->
+    | Kill(wtPath, reply) ->
+        let path = WorktreePath.value wtPath
         let validated = validateSessions sessions
 
         match validated |> Map.tryFind path with
@@ -266,19 +272,19 @@ let createAgent () =
 
     { Agent = agent }
 
-let spawnSession (agent: SessionAgent) (worktreePath: string) (prompt: string) =
+let spawnSession (agent: SessionAgent) (worktreePath: WorktreePath) (prompt: string) =
     agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, prompt, reply)), timeout = 30_000)
 
-let spawnTerminal (agent: SessionAgent) (worktreePath: string) =
+let spawnTerminal (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminal(worktreePath, reply)), timeout = 30_000)
 
-let focusSession (agent: SessionAgent) (worktreePath: string) =
+let focusSession (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> Focus(worktreePath, reply)), timeout = 10_000)
 
-let killSession (agent: SessionAgent) (worktreePath: string) =
+let killSession (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 10_000)
 
-let openNewTab (agent: SessionAgent) (worktreePath: string) =
+let openNewTab (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)
 
 let getActiveSessions (agent: SessionAgent) =

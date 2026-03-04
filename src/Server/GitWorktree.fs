@@ -70,9 +70,9 @@ let listWorktrees (repoRoot: string) =
 let parseCommitOutput (worktreePath: string) (output: string option) =
     output
     |> Option.bind (fun raw ->
-        match raw with
-        | "" -> None
-        | _ ->
+        if raw = "" then
+            None
+        else
             let lines = raw.Split([| Environment.NewLine; "\n" |], StringSplitOptions.None)
 
             match lines with
@@ -234,15 +234,15 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
     async {
         let! removeResult = runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
+        let! branchResult =
+            match removeResult with
+            | Ok _ -> runGitResult repoRoot $"branch -D -- \"{branch}\""
+            | Error _ -> async { return removeResult }
 
-        match removeResult with
-        | Error msg -> return Error $"git worktree remove failed: {msg}"
-        | Ok _ ->
-            let! branchResult = runGitResult repoRoot $"branch -D -- \"{branch}\""
-
-            match branchResult with
-            | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
-            | Ok _ -> return Ok ()
+        match removeResult, branchResult with
+        | Error msg, _ -> return Error $"git worktree remove failed: {msg}"
+        | Ok _, Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
+        | Ok _, Ok _ -> return Ok ()
     }
 
 let branchSortKey (name: string) =

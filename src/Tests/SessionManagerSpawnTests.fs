@@ -5,6 +5,7 @@ open System.Diagnostics
 open System.IO
 open System.Threading
 open NUnit.Framework
+open Shared
 open Server.SessionManager
 
 let private runAsync (a: Async<'T>) =
@@ -61,29 +62,31 @@ type SessionManagerSpawnTests() =
     [<Test>]
     member _.``spawnTerminal returns Ok and HWND is resolved``() =
         let a = agent.Value
-        let testPath = @"Q:\code\AITestAgent"
+        let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+        let testPathStr = WorktreePath.value testPath
 
         let result = runAsync (spawnTerminal a testPath)
         assertOk result "spawnTerminal should return Ok"
 
         let sessions = runAsync (getActiveSessions a)
-        Assert.That(sessions.ContainsKey(testPath), Is.True, "Session map should contain the worktree path")
+        Assert.That(sessions.ContainsKey(testPathStr), Is.True, "Session map should contain the worktree path")
 
-        let hwnd = sessions[testPath]
+        let hwnd = sessions[testPathStr]
         Assert.That(Server.Win32.isWindowValid hwnd, Is.True, "Tracked HWND should be a valid window")
         trackWindowPid hwnd
-        TestContext.Out.WriteLine($"HWND={hwnd} resolved for {testPath}")
+        TestContext.Out.WriteLine($"HWND={hwnd} resolved for {testPathStr}")
 
     [<Test>]
     member _.``killSession closes the window``() =
         let a = agent.Value
-        let testPath = @"Q:\code\AITestAgent"
+        let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+        let testPathStr = WorktreePath.value testPath
 
         let result = runAsync (spawnTerminal a testPath)
         assertOk result "spawnTerminal should return Ok"
 
         let sessions = runAsync (getActiveSessions a)
-        let hwnd = sessions[testPath]
+        let hwnd = sessions[testPathStr]
         trackWindowPid hwnd
         Assert.That(Server.Win32.isWindowValid hwnd, Is.True, "HWND should be valid before kill")
 
@@ -95,18 +98,19 @@ type SessionManagerSpawnTests() =
         Assert.That(Server.Win32.isWindowValid hwnd, Is.False, "HWND should be invalid after kill")
 
         let sessionsAfter = runAsync (getActiveSessions a)
-        Assert.That(sessionsAfter.ContainsKey(testPath), Is.False, "Session map should not contain killed session")
+        Assert.That(sessionsAfter.ContainsKey(testPathStr), Is.False, "Session map should not contain killed session")
 
     [<Test>]
     member _.``re-spawn works after killSession``() =
         let a = agent.Value
-        let testPath = @"Q:\code\AITestAgent"
+        let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+        let testPathStr = WorktreePath.value testPath
 
         let result1 = runAsync (spawnTerminal a testPath)
         assertOk result1 "First spawn should return Ok"
 
         let sessions1 = runAsync (getActiveSessions a)
-        let hwnd1 = sessions1[testPath]
+        let hwnd1 = sessions1[testPathStr]
         trackWindowPid hwnd1
         TestContext.Out.WriteLine($"First spawn: HWND={hwnd1}")
 
@@ -118,9 +122,9 @@ type SessionManagerSpawnTests() =
         assertOk result2 "Re-spawn should return Ok"
 
         let sessions2 = runAsync (getActiveSessions a)
-        Assert.That(sessions2.ContainsKey(testPath), Is.True, "Session map should contain re-spawned session")
+        Assert.That(sessions2.ContainsKey(testPathStr), Is.True, "Session map should contain re-spawned session")
 
-        let hwnd2 = sessions2[testPath]
+        let hwnd2 = sessions2[testPathStr]
         trackWindowPid hwnd2
         TestContext.Out.WriteLine($"Re-spawn: HWND={hwnd2}")
 

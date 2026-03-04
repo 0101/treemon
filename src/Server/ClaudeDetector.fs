@@ -173,22 +173,20 @@ let getStatus (worktreePath: string) =
             if fileAge > TimeSpan.FromHours(2.0) then
                 Idle
             else
-                let entry =
+                let parsed =
                     readLastLines fi.FullName 20
                     |> List.tryPick tryParseEntryKind
+                    |> Option.map (fun (kind, timestamp) ->
+                        let entryAge =
+                            timestamp
+                            |> Option.map (fun ts -> DateTimeOffset.UtcNow - ts)
+                            |> Option.defaultValue fileAge
+                        statusFromEntry kind, entryAge)
 
-                match entry with
-                | Some(kind, timestamp) ->
-                    let status = statusFromEntry kind
-                    let entryAge =
-                        timestamp
-                        |> Option.map (fun ts -> DateTimeOffset.UtcNow - ts)
-                        |> Option.defaultValue fileAge
-
-                    match status with
-                    | Done when fileAge < TimeSpan.FromSeconds(10.0) -> Working
-                    | Working when entryAge > stalenessTimeout -> Idle
-                    | other -> other
+                match parsed with
+                | Some (Done, _) when fileAge < TimeSpan.FromSeconds(10.0) -> Working
+                | Some (Working, entryAge) when entryAge > stalenessTimeout -> Idle
+                | Some (status, _) -> status
                 | None -> Idle
         with ex ->
             Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"

@@ -53,109 +53,103 @@ let repoNavSections (repos: RepoModel list) =
             else repo.Worktrees |> List.map (fun wt -> Card $"{repoId}/{wt.Branch}") })
 
 let navigateLinear (direction: int) (targets: FocusTarget list) (current: FocusTarget option) =
-    match targets with
-    | [] -> None
-    | _ ->
-        match current with
-        | None -> Some targets.Head
-        | Some c ->
-            let idx =
-                targets
-                |> List.tryFindIndex ((=) c)
-                |> Option.defaultValue -1
-            if idx < 0 then Some targets.Head
-            else Some targets[(idx + direction + targets.Length) % targets.Length]
+    match targets, current with
+    | [], _ -> None
+    | _, None -> Some targets.Head
+    | _, Some c ->
+        let idx =
+            targets
+            |> List.tryFindIndex ((=) c)
+            |> Option.defaultValue -1
+        if idx < 0 then Some targets.Head
+        else Some targets[(idx + direction + targets.Length) % targets.Length]
 
 let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedElement: FocusTarget option) =
     let sections = repoNavSections repos
     let allTargets = sections |> List.collect (fun s -> s.Header :: s.Cards)
-    match allTargets with
-    | [] -> None, NoAction
-    | _ ->
-        match focusedElement with
-        | None -> Some allTargets.Head, NoAction
-        | Some current ->
-            let cardPosition target =
-                sections
-                |> List.tryFindIndex (fun s ->
-                    s.Header = target || s.Cards |> List.contains target)
-                |> Option.map (fun si ->
-                    let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
-                    si, cardIdx)
-            match current, key with
-            | RepoHeader repoId, "ArrowLeft" ->
-                let repo = repos |> List.tryFind (fun r -> r.RepoId = repoId)
-                match repo with
-                | Some r when not r.IsCollapsed -> Some current, CollapseRepo repoId
-                | _ -> Some current, NoAction
+    match allTargets, focusedElement with
+    | [], _ -> None, NoAction
+    | _, None -> Some allTargets.Head, NoAction
+    | _, Some current ->
+        let cardPosition target =
+            sections
+            |> List.tryFindIndex (fun s ->
+                s.Header = target || s.Cards |> List.contains target)
+            |> Option.map (fun si ->
+                let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
+                si, cardIdx)
+        let repoFor repoId = repos |> List.tryFind (fun r -> r.RepoId = repoId)
+        match current, key with
+        | RepoHeader repoId, "ArrowLeft" when repoFor repoId |> Option.exists (fun r -> not r.IsCollapsed) ->
+            Some current, CollapseRepo repoId
 
-            | RepoHeader repoId, "ArrowRight" ->
-                let repo = repos |> List.tryFind (fun r -> r.RepoId = repoId)
-                match repo with
-                | Some r when r.IsCollapsed -> Some current, ExpandRepo repoId
-                | _ -> Some current, NoAction
+        | RepoHeader repoId, "ArrowRight" when repoFor repoId |> Option.exists _.IsCollapsed ->
+            Some current, ExpandRepo repoId
 
-            | RepoHeader _, ("ArrowUp" | "ArrowDown") ->
-                navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current), NoAction
+        | RepoHeader _, ("ArrowLeft" | "ArrowRight") ->
+            Some current, NoAction
 
-            | Card _, "ArrowLeft" ->
-                match cardPosition current with
-                | None -> Some current, NoAction
-                | Some (si, cardIdx) ->
-                    let colPos = cardIdx % cols
-                    if colPos > 0 then
-                        Some sections[si].Cards[cardIdx - 1], NoAction
-                    else
-                        if si > 0 then
-                            let prev = sections[si - 1]
-                            match prev.Cards with
-                            | [] -> Some prev.Header, NoAction
-                            | cards -> Some (List.last cards), NoAction
-                        else
-                            Some sections[si].Header, NoAction
+        | RepoHeader _, ("ArrowUp" | "ArrowDown") ->
+            navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current), NoAction
 
-            | Card _, "ArrowRight" ->
-                match cardPosition current with
-                | None -> Some current, NoAction
-                | Some (si, cardIdx) ->
-                    let section = sections[si]
-                    let colPos = cardIdx % cols
-                    let rowEnd = colPos >= cols - 1 || cardIdx >= section.Cards.Length - 1
-                    if not rowEnd then
-                        Some section.Cards[cardIdx + 1], NoAction
-                    else
-                        let nextRowStart = cardIdx - colPos + cols
-                        if nextRowStart < section.Cards.Length then
-                            Some section.Cards[nextRowStart], NoAction
-                        elif si + 1 < sections.Length then
-                            Some sections[si + 1].Header, NoAction
-                        else
-                            navigateLinear 1 allTargets (Some current), NoAction
-
-            | Card _, "ArrowDown" ->
-                match cardPosition current with
-                | None -> Some current, NoAction
-                | Some (si, cardIdx) ->
-                    let targetIdx = cardIdx + cols
-                    if targetIdx < sections[si].Cards.Length then
-                        Some sections[si].Cards[targetIdx], NoAction
-                    else
-                        if si + 1 < sections.Length then
-                            Some sections[si + 1].Header, NoAction
-                        else
-                            Some allTargets.Head, NoAction
-
-            | Card _, "ArrowUp" ->
-                match cardPosition current with
-                | None -> Some current, NoAction
-                | Some (si, cardIdx) ->
-                    let targetIdx = cardIdx - cols
-                    if targetIdx >= 0 then
-                        Some sections[si].Cards[targetIdx], NoAction
+        | Card _, "ArrowLeft" ->
+            match cardPosition current with
+            | None -> Some current, NoAction
+            | Some (si, cardIdx) ->
+                let colPos = cardIdx % cols
+                if colPos > 0 then
+                    Some sections[si].Cards[cardIdx - 1], NoAction
+                else
+                    if si > 0 then
+                        let prev = sections[si - 1]
+                        match prev.Cards with
+                        | [] -> Some prev.Header, NoAction
+                        | cards -> Some (List.last cards), NoAction
                     else
                         Some sections[si].Header, NoAction
 
-            | _ -> Some current, NoAction
+        | Card _, "ArrowRight" ->
+            match cardPosition current with
+            | None -> Some current, NoAction
+            | Some (si, cardIdx) ->
+                let section = sections[si]
+                let colPos = cardIdx % cols
+                let rowEnd = colPos >= cols - 1 || cardIdx >= section.Cards.Length - 1
+                if not rowEnd then
+                    Some section.Cards[cardIdx + 1], NoAction
+                else
+                    let nextRowStart = cardIdx - colPos + cols
+                    if nextRowStart < section.Cards.Length then
+                        Some section.Cards[nextRowStart], NoAction
+                    elif si + 1 < sections.Length then
+                        Some sections[si + 1].Header, NoAction
+                    else
+                        navigateLinear 1 allTargets (Some current), NoAction
+
+        | Card _, "ArrowDown" ->
+            match cardPosition current with
+            | None -> Some current, NoAction
+            | Some (si, cardIdx) ->
+                let targetIdx = cardIdx + cols
+                if targetIdx < sections[si].Cards.Length then
+                    Some sections[si].Cards[targetIdx], NoAction
+                else
+                    if si + 1 < sections.Length then
+                        Some sections[si + 1].Header, NoAction
+                    else
+                        Some allTargets.Head, NoAction
+
+        | Card _, "ArrowUp" ->
+            match cardPosition current with
+            | None -> Some current, NoAction
+            | Some (si, cardIdx) ->
+                let targetIdx = cardIdx - cols
+                if targetIdx >= 0 then
+                    Some sections[si].Cards[targetIdx], NoAction
+                else
+                    Some sections[si].Header, NoAction
+
+        | _ -> Some current, NoAction
 
 let scrollFocusedIntoView (useCenter: bool) (target: FocusTarget option) =
     match target with
