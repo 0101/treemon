@@ -13,6 +13,7 @@
     <Compile Include="Log.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
+    <Compile Include="SystemMetrics.fs" />
     <Compile Include="SessionManager.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />

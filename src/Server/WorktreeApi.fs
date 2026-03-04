@@ -103,6 +103,7 @@ let getWorktrees
     (sessionAgent: SessionManager.SessionAgent)
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
+    (deployBranch: string option)
     : Async<DashboardResponse> =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
@@ -135,6 +136,8 @@ let getWorktrees
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
               AppVersion = appVersion
+              DeployBranch = deployBranch
+              SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd }
     }
 
@@ -265,6 +268,7 @@ let worktreeApi
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
+    (deployBranch: string option)
     : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
@@ -291,7 +295,7 @@ let worktreeApi
 
     match fixtures with
     | Some f ->
-        { getWorktrees = fun () -> async { return { f.Worktrees with EditorName = getEditorConfig () |> snd } }
+        { getWorktrees = fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } }
           openTerminal = fun _ -> async { return () }
           openEditor = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
@@ -307,7 +311,7 @@ let worktreeApi
           createWorktree = fun _ -> async { return Ok() }
           openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun branch ->

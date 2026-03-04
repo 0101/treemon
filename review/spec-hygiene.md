@@ -21,11 +21,12 @@ Use the `/spec-management` skill to evaluate the spec directory. Flag:
 
 A spec is single-purpose if it:
 - Describes a single refactoring step (rename, type change, parameter change)
+- Describes a minor feature or UI element that is a natural subsection of an existing spec (e.g., a header bar, a tooltip, a button) rather than a standalone architectural concern
 - Has no lasting architectural significance beyond "we did this"
 - Would never be consulted again after the change is implemented
-- Could be a paragraph in a broader spec instead of its own file
+- Could be a paragraph or section in a broader spec instead of its own file
 
-**Action:** Either incorporate the relevant design decisions into a related broader spec, or delete the file if it has no lasting value.
+**Action:** Incorporate the relevant design decisions into the related broader spec as a section, then delete the standalone file.
 
 ### 2. Specs not updated to reflect the current branch's changes
 

@@ -24,7 +24,9 @@ type Model =
       EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
-      DeletedBranches: Set<string> }
+      DeletedBranches: Set<string>
+      DeployBranch: string option
+      SystemMetrics: SystemMetrics option }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -83,7 +85,9 @@ let init () =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
-      DeletedBranches = Set.empty },
+      DeletedBranches = Set.empty
+      DeployBranch = None
+      SystemMetrics = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -160,7 +164,9 @@ let update msg model =
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
-                DeletedBranches = stillPending }
+                DeletedBranches = stillPending
+                DeployBranch = response.DeployBranch
+                SystemMetrics = response.SystemMetrics }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
@@ -1131,73 +1137,123 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
         ]
     ]
 
-let view model dispatch =
+let barColor (pct: float) =
+    if pct >= 80.0 then "#f38ba8"
+    elif pct >= 50.0 then "#f9e2af"
+    else "#6c7086"
+
+let viewMetricBar (pct: float) (label: string) =
     Html.div [
-        prop.className "dashboard"
-        prop.tabIndex 0
-        prop.autoFocus true
-        prop.onKeyDown (fun e ->
-            match e.key with
-            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                e.preventDefault()
-                dispatch (KeyPressed (e.key, false))
-            | key ->
-                let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                dispatch (KeyPressed (key, hasModifier)))
+        prop.className "metric-bar-row"
         prop.children [
             Html.div [
-                prop.className "dashboard-header"
+                prop.className "metric-bar-track"
                 prop.children [
                     Html.div [
-                        prop.className "header-top"
-                        prop.children [
-                            Html.h1 [
-                                prop.children [
-                                    if model.HasError then viewEyeRolledBack
-                                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
-                                    else viewEyeClosed
-                                ]
-                            ]
-                            Html.div [
-                                prop.className "header-controls"
-                                prop.children [
-                                    Html.button [
-                                        prop.className "ctrl-btn"
-                                        yield! noFocusProps
-                                        prop.onClick (fun _ -> dispatch ToggleSort)
-                                        prop.text ($"Sort: {sortLabel model.SortMode}")
-                                    ]
-                                    Html.button [
-                                        prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
-                                        yield! noFocusProps
-                                        prop.onClick (fun _ -> dispatch ToggleCompact)
-                                        prop.text "Compact"
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]
-                    Html.div [
-                        prop.className "status-bar"
-                        prop.children [
-                            if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
-                                Html.span "Waiting for first refresh..."
+                        prop.className "metric-bar-fill"
+                        prop.style [
+                            style.width (length.percent (min pct 100.0))
+                            style.backgroundColor (barColor pct)
                         ]
                     ]
                 ]
             ]
+            Html.span [ prop.className "metric-bar-label"; prop.text label ]
+        ]
+    ]
 
-            if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
-                skeletonGrid ()
-            else
-                Html.div [
-                    prop.className "repo-list"
-                    prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+let viewSystemMetrics (metrics: SystemMetrics option) =
+    match metrics with
+    | None -> Html.none
+    | Some m ->
+        let memPct = float m.MemoryUsedMb / float m.MemoryTotalMb * 100.0
+        Html.div [
+            prop.className "system-metrics"
+            prop.children [
+                viewMetricBar m.CpuPercent "CPU"
+                viewMetricBar memPct "RAM"
+            ]
+        ]
+
+let viewAppHeader model dispatch =
+    Html.div [
+        prop.className "app-header"
+        prop.children [
+            Html.div [
+                prop.className "header-left"
+                prop.children [
+                    viewSystemMetrics model.SystemMetrics
                 ]
+            ]
+            Html.div [
+                prop.className "header-center"
+                prop.children [
+                    if model.HasError then viewEyeRolledBack
+                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
+                    else viewEyeClosed
+                ]
+            ]
+            Html.div [
+                prop.className "header-right"
+                prop.children [
+                    match model.DeployBranch with
+                    | Some branch ->
+                        Html.span [ prop.className "deploy-branch"; prop.text branch ]
+                    | None -> ()
+                    Html.div [
+                        prop.className "header-controls"
+                        prop.children [
+                            Html.button [
+                                prop.className "ctrl-btn"
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleSort)
+                                prop.text ($"Sort: {sortLabel model.SortMode}")
+                            ]
+                            Html.button [
+                                prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleCompact)
+                                prop.text "Compact"
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
 
-            schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+let view model dispatch =
+    React.fragment [
+        viewAppHeader model dispatch
+        Html.div [
+            prop.className "dashboard"
+            prop.tabIndex 0
+            prop.autoFocus true
+            prop.onKeyDown (fun e ->
+                match e.key with
+                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                    e.preventDefault()
+                    dispatch (KeyPressed (e.key, false))
+                | key ->
+                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                    dispatch (KeyPressed (key, hasModifier)))
+            prop.children [
+                if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
+                    Html.div [
+                        prop.className "status-bar"
+                        prop.children [ Html.span "Waiting for first refresh..." ]
+                    ]
+                    skeletonGrid ()
+                else
+                    Html.div [
+                        prop.className "repo-list"
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+                    ]
 
-            CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+
+                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+            ]
         ]
     ]
 
