@@ -569,7 +569,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
         let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
@@ -598,7 +598,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
@@ -627,7 +627,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
         Assert.That(tasks.Length, Is.EqualTo(15))
@@ -639,7 +639,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         let localTasks =
             tasks
@@ -699,7 +699,7 @@ type BuildPhase2TasksTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks repos
+        let tasks = buildPhase2Tasks Map.empty repos
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
@@ -717,7 +717,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks repos
+        let tasks = buildPhase2Tasks Map.empty repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList _ -> true | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr _ -> true | _ -> false)
@@ -727,7 +727,7 @@ type BuildPhase2TasksTests() =
 
     [<Test>]
     member _.``Empty repos returns empty task list``() =
-        let tasks = buildPhase2Tasks Map.empty
+        let tasks = buildPhase2Tasks Map.empty Map.empty
         Assert.That(tasks, Is.Empty)
 
     [<Test>]
@@ -736,7 +736,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", PerRepoState.empty ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks repos
+        let tasks = buildPhase2Tasks Map.empty repos
 
         Assert.That(tasks.Length, Is.EqualTo(1))
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
