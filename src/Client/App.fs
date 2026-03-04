@@ -49,9 +49,8 @@ type Msg =
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
     | ArchiveWorktree of string
-    | ArchiveCompleted of Result<unit, string>
     | UnarchiveWorktree of string
-    | UnarchiveCompleted of Result<unit, string>
+    | ArchiveOpCompleted of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
@@ -279,21 +278,15 @@ let update msg model =
         { model with FocusedElement = target }, Cmd.none
 
     | ArchiveWorktree branch ->
-        model, Cmd.OfAsync.perform worktreeApi.archiveWorktree branch ArchiveCompleted
-
-    | ArchiveCompleted (Ok _) ->
-        model, fetchWorktrees ()
-
-    | ArchiveCompleted (Error _) ->
-        model, Cmd.none
+        model, Cmd.OfAsync.perform worktreeApi.archiveWorktree branch ArchiveOpCompleted
 
     | UnarchiveWorktree branch ->
-        model, Cmd.OfAsync.perform worktreeApi.unarchiveWorktree branch UnarchiveCompleted
+        model, Cmd.OfAsync.perform worktreeApi.unarchiveWorktree branch ArchiveOpCompleted
 
-    | UnarchiveCompleted (Ok _) ->
+    | ArchiveOpCompleted (Ok _) ->
         model, fetchWorktrees ()
 
-    | UnarchiveCompleted (Error _) ->
+    | ArchiveOpCompleted (Error _) ->
         model, Cmd.none
 
     | ModalMsg modalMsg ->

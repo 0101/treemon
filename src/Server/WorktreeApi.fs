@@ -114,28 +114,16 @@ let getWorktrees
             state.Repos
             |> Map.toList
             |> List.map (fun (repoId, repo) ->
-                let repoRoot = rootPaths |> Map.tryFind repoId
-
-                let liveBranches =
-                    repo.WorktreeList
-                    |> List.choose _.Branch
-                    |> Set.ofList
-
                 let archivedBranches =
-                    repoRoot
+                    rootPaths
+                    |> Map.tryFind repoId
                     |> Option.map TreemonConfig.readArchivedBranches
                     |> Option.defaultValue []
                     |> Set.ofList
 
-                let cleanedArchived = Set.intersect archivedBranches liveBranches
-
-                if cleanedArchived <> archivedBranches then
-                    repoRoot |> Option.iter (fun root ->
-                        TreemonConfig.setArchivedBranches root (Set.toList cleanedArchived))
-
                 let statuses =
                     repo.WorktreeList
-                    |> List.map (assembleFromState activeSessionPaths cleanedArchived repo)
+                    |> List.map (assembleFromState activeSessionPaths archivedBranches repo)
 
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)
@@ -239,54 +227,56 @@ let private findRepoRootForBranch
             worktrees
             |> List.tryFind (fun wt -> wt.Branch = Some branch)
 
-        match worktree with
-        | None -> return Error $"No worktree found for branch '{branch}'"
-        | Some wt ->
-            let repoRoot =
+        let repoRoot =
+            worktree
+            |> Option.bind (fun wt ->
                 findRepoForPath state wt.Path
-                |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
+                |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid))
 
-            match repoRoot with
-            | Some root -> return Ok root
-            | None -> return Error $"Could not identify repo root for worktree at '{wt.Path}'"
+        match worktree, repoRoot with
+        | Some _, Some root -> return Ok root
+        | Some wt, None -> return Error $"Could not identify repo root for worktree at '{wt.Path}'"
+        | None, _ -> return Error $"No worktree found for branch '{branch}'"
     }
 
-let private archiveWorktree
+let private updateArchivedBranches
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
+    (setOp: string -> Set<string> -> Set<string>)
     (branch: string)
     =
     async {
-        let! repoRoot = findRepoRootForBranch agent rootPaths branch
+        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let worktrees = allWorktrees state
 
-        match repoRoot with
-        | Error msg -> return Error msg
-        | Ok root ->
+        let worktree =
+            worktrees
+            |> List.tryFind (fun wt -> wt.Branch = Some branch)
+
+        let repoId =
+            worktree
+            |> Option.bind (fun wt -> findRepoForPath state wt.Path)
+
+        let repoRoot =
+            repoId
+            |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
+
+        match worktree, repoId, repoRoot with
+        | Some _, Some rid, Some root ->
+            let liveBranches =
+                state.Repos
+                |> Map.tryFind rid
+                |> Option.map (fun repo -> repo.WorktreeList |> List.choose _.Branch |> Set.ofList)
+                |> Option.defaultValue Set.empty
+
             let existing = TreemonConfig.readArchivedBranches root |> Set.ofList
-
-            if Set.contains branch existing then
-                return Ok ()
-            else
-                let updated = Set.add branch existing |> Set.toList
-                TreemonConfig.setArchivedBranches root updated
-                return Ok ()
-    }
-
-let private unarchiveWorktree
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (rootPaths: Map<RepoId, string>)
-    (branch: string)
-    =
-    async {
-        let! repoRoot = findRepoRootForBranch agent rootPaths branch
-
-        match repoRoot with
-        | Error msg -> return Error msg
-        | Ok root ->
-            let existing = TreemonConfig.readArchivedBranches root |> Set.ofList
-            let updated = Set.remove branch existing |> Set.toList
-            TreemonConfig.setArchivedBranches root updated
+            let updated = setOp branch existing |> Set.intersect liveBranches
+            TreemonConfig.setArchivedBranches root (Set.toList updated)
             return Ok ()
+        | Some wt, _, _ ->
+            return Error $"Could not identify repo root for worktree at '{wt.Path}'"
+        | None, _, _ ->
+            return Error $"No worktree found for branch '{branch}'"
     }
 
 let worktreeApi
@@ -446,8 +436,8 @@ let worktreeApi
           killSession = fun wtPath ->
               withValidatedPath wtPath "killSession" (fun () ->
                   SessionManager.killSession sessionAgent wtPath)
-          archiveWorktree = archiveWorktree agent rootPaths
-          unarchiveWorktree = unarchiveWorktree agent rootPaths
+          archiveWorktree = updateArchivedBranches agent rootPaths Set.add
+          unarchiveWorktree = updateArchivedBranches agent rootPaths Set.remove
           getBranches = fun repoIdStr ->
               async {
                   let repoId = RepoId.create repoIdStr
