@@ -214,31 +214,6 @@ let private deleteWorktree
                 return Error $"Could not identify repo root for worktree at '{wt.Path}'"
     }
 
-let private findRepoRootForBranch
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (rootPaths: Map<RepoId, string>)
-    (branch: string)
-    =
-    async {
-        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-        let worktrees = allWorktrees state
-
-        let worktree =
-            worktrees
-            |> List.tryFind (fun wt -> wt.Branch = Some branch)
-
-        let repoRoot =
-            worktree
-            |> Option.bind (fun wt ->
-                findRepoForPath state wt.Path
-                |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid))
-
-        match worktree, repoRoot with
-        | Some _, Some root -> return Ok root
-        | Some wt, None -> return Error $"Could not identify repo root for worktree at '{wt.Path}'"
-        | None, _ -> return Error $"No worktree found for branch '{branch}'"
-    }
-
 let private updateArchivedBranches
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -269,9 +244,12 @@ let private updateArchivedBranches
                 |> Option.map (fun repo -> repo.WorktreeList |> List.choose _.Branch |> Set.ofList)
                 |> Option.defaultValue Set.empty
 
-            let existing = TreemonConfig.readArchivedBranches root |> Set.ofList
-            let updated = setOp branch existing |> Set.intersect liveBranches
-            TreemonConfig.setArchivedBranches root (Set.toList updated)
+            TreemonConfig.modifyArchivedBranches root (fun existing ->
+                existing
+                |> Set.ofList
+                |> setOp branch
+                |> Set.intersect liveBranches
+                |> Set.toList)
             return Ok ()
         | Some wt, _, _ ->
             return Error $"Could not identify repo root for worktree at '{wt.Path}'"

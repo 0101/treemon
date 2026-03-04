@@ -344,7 +344,7 @@ type ArchiveE2ETests() =
     let makeWorktreeJson (branch: string) (isArchived: bool) =
         let archived = if isArchived then "true" else "false"
         $"""{{
-            "Path":"Q:/test/{branch}","Branch":"{branch}",
+            "Path":{{"WorktreePath":"Q:/test/{branch}"}},"Branch":"{branch}",
             "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
             "Beads":{{"Open":0,"InProgress":0,"Closed":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
