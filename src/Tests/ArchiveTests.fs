@@ -518,9 +518,13 @@ type ArchiveE2ETests() =
 
             let archiveBtn = page.Locator(".wt-card .archive-btn").First
             do! archiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! archiveBtn.ClickAsync()
 
-            do! page.WaitForTimeoutAsync(500.0f)
+            let responseTask = page.WaitForResponseAsync(
+                (fun (r: IResponse) -> r.Url.Contains("/IWorktreeApi/archiveWorktree")),
+                PageWaitForResponseOptions(Timeout = 5000.0f))
+            do! archiveBtn.ClickAsync()
+            let! _ = responseTask
+
             Assert.That(archiveCalls.Count, Is.GreaterThanOrEqualTo(1), "Clicking archive should call archiveWorktree API")
 
             do! page.CloseAsync()
@@ -542,9 +546,13 @@ type ArchiveE2ETests() =
 
             let unarchiveBtn = page.Locator(".archive-card .unarchive-btn").First
             do! unarchiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! unarchiveBtn.ClickAsync()
 
-            do! page.WaitForTimeoutAsync(500.0f)
+            let responseTask = page.WaitForResponseAsync(
+                (fun (r: IResponse) -> r.Url.Contains("/IWorktreeApi/unarchiveWorktree")),
+                PageWaitForResponseOptions(Timeout = 5000.0f))
+            do! unarchiveBtn.ClickAsync()
+            let! _ = responseTask
+
             Assert.That(unarchiveCalls.Count, Is.GreaterThanOrEqualTo(1), "Clicking unarchive should call unarchiveWorktree API")
 
             do! page.CloseAsync()
@@ -728,7 +736,9 @@ type ArchiveE2ETests() =
             do! dashboard.FocusAsync()
 
             do! page.Keyboard.PressAsync("ArrowDown")
-            do! page.WaitForTimeoutAsync(200.0f)
+            let! _ = page.WaitForFunctionAsync(
+                "() => document.querySelector('.focused') !== null",
+                null, PageWaitForFunctionOptions(Timeout = 5000.0f))
 
             let focusedElements = System.Collections.Generic.List<string>()
             let rec pressAndCollect remaining =
@@ -740,7 +750,9 @@ type ArchiveE2ETests() =
                             let! classes = focused.First.GetAttributeAsync("class")
                             focusedElements.Add(classes)
                         do! page.Keyboard.PressAsync("ArrowDown")
-                        do! page.WaitForTimeoutAsync(150.0f)
+                        let! _ = page.WaitForFunctionAsync(
+                            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))).then(() => true)",
+                            null, PageWaitForFunctionOptions(Timeout = 5000.0f))
                         return! pressAndCollect (remaining - 1)
                 }
             do! pressAndCollect 10
