@@ -118,9 +118,7 @@ let getWorktrees
                 let archivedBranches =
                     rootPaths
                     |> Map.tryFind repoId
-                    |> Option.map TreemonConfig.readArchivedBranches
-                    |> Option.defaultValue []
-                    |> Set.ofList
+                    |> TreemonConfig.readArchivedBranchSet
 
                 let statuses =
                     repo.WorktreeList
@@ -254,6 +252,7 @@ let private updateArchivedBranches
                 |> setOp branch
                 |> Set.intersect liveBranches
                 |> Set.toList)
+            agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh rid)
             return Ok ()
         | Some wt, _, _ ->
             return Error $"Could not identify repo root for worktree at '{wt.Path}'"
