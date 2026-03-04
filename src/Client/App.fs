@@ -1137,18 +1137,41 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
         ]
     ]
 
+let barColor (pct: float) =
+    if pct >= 80.0 then "#f38ba8"
+    elif pct >= 50.0 then "#f9e2af"
+    else "#6c7086"
+
+let viewMetricBar (pct: float) (label: string) =
+    Html.div [
+        prop.className "metric-bar-row"
+        prop.children [
+            Html.div [
+                prop.className "metric-bar-track"
+                prop.children [
+                    Html.div [
+                        prop.className "metric-bar-fill"
+                        prop.style [
+                            style.width (length.percent (min pct 100.0))
+                            style.backgroundColor (barColor pct)
+                        ]
+                    ]
+                ]
+            ]
+            Html.span [ prop.className "metric-bar-label"; prop.text label ]
+        ]
+    ]
+
 let viewSystemMetrics (metrics: SystemMetrics option) =
     match metrics with
     | None -> Html.none
     | Some m ->
-        let memGbUsed = float m.MemoryUsedMb / 1024.0
-        let memGbTotal = float m.MemoryTotalMb / 1024.0
+        let memPct = float m.MemoryUsedMb / float m.MemoryTotalMb * 100.0
         Html.div [
             prop.className "system-metrics"
             prop.children [
-                Html.span [ prop.className "metric"; prop.text $"%.0f{m.CpuPercent}%% CPU" ]
-                Html.span [ prop.className "metric-sep"; prop.text "\u00b7" ]
-                Html.span [ prop.className "metric"; prop.text $"%.1f{memGbUsed} / %.1f{memGbTotal} GB" ]
+                viewMetricBar m.CpuPercent "CPU"
+                viewMetricBar memPct "RAM"
             ]
         ]
 

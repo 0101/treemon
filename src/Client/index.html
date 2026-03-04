@@ -30,8 +30,11 @@
             background: #3a2e20; color: #f9e2af; font-size: 0.78em; font-weight: 600;
             padding: 2px 8px; border-radius: 4px; white-space: nowrap;
         }
-        .system-metrics { display: flex; align-items: center; gap: 6px; font-size: 0.78em; color: #7f849c; white-space: nowrap; }
-        .metric-sep { color: #45475a; }
+        .system-metrics { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+        .metric-bar-row { display: flex; align-items: center; gap: 6px; }
+        .metric-bar-track { width: 80px; height: 5px; background: #313244; border-radius: 3px; overflow: hidden; }
+        .metric-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease, background-color 0.5s ease; }
+        .metric-bar-label { font-size: 0.65em; color: #585b70; white-space: nowrap; line-height: 1; }
         .header-controls { display: flex; gap: 6px; }
         .ctrl-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 6px;
