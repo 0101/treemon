@@ -15,19 +15,6 @@ let private claudeProjectsDir =
 let encodeWorktreePath (worktreePath: string) =
     worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
 
-let private findLatestJsonl (projectDir: string) =
-    try
-        if Directory.Exists(projectDir) then
-            Directory.GetFiles(projectDir, "*.jsonl")
-            |> Array.map (fun f -> FileInfo(f))
-            |> Array.sortByDescending _.LastWriteTimeUtc
-            |> Array.tryHead
-        else
-            None
-    with ex ->
-        Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
-        None
-
 let private findAllJsonlFiles (projectDir: string) =
     try
         if Directory.Exists(projectDir) then
@@ -272,17 +259,21 @@ let getSessionMtime (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
-    findLatestJsonl projectDir
-    |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+    findAllJsonlFiles projectDir
+    |> List.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+    |> List.sortDescending
+    |> List.tryHead
 
 let getLastMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
-    findLatestJsonl projectDir
-    |> Option.bind (fun fi ->
+    findAllJsonlFiles projectDir
+    |> List.choose (fun fi ->
         readLastLines fi.FullName 20
         |> List.tryPick tryParseAssistantText)
+    |> List.sortByDescending snd
+    |> List.tryHead
     |> Option.map (fun (text, timestamp) ->
         { Source = "claude"
           Message = truncateMessage 80 text
@@ -402,6 +393,8 @@ let getLastUserMessage (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
-    findLatestJsonl projectDir
-    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
+    findAllJsonlFiles projectDir
+    |> List.choose (fun fi -> scanForUserMessage fi.FullName)
+    |> List.sortByDescending snd
+    |> List.tryHead
     |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
