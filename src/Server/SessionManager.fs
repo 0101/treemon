@@ -75,21 +75,21 @@ let private spawnWtAndResolve (args: string) (logLabel: string) =
         Log.log "SessionManager" $"Failed to spawn {logLabel} wt.exe: {ex.Message}"
         Error $"Failed to spawn {logLabel}: {ex.Message}"
 
-let private spawnAndResolve (worktreePath: string) (prompt: string) =
+let private spawnWithCommand (worktreePath: string) (command: string option) (logLabel: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let escapedPrompt = prompt.Replace("'", "''")
-    let encoded = encodeCommand $"Set-Location '{nativePath}'; claude '{escapedPrompt}'"
-    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "session"
+    let script =
+        match command with
+        | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
+        | None -> $"Set-Location '{nativePath}'"
+    let encoded = encodeCommand script
+    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" logLabel
 
-let private spawnWithCommand (worktreePath: string) (command: string) =
-    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let encoded = encodeCommand $"Set-Location '{nativePath}'; {command}"
-    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "action"
+let private spawnAndResolve (worktreePath: string) (prompt: string) =
+    let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+    spawnWithCommand worktreePath (Some command) "session"
 
 let private spawnTerminalAndResolve (worktreePath: string) =
-    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let encoded = encodeCommand $"Set-Location '{nativePath}'"
-    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "terminal"
+    spawnWithCommand worktreePath None "terminal"
 
 let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command: string option) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
@@ -226,7 +226,7 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
             reply.Reply(result)
             validated
         | None ->
-            let spawnResult = spawnWithCommand path command
+            let spawnResult = spawnWithCommand path (Some command) "action"
             match spawnResult with
             | Ok hwnd ->
                 reply.Reply(Ok())
