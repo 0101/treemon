@@ -78,30 +78,27 @@ let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedEl
         if isOnFirstRow si cardIdx then ScrollToTop
         elif isOnLastRow si cardIdx then ScrollToBottom
         else Normal
+    let cardPosition target =
+        sections
+        |> List.tryFindIndex (fun s ->
+            s.Header = target || s.Cards |> List.contains target)
+        |> Option.map (fun si ->
+            let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
+            si, cardIdx)
     let hintForTarget target =
         match target with
         | RepoHeader repoId ->
             if sections |> List.tryHead |> Option.exists (fun s -> s.RepoId = repoId) then ScrollToTop else Normal
         | Card _ ->
-            sections
-            |> List.tryFindIndex (fun s -> s.Cards |> List.contains target)
-            |> Option.bind (fun si ->
-                sections[si].Cards
-                |> List.tryFindIndex ((=) target)
-                |> Option.map (fun ci -> hintFor si ci))
+            cardPosition target
+            |> Option.map (fun (si, ci) -> hintFor si ci)
             |> Option.defaultValue Normal
+    let hintOf = Option.map hintForTarget >> Option.defaultValue Normal
+    let repoFor repoId = repos |> List.tryFind (fun r -> r.RepoId = repoId)
     match allTargets, focusedElement with
     | [], _ -> None, NoAction, Normal
     | _, None -> Some allTargets.Head, NoAction, ScrollToTop
     | _, Some current ->
-        let cardPosition target =
-            sections
-            |> List.tryFindIndex (fun s ->
-                s.Header = target || s.Cards |> List.contains target)
-            |> Option.map (fun si ->
-                let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
-                si, cardIdx)
-        let repoFor repoId = repos |> List.tryFind (fun r -> r.RepoId = repoId)
         match current, key with
         | RepoHeader repoId, "ArrowLeft" when repoFor repoId |> Option.exists (fun r -> not r.IsCollapsed) ->
             Some current, CollapseRepo repoId, Normal
@@ -114,7 +111,7 @@ let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedEl
 
         | RepoHeader _, ("ArrowUp" | "ArrowDown") ->
             let target = navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current)
-            target, NoAction, target |> Option.map hintForTarget |> Option.defaultValue Normal
+            target, NoAction, hintOf target
 
         | Card _, "ArrowLeft" ->
             match cardPosition current with
@@ -151,7 +148,7 @@ let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedEl
                         Some sections[si + 1].Header, NoAction, Normal
                     else
                         let target = navigateLinear 1 allTargets (Some current)
-                        target, NoAction, target |> Option.map hintForTarget |> Option.defaultValue Normal
+                        target, NoAction, hintOf target
 
         | Card _, "ArrowDown" ->
             match cardPosition current with
@@ -178,8 +175,9 @@ let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedEl
 
         | _ -> Some current, NoAction, Normal
 
-let private headerOffset = 36.0 + 50.0
-let private bottomPadding = 50.0
+let private headerHeight = 36.0
+let private scrollPadding = 50.0
+let private headerOffset = headerHeight + scrollPadding
 
 let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     match target with
@@ -202,7 +200,7 @@ let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
                 | ScrollToTop -> scrollTo 0
                 | ScrollToBottom -> scrollTo docHeight
                 | Normal when rectTop < headerOffset -> scrollTo (elTop - headerOffset)
-                | Normal when rectBottom > viewH - bottomPadding -> scrollTo (elBottom - viewH + bottomPadding)
+                | Normal when rectBottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
                 | _ -> ()))
 
 let navigateToFirst (repos: RepoModel list) =

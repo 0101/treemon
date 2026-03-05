@@ -1141,6 +1141,11 @@ let barColor (pct: float) =
     elif pct >= 50.0 then "#f9e2af"
     else "#6c7086"
 
+let labelColor (pct: float) =
+    if pct >= 80.0 then Some "#f38ba8"
+    elif pct >= 50.0 then Some "#f9e2af"
+    else None
+
 let viewMetricBar (pct: float) (label: string) =
     Html.div [
         prop.className "metric-bar-row"
@@ -1157,7 +1162,13 @@ let viewMetricBar (pct: float) (label: string) =
                     ]
                 ]
             ]
-            Html.span [ prop.className "metric-bar-label"; prop.text label ]
+            Html.span [
+                prop.className "metric-bar-label"
+                match labelColor pct with
+                | Some c -> prop.style [ style.color c ]
+                | None -> ()
+                prop.text label
+            ]
         ]
     ]
 
