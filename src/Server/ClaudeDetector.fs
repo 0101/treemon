@@ -28,6 +28,18 @@ let private findLatestJsonl (projectDir: string) =
         Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
         None
 
+let private findAllJsonlFiles (projectDir: string) =
+    try
+        if Directory.Exists(projectDir) then
+            Directory.GetFiles(projectDir, "*.jsonl")
+            |> Array.map (fun f -> FileInfo(f))
+            |> Array.toList
+        else
+            []
+    with ex ->
+        Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
+        []
+
 let private readLastLines (filePath: string) (maxLines: int) =
     try
         use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
@@ -162,36 +174,57 @@ let private statusFromEntry entryKind =
 
 let private stalenessTimeout = TimeSpan.FromMinutes(30.0)
 
+let private statusPriority = function
+    | Working -> 3
+    | WaitingForUser -> 2
+    | Done -> 1
+    | Idle -> 0
+
+let private getFileStatus (now: DateTimeOffset) (fileLastWriteUtc: DateTimeOffset, lastLinesReversed: string list) =
+    let fileAge = now - fileLastWriteUtc
+    if fileAge > TimeSpan.FromHours(2.0) then
+        Idle
+    else
+        let parsed =
+            lastLinesReversed
+            |> List.tryPick tryParseEntryKind
+            |> Option.map (fun (kind, timestamp) ->
+                let entryAge =
+                    timestamp
+                    |> Option.map (fun ts -> now - ts)
+                    |> Option.defaultValue fileAge
+                statusFromEntry kind, entryAge)
+
+        match parsed with
+        | Some (Done, _) when fileAge < TimeSpan.FromSeconds(10.0) -> Working
+        | Some (Working, entryAge) when entryAge > stalenessTimeout -> Idle
+        | Some (status, _) -> status
+        | None -> Idle
+
+let internal getStatusFromFiles (now: DateTimeOffset) (files: (DateTimeOffset * string list) list) =
+    match files with
+    | [] -> Idle
+    | _ ->
+        files
+        |> List.map (getFileStatus now)
+        |> List.maxBy statusPriority
+
 let getStatus (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
-    match findLatestJsonl projectDir with
-    | Some fi ->
-        try
-            let fileAge = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if fileAge > TimeSpan.FromHours(2.0) then
-                Idle
-            else
-                let parsed =
-                    readLastLines fi.FullName 20
-                    |> List.tryPick tryParseEntryKind
-                    |> Option.map (fun (kind, timestamp) ->
-                        let entryAge =
-                            timestamp
-                            |> Option.map (fun ts -> DateTimeOffset.UtcNow - ts)
-                            |> Option.defaultValue fileAge
-                        statusFromEntry kind, entryAge)
+    let files =
+        findAllJsonlFiles projectDir
+        |> List.choose (fun fi ->
+            try
+                let lastWrite = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+                let lines = readLastLines fi.FullName 20
+                Some(lastWrite, lines)
+            with ex ->
+                Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
+                None)
 
-                match parsed with
-                | Some (Done, _) when fileAge < TimeSpan.FromSeconds(10.0) -> Working
-                | Some (Working, entryAge) when entryAge > stalenessTimeout -> Idle
-                | Some (status, _) -> status
-                | None -> Idle
-        with ex ->
-            Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
-            Idle
-    | None -> Idle
+    getStatusFromFiles DateTimeOffset.UtcNow files
 
 let private truncateMessage (maxLen: int) (text: string) =
     let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
