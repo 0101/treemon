@@ -308,7 +308,8 @@ let worktreeApi
           unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
           getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
           createWorktree = fun _ -> async { return Ok() }
-          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
+          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          launchAction = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
@@ -466,4 +467,20 @@ let worktreeApi
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
-                  SessionManager.openNewTab sessionAgent wtPath) }
+                  SessionManager.openNewTab sessionAgent wtPath)
+          launchAction = fun req ->
+              withValidatedPath req.Path "launchAction" (fun () ->
+                  async {
+                      let path = WorktreePath.value req.Path
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                      let provider =
+                          state.Repos
+                          |> Map.values
+                          |> Seq.tryPick (fun repo ->
+                              repo.CodingToolData
+                              |> Map.tryFind path
+                              |> Option.bind (fun (_, p, _) -> p))
+
+                      return! SessionManager.launchAction sessionAgent req.Path req.Prompt provider
+                  }) }
