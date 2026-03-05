@@ -720,9 +720,6 @@ let buildBadge (repoName: string) (build: BuildInfo) =
             | None -> ()
         ]
 
-let buildBadges (repoName: string) (builds: BuildInfo list) =
-    React.fragment (builds |> List.map (buildBadge repoName))
-
 let terminalButton dispatch (wt: WorktreeStatus) =
     let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
     let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
@@ -852,17 +849,16 @@ let prSection dispatch (wt: WorktreeStatus) (repoName: string) =
     | HasPr pr -> prBadgeContent dispatch wt repoName pr
 
 let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
-    let createPrButton =
-        if not (isMainBranch wt.Branch) then
-            actionButton dispatch wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR"
-        else Html.none
-    match wt.Pr with
-    | NoPr ->
+    match wt.Pr, isMainBranch wt.Branch with
+    | NoPr, true -> Html.none
+    | NoPr, false ->
         Html.div [
             prop.className "pr-row"
-            prop.children [ createPrButton ]
+            prop.children [
+                actionButton dispatch wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR"
+            ]
         ]
-    | HasPr pr ->
+    | HasPr pr, _ ->
         Html.div [
             prop.className "pr-row"
             prop.children [ prBadgeContent dispatch wt repoName pr ]
