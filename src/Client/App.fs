@@ -51,6 +51,8 @@ type Msg =
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
+    | LaunchAction of path: WorktreePath * prompt: string
+    | LaunchActionResult of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
@@ -277,6 +279,12 @@ let update msg model =
         model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
 
     | SessionResult _ ->
+        model, fetchWorktrees ()
+
+    | LaunchAction (path, prompt) ->
+        model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult
+
+    | LaunchActionResult _ ->
         model, fetchWorktrees ()
 
     | SetFocus target ->
@@ -744,6 +752,23 @@ let newTabButton dispatch (wt: WorktreeStatus) =
         prop.text "+"
     ]
 
+let isCodingToolBusy (wt: WorktreeStatus) =
+    wt.CodingTool = Working || wt.CodingTool = WaitingForUser
+
+let actionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) =
+    let disabled = isCodingToolBusy wt
+    Html.button [
+        prop.className (if disabled then "action-btn disabled" else "action-btn")
+        prop.disabled disabled
+        yield! noFocusProps
+        prop.title (if disabled then $"{providerDisplayName wt.CodingToolProvider} is active" else title)
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (LaunchAction (wt.Path, prompt)))
+        prop.text "\u25B6"
+    ]
+
+let isMainBranch (branch: string) =
+    branch = "main" || branch = "master"
+
 let binIcon =
     Svg.svg [
         svg.className "btn-icon"
@@ -777,7 +802,7 @@ let deleteButton dispatch (wt: WorktreeStatus) =
 
 let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 
-let prBadgeContent (repoName: string) (pr: PrInfo) =
+let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
             Interop.createElement "a" [
@@ -801,27 +826,46 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                     prop.className (if unresolved = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{unresolved}/{total} threads")
                 ]
+                if unresolved > 0 then
+                    actionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments"
             | CountOnly total ->
                 Html.span [
                     prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{total} comments")
                 ]
+                if total > 0 && not pr.IsMerged then
+                    actionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments"
             | _ -> ()
-            buildBadges repoName pr.Builds
+            pr.Builds |> List.map (fun build ->
+                React.fragment [
+                    buildBadge repoName build
+                    if build.Status = Failed then
+                        match build.Url with
+                        | Some url -> actionButton dispatch wt $"/fix-build {url}" "Fix build"
+                        | None -> ()
+                ]) |> React.fragment
     ]
 
-let prSection (repoName: string) (wt: WorktreeStatus) =
+let prSection dispatch (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr with
     | NoPr -> Html.none
-    | HasPr pr -> prBadgeContent repoName pr
+    | HasPr pr -> prBadgeContent dispatch wt repoName pr
 
-let prRow (repoName: string) (wt: WorktreeStatus) =
+let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
+    let createPrButton =
+        if not (isMainBranch wt.Branch) then
+            actionButton dispatch wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR"
+        else Html.none
     match wt.Pr with
-    | NoPr -> Html.none
+    | NoPr ->
+        Html.div [
+            prop.className "pr-row"
+            prop.children [ createPrButton ]
+        ]
     | HasPr pr ->
         Html.div [
             prop.className "pr-row"
-            prop.children [ prBadgeContent repoName pr ]
+            prop.children [ prBadgeContent dispatch wt repoName pr ]
         ]
 
 let workMetricsView = ArchiveViews.workMetricsView
@@ -853,7 +897,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
-                    prSection repoName wt
+                    prSection dispatch wt repoName
                 ]
             ]
         ]
@@ -897,7 +941,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
 
                     mainBehindWithSync dispatch wt branchEvents isPending scopedKey
 
-                    prRow repoName wt
+                    prRow dispatch wt repoName
                 ]
             ]
 

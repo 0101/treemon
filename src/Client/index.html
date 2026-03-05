@@ -136,6 +136,14 @@
         .build-badge.partial { background: #3a2e20; color: #fab387; }
         .build-badge.canceled { background: #313244; color: #7f849c; }
 
+        .action-btn {
+            background: #313244; border: 1px solid #a6e3a1; border-radius: 4px;
+            color: #a6e3a1; cursor: pointer; font-family: inherit; font-size: 0.75em;
+            padding: 0 5px; line-height: 1.4; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+        }
+        .action-btn:hover { background: #1e3a2f; }
+        .action-btn.disabled { opacity: 0.4; cursor: not-allowed; border-color: #585b70; color: #585b70; }
+
         .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #7f849c; padding: 8px 0 4px; }
 
         .scheduler-footer {
