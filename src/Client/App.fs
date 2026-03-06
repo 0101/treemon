@@ -28,7 +28,8 @@ type Model =
       CreateModal: CreateWorktreeModal.ModalState
       DeletedBranches: Set<string>
       DeployBranch: string option
-      SystemMetrics: SystemMetrics option }
+      SystemMetrics: SystemMetrics option
+      LastError: string option }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -56,6 +57,7 @@ type Msg =
     | LaunchAction of path: WorktreePath * prompt: string
     | LaunchActionResult of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
+    | DismissError
 
 let worktreeApi =
     Remoting.createApi ()
@@ -91,7 +93,8 @@ let init () =
       CreateModal = CreateWorktreeModal.Closed
       DeletedBranches = Set.empty
       DeployBranch = None
-      SystemMetrics = None },
+      SystemMetrics = None
+      LastError = None },
     fetchWorktrees ()
 
 let rng = System.Random()
@@ -174,10 +177,11 @@ let update msg model =
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
-    | DataFailed _ ->
+    | DataFailed ex ->
         { model with
             IsLoading = false
-            HasError = true },
+            HasError = true
+            LastError = Some ex.Message },
         Cmd.none
 
     | ToggleSort ->
@@ -271,8 +275,8 @@ let update msg model =
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
-    | DeleteCompleted (Error _) ->
-        { model with DeletedBranches = Set.empty }, fetchWorktrees ()
+    | DeleteCompleted (Error msg) ->
+        { model with DeletedBranches = Set.empty; LastError = Some $"Delete failed: {msg}" }, fetchWorktrees ()
 
     | FocusSession path ->
         model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult (fun _ -> SessionResult (Error "Network error"))
@@ -280,14 +284,21 @@ let update msg model =
     | OpenNewTab path ->
         model, Cmd.OfAsync.either worktreeApi.openNewTab path SessionResult (fun _ -> SessionResult (Error "Network error"))
 
-    | SessionResult _ ->
+    | SessionResult (Error msg) ->
+        { model with LastError = Some $"Session operation failed: {msg}" }, fetchWorktrees ()
+    | SessionResult (Ok _) ->
         model, fetchWorktrees ()
 
     | LaunchAction (path, prompt) ->
-        model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult
+        model, Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult (fun _ -> LaunchActionResult (Error "Network error"))
 
-    | LaunchActionResult _ ->
+    | LaunchActionResult (Error msg) ->
+        { model with LastError = Some $"Action failed: {msg}" }, fetchWorktrees ()
+    | LaunchActionResult (Ok _) ->
         model, fetchWorktrees ()
+
+    | DismissError ->
+        { model with LastError = None }, Cmd.none
 
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
@@ -365,6 +376,16 @@ let pollingSubscription (model: Model) : Sub<Msg> =
           [ "sync-polling" ], syncPolling ]
     else
         [ [ "polling" ], worktreePolling ]
+
+let errorDismissSubscription (model: Model) : Sub<Msg> =
+    match model.LastError with
+    | Some _ ->
+        let dismiss (dispatch: Dispatch<Msg>) =
+            let id = Fable.Core.JS.setTimeout (fun () -> dispatch DismissError) 5000
+            { new System.IDisposable with
+                member _.Dispose() = Fable.Core.JS.clearTimeout id }
+        [ [ "error-dismiss" ], dismiss ]
+    | None -> []
 
 let relativeTime = ArchiveViews.relativeTime
 
@@ -1272,6 +1293,17 @@ let viewAppHeader model dispatch =
 
 let view model dispatch =
     React.fragment [
+        match model.LastError with
+        | Some msg ->
+            Html.div [
+                prop.className "error-toast"
+                prop.onClick (fun _ -> dispatch DismissError)
+                prop.children [
+                    Html.span [ prop.text msg ]
+                    Html.button [ prop.className "toast-dismiss"; prop.text "✕" ]
+                ]
+            ]
+        | None -> ()
         viewAppHeader model dispatch
         Html.div [
             prop.className "dashboard"
@@ -1307,7 +1339,10 @@ let view model dispatch =
 
 open Elmish.React
 
+let combinedSubscription model =
+    pollingSubscription model @ errorDismissSubscription model
+
 Program.mkProgram init update view
-|> Program.withSubscription pollingSubscription
+|> Program.withSubscription combinedSubscription
 |> Program.withReactBatched "app"
 |> Program.run
