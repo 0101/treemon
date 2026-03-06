@@ -1,4 +1,4 @@
-module App
+﻿module App
 
 open Shared
 open Shared.EventUtils
@@ -736,7 +736,7 @@ let editorButton dispatch editorName (wt: WorktreeStatus) =
         prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
-        prop.text "{⋯}"
+        prop.text "{â‹¯}"
     ]
 
 let newTabButton dispatch (wt: WorktreeStatus) =
@@ -758,7 +758,7 @@ let actionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) 
         prop.disabled disabled
         yield! noFocusProps
         prop.title (if disabled then $"{providerDisplayName wt.CodingToolProvider} is active" else title)
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (LaunchAction (wt.Path, prompt)))
+        prop.onClick (fun e -> e.stopPropagation(); if not disabled then dispatch (LaunchAction (wt.Path, prompt)))
         prop.text "\u25B6"
     ]
 
