@@ -2,6 +2,7 @@ module Tests.ClaudeSessionReplayTests
 
 open System
 open System.IO
+open System.Text.Json
 open NUnit.Framework
 open Server.ClaudeDetector
 open Shared
@@ -202,3 +203,165 @@ type ParentAuthoritativeResolutionTests() =
               makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ] ]
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Working))
+
+
+// --- Timeline Replay Infrastructure ---
+
+type private TimelineEntry =
+    { Timestamp: DateTimeOffset
+      FileName: string
+      Kind: SessionFileKind
+      Line: string
+      LineIndex: int }
+
+type private StatusTransition =
+    { Timestamp: string
+      Status: string
+      Trigger: string }
+
+let private fixtureFiles =
+    [ "parent-session.jsonl"
+      "subagent-executor.jsonl"
+      "subagent-reviewer-claude.jsonl"
+      "subagent-reviewer-gemini.jsonl" ]
+
+let private parseTimestampFromLine (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        match doc.RootElement.TryGetProperty("timestamp") with
+        | true, ts ->
+            match DateTimeOffset.TryParse(ts.GetString()) with
+            | true, dto -> Some dto
+            | _ -> None
+        | _ -> None
+    with _ -> None
+
+let private statusToString = function
+    | Working -> "Working"
+    | WaitingForUser -> "WaitingForUser"
+    | Done -> "Done"
+    | Idle -> "Idle"
+
+let private maxLinesForReplay = 20
+
+let private buildTimeline () =
+    fixtureFiles
+    |> List.collect (fun fileName ->
+        let path = Path.Combine(fixtureDir, fileName)
+        let kind = kindFromFileName fileName
+        File.ReadAllLines(path)
+        |> Array.mapi (fun i line -> i, line.Trim())
+        |> Array.filter (fun (_, line) -> line.Length > 0)
+        |> Array.choose (fun (i, line) ->
+            parseTimestampFromLine line
+            |> Option.map (fun ts ->
+                { Timestamp = ts
+                  FileName = fileName
+                  Kind = kind
+                  Line = line
+                  LineIndex = i }))
+        |> Array.toList)
+    |> List.sortBy _.Timestamp
+
+let private replayTimeline (timeline: TimelineEntry list) =
+    let folder (accumulatedLines: Map<string, string list>, lastStatus: CodingToolStatus option, transitions: StatusTransition list) (entry: TimelineEntry) =
+        let currentLines =
+            accumulatedLines
+            |> Map.tryFind entry.FileName
+            |> Option.defaultValue []
+        let updatedLines = entry.Line :: currentLines
+        let newAccumulated = accumulatedLines |> Map.add entry.FileName updatedLines
+
+        let files =
+            newAccumulated
+            |> Map.toList
+            |> List.map (fun (fileName, lines) ->
+                let kind = kindFromFileName fileName
+                let latestTimestamp =
+                    lines
+                    |> List.tryPick parseTimestampFromLine
+                    |> Option.defaultValue entry.Timestamp
+                let lastLinesReversed = lines |> List.truncate maxLinesForReplay
+                makeFileData kind latestTimestamp lastLinesReversed)
+
+        let status = getStatusFromFiles entry.Timestamp files
+
+        let newTransitions =
+            match lastStatus with
+            | Some prev when prev = status -> transitions
+            | _ ->
+                let transition =
+                    { Timestamp = entry.Timestamp.ToString("o")
+                      Status = statusToString status
+                      Trigger = $"{entry.FileName}:{entry.LineIndex}" }
+                transitions @ [ transition ]
+
+        (newAccumulated, Some status, newTransitions)
+
+    let (_, _, transitions) =
+        timeline
+        |> List.fold folder (Map.empty, None, [])
+
+    transitions
+
+let private parseTransition (line: string) =
+    use doc = JsonDocument.Parse(line)
+    let root = doc.RootElement
+    { Timestamp = root.GetProperty("timestamp").GetString()
+      Status = root.GetProperty("status").GetString()
+      Trigger = root.GetProperty("trigger").GetString() }
+
+let private expectedStatusesPath =
+    Path.Combine(fixtureDir, "expected-statuses.jsonl")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type TimelineReplayTests() =
+
+    [<Test>]
+    member _.``Timeline replay matches expected status transitions``() =
+        let timeline = buildTimeline ()
+        let actual = replayTimeline timeline
+
+        Assert.That(
+            File.Exists(expectedStatusesPath),
+            Is.True,
+            $"Expected statuses fixture not found at {expectedStatusesPath}. Run the generator first.")
+
+        let expected =
+            File.ReadAllLines(expectedStatusesPath)
+            |> Array.map _.Trim()
+            |> Array.filter (fun s -> s.Length > 0)
+            |> Array.map parseTransition
+            |> Array.toList
+
+        Assert.That(actual.Length, Is.EqualTo(expected.Length),
+            $"Number of status transitions differs. Actual: {actual.Length}, Expected: {expected.Length}")
+
+        List.zip actual expected
+        |> List.iteri (fun i (a, e) ->
+            Assert.That(a.Timestamp, Is.EqualTo(e.Timestamp),
+                $"Transition {i}: timestamp mismatch")
+            Assert.That(a.Status, Is.EqualTo(e.Status),
+                $"Transition {i}: status mismatch at {a.Timestamp} (trigger: {a.Trigger})")
+            Assert.That(a.Trigger, Is.EqualTo(e.Trigger),
+                $"Transition {i}: trigger mismatch at {a.Timestamp}"))
+
+    [<Test>]
+    member _.``Timeline has entries from all fixture files``() =
+        let timeline = buildTimeline ()
+        let filesWithEntries =
+            timeline
+            |> List.map _.FileName
+            |> List.distinct
+        Assert.That(filesWithEntries.Length, Is.EqualTo(4),
+            $"Expected entries from all 4 fixture files, got: {filesWithEntries}")
+
+    [<Test>]
+    member _.``Timeline entries are sorted by timestamp``() =
+        let timeline = buildTimeline ()
+        let timestamps = timeline |> List.map _.Timestamp
+        let sorted = timestamps |> List.sort
+        Assert.That(timestamps, Is.EqualTo(sorted))
