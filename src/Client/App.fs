@@ -696,7 +696,7 @@ let buildBadge (repoName: string) (build: BuildInfo) =
         | _ -> None
     match build.Url with
     | Some url ->
-        Interop.createElement "a" [
+        Html.a [
             prop.className className
             prop.text text
             prop.href url
@@ -796,7 +796,7 @@ let prActionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string
 let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
-            Interop.createElement "a" [
+            Html.a [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
                 prop.href pr.Url
@@ -804,7 +804,7 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                 prop.text "Merged"
             ]
         else
-            Interop.createElement "a" [
+            Html.a [
                 prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title
                 prop.href pr.Url
