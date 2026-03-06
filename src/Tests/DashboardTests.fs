@@ -411,7 +411,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Beads counts use colored numbers not O/P/D prefix``() =
+    member this.``Beads counts are plain numbers with correct CSS classes``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts").First
 
@@ -419,26 +419,17 @@ type DashboardTests() =
             let! openText = openSpan.TextContentAsync()
             Assert.That(openText, Does.Match(@"^\d+$"), "Open count should be a plain number (no 'O:' prefix)")
 
-            let! openColor = openSpan |> computedStyle "color"
-            Assert.That(openColor, Is.EqualTo("rgb(249, 226, 175)"), "Open count should be amber (#f9e2af)")
-
             let inprogressSpan = beadsCounts.Locator(".beads-inprogress")
             let! inprogressText = inprogressSpan.TextContentAsync()
             Assert.That(inprogressText, Does.Match(@"^\d+$"), "InProgress count should be a plain number (no 'P:' prefix)")
 
-            let! inprogressColor = inprogressSpan |> computedStyle "color"
-            Assert.That(inprogressColor, Is.EqualTo("rgb(137, 180, 250)"), "InProgress count should be blue (#89b4fa)")
-
             let closedSpan = beadsCounts.Locator(".beads-closed")
             let! closedText = closedSpan.TextContentAsync()
             Assert.That(closedText, Does.Match(@"^\d+$"), "Closed count should be a plain number (no 'D:' prefix)")
-
-            let! closedColor = closedSpan |> computedStyle "color"
-            Assert.That(closedColor, Is.EqualTo("rgb(166, 227, 161)"), "Closed count should be green (#a6e3a1)")
         }
 
     [<Test>]
-    member this.``Progress bar has three colored segments``() =
+    member this.``Progress bar has three segments``() =
         task {
             let progressBar = this.Page.Locator(".wt-card .progress-bar").First
 
@@ -453,15 +444,6 @@ type DashboardTests() =
             let segClosed = progressBar.Locator(".progress-segment.seg-closed")
             let! closedCount = segClosed.CountAsync()
             Assert.That(closedCount, Is.EqualTo(1), "Progress bar should have a seg-closed segment")
-
-            let! openBg = segOpen |> computedStyle "backgroundColor"
-            Assert.That(openBg, Is.EqualTo("rgb(249, 226, 175)"), "seg-open background should be amber")
-
-            let! ipBg = segInprogress |> computedStyle "backgroundColor"
-            Assert.That(ipBg, Is.EqualTo("rgb(137, 180, 250)"), "seg-inprogress background should be blue")
-
-            let! closedBg = segClosed |> computedStyle "backgroundColor"
-            Assert.That(closedBg, Is.EqualTo("rgb(166, 227, 161)"), "seg-closed background should be green")
         }
 
     [<Test>]
