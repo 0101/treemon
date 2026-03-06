@@ -24,6 +24,7 @@ let private defaultModel : Model =
       DeployBranch = None
       SystemMetrics = None
       LastError = None
+      ColumnCount = 1
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = Modal.Closed

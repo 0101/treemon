@@ -29,7 +29,8 @@ type Model =
       DeletedBranches: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
-      LastError: string option }
+      LastError: string option
+      ColumnCount: int }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -58,6 +59,7 @@ type Msg =
     | LaunchActionResult of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
     | DismissError
+    | ColumnsChanged of int
 
 let worktreeApi =
     Remoting.createApi ()
@@ -94,7 +96,8 @@ let init () =
       DeletedBranches = Set.empty
       DeployBranch = None
       SystemMetrics = None
-      LastError = None },
+      LastError = None
+      ColumnCount = 1 },
     fetchWorktrees ()
 
 let rng = System.Random()
@@ -300,6 +303,9 @@ let update msg model =
     | DismissError ->
         { model with LastError = None }, Cmd.none
 
+    | ColumnsChanged cols ->
+        { model with ColumnCount = cols }, Cmd.none
+
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
 
@@ -331,8 +337,7 @@ let update msg model =
         else
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
-            let cols = getColumnCount ()
-            let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
+            let newFocus, navAction, scrollHint = navigateSpatial key model.ColumnCount model.Repos model.FocusedElement
             let actionCmd =
                 match navAction with
                 | NoAction -> Cmd.none
@@ -1339,8 +1344,18 @@ let view model dispatch =
 
 open Elmish.React
 
+let columnCountSubscription (_model: Model) : Sub<Msg> =
+    let observe (dispatch: Dispatch<Msg>) =
+        Dom.window.requestAnimationFrame(fun (_: float) ->
+            dispatch (ColumnsChanged (getColumnCount ()))) |> ignore
+        let onResize = fun _ -> dispatch (ColumnsChanged (getColumnCount ()))
+        Dom.window.addEventListener("resize", unbox onResize)
+        { new System.IDisposable with
+            member _.Dispose() = Dom.window.removeEventListener("resize", unbox onResize) }
+    [ [ "column-count" ], observe ]
+
 let combinedSubscription model =
-    pollingSubscription model @ errorDismissSubscription model
+    pollingSubscription model @ errorDismissSubscription model @ columnCountSubscription model
 
 Program.mkProgram init update view
 |> Program.withSubscription combinedSubscription
