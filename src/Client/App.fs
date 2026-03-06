@@ -64,7 +64,7 @@ let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.getWorktrees () DataLoaded DataFailed
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.either worktreeApi.getSyncStatus () SyncStatusUpdate (fun _ -> SyncStatusUpdate Map.empty)
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
@@ -230,7 +230,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync branch (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.either worktreeApi.startSync branch (fun r -> SyncStarted (key, r)) (fun _ -> SyncStarted (key, Error "Network error"))
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -265,7 +265,7 @@ let update msg model =
                 Repos = updatedRepos
                 DeletedBranches = model.DeletedBranches |> Set.add branch }
         { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+        Cmd.OfAsync.either worktreeApi.deleteWorktree branch DeleteCompleted (fun _ -> DeleteCompleted (Error "Network error"))
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
@@ -274,10 +274,10 @@ let update msg model =
         { model with DeletedBranches = Set.empty }, fetchWorktrees ()
 
     | FocusSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult (fun _ -> SessionResult (Error "Network error"))
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.openNewTab path SessionResult (fun _ -> SessionResult (Error "Network error"))
 
     | SessionResult _ ->
         model, fetchWorktrees ()

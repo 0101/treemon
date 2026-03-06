@@ -15,10 +15,10 @@ let update (api: Lazy<IWorktreeApi>) msg : UpdateResult * Cmd<Msg> =
     match msg with
     | Archive branch ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.archiveWorktree branch) () OpCompleted
+        Cmd.OfAsync.either (fun () -> api.Value.archiveWorktree branch) () OpCompleted (fun _ -> OpCompleted (Error "Network error"))
     | Unarchive branch ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.unarchiveWorktree branch) () OpCompleted
+        Cmd.OfAsync.either (fun () -> api.Value.unarchiveWorktree branch) () OpCompleted (fun _ -> OpCompleted (Error "Network error"))
     | OpCompleted (Ok _) ->
         { RefreshWorktrees = true }, Cmd.none
     | OpCompleted (Error _) ->

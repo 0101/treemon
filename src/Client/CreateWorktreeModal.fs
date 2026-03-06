@@ -84,7 +84,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
                   BranchName = BranchName.create (form.Name.Trim())
                   BaseBranch = BranchName.create form.BaseBranch }
             { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
-            Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
+            Cmd.OfAsync.either api.Value.createWorktree request CreateWorktreeCompleted (fun _ -> CreateWorktreeCompleted (Error "Network error"))
         | _ -> just modal
 
     | CreateWorktreeCompleted (Ok _) ->
