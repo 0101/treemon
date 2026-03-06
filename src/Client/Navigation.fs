@@ -39,8 +39,7 @@ let getColumnCount () =
     Dom.document.querySelector ".card-grid"
     |> Option.ofObj
     |> Option.map (fun el ->
-        // Dom.window.getComputedStyle is not available in typed Browser bindings — keep dynamic
-        let cols: string = Dom.window?getComputedStyle(el)?getPropertyValue("grid-template-columns")
+        let cols: string = Dom.window.getComputedStyle(el).getPropertyValue("grid-template-columns")
         cols.Trim().Split(' ') |> Array.length)
     |> Option.defaultValue 1
 
