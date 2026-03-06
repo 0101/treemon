@@ -776,6 +776,30 @@ let deleteButton dispatch (wt: WorktreeStatus) =
 
 let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 
+let conflictIcon =
+    Svg.svg [
+        svg.className "conflict-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.custom ("role", "img")
+        svg.children [
+            Svg.title "Merge conflicts"
+            Svg.circle [ svg.cx 12; svg.cy 17; svg.r 1 ]
+            Svg.path [
+                svg.d "M12 10L12 14"
+                svg.custom ("strokeWidth", "2")
+                svg.custom ("strokeLinecap", "round")
+                svg.custom ("strokeLinejoin", "round")
+            ]
+            Svg.path [
+                svg.d "M3.44722 18.1056L10.2111 4.57771C10.9482 3.10361 13.0518 3.10362 13.7889 4.57771L20.5528 18.1056C21.2177 19.4354 20.2507 21 18.7639 21H5.23607C3.7493 21 2.78231 19.4354 3.44722 18.1056Z"
+                svg.custom ("strokeWidth", "2")
+                svg.custom ("strokeLinecap", "round")
+                svg.custom ("strokeLinejoin", "round")
+            ]
+        ]
+    ]
+
 let prBadgeContent (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
@@ -794,6 +818,7 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                 prop.target "_blank"
                 prop.text ($"PR #{pr.Id}")
             ]
+            if pr.HasConflicts then conflictIcon
             match pr.Comments with
             | WithResolution (unresolved, total) when total > 0 ->
                 Html.span [
