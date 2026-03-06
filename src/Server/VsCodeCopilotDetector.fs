@@ -375,10 +375,14 @@ let getLastMessage (worktreePath: string) : CardEvent option =
                                Status = None
                                Duration = None }
 
-let getLastUserMessage (worktreePath: string) : string option =
+let getLastUserMessage (worktreePath: string) : (string * DateTimeOffset) option =
     match getChatSessionsDir worktreePath |> Option.bind findMostRecentSessionFile with
     | None -> None
     | Some fi ->
+        let fileMtime = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
         getReconstructed fi
-        |> Option.bind (fun req -> req.UserText)
-        |> Option.map (truncateMessage 120)
+        |> Option.bind (fun req ->
+            req.UserText
+            |> Option.map (fun text ->
+                let ts = req.CompletedAt |> Option.defaultValue fileMtime
+                truncateMessage 120 text, ts))

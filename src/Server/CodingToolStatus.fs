@@ -97,15 +97,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             ClaudeDetector.getLastUserMessageFromFiles claudeFiles
         | Some Copilot ->
             let cliMsg = CopilotDetector.getLastUserMessage worktreePath
-
-            let vsCodeMsg =
-                VsCodeCopilotDetector.getLastUserMessage worktreePath
-                |> Option.map (fun text ->
-                    let mtime =
-                        VsCodeCopilotDetector.getSessionMtime worktreePath
-                        |> Option.defaultValue DateTimeOffset.MinValue
-
-                    (text, mtime))
+            let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
 
             [ cliMsg; vsCodeMsg ]
             |> List.choose id
@@ -115,14 +107,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             let claudeMsg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
             let copilotMsg = CopilotDetector.getLastUserMessage worktreePath
 
-            let vsCodeMsg =
-                VsCodeCopilotDetector.getLastUserMessage worktreePath
-                |> Option.map (fun text ->
-                    let mtime =
-                        VsCodeCopilotDetector.getSessionMtime worktreePath
-                        |> Option.defaultValue DateTimeOffset.MinValue
-
-                    (text, mtime))
+            let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
 
             [ claudeMsg; copilotMsg; vsCodeMsg ]
             |> List.choose id
