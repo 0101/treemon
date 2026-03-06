@@ -22,6 +22,8 @@ let private defaultModel : Model =
       BranchEvents = Map.empty
       SyncPending = Set.empty
       AppVersion = Some "1.0"
+      DeployBranch = None
+      SystemMetrics = None
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = Modal.Closed
@@ -568,6 +570,7 @@ type EnterKeySuppressedWhileModalOpenTests() =
         { RepoId = repoId
           Name = "TestRepo"
           Worktrees = []
+          ArchivedWorktrees = []
           IsReady = true
           IsCollapsed = false }
 

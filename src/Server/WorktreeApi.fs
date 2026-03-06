@@ -17,6 +17,7 @@ let loadFixtures (path: string) =
 
 let private assembleFromState
     (activeSessions: Set<string>)
+    (archivedBranches: Set<string>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
@@ -41,7 +42,11 @@ let private assembleFromState
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
-      HasActiveSession = Set.contains wt.Path activeSessions }
+      HasActiveSession = Set.contains wt.Path activeSessions
+      IsArchived =
+        wt.Branch
+        |> Option.map (fun b -> Set.contains b archivedBranches)
+        |> Option.defaultValue false }
 
 let private allWorktrees (state: RefreshScheduler.DashboardState) =
     state.Repos
@@ -96,7 +101,9 @@ let private getEditorConfig () =
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (rootPaths: Map<RepoId, string>)
     (appVersion: string)
+    (deployBranch: string option)
     : Async<DashboardResponse> =
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
@@ -108,9 +115,14 @@ let getWorktrees
             state.Repos
             |> Map.toList
             |> List.map (fun (repoId, repo) ->
+                let archivedBranches =
+                    rootPaths
+                    |> Map.tryFind repoId
+                    |> TreemonConfig.readArchivedBranchSet
+
                 let statuses =
                     repo.WorktreeList
-                    |> List.map (assembleFromState activeSessionPaths repo)
+                    |> List.map (assembleFromState activeSessionPaths archivedBranches repo)
 
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)
@@ -123,6 +135,8 @@ let getWorktrees
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
               AppVersion = appVersion
+              DeployBranch = deployBranch
+              SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd }
     }
 
@@ -202,6 +216,51 @@ let private deleteWorktree
                 return Error $"Could not identify repo root for worktree at '{wt.Path}'"
     }
 
+let private updateArchivedBranches
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (rootPaths: Map<RepoId, string>)
+    (setOp: string -> Set<string> -> Set<string>)
+    (branchName: BranchName)
+    =
+    let branch = BranchName.value branchName
+    async {
+        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let worktrees = allWorktrees state
+
+        let worktree =
+            worktrees
+            |> List.tryFind (fun wt -> wt.Branch = Some branch)
+
+        let repoId =
+            worktree
+            |> Option.bind (fun wt -> findRepoForPath state wt.Path)
+
+        let repoRoot =
+            repoId
+            |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
+
+        match worktree, repoId, repoRoot with
+        | Some _, Some rid, Some root ->
+            let liveBranches =
+                state.Repos
+                |> Map.tryFind rid
+                |> Option.map (fun repo -> repo.WorktreeList |> List.choose _.Branch |> Set.ofList)
+                |> Option.defaultValue Set.empty
+
+            TreemonConfig.modifyArchivedBranches root (fun existing ->
+                existing
+                |> Set.ofList
+                |> setOp branch
+                |> Set.intersect liveBranches
+                |> Set.toList)
+            agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh rid)
+            return Ok ()
+        | Some wt, _, _ ->
+            return Error $"Could not identify repo root for worktree at '{wt.Path}'"
+        | None, _, _ ->
+            return Error $"No worktree found for branch '{branch}'"
+    }
+
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
@@ -209,6 +268,7 @@ let worktreeApi
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
+    (deployBranch: string option)
     : IWorktreeApi =
     let fixtures = testFixtures |> Option.map loadFixtures
 
@@ -235,7 +295,7 @@ let worktreeApi
 
     match fixtures with
     | Some f ->
-        { getWorktrees = fun () -> async { return { f.Worktrees with EditorName = getEditorConfig () |> snd } }
+        { getWorktrees = fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } }
           openTerminal = fun _ -> async { return () }
           openEditor = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
@@ -245,11 +305,13 @@ let worktreeApi
           launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
           killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          archiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
+          unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
           getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
           createWorktree = fun _ -> async { return Ok() }
           openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent appVersion
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun branch ->
@@ -357,6 +419,8 @@ let worktreeApi
           killSession = fun wtPath ->
               withValidatedPath wtPath "killSession" (fun () ->
                   SessionManager.killSession sessionAgent wtPath)
+          archiveWorktree = updateArchivedBranches agent rootPaths Set.add
+          unarchiveWorktree = updateArchivedBranches agent rootPaths Set.remove
           getBranches = fun repoIdStr ->
               async {
                   let repoId = RepoId.create repoIdStr

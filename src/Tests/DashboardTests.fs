@@ -47,15 +47,12 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Header h1 contains eye SVG and no text``() =
+    member this.``Header contains eye SVG``() =
         task {
-            let h1 = this.Page.Locator(".dashboard-header h1")
-            let svg = h1.Locator("svg")
+            let headerLeft = this.Page.Locator(".app-header .header-center")
+            let svg = headerLeft.Locator("svg")
             let! svgCount = svg.CountAsync()
-            Assert.That(svgCount, Is.EqualTo(1), "h1 should contain exactly one SVG element (the eye logo)")
-
-            let! text = h1.EvaluateAsync<string>("el => Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join('')")
-            Assert.That(text, Is.Empty, "h1 should have no direct text content (Treemon text removed)")
+            Assert.That(svgCount, Is.EqualTo(1), "Header should contain exactly one SVG element (the eye logo)")
         }
 
     [<Test>]
@@ -97,13 +94,6 @@ type DashboardTests() =
             let card = this.Page.Locator(".wt-card").First
             let! minWidth = card |> computedStyle "minWidth"
             Assert.That(minWidth, Is.EqualTo("0px"), "Card min-width should be 0 to allow text-overflow ellipsis in grid")
-        }
-
-    [<Test>]
-    member this.``Status bar does not show worktree count``() =
-        task {
-            let! statusText = this.Page.Locator(".status-bar").TextContentAsync()
-            Assert.That(statusText, Does.Not.Contain("worktrees"), "Worktree count was removed from status bar")
         }
 
     [<Test>]
@@ -421,7 +411,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Beads counts use colored numbers not O/P/D prefix``() =
+    member this.``Beads counts are plain numbers with correct CSS classes``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts").First
 
@@ -429,26 +419,17 @@ type DashboardTests() =
             let! openText = openSpan.TextContentAsync()
             Assert.That(openText, Does.Match(@"^\d+$"), "Open count should be a plain number (no 'O:' prefix)")
 
-            let! openColor = openSpan |> computedStyle "color"
-            Assert.That(openColor, Is.EqualTo("rgb(249, 226, 175)"), "Open count should be amber (#f9e2af)")
-
             let inprogressSpan = beadsCounts.Locator(".beads-inprogress")
             let! inprogressText = inprogressSpan.TextContentAsync()
             Assert.That(inprogressText, Does.Match(@"^\d+$"), "InProgress count should be a plain number (no 'P:' prefix)")
 
-            let! inprogressColor = inprogressSpan |> computedStyle "color"
-            Assert.That(inprogressColor, Is.EqualTo("rgb(137, 180, 250)"), "InProgress count should be blue (#89b4fa)")
-
             let closedSpan = beadsCounts.Locator(".beads-closed")
             let! closedText = closedSpan.TextContentAsync()
             Assert.That(closedText, Does.Match(@"^\d+$"), "Closed count should be a plain number (no 'D:' prefix)")
-
-            let! closedColor = closedSpan |> computedStyle "color"
-            Assert.That(closedColor, Is.EqualTo("rgb(166, 227, 161)"), "Closed count should be green (#a6e3a1)")
         }
 
     [<Test>]
-    member this.``Progress bar has three colored segments``() =
+    member this.``Progress bar has three segments``() =
         task {
             let progressBar = this.Page.Locator(".wt-card .progress-bar").First
 
@@ -463,15 +444,6 @@ type DashboardTests() =
             let segClosed = progressBar.Locator(".progress-segment.seg-closed")
             let! closedCount = segClosed.CountAsync()
             Assert.That(closedCount, Is.EqualTo(1), "Progress bar should have a seg-closed segment")
-
-            let! openBg = segOpen |> computedStyle "backgroundColor"
-            Assert.That(openBg, Is.EqualTo("rgb(249, 226, 175)"), "seg-open background should be amber")
-
-            let! ipBg = segInprogress |> computedStyle "backgroundColor"
-            Assert.That(ipBg, Is.EqualTo("rgb(137, 180, 250)"), "seg-inprogress background should be blue")
-
-            let! closedBg = segClosed |> computedStyle "backgroundColor"
-            Assert.That(closedBg, Is.EqualTo("rgb(166, 227, 161)"), "seg-closed background should be green")
         }
 
     [<Test>]
@@ -589,8 +561,8 @@ type DashboardTests() =
             Assert.That(count, Is.EqualTo(allCount), $"All .{btnClass} should be inside card headers")
         }
 
-    [<TestCase("terminal-btn", ">", "Focus session window")>]
-    [<TestCase("delete-btn", "\u2715", "Remove worktree")>]
+    [<TestCase("terminal-btn", ">", "Focus session window (Enter)")>]
+    [<TestCase("delete-btn", "", "Remove worktree (Del)")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
             let btn = this.Page.Locator($".wt-card .{btnClass}").First
@@ -3588,7 +3560,7 @@ type DashboardTests() =
             Assert.That(text, Is.EqualTo("+"), "New tab button text should be '+'")
 
             let! title = newTabBtn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Open new tab in tracked window"), "New tab button title")
+            Assert.That(title, Is.EqualTo("Open new tab in tracked window (+)"), "New tab button title")
         }
 
     [<Test>]

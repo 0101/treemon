@@ -24,7 +24,9 @@ type Model =
       EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
-      DeletedBranches: Set<string> }
+      DeletedBranches: Set<string>
+      DeployBranch: string option
+      SystemMetrics: SystemMetrics option }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -48,6 +50,7 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
+    | ArchiveMsg of ArchiveViews.Msg
     | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
@@ -82,7 +85,9 @@ let init () =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
-      DeletedBranches = Set.empty },
+      DeletedBranches = Set.empty
+      DeployBranch = None
+      SystemMetrics = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -117,6 +122,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
+    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive (BranchName.create wt.Branch)))
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
@@ -141,9 +147,11 @@ let update msg model =
             let repos =
                 response.Repos
                 |> List.map (fun r ->
+                    let active, archived = r.Worktrees |> List.partition (fun wt -> not wt.IsArchived)
                     { RepoId = r.RepoId
                       Name = r.RootFolderName
-                      Worktrees = sortWorktrees model.SortMode r.Worktrees
+                      Worktrees = sortWorktrees model.SortMode active
+                      ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
                       Provider = r.Provider })
@@ -157,7 +165,9 @@ let update msg model =
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
-                DeletedBranches = stillPending }
+                DeletedBranches = stillPending
+                DeployBranch = response.DeployBranch
+                SystemMetrics = response.SystemMetrics }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
@@ -273,6 +283,11 @@ let update msg model =
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
 
+    | ArchiveMsg archiveMsg ->
+        let result, archiveCmd = ArchiveViews.update (lazy worktreeApi) archiveMsg
+        let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+        model, Cmd.batch [ Cmd.map ArchiveMsg archiveCmd; refreshCmd ]
+
     | ModalMsg modalMsg ->
         let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
         let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
@@ -281,9 +296,8 @@ let update msg model =
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
 
     | KeyPressed (key, hasModifier) ->
-        let scrollToFocus oldFocus newFocus =
-            let useCenter = isLargeJump model.Repos oldFocus newFocus
-            Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
+        let scrollToFocus hint newFocus =
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
         if CreateWorktreeModal.isOpen model.CreateModal then
             match key with
             | "Escape" ->
@@ -298,22 +312,22 @@ let update msg model =
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
-            let newFocus, navAction = navigateSpatial key cols model.Repos model.FocusedElement
+            let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
             let actionCmd =
                 match navAction with
                 | NoAction -> Cmd.none
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
             { model with FocusedElement = newFocus },
-            Cmd.batch [ actionCmd; scrollToFocus model.FocusedElement newFocus ]
+            Cmd.batch [ actionCmd; scrollToFocus scrollHint newFocus ]
         | "Home" ->
             let newFocus = navigateToFirst model.Repos
             { model with FocusedElement = newFocus },
-            scrollToFocus model.FocusedElement newFocus
+            scrollToFocus ScrollToTop newFocus
         | "End" ->
             let newFocus = navigateToLast model.Repos
             { model with FocusedElement = newFocus },
-            scrollToFocus model.FocusedElement newFocus
+            scrollToFocus ScrollToBottom newFocus
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -343,14 +357,7 @@ let pollingSubscription (model: Model) : Sub<Msg> =
     else
         [ [ "polling" ], worktreePolling ]
 
-let relativeTime (dt: System.DateTimeOffset) =
-    let now = System.DateTimeOffset.Now
-    let diff = now - dt
-    match diff with
-    | d when d.TotalMinutes < 1.0 -> "just now"
-    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
-    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
-    | d -> $"{int d.TotalDays}d ago"
+let relativeTime = ArchiveViews.relativeTime
 
 let ctClassName =
     function
@@ -460,7 +467,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.disabled disabled
                 yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
-                prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main")
+                prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
                 prop.text "Sync"
             ]
 
@@ -480,7 +487,7 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
                 prop.className "git-commit-msg"
                 prop.children [
                     Html.text wt.LastCommitMessage
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                 ]
             ]
         ]
@@ -710,7 +717,7 @@ let buildBadges (repoName: string) (builds: BuildInfo list) =
 
 let terminalButton dispatch (wt: WorktreeStatus) =
     let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
-    let title = if wt.HasActiveSession then "Focus session window" else "Open terminal"
+    let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
     Html.button [
         prop.className "terminal-btn"
         prop.title title
@@ -722,7 +729,7 @@ let terminalButton dispatch (wt: WorktreeStatus) =
 let editorButton dispatch editorName (wt: WorktreeStatus) =
     Html.button [
         prop.className "editor-btn"
-        prop.title $"Open in {editorName}"
+        prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
         prop.text "{⋯}"
@@ -731,22 +738,44 @@ let editorButton dispatch editorName (wt: WorktreeStatus) =
 let newTabButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
-        prop.title "Open new tab in tracked window"
+        prop.title "Open new tab in tracked window (+)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
         prop.text "+"
     ]
 
+let binIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "1.5")
+        svg.custom ("strokeLinecap", "round")
+        svg.children [
+            Svg.path [ svg.d "M20.5001 6H3.5" ]
+            Svg.path [ svg.d "M9.5 11L10 16" ]
+            Svg.path [ svg.d "M14.5 11L14 16" ]
+            Svg.path [
+                svg.d "M6.5 6C6.55588 6 6.58382 6 6.60915 5.99936C7.43259 5.97849 8.15902 5.45491 8.43922 4.68032C8.44784 4.65649 8.45667 4.62999 8.47434 4.57697L8.57143 4.28571C8.65431 4.03708 8.69575 3.91276 8.75071 3.8072C8.97001 3.38607 9.37574 3.09364 9.84461 3.01877C9.96213 3 10.0932 3 10.3553 3H13.6447C13.9068 3 14.0379 3 14.1554 3.01877C14.6243 3.09364 15.03 3.38607 15.2493 3.8072C15.3043 3.91276 15.3457 4.03708 15.4286 4.28571L15.5257 4.57697C15.5433 4.62992 15.5522 4.65651 15.5608 4.68032C15.841 5.45491 16.5674 5.97849 17.3909 5.99936C17.4162 6 17.4441 6 17.5 6"
+                svg.custom ("strokeLinecap", "butt")
+            ]
+            Svg.path [ svg.d "M18.3735 15.3991C18.1965 18.054 18.108 19.3815 17.243 20.1907C16.378 21 15.0476 21 12.3868 21H11.6134C8.9526 21 7.6222 21 6.75719 20.1907C5.89218 19.3815 5.80368 18.054 5.62669 15.3991L5.16675 8.5M18.8334 8.5L18.6334 11.5" ]
+        ]
+    ]
+
 let deleteButton dispatch (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
-        prop.title "Remove worktree"
+        prop.title "Remove worktree (Del)"
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
             dispatch (ConfirmDeleteWorktree wt.Branch))
-        prop.text "\u2715"
+        prop.children [ binIcon ]
     ]
+
+let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 
 let prBadgeContent (repoName: string) (pr: PrInfo) =
     React.fragment [
@@ -795,38 +824,7 @@ let prRow (repoName: string) (wt: WorktreeStatus) =
             prop.children [ prBadgeContent repoName pr ]
         ]
 
-let workMetricsView (metrics: WorkMetrics option) =
-    match metrics with
-    | None -> Html.none
-    | Some m when m.CommitCount = 0 -> Html.none
-    | Some m ->
-        let displayCount = min m.CommitCount 90
-        let overflow = m.CommitCount - displayCount
-        Html.span [
-            prop.className "work-metrics"
-            prop.children [
-                Html.span [
-                    prop.className "commit-grid"
-                    prop.children (
-                        List.init displayCount (fun _ ->
-                            Html.span [ prop.className "commit-square" ])
-                    )
-                ]
-                if overflow > 0 then
-                    Html.span [ prop.className "commit-overflow"; prop.text $"+{overflow}" ]
-                match m.LinesAdded, m.LinesRemoved with
-                | 0, 0 -> Html.none
-                | added, removed ->
-                    Html.span [
-                        prop.className "diff-stats"
-                        prop.children [
-                            Html.span [ prop.className "diff-added"; prop.text $"+{added}" ]
-                            Html.text " "
-                            Html.span [ prop.className "diff-removed"; prop.text $"-{removed}" ]
-                        ]
-                    ]
-            ]
-        ]
+let workMetricsView = ArchiveViews.workMetricsView
 
 let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
@@ -842,10 +840,11 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime wt.LastCommitTime) ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
                     editorButton dispatch editorName wt
+                    archiveButton dispatch wt
                     deleteButton dispatch wt
                 ]
             ]
@@ -882,6 +881,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                             terminalButton dispatch wt
                             if wt.HasActiveSession then newTabButton dispatch wt
                             editorButton dispatch editorName wt
+                            archiveButton dispatch wt
                             deleteButton dispatch wt
                         ]
                     ]
@@ -928,6 +928,8 @@ let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option
     let isFocused = focusedElement = Some (Card scopedKey)
     if isCompact then compactWorktreeCard dispatch editorName repoName scopedKey isFocused wt
     else worktreeCard dispatch editorName repoName events isPending scopedKey isFocused wt
+
+let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
 
 let skeletonCard () =
     Html.div [
@@ -1158,76 +1160,138 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                         prop.className "card-grid"
                         prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
                     ]
+                    archiveSection dispatch repo.ArchivedWorktrees
         ]
     ]
 
-let view model dispatch =
+let barColor (pct: float) =
+    if pct >= 80.0 then "#f38ba8"
+    elif pct >= 50.0 then "#f9e2af"
+    else "#6c7086"
+
+let labelColor (pct: float) =
+    if pct >= 80.0 then Some "#f38ba8"
+    elif pct >= 50.0 then Some "#f9e2af"
+    else None
+
+let viewMetricBar (pct: float) (label: string) =
     Html.div [
-        prop.className "dashboard"
-        prop.tabIndex 0
-        prop.autoFocus true
-        prop.onKeyDown (fun e ->
-            match e.key with
-            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                e.preventDefault()
-                dispatch (KeyPressed (e.key, false))
-            | key ->
-                let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                dispatch (KeyPressed (key, hasModifier)))
+        prop.className "metric-bar-row"
         prop.children [
             Html.div [
-                prop.className "dashboard-header"
+                prop.className "metric-bar-track"
                 prop.children [
                     Html.div [
-                        prop.className "header-top"
-                        prop.children [
-                            Html.h1 [
-                                prop.children [
-                                    if model.HasError then viewEyeRolledBack
-                                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
-                                    else viewEyeClosed
-                                ]
-                            ]
-                            Html.div [
-                                prop.className "header-controls"
-                                prop.children [
-                                    Html.button [
-                                        prop.className "ctrl-btn"
-                                        yield! noFocusProps
-                                        prop.onClick (fun _ -> dispatch ToggleSort)
-                                        prop.text ($"Sort: {sortLabel model.SortMode}")
-                                    ]
-                                    Html.button [
-                                        prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
-                                        yield! noFocusProps
-                                        prop.onClick (fun _ -> dispatch ToggleCompact)
-                                        prop.text "Compact"
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]
-                    Html.div [
-                        prop.className "status-bar"
-                        prop.children [
-                            if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
-                                Html.span "Waiting for first refresh..."
+                        prop.className "metric-bar-fill"
+                        prop.style [
+                            style.width (length.percent (min pct 100.0))
+                            style.backgroundColor (barColor pct)
                         ]
                     ]
                 ]
             ]
+            Html.span [
+                prop.className "metric-bar-label"
+                match labelColor pct with
+                | Some c -> prop.style [ style.color c ]
+                | None -> ()
+                prop.text label
+            ]
+        ]
+    ]
 
-            if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
-                skeletonGrid ()
-            else
-                Html.div [
-                    prop.className "repo-list"
-                    prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+let viewSystemMetrics (metrics: SystemMetrics option) =
+    match metrics with
+    | None -> Html.none
+    | Some m ->
+        let memPct = float m.MemoryUsedMb / float m.MemoryTotalMb * 100.0
+        Html.div [
+            prop.className "system-metrics"
+            prop.children [
+                viewMetricBar m.CpuPercent "CPU"
+                viewMetricBar memPct "RAM"
+            ]
+        ]
+
+let viewAppHeader model dispatch =
+    Html.div [
+        prop.className "app-header"
+        prop.children [
+            Html.div [
+                prop.className "header-left"
+                prop.children [
+                    viewSystemMetrics model.SystemMetrics
                 ]
+            ]
+            Html.div [
+                prop.className "header-center"
+                prop.children [
+                    if model.HasError then viewEyeRolledBack
+                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
+                    else viewEyeClosed
+                ]
+            ]
+            Html.div [
+                prop.className "header-right"
+                prop.children [
+                    match model.DeployBranch with
+                    | Some branch ->
+                        Html.span [ prop.className "deploy-branch"; prop.text branch ]
+                    | None -> ()
+                    Html.div [
+                        prop.className "header-controls"
+                        prop.children [
+                            Html.button [
+                                prop.className "ctrl-btn"
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleSort)
+                                prop.text ($"Sort: {sortLabel model.SortMode}")
+                            ]
+                            Html.button [
+                                prop.className (if model.IsCompact then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleCompact)
+                                prop.text "Compact"
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ]
+    ]
 
-            schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+let view model dispatch =
+    React.fragment [
+        viewAppHeader model dispatch
+        Html.div [
+            prop.className "dashboard"
+            prop.tabIndex 0
+            prop.autoFocus true
+            prop.onKeyDown (fun e ->
+                match e.key with
+                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                    e.preventDefault()
+                    dispatch (KeyPressed (e.key, false))
+                | key ->
+                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                    dispatch (KeyPressed (key, hasModifier)))
+            prop.children [
+                if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
+                    Html.div [
+                        prop.className "status-bar"
+                        prop.children [ Html.span "Waiting for first refresh..." ]
+                    ]
+                    skeletonGrid ()
+                else
+                    Html.div [
+                        prop.className "repo-list"
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+                    ]
 
-            CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+
+                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+            ]
         ]
     ]
 

@@ -67,7 +67,7 @@ type PickMostOverdueTests() =
         Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
     [<Test>]
-    member _.``Multiple overdue returns first overdue in list order``() =
+    member _.``Multiple overdue returns most overdue task``() =
         let now = DateTimeOffset.UtcNow
         let slightlyOverdue = now.AddSeconds(-20.0)
         let veryOverdue = now.AddSeconds(-200.0)
@@ -82,7 +82,7 @@ type PickMostOverdueTests() =
 
         let result = pickMostOverdue now lastRuns tasks
 
-        Assert.That(result, Is.EqualTo(Some(RefreshWorktreeList testRepoId)))
+        Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
     [<Test>]
     member _.``Empty task list returns None``() =
@@ -569,7 +569,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
         let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
@@ -598,7 +598,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
@@ -627,7 +627,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
         Assert.That(tasks.Length, Is.EqualTo(15))
@@ -639,7 +639,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList repos
+        let tasks = buildTaskList Map.empty repos
 
         let localTasks =
             tasks
@@ -655,6 +655,73 @@ type BuildTaskListTests() =
 
         Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(3))
         Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(3))
+
+    [<Test>]
+    member _.``Archived worktree excluded from per-worktree tasks``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildTaskList archivedPaths repos
+
+        let perWorktreePaths =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+
+        Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"),
+            "Archived worktree should not appear in per-worktree tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
+            "Non-archived worktree should have Git, Beads, CodingTool tasks")
+
+    [<Test>]
+    member _.``Repo-level tasks unaffected by archived paths``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildTaskList archivedPaths repos
+
+        let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList r -> r = repo1 | _ -> false)
+        let hasPr = tasks |> List.exists (function RefreshPr r -> r = repo1 | _ -> false)
+        let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
+
+        Assert.That(hasWorktreeList, Is.True, "RefreshWorktreeList should still be present")
+        Assert.That(hasPr, Is.True, "RefreshPr should still be present")
+        Assert.That(hasFetch, Is.True, "RefreshFetch should still be present")
+
+    [<Test>]
+    member _.``Empty archived set produces same results as no filtering``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let tasksNoArchive = buildTaskList Map.empty repos
+        let tasksEmptyArchive = buildTaskList ([ RepoId "Repo1", Set.empty ] |> Map.ofList) repos
+
+        Assert.That(tasksEmptyArchive, Is.EqualTo(tasksNoArchive),
+            "Empty archived set should produce identical task list")
+
+    [<Test>]
+    member _.``All worktrees archived leaves only repo-level tasks``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildTaskList archivedPaths repos
+
+        let hasPerWorktree =
+            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+
+        Assert.That(hasPerWorktree, Is.False, "No per-worktree tasks when all worktrees archived")
+        Assert.That(tasks.Length, Is.EqualTo(3), "Should have WorktreeList + Pr + Fetch")
 
 
 [<TestFixture>]
@@ -699,7 +766,7 @@ type BuildPhase2TasksTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks repos
+        let tasks = buildPhase2Tasks Map.empty repos
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
@@ -717,7 +784,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks repos
+        let tasks = buildPhase2Tasks Map.empty repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList _ -> true | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr _ -> true | _ -> false)
@@ -727,7 +794,7 @@ type BuildPhase2TasksTests() =
 
     [<Test>]
     member _.``Empty repos returns empty task list``() =
-        let tasks = buildPhase2Tasks Map.empty
+        let tasks = buildPhase2Tasks Map.empty Map.empty
         Assert.That(tasks, Is.Empty)
 
     [<Test>]
@@ -736,10 +803,70 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", PerRepoState.empty ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks repos
+        let tasks = buildPhase2Tasks Map.empty repos
 
         Assert.That(tasks.Length, Is.EqualTo(1))
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
+
+    [<Test>]
+    member _.``Archived worktree gets Git but not Beads or CodingTool``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildPhase2Tasks archivedPaths repos
+
+        let archivedGit = tasks |> List.filter (function RefreshGit(_, p) -> p = "/r1/feat" | _ -> false)
+        let archivedBeads = tasks |> List.filter (function RefreshBeads(_, p) -> p = "/r1/feat" | _ -> false)
+        let archivedCoding = tasks |> List.filter (function RefreshCodingTool(_, p) -> p = "/r1/feat" | _ -> false)
+
+        Assert.That(archivedGit.Length, Is.EqualTo(1),
+            "Archived worktree should still get RefreshGit for commit data")
+        Assert.That(archivedBeads.Length, Is.EqualTo(0),
+            "Archived worktree should not get RefreshBeads")
+        Assert.That(archivedCoding.Length, Is.EqualTo(0),
+            "Archived worktree should not get RefreshCodingTool")
+
+        let activePaths =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+            |> List.filter ((=) "/r1/main")
+
+        Assert.That(activePaths.Length, Is.EqualTo(3),
+            "Non-archived worktree should have Git, Beads, CodingTool tasks")
+
+    [<Test>]
+    member _.``RefreshFetch unaffected by archived paths``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildPhase2Tasks archivedPaths repos
+
+        let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
+        let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
+
+        Assert.That(hasFetch, Is.True, "RefreshFetch should still be present even when all worktrees archived")
+        Assert.That(gitCount, Is.EqualTo(2), "Both archived worktrees should still get RefreshGit")
+        Assert.That(tasks.Length, Is.EqualTo(3), "RefreshFetch + 2 RefreshGit when all worktrees archived")
+
+    [<Test>]
+    member _.``Empty archived set produces same results as no filtering``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let tasksNoArchive = buildPhase2Tasks Map.empty repos
+        let tasksEmptyArchive = buildPhase2Tasks ([ RepoId "Repo1", Set.empty ] |> Map.ofList) repos
+
+        Assert.That(tasksEmptyArchive, Is.EqualTo(tasksNoArchive),
+            "Empty archived set should produce identical phase 2 task list")
 
 
 [<TestFixture>]

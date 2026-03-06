@@ -71,3 +71,39 @@ let listWindowsTerminalWindows () =
 
 let closeWindow (hwnd: nativeint) =
     PostMessageNative(hwnd, WM_CLOSE, 0n, 0n)
+
+// System metrics P/Invoke
+
+[<Struct; StructLayout(LayoutKind.Sequential)>]
+type MEMORYSTATUSEX =
+    val mutable dwLength: uint32
+    val mutable dwMemoryLoad: uint32
+    val mutable ullTotalPhys: uint64
+    val mutable ullAvailPhys: uint64
+    val mutable ullTotalPageFile: uint64
+    val mutable ullAvailPageFile: uint64
+    val mutable ullTotalVirtual: uint64
+    val mutable ullAvailVirtual: uint64
+    val mutable ullAvailExtendedVirtual: uint64
+
+[<DllImport("kernel32.dll", SetLastError = true)>]
+extern bool private GlobalMemoryStatusEx(MEMORYSTATUSEX& lpBuffer)
+
+[<Struct; StructLayout(LayoutKind.Sequential)>]
+type FILETIME =
+    val mutable dwLowDateTime: uint32
+    val mutable dwHighDateTime: uint32
+
+[<DllImport("kernel32.dll", SetLastError = true)>]
+extern bool private GetSystemTimes(FILETIME& lpIdleTime, FILETIME& lpKernelTime, FILETIME& lpUserTime)
+
+let readMemoryStatus () =
+    let mutable status = MEMORYSTATUSEX()
+    status.dwLength <- uint32 (Marshal.SizeOf<MEMORYSTATUSEX>())
+    if GlobalMemoryStatusEx(&status) then Some status else None
+
+let readSystemTimes () =
+    let mutable idle = FILETIME()
+    let mutable kernel = FILETIME()
+    let mutable user = FILETIME()
+    if GetSystemTimes(&idle, &kernel, &user) then Some (idle, kernel, user) else None

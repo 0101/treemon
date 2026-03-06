@@ -188,7 +188,32 @@ let private intervalOf = function
     | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
     | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
 
-let buildTaskList (repos: Map<RepoId, PerRepoState>) =
+let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
+    rootPaths
+    |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root))
+
+let resolveArchivedPaths (archivedBranchSets: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
+    repos
+    |> Map.map (fun repoId repo ->
+        let archivedBranches =
+            archivedBranchSets
+            |> Map.tryFind repoId
+            |> Option.defaultValue Set.empty
+
+        repo.WorktreeList
+        |> List.choose (fun wt ->
+            wt.Branch
+            |> Option.filter (fun b -> Set.contains b archivedBranches)
+            |> Option.map (fun _ -> wt.Path))
+        |> Set.ofList)
+
+let private isPathArchived (archivedPaths: Map<RepoId, Set<string>>) repoId path =
+    archivedPaths
+    |> Map.tryFind repoId
+    |> Option.map (Set.contains path)
+    |> Option.defaultValue false
+
+let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
 
     let worktreeLists =
@@ -198,6 +223,7 @@ let buildTaskList (repos: Map<RepoId, PerRepoState>) =
         repoList
         |> List.collect (fun (repoId, repo) ->
             repo.WorktreeList
+            |> List.filter (fun wt -> not (isPathArchived archivedPaths repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
@@ -213,16 +239,18 @@ let buildTaskList (repos: Map<RepoId, PerRepoState>) =
 let buildPhase1Tasks (rootPaths: Map<RepoId, string>) =
     rootPaths |> Map.toList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
 
-let buildPhase2Tasks (repos: Map<RepoId, PerRepoState>) =
+let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.toList
     |> List.collect (fun (repoId, repo) ->
         let perWorktree =
             repo.WorktreeList
             |> List.collect (fun wt ->
+                let archived = isPathArchived archivedPaths repoId wt.Path
                 [ RefreshGit(repoId, wt.Path)
-                  RefreshBeads(repoId, wt.Path)
-                  RefreshCodingTool(repoId, wt.Path) ])
+                  if not archived then
+                      RefreshBeads(repoId, wt.Path)
+                      RefreshCodingTool(repoId, wt.Path) ])
 
         RefreshFetch repoId :: perWorktree)
 
@@ -373,8 +401,10 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let! phase1Runs = runPhase agent rootPaths phase1Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
+        let archivedBranchSets = readArchivedBranchSets rootPaths
+        let archivedPaths = resolveArchivedPaths archivedBranchSets state.Repos
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
-        let phase2Tasks = buildPhase2Tasks state.Repos
+        let phase2Tasks = buildPhase2Tasks archivedPaths state.Repos
         let! phase2Runs = runPhase agent rootPaths phase2Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
@@ -393,6 +423,7 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
 let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.filter (fun task -> deadlineOf lastRuns task <= now)
+    |> List.sortBy (deadlineOf lastRuns)
     |> List.tryHead
 
 let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
@@ -427,7 +458,9 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 if Map.isEmpty state.Repos then initialRepos
                 else state.Repos
 
-            let tasks = buildTaskList repos
+            let archivedBranchSets = readArchivedBranchSets rootPaths
+            let archivedPaths = resolveArchivedPaths archivedBranchSets repos
+            let tasks = buildTaskList archivedPaths repos
             let now = DateTimeOffset.UtcNow
 
             let effectiveLastRuns =

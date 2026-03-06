@@ -99,7 +99,8 @@ type WorktreeStatus =
       MainBehindCount: int
       IsDirty: bool
       WorkMetrics: WorkMetrics option
-      HasActiveSession: bool }
+      HasActiveSession: bool
+      IsArchived: bool }
 
 [<RequireQualifiedAccess>]
 type StepStatus =
@@ -127,11 +128,18 @@ type RepoWorktrees =
       IsReady: bool
       Provider: RepoProvider option }
 
+type SystemMetrics =
+    { CpuPercent: float
+      MemoryUsedMb: int
+      MemoryTotalMb: int }
+
 type DashboardResponse =
     { Repos: RepoWorktrees list
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       AppVersion: string
+      DeployBranch: string option
+      SystemMetrics: SystemMetrics option
       EditorName: string }
 
 type IWorktreeApi =
@@ -145,6 +153,8 @@ type IWorktreeApi =
       launchSession: LaunchRequest -> Async<Result<unit, string>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>
+      archiveWorktree: BranchName -> Async<Result<unit, string>>
+      unarchiveWorktree: BranchName -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>> }
