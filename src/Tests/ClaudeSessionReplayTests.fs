@@ -29,6 +29,12 @@ let private readLinesReversedUpTo (fileName: string) (maxLineIndex: int) (maxLin
     |> Array.truncate maxLines
     |> Array.toList
 
+let private kindFromFileName (fileName: string) =
+    if fileName.StartsWith("subagent-") then Subagent else Parent
+
+let private makeFileData (kind: SessionFileKind) (lastWrite: DateTimeOffset) (lines: string list) =
+    { Kind = kind; LastWriteUtc = lastWrite; LastLinesReversed = lines }
+
 let private executorLines = readLastLinesReversed "subagent-executor.jsonl" 20
 let private reviewerClaudeLines = readLastLinesReversed "subagent-reviewer-claude.jsonl" 20
 let private reviewerGeminiLines = readLastLinesReversed "subagent-reviewer-gemini.jsonl" 20
@@ -39,9 +45,9 @@ let private now = DateTimeOffset(2026, 3, 5, 15, 0, 0, TimeSpan.Zero)
 let private recentTime = now.AddSeconds(-30.0)
 
 let private completedSubagentFiles =
-    [ (recentTime, executorLines)
-      (recentTime, reviewerClaudeLines)
-      (recentTime, reviewerGeminiLines) ]
+    [ makeFileData Subagent recentTime executorLines
+      makeFileData Subagent recentTime reviewerClaudeLines
+      makeFileData Subagent recentTime reviewerGeminiLines ]
 
 
 [<TestFixture>]
@@ -51,13 +57,13 @@ type SessionReplayTests() =
 
     [<Test>]
     member _.``Parent actively working with completed subagents yields Working``() =
-        let files = (recentTime, parentActiveLines) :: completedSubagentFiles
+        let files = (makeFileData Parent recentTime parentActiveLines) :: completedSubagentFiles
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Working))
 
     [<Test>]
     member _.``All files completed yields Done``() =
-        let files = (recentTime, parentCompletedLines) :: completedSubagentFiles
+        let files = (makeFileData Parent recentTime parentCompletedLines) :: completedSubagentFiles
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Done))
 
@@ -65,18 +71,18 @@ type SessionReplayTests() =
     member _.``All files stale yields Idle``() =
         let staleTime = now.AddHours(-3.0)
         let files =
-            [ (staleTime, parentCompletedLines)
-              (staleTime, executorLines)
-              (staleTime, reviewerClaudeLines)
-              (staleTime, reviewerGeminiLines) ]
+            [ makeFileData Parent staleTime parentCompletedLines
+              makeFileData Subagent staleTime executorLines
+              makeFileData Subagent staleTime reviewerClaudeLines
+              makeFileData Subagent staleTime reviewerGeminiLines ]
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Idle))
 
     [<Test>]
-    member _.``One active file among completed files yields Working``() =
+    member _.``One active parent among completed subagents yields Working``() =
         let files =
-            [ (recentTime, parentActiveLines)
-              (recentTime, executorLines) ]
+            [ makeFileData Parent recentTime parentActiveLines
+              makeFileData Subagent recentTime executorLines ]
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Working))
 
@@ -84,21 +90,22 @@ type SessionReplayTests() =
     member _.``Single file with WaitingForUser yields WaitingForUser``() =
         let askUserEntry =
             """{"type":"assistant","timestamp":"2026-03-05T14:59:30.000Z","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"AskUserQuestion","id":"toolu_test","input":{"question":"Which approach?"}}]}}"""
-        let files = [ (recentTime, [ askUserEntry ]) ]
+        let files = [ makeFileData Parent recentTime [ askUserEntry ] ]
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(WaitingForUser))
 
     [<Test>]
     member _.``Recently completed file yields Working due to Done-to-Working conversion``() =
         let justNow = now.AddSeconds(-5.0)
-        let files = [ (justNow, executorLines) ]
+        let files = [ makeFileData Subagent justNow executorLines ]
         let result = getStatusFromFiles now files
+        // No parent files => parent status defaults to Idle, subagent Working upgrades to Working
         Assert.That(result, Is.EqualTo(Working))
 
     [<Test>]
     member _.``File older than 2 hours yields Idle regardless of content``() =
         let oldTime = now.AddHours(-2.5)
-        let files = [ (oldTime, parentActiveLines) ]
+        let files = [ makeFileData Parent oldTime parentActiveLines ]
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Idle))
 
@@ -106,3 +113,92 @@ type SessionReplayTests() =
     member _.``Empty file list yields Idle``() =
         let result = getStatusFromFiles now []
         Assert.That(result, Is.EqualTo(Idle))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ParentAuthoritativeResolutionTests() =
+
+    let makeWorkingEntry timestamp =
+        $"""{{"type":"user","timestamp":"{timestamp}","message":{{"content":[{{"type":"text","text":"do something"}}]}}}}"""
+
+    let makeDoneEntry timestamp =
+        $"""{{"type":"assistant","timestamp":"{timestamp}","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"all done"}}]}}}}"""
+
+    let makeWaitingEntry timestamp =
+        $"""{{"type":"assistant","timestamp":"{timestamp}","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","name":"AskUserQuestion","id":"toolu_test","input":{{"question":"Which approach?"}}}}]}}}}"""
+
+    [<Test>]
+    member _.``Parent Working + subagent Done = Working``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ]
+              makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``Parent WaitingForUser + subagent Working = WaitingForUser``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeWaitingEntry "2026-03-05T14:59:30.000Z" ]
+              makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(WaitingForUser))
+
+    [<Test>]
+    member _.``Parent Done + subagent Working = Working``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
+              makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``Parent Done + subagent Done = Done``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:30.000Z" ]
+              makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Done))
+
+    [<Test>]
+    member _.``Parent Idle + subagent Working = Working``() =
+        let files =
+            [ makeFileData Parent recentTime []
+              makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``No parent files with subagent Working = Working (parent defaults to Idle)``() =
+        let files =
+            [ makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``No parent files with subagent Done = Done from subagent does not upgrade Idle``() =
+        let files =
+            [ makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        // Parent defaults to Idle, subagent Done does not upgrade
+        Assert.That(result, Is.EqualTo(Idle))
+
+    [<Test>]
+    member _.``Parent WaitingForUser + multiple subagents Working = WaitingForUser``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeWaitingEntry "2026-03-05T14:59:30.000Z" ]
+              makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ]
+              makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(WaitingForUser))
+
+    [<Test>]
+    member _.``Parent Done + one subagent Working among Done subagents = Working``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
+              makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
+              makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ]
+              makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Working))

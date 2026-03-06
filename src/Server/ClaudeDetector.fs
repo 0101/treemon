@@ -5,6 +5,13 @@ open System.IO
 open System.Text.Json
 open Shared
 
+type SessionFileKind = Parent | Subagent
+
+type SessionFileData =
+    { Kind: SessionFileKind
+      LastWriteUtc: DateTimeOffset
+      LastLinesReversed: string list }
+
 let private claudeProjectsDir =
     Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -15,11 +22,30 @@ let private claudeProjectsDir =
 let encodeWorktreePath (worktreePath: string) =
     worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
 
+let private classifyFile (projectDir: string) (fi: FileInfo) =
+    let relativePath = Path.GetRelativePath(projectDir, fi.FullName)
+    let isSubagent =
+        relativePath.Contains(Path.Combine("subagents", ""))
+        || relativePath.Contains("subagents/")
+    if isSubagent then Subagent else Parent
+
 let private findAllJsonlFiles (projectDir: string) =
     try
         if Directory.Exists(projectDir) then
-            Directory.GetFiles(projectDir, "*.jsonl")
-            |> Array.map (fun f -> FileInfo(f))
+            let topLevel =
+                Directory.GetFiles(projectDir, "*.jsonl")
+                |> Array.map (fun f -> FileInfo(f))
+            let subagentFiles =
+                Directory.GetDirectories(projectDir)
+                |> Array.collect (fun sessionDir ->
+                    let subagentsDir = Path.Combine(sessionDir, "subagents")
+                    if Directory.Exists(subagentsDir) then
+                        Directory.GetFiles(subagentsDir, "*.jsonl")
+                        |> Array.map (fun f -> FileInfo(f))
+                    else
+                        Array.empty)
+            Array.append topLevel subagentFiles
+            |> Array.map (fun fi -> fi, classifyFile projectDir fi)
             |> Array.toList
         else
             []
@@ -167,13 +193,13 @@ let private statusPriority = function
     | Done -> 1
     | Idle -> 0
 
-let private getFileStatus (now: DateTimeOffset) (fileLastWriteUtc: DateTimeOffset, lastLinesReversed: string list) =
-    let fileAge = now - fileLastWriteUtc
+let private getFileStatus (now: DateTimeOffset) (file: SessionFileData) =
+    let fileAge = now - file.LastWriteUtc
     if fileAge > TimeSpan.FromHours(2.0) then
         Idle
     else
         let parsed =
-            lastLinesReversed
+            file.LastLinesReversed
             |> List.tryPick tryParseEntryKind
             |> Option.map (fun (kind, timestamp) ->
                 let entryAge =
@@ -188,13 +214,28 @@ let private getFileStatus (now: DateTimeOffset) (fileLastWriteUtc: DateTimeOffse
         | Some (status, _) -> status
         | None -> Idle
 
-let internal getStatusFromFiles (now: DateTimeOffset) (files: (DateTimeOffset * string list) list) =
+let private bestStatusByKind (now: DateTimeOffset) (kind: SessionFileKind) (files: SessionFileData list) =
+    files
+    |> List.filter (fun f -> f.Kind = kind)
+    |> List.map (getFileStatus now)
+    |> function
+       | [] -> None
+       | statuses -> statuses |> List.maxBy statusPriority |> Some
+
+let internal getStatusFromFiles (now: DateTimeOffset) (files: SessionFileData list) =
     match files with
     | [] -> Idle
     | _ ->
-        files
-        |> List.map (getFileStatus now)
-        |> List.maxBy statusPriority
+        let parentStatus = bestStatusByKind now Parent files |> Option.defaultValue Idle
+        match parentStatus with
+        | Working | WaitingForUser -> parentStatus
+        | Done | Idle ->
+            let anySubagentWorking =
+                files
+                |> List.filter (fun f -> f.Kind = Subagent)
+                |> List.exists (fun f -> getFileStatus now f = Working)
+            if anySubagentWorking then Working
+            else parentStatus
 
 let getStatus (worktreePath: string) =
     let encoded = encodeWorktreePath worktreePath
@@ -202,11 +243,11 @@ let getStatus (worktreePath: string) =
 
     let files =
         findAllJsonlFiles projectDir
-        |> List.choose (fun fi ->
+        |> List.choose (fun (fi, kind) ->
             try
                 let lastWrite = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
                 let lines = readLastLines fi.FullName 20
-                Some(lastWrite, lines)
+                Some { Kind = kind; LastWriteUtc = lastWrite; LastLinesReversed = lines }
             with ex ->
                 Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
                 None)
@@ -260,7 +301,9 @@ let getSessionMtime (worktreePath: string) =
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
     findAllJsonlFiles projectDir
-    |> List.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+    |> List.choose (fun (fi, kind) ->
+        if kind = Parent then Some(DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+        else None)
     |> List.sortDescending
     |> List.tryHead
 
@@ -269,9 +312,11 @@ let getLastMessage (worktreePath: string) =
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
     findAllJsonlFiles projectDir
-    |> List.choose (fun fi ->
-        readLastLines fi.FullName 20
-        |> List.tryPick tryParseAssistantText)
+    |> List.choose (fun (fi, kind) ->
+        if kind = Parent then
+            readLastLines fi.FullName 20
+            |> List.tryPick tryParseAssistantText
+        else None)
     |> List.sortByDescending snd
     |> List.tryHead
     |> Option.map (fun (text, timestamp) ->
@@ -394,7 +439,9 @@ let getLastUserMessage (worktreePath: string) =
     let projectDir = Path.Combine(claudeProjectsDir, encoded)
 
     findAllJsonlFiles projectDir
-    |> List.choose (fun fi -> scanForUserMessage fi.FullName)
+    |> List.choose (fun (fi, kind) ->
+        if kind = Parent then scanForUserMessage fi.FullName
+        else None)
     |> List.sortByDescending snd
     |> List.tryHead
     |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
