@@ -1,0 +1,11 @@
+{
+  "number": 7,
+  "title": "PR with unknown merge status",
+  "state": "open",
+  "draft": false,
+  "merged_at": null,
+  "mergeable": null,
+  "head": { "ref": "feature/unknown-merge" },
+  "comments": 0,
+  "review_comments": 0
+}

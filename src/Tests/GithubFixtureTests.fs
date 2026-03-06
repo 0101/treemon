@@ -161,3 +161,34 @@ type ParseFailedJobsFixtureTests() =
     member _.``Invalid JSON returns None``() =
         let result = parseFailedJobs "not json"
         Assert.That(result, Is.EqualTo(None))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ParsePrMergeabilityTests() =
+
+    [<Test>]
+    member _.``PR with mergeable false has conflicts``() =
+        let result = readFixture "pr-detail-conflicts.json" |> parsePrMergeability
+        Assert.That(result, Is.True)
+
+    [<Test>]
+    member _.``PR with mergeable true has no conflicts``() =
+        let result = readFixture "pr-detail-mergeable.json" |> parsePrMergeability
+        Assert.That(result, Is.False)
+
+    [<Test>]
+    member _.``PR with mergeable null has no conflicts``() =
+        let result = readFixture "pr-detail-null-mergeable.json" |> parsePrMergeability
+        Assert.That(result, Is.False)
+
+    [<Test>]
+    member _.``Invalid JSON returns false``() =
+        let result = parsePrMergeability "not json"
+        Assert.That(result, Is.False)
+
+    [<Test>]
+    member _.``JSON without mergeable field returns false``() =
+        let result = parsePrMergeability """{"number": 1, "title": "test"}"""
+        Assert.That(result, Is.False)
