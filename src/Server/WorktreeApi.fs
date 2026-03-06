@@ -68,6 +68,14 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
 
 let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
+let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
+    state.Repos
+    |> Map.values
+    |> Seq.tryPick (fun repo ->
+        repo.CodingToolData
+        |> Map.tryFind path
+        |> Option.bind (fun (_, p, _) -> p))
+
 let private readGlobalConfig () =
     let configPath =
         Path.Combine(
@@ -473,14 +481,6 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-
-                      let provider =
-                          state.Repos
-                          |> Map.values
-                          |> Seq.tryPick (fun repo ->
-                              repo.CodingToolData
-                              |> Map.tryFind path
-                              |> Option.bind (fun (_, p, _) -> p))
-
+                      let provider = resolveProvider state path
                       return! SessionManager.launchAction sessionAgent req.Path req.Prompt provider
                   }) }

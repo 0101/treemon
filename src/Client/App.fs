@@ -762,9 +762,6 @@ let actionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) 
         prop.text "\u25B6"
     ]
 
-let isMainBranch (branch: string) =
-    branch = "main" || branch = "master"
-
 let binIcon =
     Svg.svg [
         svg.className "btn-icon"
@@ -829,7 +826,7 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                     prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{total} comments")
                 ]
-                if total > 0 && not pr.IsMerged then
+                if total > 0 then
                     actionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments"
             | _ -> ()
             pr.Builds |> List.map (fun build ->
@@ -848,9 +845,9 @@ let prSection dispatch (wt: WorktreeStatus) (repoName: string) =
     | HasPr pr -> prBadgeContent dispatch wt repoName pr
 
 let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
-    match wt.Pr, isMainBranch wt.Branch with
-    | NoPr, true -> Html.none
-    | NoPr, false ->
+    match wt.Pr, wt.Branch with
+    | NoPr, ("main" | "master") -> Html.none
+    | NoPr, _ ->
         Html.div [
             prop.className "pr-row"
             prop.children [
