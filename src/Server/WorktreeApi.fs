@@ -378,10 +378,10 @@ let worktreeApi
                       |> Map.toList
                       |> List.collect (fun (repoId, repo) ->
                           repo.WorktreeList
-                          |> List.choose (fun wt ->
-                              wt.Branch |> Option.map (fun b ->
-                                  let key = scopedBranchKey repoId b
-                                  key, wt.Path)))
+                          |> List.map (fun wt ->
+                              let branch = wt.Branch |> Option.defaultValue "(detached)"
+                              let key = scopedBranchKey repoId branch
+                              key, wt.Path))
                       |> Map.ofList
 
                   let! syncEvents = syncAgent.PostAndAsyncReply(SyncEngine.GetAllEvents)
