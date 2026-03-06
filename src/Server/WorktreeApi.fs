@@ -161,8 +161,8 @@ let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePa
             try
                 let psi =
                     System.Diagnostics.ProcessStartInfo(
-                        "cmd.exe",
-                        $"/c {editor} \"{path}\"",
+                        FileName = editor,
+                        Arguments = $"\"{path}\"",
                         UseShellExecute = false,
                         CreateNoWindow = true
                     )
