@@ -152,7 +152,7 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                         prop.children (
                             form.Branches
                             |> List.map (fun b ->
-                                Html.option [ prop.value b; prop.text b ]))
+                                Html.option [ prop.key b; prop.value b; prop.text b ]))
                     ]
                 ]
             ]

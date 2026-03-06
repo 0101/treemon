@@ -714,6 +714,9 @@ let buildBadge (repoName: string) (build: BuildInfo) =
             | None -> ()
         ]
 
+let buildBadges (repoName: string) (builds: BuildInfo list) =
+    React.fragment (builds |> List.map (fun build ->
+        React.keyedFragment(build.Name, [ buildBadge repoName build ])))
 let terminalButton dispatch (wt: WorktreeStatus) =
     let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
     let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
@@ -1141,7 +1144,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
                     prop.children (
                         repo.Worktrees
                         |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
+                            Html.span [ prop.key wt.Branch; prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
                 ]
             Html.button [
                 prop.className "create-wt-btn"
