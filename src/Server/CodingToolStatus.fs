@@ -19,14 +19,8 @@ let private copilotProvider =
       GetLastUserMessage = CopilotDetector.getLastUserMessage
       GetSessionMtime = CopilotDetector.getSessionMtime }
 
-let private claudeProvider =
-    { Provider = Claude
-      GetStatus = ClaudeDetector.getStatus
-      GetLastMessage = ClaudeDetector.getLastMessage
-      GetLastUserMessage = ClaudeDetector.getLastUserMessage
-      GetSessionMtime = ClaudeDetector.getSessionMtime }
-
-let private providers = [ claudeProvider; copilotProvider ]
+// Claude is handled explicitly to share file enumeration, so it's not in this list
+let private otherProviders = [ copilotProvider ]
 
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
     let configPath = Path.Combine(worktreePath, ".treemon.json")
@@ -81,41 +75,27 @@ let internal resolveStatus
         | Some r -> r.Status, Some r.Provider
         | None -> Idle, None
 
-let private gatherResults (worktreePath: string) (entries: ProviderEntry list) =
-    entries
-    |> List.map (fun entry ->
-        match entry.Provider with
-        | Claude ->
-            let files = ClaudeDetector.enumerateFiles worktreePath
-            { Provider = Claude
-              Status = ClaudeDetector.getStatusFromEnumeratedFiles files
-              Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
-        | Copilot ->
-            { Provider = Copilot
+let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) list) =
+    { Provider = Claude
+      Status = ClaudeDetector.getStatusFromEnumeratedFiles files
+      Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
+
+let private gatherResults (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) =
+    let claudeResult = getClaudeResult claudeFiles
+
+    let otherResults =
+        otherProviders
+        |> List.map (fun entry ->
+            { Provider = entry.Provider
               Status = entry.GetStatus worktreePath
               Mtime = entry.GetSessionMtime worktreePath })
 
-let getStatus (worktreePath: string) : CodingToolStatus * CodingToolProvider option =
-    let configured = readConfiguredProvider worktreePath
-    let results = gatherResults worktreePath providers
-    resolveStatus configured results
+    claudeResult :: otherResults
 
 let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
-
-    let results =
-        providers
-        |> List.map (fun entry ->
-            match entry.Provider with
-            | Claude ->
-                { Provider = Claude
-                  Status = ClaudeDetector.getStatusFromEnumeratedFiles claudeFiles
-                  Mtime = ClaudeDetector.getSessionMtimeFromFiles claudeFiles }
-            | Copilot ->
-                { Provider = Copilot
-                  Status = entry.GetStatus worktreePath
-                  Mtime = entry.GetSessionMtime worktreePath })
+    let results = gatherResults worktreePath claudeFiles
 
     let status, provider = resolveStatus configured results
     let target = configured |> Option.orElse provider
@@ -127,47 +107,31 @@ let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvide
         | Some Copilot ->
             copilotProvider.GetLastUserMessage worktreePath
         | None ->
-            [ ClaudeDetector.getLastUserMessageFromFiles claudeFiles
-              copilotProvider.GetLastUserMessage worktreePath ]
+            let claudeMsg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
+            let copilotMsg = copilotProvider.GetLastUserMessage worktreePath
+
+            [ claudeMsg; copilotMsg ]
             |> List.choose id
+            |> List.sortByDescending snd
             |> List.tryHead
 
     status, provider, lastUserMsg
 
 let getLastMessage (worktreePath: string) : CardEvent option =
     let configured = readConfiguredProvider worktreePath
+    let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
 
-    let candidates =
-        match configured with
-        | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
-        | None -> providers
+    let claudeMsg =
+        if configured.IsNone || configured = Some Claude then
+            ClaudeDetector.getLastMessageFromFiles claudeFiles
+        else None
 
-    candidates
-    |> List.choose (fun entry ->
-        match entry.Provider with
-        | Claude ->
-            ClaudeDetector.enumerateFiles worktreePath
-            |> ClaudeDetector.getLastMessageFromFiles
-        | Copilot ->
-            entry.GetLastMessage worktreePath)
+    let copilotMsg =
+        if configured.IsNone || configured = Some Copilot then
+            copilotProvider.GetLastMessage worktreePath
+        else None
+
+    [ claudeMsg; copilotMsg ]
+    |> List.choose id
     |> List.sortByDescending _.Timestamp
-    |> List.tryHead
-
-let getLastUserMessage (worktreePath: string) (activeProvider: CodingToolProvider option) : (string * DateTimeOffset) option =
-    let configured = readConfiguredProvider worktreePath
-    let target = configured |> Option.orElse activeProvider
-
-    let candidates =
-        match target with
-        | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
-        | None -> providers
-
-    candidates
-    |> List.choose (fun entry ->
-        match entry.Provider with
-        | Claude ->
-            ClaudeDetector.enumerateFiles worktreePath
-            |> ClaudeDetector.getLastUserMessageFromFiles
-        | Copilot ->
-            entry.GetLastUserMessage worktreePath)
     |> List.tryHead

@@ -51,7 +51,7 @@ let enumerateFiles (worktreePath: string) =
     findAllJsonlFiles projectDir
 
 let private parentFiles (files: (FileInfo * SessionFileKind) list) =
-    files |> List.choose (fun (fi, kind) -> if kind = Parent then Some fi else None)
+    files |> List.choose (function (fi, Parent) -> Some fi | _ -> None)
 
 let private readLastLines (filePath: string) (maxLines: int) =
     try
@@ -233,6 +233,7 @@ let internal getStatusFromFiles (now: DateTimeOffset) (files: SessionFileData li
             let subagentStatus = bestStatusByKind now Subagent files |> Option.defaultValue Idle
             match subagentStatus with
             | Working -> Working
+            | WaitingForUser -> WaitingForUser
             | _ -> parentStatus
 
 let getStatusFromEnumeratedFiles (files: (FileInfo * SessionFileKind) list) =
@@ -248,9 +249,6 @@ let getStatusFromEnumeratedFiles (files: (FileInfo * SessionFileKind) list) =
                 None)
 
     getStatusFromFiles DateTimeOffset.UtcNow sessionFiles
-
-let getStatus (worktreePath: string) =
-    enumerateFiles worktreePath |> getStatusFromEnumeratedFiles
 
 let private truncateMessage (maxLen: int) (text: string) =
     let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
@@ -302,9 +300,6 @@ let getSessionMtimeFromFiles (files: (FileInfo * SessionFileKind) list) =
        | [] -> None
        | mtimes -> mtimes |> List.max |> Some
 
-let getSessionMtime (worktreePath: string) =
-    enumerateFiles worktreePath |> getSessionMtimeFromFiles
-
 let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
     |> parentFiles
@@ -320,9 +315,6 @@ let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
           Timestamp = timestamp
           Status = None
           Duration = None })
-
-let getLastMessage (worktreePath: string) =
-    enumerateFiles worktreePath |> getLastMessageFromFiles
 
 let private tryExtractSlashCommand (text: string) =
     let extractTag (tag: string) (s: string) =
@@ -441,5 +433,3 @@ let getLastUserMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
        | messages -> messages |> List.maxBy snd |> Some
     |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
 
-let getLastUserMessage (worktreePath: string) =
-    enumerateFiles worktreePath |> getLastUserMessageFromFiles

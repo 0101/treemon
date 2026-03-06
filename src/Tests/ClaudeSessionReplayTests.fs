@@ -155,6 +155,14 @@ type ParentAuthoritativeResolutionTests() =
         Assert.That(result, Is.EqualTo(Working))
 
     [<Test>]
+    member _.``Parent Done + subagent WaitingForUser = WaitingForUser``() =
+        let files =
+            [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
+              makeFileData Subagent recentTime [ makeWaitingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(WaitingForUser))
+
+    [<Test>]
     member _.``Parent Done + subagent Done = Done``() =
         let files =
             [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:30.000Z" ]
