@@ -6,6 +6,7 @@ open System.Threading
 open NUnit.Framework
 open Shared
 open Server.SessionManager
+open Server.CodingToolStatus
 
 let private runAsync (a: Async<'T>) =
     Async.RunSynchronously(a, timeout = 30_000)
@@ -64,8 +65,9 @@ type ActionLaunchSpawnTests() =
     member _.``launchAction with no existing session spawns new window and tracks HWND``() =
         let a = agent.Value
         let prompt = "/pr https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
 
-        let result = runAsync (launchAction a testPath prompt (Some CodingToolProvider.Claude))
+        let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction should return Ok when no session exists"
 
         let sessions = runAsync (getActiveSessions a)
@@ -95,7 +97,8 @@ type ActionLaunchSpawnTests() =
         TestContext.Out.WriteLine($"WT windows before launchAction: {windowCountBefore}")
 
         let prompt = "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123"
-        let actionResult = runAsync (launchAction a testPath prompt (Some CodingToolProvider.Claude))
+        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+        let actionResult = runAsync (launchAction a testPath command)
         assertOk actionResult "launchAction should return Ok when session exists (new tab)"
 
         Thread.Sleep(2000)
@@ -115,8 +118,9 @@ type ActionLaunchSpawnTests() =
     member _.``launchAction spawns session that stays open (interactive mode)``() =
         let a = agent.Value
         let prompt = "Commit all changes, push to origin, and create a pull request for this branch"
+        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
 
-        let result = runAsync (launchAction a testPath prompt (Some CodingToolProvider.Claude))
+        let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction should return Ok"
 
         let sessions = runAsync (getActiveSessions a)
@@ -133,8 +137,9 @@ type ActionLaunchSpawnTests() =
     member _.``launchAction with special characters in prompt succeeds``() =
         let a = agent.Value
         let prompt = "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc"
+        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
 
-        let result = runAsync (launchAction a testPath prompt (Some CodingToolProvider.Claude))
+        let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction with URL containing & and ? should return Ok"
 
         let sessions = runAsync (getActiveSessions a)

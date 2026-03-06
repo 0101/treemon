@@ -2,7 +2,7 @@ module Tests.CommandBuilderTests
 
 open NUnit.Framework
 open Shared
-open Server.SessionManager
+open Server.CodingToolStatus
 
 [<TestFixture>]
 [<Category("Unit")>]

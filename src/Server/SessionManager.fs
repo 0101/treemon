@@ -7,7 +7,7 @@ open System.Text.Json
 open Shared
 
 type private SessionMsg =
-    | Spawn of worktreePath: WorktreePath * prompt: string * AsyncReplyChannel<Result<unit, string>>
+    | Spawn of worktreePath: WorktreePath * command: string * AsyncReplyChannel<Result<unit, string>>
     | SpawnTerminal of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | OpenNewTab of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | LaunchAction of worktreePath: WorktreePath * command: string * AsyncReplyChannel<Result<unit, string>>
@@ -46,12 +46,6 @@ let private buildScript (nativePath: string) (command: string option) =
     | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
     | None -> $"Set-Location '{nativePath}'"
 
-let internal buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
-    let escapedPrompt = prompt.Replace("'", "''")
-    match provider |> Option.defaultValue CodingToolProvider.Claude with
-    | CodingToolProvider.Claude -> $"claude --dangerously-skip-permissions '{escapedPrompt}'"
-    | CodingToolProvider.Copilot -> $"copilot --yolo -i '{escapedPrompt}'"
-
 let private spawnWtAndResolve (args: string) (logLabel: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
     Log.log "SessionManager" $"Spawning {logLabel}: wt.exe {args}"
@@ -85,8 +79,7 @@ let private spawnWithCommand (worktreePath: string) (command: string option) (lo
     let encoded = buildScript nativePath command |> encodeCommand
     spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" logLabel
 
-let private spawnAndResolve (worktreePath: string) (prompt: string) =
-    let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+let private spawnAndResolve (worktreePath: string) (command: string) =
     spawnWithCommand worktreePath (Some command) "session"
 
 let private spawnTerminalAndResolve (worktreePath: string) =
@@ -191,9 +184,9 @@ let private spawnAndTrack (validated: Map<string, nativeint>) path spawnFn (repl
 
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     match msg with
-    | Spawn(wtPath, prompt, reply) ->
+    | Spawn(wtPath, command, reply) ->
         let path = WorktreePath.value wtPath
-        spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path prompt) reply
+        spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path command) reply
 
     | SpawnTerminal(wtPath, reply) ->
         let path = WorktreePath.value wtPath
@@ -305,8 +298,8 @@ let createAgent () =
 
     { Agent = agent }
 
-let spawnSession (agent: SessionAgent) (worktreePath: WorktreePath) (prompt: string) =
-    agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, prompt, reply)), timeout = 30_000)
+let spawnSession (agent: SessionAgent) (worktreePath: WorktreePath) (command: string) =
+    agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, command, reply)), timeout = 30_000)
 
 let spawnTerminal (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminal(worktreePath, reply)), timeout = 30_000)
@@ -320,8 +313,7 @@ let killSession (agent: SessionAgent) (worktreePath: WorktreePath) =
 let openNewTab (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)
 
-let launchAction (agent: SessionAgent) (worktreePath: WorktreePath) (prompt: string) (provider: CodingToolProvider option) =
-    let command = buildInteractiveCommand provider prompt
+let launchAction (agent: SessionAgent) (worktreePath: WorktreePath) (command: string) =
     agent.Agent.PostAndAsyncReply((fun reply -> LaunchAction(worktreePath, command, reply)), timeout = 30_000)
 
 let getActiveSessions (agent: SessionAgent) =

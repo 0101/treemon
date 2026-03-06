@@ -417,7 +417,13 @@ let worktreeApi
           deleteWorktree = deleteWorktree agent rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
-                  SessionManager.spawnSession sessionAgent req.Path req.Prompt)
+                  async {
+                      let path = WorktreePath.value req.Path
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      return! SessionManager.spawnSession sessionAgent req.Path command
+                  })
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
                   SessionManager.focusSession sessionAgent wtPath)
@@ -479,5 +485,6 @@ let worktreeApi
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      return! SessionManager.launchAction sessionAgent req.Path req.Prompt provider
+                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      return! SessionManager.launchAction sessionAgent req.Path command
                   }) }
