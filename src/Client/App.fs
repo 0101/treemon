@@ -827,14 +827,13 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                 if total > 0 then
                     prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | _ -> ()
-            pr.Builds |> List.map (fun build ->
-                React.fragment [
+            yield! pr.Builds |> List.collect (fun build -> [
                     buildBadge repoName build
                     if build.Status = Failed then
                         match build.Url with
                         | Some url -> prActionButton dispatch wt $"/fix-build {url}" "Fix build" wrenchIcon
                         | None -> ()
-                ]) |> React.fragment
+                ])
     ]
 
 let prSection dispatch (wt: WorktreeStatus) (repoName: string) =

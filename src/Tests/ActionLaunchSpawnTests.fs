@@ -7,14 +7,7 @@ open NUnit.Framework
 open Shared
 open Server.SessionManager
 open Server.CodingToolStatus
-
-let private runAsync (a: Async<'T>) =
-    Async.RunSynchronously(a, timeout = 30_000)
-
-let private assertOk (result: Result<unit, string>) (message: string) =
-    match result with
-    | Ok() -> ()
-    | Error err -> Assert.Fail($"{message}: {err}")
+open Tests.TestUtils
 
 [<TestFixture>]
 [<Category("Local")>]

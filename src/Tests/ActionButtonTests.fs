@@ -14,12 +14,6 @@ type ActionButtonTests() =
     let compactBtn (page: IPage) =
         page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
 
-    let noFocusProps = [|
-        "tabIndex"
-        "onMouseDown"
-        "onKeyDown"
-    |]
-
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
