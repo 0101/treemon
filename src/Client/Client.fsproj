@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Types.fs" />
     <Compile Include="Navigation.fs" />
     <Compile Include="CreateWorktreeModal.fs" />
     <Compile Include="ArchiveViews.fs" />

@@ -6,6 +6,7 @@ open Shared
 open Shared.EventUtils
 open App
 open Navigation
+open Client.Types
 
 module Modal = CreateWorktreeModal
 

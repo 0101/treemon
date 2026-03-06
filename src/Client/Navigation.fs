@@ -3,28 +3,7 @@ module Navigation
 open Shared
 open Browser
 open Fable.Core.JsInterop
-
-type FocusTarget =
-    | RepoHeader of RepoId
-    | Card of scopedKey: string
-
-type RepoModel =
-    { RepoId: RepoId
-      Name: string
-      Worktrees: WorktreeStatus list
-      ArchivedWorktrees: WorktreeStatus list
-      IsReady: bool
-      IsCollapsed: bool }
-
-type NavAction =
-    | NoAction
-    | CollapseRepo of RepoId
-    | ExpandRepo of RepoId
-
-type RepoNav =
-    { RepoId: RepoId
-      Header: FocusTarget
-      Cards: FocusTarget list }
+open Client.Types
 
 let visibleFocusTargets (repos: RepoModel list) =
     repos
@@ -64,8 +43,6 @@ let navigateLinear (direction: int) (targets: FocusTarget list) (current: FocusT
             |> Option.defaultValue -1
         if idx < 0 then Some targets.Head
         else Some targets[(idx + direction + targets.Length) % targets.Length]
-
-type ScrollHint = Normal | ScrollToTop | ScrollToBottom
 
 let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedElement: FocusTarget option) =
     let sections = repoNavSections repos

@@ -2,6 +2,7 @@ module CreateWorktreeModal
 
 open Shared
 open Navigation
+open Client.Types
 open Elmish
 open Feliz
 

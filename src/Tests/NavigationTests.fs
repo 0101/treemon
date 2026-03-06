@@ -4,6 +4,7 @@ open System
 open NUnit.Framework
 open Shared
 open Navigation
+open Client.Types
 
 module NavHelpers =
     let makeWorktree branch : WorktreeStatus =

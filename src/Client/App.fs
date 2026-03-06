@@ -3,6 +3,7 @@
 open Shared
 open Shared.EventUtils
 open Navigation
+open Client.Types
 open Elmish
 open Feliz
 open Fable.Remoting.Client
