@@ -22,36 +22,36 @@ let private claudeProjectsDir =
 let encodeWorktreePath (worktreePath: string) =
     worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
 
-let private classifyFile (projectDir: string) (fi: FileInfo) =
-    let relativePath = Path.GetRelativePath(projectDir, fi.FullName)
-    let isSubagent =
-        relativePath.Contains(Path.Combine("subagents", ""))
-        || relativePath.Contains("subagents/")
-    if isSubagent then Subagent else Parent
-
-let private findAllJsonlFiles (projectDir: string) =
+let internal findAllJsonlFiles (projectDir: string) =
     try
         if Directory.Exists(projectDir) then
             let topLevel =
                 Directory.GetFiles(projectDir, "*.jsonl")
-                |> Array.map (fun f -> FileInfo(f))
+                |> Array.map (fun f -> FileInfo(f), Parent)
             let subagentFiles =
                 Directory.GetDirectories(projectDir)
                 |> Array.collect (fun sessionDir ->
                     let subagentsDir = Path.Combine(sessionDir, "subagents")
                     if Directory.Exists(subagentsDir) then
                         Directory.GetFiles(subagentsDir, "*.jsonl")
-                        |> Array.map (fun f -> FileInfo(f))
+                        |> Array.map (fun f -> FileInfo(f), Subagent)
                     else
                         Array.empty)
             Array.append topLevel subagentFiles
-            |> Array.map (fun fi -> fi, classifyFile projectDir fi)
             |> Array.toList
         else
             []
     with ex ->
         Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
         []
+
+let enumerateFiles (worktreePath: string) =
+    let encoded = encodeWorktreePath worktreePath
+    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+    findAllJsonlFiles projectDir
+
+let private parentFiles (files: (FileInfo * SessionFileKind) list) =
+    files |> List.choose (fun (fi, kind) -> if kind = Parent then Some fi else None)
 
 let private readLastLines (filePath: string) (maxLines: int) =
     try
@@ -230,19 +230,14 @@ let internal getStatusFromFiles (now: DateTimeOffset) (files: SessionFileData li
         match parentStatus with
         | Working | WaitingForUser -> parentStatus
         | Done | Idle ->
-            let anySubagentWorking =
-                files
-                |> List.filter (fun f -> f.Kind = Subagent)
-                |> List.exists (fun f -> getFileStatus now f = Working)
-            if anySubagentWorking then Working
-            else parentStatus
+            let subagentStatus = bestStatusByKind now Subagent files |> Option.defaultValue Idle
+            match subagentStatus with
+            | Working -> Working
+            | _ -> parentStatus
 
-let getStatus (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
-
-    let files =
-        findAllJsonlFiles projectDir
+let getStatusFromEnumeratedFiles (files: (FileInfo * SessionFileKind) list) =
+    let sessionFiles =
+        files
         |> List.choose (fun (fi, kind) ->
             try
                 let lastWrite = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
@@ -252,7 +247,10 @@ let getStatus (worktreePath: string) =
                 Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
                 None)
 
-    getStatusFromFiles DateTimeOffset.UtcNow files
+    getStatusFromFiles DateTimeOffset.UtcNow sessionFiles
+
+let getStatus (worktreePath: string) =
+    enumerateFiles worktreePath |> getStatusFromEnumeratedFiles
 
 let private truncateMessage (maxLen: int) (text: string) =
     let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
@@ -296,35 +294,35 @@ let private tryParseAssistantText (line: string) =
         Log.log "Claude" $"Failed to parse assistant text: {ex.Message}"
         None
 
+let getSessionMtimeFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> parentFiles
+    |> List.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+    |> function
+       | [] -> None
+       | mtimes -> mtimes |> List.max |> Some
+
 let getSessionMtime (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+    enumerateFiles worktreePath |> getSessionMtimeFromFiles
 
-    findAllJsonlFiles projectDir
-    |> List.choose (fun (fi, kind) ->
-        if kind = Parent then Some(DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
-        else None)
-    |> List.sortDescending
-    |> List.tryHead
-
-let getLastMessage (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
-
-    findAllJsonlFiles projectDir
-    |> List.choose (fun (fi, kind) ->
-        if kind = Parent then
-            readLastLines fi.FullName 20
-            |> List.tryPick tryParseAssistantText
-        else None)
-    |> List.sortByDescending snd
-    |> List.tryHead
+let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> parentFiles
+    |> List.choose (fun fi ->
+        readLastLines fi.FullName 20
+        |> List.tryPick tryParseAssistantText)
+    |> function
+       | [] -> None
+       | messages -> messages |> List.maxBy snd |> Some
     |> Option.map (fun (text, timestamp) ->
         { Source = "claude"
           Message = truncateMessage 80 text
           Timestamp = timestamp
           Status = None
           Duration = None })
+
+let getLastMessage (worktreePath: string) =
+    enumerateFiles worktreePath |> getLastMessageFromFiles
 
 let private tryExtractSlashCommand (text: string) =
     let extractTag (tag: string) (s: string) =
@@ -434,14 +432,14 @@ let scanForUserMessage (filePath: string) =
         Log.log "Claude" $"Failed to scan JSONL {filePath}: {ex.Message}"
         None
 
-let getLastUserMessage (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
-
-    findAllJsonlFiles projectDir
-    |> List.choose (fun (fi, kind) ->
-        if kind = Parent then scanForUserMessage fi.FullName
-        else None)
-    |> List.sortByDescending snd
-    |> List.tryHead
+let getLastUserMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> parentFiles
+    |> List.choose (fun fi -> scanForUserMessage fi.FullName)
+    |> function
+       | [] -> None
+       | messages -> messages |> List.maxBy snd |> Some
     |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
+
+let getLastUserMessage (worktreePath: string) =
+    enumerateFiles worktreePath |> getLastUserMessageFromFiles

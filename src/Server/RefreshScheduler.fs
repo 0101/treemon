@@ -285,8 +285,7 @@ let private executeTask
             agent.Post(UpdateBeads(repoId, path, beads))
 
         | RefreshCodingTool(repoId, path) ->
-            let status, provider = CodingToolStatus.getStatus path
-            let lastUserMsg = CodingToolStatus.getLastUserMessage path provider
+            let status, provider, lastUserMsg = CodingToolStatus.getRefreshData path
             agent.Post(UpdateCodingTool(repoId, path, (status, provider, lastUserMsg)))
 
         | RefreshPr repoId ->

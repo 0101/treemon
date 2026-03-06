@@ -294,7 +294,7 @@ let private replayTimeline (timeline: TimelineEntry list) =
                     { Timestamp = entry.Timestamp.ToString("o")
                       Status = statusToString status
                       Trigger = $"{entry.FileName}:{entry.LineIndex}" }
-                transitions @ [ transition ]
+                transition :: transitions
 
         (newAccumulated, Some status, newTransitions)
 
@@ -302,7 +302,7 @@ let private replayTimeline (timeline: TimelineEntry list) =
         timeline
         |> List.fold folder (Map.empty, None, [])
 
-    transitions
+    transitions |> List.rev
 
 let private parseTransition (line: string) =
     use doc = JsonDocument.Parse(line)

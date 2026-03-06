@@ -103,3 +103,5 @@ NUnit test that:
 - Expected-status file is checked in and diff-reviewable — algorithm changes require explicit approval of status shifts
 - Fixture files from the first feature (treemon-9cs) are reused as-is (flat naming); tests tag them as Parent or Subagent by filename convention (files starting with `subagent-` are Subagent, others are Parent)
 - Path-based detection only — no need to parse content for `"isSidechain"` since directory structure is sufficient
+- File enumeration consolidated: `enumerateFiles` called once per poll cycle, results passed to `*FromFiles` variants. `CodingToolStatus.getRefreshData` combines status+provider+lastUserMessage in a single call for the scheduler path. `getLastMessage` (called from a different code path) enumerates independently.
+- Subagent status uses `bestStatusByKind` (same as parent) rather than manual filter+exists, so subagent WaitingForUser is properly considered when parent is Done/Idle
