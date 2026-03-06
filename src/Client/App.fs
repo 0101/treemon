@@ -761,7 +761,7 @@ let binIcon =
         svg.viewBox (0, 0, 24, 24)
         svg.fill "none"
         svg.stroke "currentColor"
-        svg.custom ("strokeWidth", "1.5")
+        svg.strokeWidth 1.5
         svg.custom ("strokeLinecap", "round")
         svg.children [
             Svg.path [ svg.d "M20.5001 6H3.5" ]
@@ -1057,7 +1057,7 @@ let viewEyeRolledBack =
                 svg.strokeWidth 2.5
             ]
             Svg.g [
-                svg.custom ("clipPath", "url(#eye-shape)")
+                svg.clipPath "url(#eye-shape)"
                 svg.children [
                     Svg.g [
                         svg.custom ("transform", "translate(0, -9)")
