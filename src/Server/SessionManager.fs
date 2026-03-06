@@ -49,8 +49,8 @@ let private buildScript (nativePath: string) (command: string option) =
 let internal buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")
     match provider |> Option.defaultValue CodingToolProvider.Claude with
-    | CodingToolProvider.Claude -> $"claude '{escapedPrompt}'"
-    | CodingToolProvider.Copilot -> $"copilot -i '{escapedPrompt}'"
+    | CodingToolProvider.Claude -> $"claude --dangerously-skip-permissions '{escapedPrompt}'"
+    | CodingToolProvider.Copilot -> $"copilot --yolo -i '{escapedPrompt}'"
 
 let private spawnWtAndResolve (args: string) (logLabel: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
