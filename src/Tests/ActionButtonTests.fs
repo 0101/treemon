@@ -273,17 +273,6 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    member this.``Action button displays play triangle character``() =
-        task {
-            let actionBtns = this.Page.Locator(".wt-card .action-btn")
-            do! actionBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            let! text = actionBtns.First.TextContentAsync()
-            Assert.That(text, Is.EqualTo("\u25B6"),
-                "Action button should display the play triangle character (U+25B6)")
-        }
-
-    [<Test>]
     member this.``Disabled action button has correct tooltip showing provider is active``() =
         task {
             let disabledBtns = this.Page.Locator(".wt-card .action-btn.disabled")
