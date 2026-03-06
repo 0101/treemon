@@ -101,3 +101,21 @@ type ErrorToastTests() =
     member _.``init starts with LastError None``() =
         let model, _ = init ()
         Assert.That(model.LastError, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``init starts with ColumnCount 1``() =
+        let model, _ = init ()
+        Assert.That(model.ColumnCount, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``ColumnsChanged updates ColumnCount``() =
+        let model = tryUpdateModel (ColumnsChanged 3) defaultModel
+        Assert.That(model.ColumnCount, Is.EqualTo(3))
+
+    [<Test>]
+    member _.``ColumnsChanged preserves other fields``() =
+        let modelWithError = { defaultModel with LastError = Some "err"; IsCompact = true }
+        let model = tryUpdateModel (ColumnsChanged 4) modelWithError
+        Assert.That(model.ColumnCount, Is.EqualTo(4))
+        Assert.That(model.LastError, Is.EqualTo(Some "err"))
+        Assert.That(model.IsCompact, Is.True)
