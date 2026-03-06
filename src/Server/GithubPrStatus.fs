@@ -31,8 +31,7 @@ type internal ParsedGithubPr =
       IsDraft: bool
       IsMerged: bool
       CommentCount: int
-      ReviewCommentCount: int
-      HasConflicts: bool }
+      ReviewCommentCount: int }
 
 let internal parsePrList (json: string) =
     try
@@ -56,8 +55,7 @@ let internal parsePrList (json: string) =
                       IsDraft = isDraft
                       IsMerged = isMerged
                       CommentCount = comments
-                      ReviewCommentCount = reviewComments
-                      HasConflicts = false })
+                      ReviewCommentCount = reviewComments })
     with ex ->
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
         []
