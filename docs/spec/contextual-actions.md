@@ -66,6 +66,7 @@ Action button rendering functions take `dispatch`, `wt: WorktreeStatus`, and con
 - **Single smart endpoint over separate spawn/tab endpoints**: Client doesn't need to know session state — server checks HWND and picks the right path
 - **Positional argument over stdin/SendInput**: `claude "prompt"` starts interactive mode reliably; no stdin pipe exists to wt.exe-launched processes
 - **Disabled over hidden**: Action buttons show as disabled (not hidden) when coding tool is active — user sees the actions exist but understands why they can't click
+- **Auto-accept flags (`--dangerously-skip-permissions`, `--yolo`)**: Action commands use Claude's `--dangerously-skip-permissions` and Copilot's `--yolo` flags to skip per-tool-call permission prompts. This is intentional: the user explicitly clicks an action button on the dashboard, the prompt is predefined (not arbitrary), and the session opens interactively so the user can review results and intervene. The alternative (no flags) would require clicking through dozens of permission dialogs for routine operations like `/pr` or `/fix-build`, defeating the purpose of one-click actions
 
 ## Key Files
 
