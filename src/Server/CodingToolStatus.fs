@@ -5,6 +5,7 @@ open System.IO
 open System.Text.Json
 open Shared
 
+
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
     let configPath = Path.Combine(worktreePath, ".treemon.json")
 
@@ -52,13 +53,11 @@ let internal resolveStatus
 
     match configuredProvider with
     | Some provider ->
-        let result =
-            providerResults
-            |> List.tryFind (fun r -> r.Provider = provider)
-            |> Option.map _.Status
-            |> Option.defaultValue Idle
+        let matching = providerResults |> List.filter (fun r -> r.Provider = provider)
 
-        result, Some provider
+        match pickActiveProvider matching with
+        | Some r -> r.Status, Some provider
+        | None -> Idle, Some provider
     | None ->
         match pickActiveProvider providerResults with
         | Some r -> r.Status, Some r.Provider
@@ -77,7 +76,12 @@ let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInf
           Status = CopilotDetector.getStatus worktreePath
           Mtime = CopilotDetector.getSessionMtime worktreePath }
 
-    [ claudeResult; copilotResult ]
+    let vsCodeCopilotResult =
+        { Provider = Copilot
+          Status = VsCodeCopilotDetector.getStatus worktreePath
+          Mtime = VsCodeCopilotDetector.getSessionMtime worktreePath }
+
+    [ claudeResult; copilotResult; vsCodeCopilotResult ]
 
 let getRefreshData (worktreePath: string) : CodingToolResult =
     let configured = readConfiguredProvider worktreePath
@@ -92,12 +96,35 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | Some Claude ->
             ClaudeDetector.getLastUserMessageFromFiles claudeFiles
         | Some Copilot ->
-            CopilotDetector.getLastUserMessage worktreePath
+            let cliMsg = CopilotDetector.getLastUserMessage worktreePath
+
+            let vsCodeMsg =
+                VsCodeCopilotDetector.getLastUserMessage worktreePath
+                |> Option.map (fun text ->
+                    let mtime =
+                        VsCodeCopilotDetector.getSessionMtime worktreePath
+                        |> Option.defaultValue DateTimeOffset.MinValue
+
+                    (text, mtime))
+
+            [ cliMsg; vsCodeMsg ]
+            |> List.choose id
+            |> List.sortByDescending snd
+            |> List.tryHead
         | None ->
             let claudeMsg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
             let copilotMsg = CopilotDetector.getLastUserMessage worktreePath
 
-            [ claudeMsg; copilotMsg ]
+            let vsCodeMsg =
+                VsCodeCopilotDetector.getLastUserMessage worktreePath
+                |> Option.map (fun text ->
+                    let mtime =
+                        VsCodeCopilotDetector.getSessionMtime worktreePath
+                        |> Option.defaultValue DateTimeOffset.MinValue
+
+                    (text, mtime))
+
+            [ claudeMsg; copilotMsg; vsCodeMsg ]
             |> List.choose id
             |> List.sortByDescending snd
             |> List.tryHead
@@ -107,10 +134,15 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | Some Claude ->
             ClaudeDetector.getLastMessageFromFiles claudeFiles
         | Some Copilot ->
-            CopilotDetector.getLastMessage worktreePath
+            [ CopilotDetector.getLastMessage worktreePath
+              VsCodeCopilotDetector.getLastMessage worktreePath ]
+            |> List.choose id
+            |> List.sortByDescending _.Timestamp
+            |> List.tryHead
         | None ->
             [ ClaudeDetector.getLastMessageFromFiles claudeFiles
-              CopilotDetector.getLastMessage worktreePath ]
+              CopilotDetector.getLastMessage worktreePath
+              VsCodeCopilotDetector.getLastMessage worktreePath ]
             |> List.choose id
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
