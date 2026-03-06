@@ -338,10 +338,7 @@ let worktreeApi
                                   |> Map.tryFind repoId
                                   |> Option.defaultValue (worktreeRoots |> List.head)
                               let syncKey = scopedBranchKey repoId branch
-                              let provider =
-                                  repo.CodingToolData
-                                  |> Map.tryFind wt.Path
-                                  |> Option.bind (fun (_, p, _) -> p)
+                              let provider = resolveProvider state wt.Path
                               wt.Path, repoRoot, syncKey, provider))
 
                   match worktreeWithRepo with
