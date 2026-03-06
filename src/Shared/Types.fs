@@ -70,7 +70,8 @@ and PrInfo =
       IsDraft: bool
       Comments: CommentSummary
       Builds: BuildInfo list
-      IsMerged: bool }
+      IsMerged: bool
+      HasConflicts: bool }
 
 type WorkMetrics =
     { CommitCount: int

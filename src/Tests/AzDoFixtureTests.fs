@@ -72,6 +72,24 @@ type ParsePrListFixtureTests() =
         Assert.That(active.ClosedDate, Is.EqualTo(None))
 
     [<Test>]
+    member _.``PR with mergeStatus conflicts has HasConflicts true``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let conflicting = prs |> List.find (fun pr -> pr.PrId = 101)
+        Assert.That(conflicting.HasConflicts, Is.True)
+
+    [<Test>]
+    member _.``PR with mergeStatus succeeded has HasConflicts false``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let clean = prs |> List.find (fun pr -> pr.PrId = 102)
+        Assert.That(clean.HasConflicts, Is.False)
+
+    [<Test>]
+    member _.``PR without mergeStatus field has HasConflicts false``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let completed = prs |> List.find (fun pr -> pr.PrId = 100)
+        Assert.That(completed.HasConflicts, Is.False)
+
+    [<Test>]
     member _.``Empty array returns empty list and no GUID``() =
         let guid, prs = parsePrList "[]"
         Assert.That(prs, Is.Empty)

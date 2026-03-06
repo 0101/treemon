@@ -229,7 +229,8 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                   IsDraft = pr.IsDraft
                                   Comments = CountOnly commentCount
                                   Builds = builds
-                                  IsMerged = pr.IsMerged }
+                                  IsMerged = pr.IsMerged
+                                  HasConflicts = false }
                     })
                 |> Async.Parallel
 
