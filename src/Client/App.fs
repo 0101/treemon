@@ -91,7 +91,7 @@ let init () =
       DeletedBranches = Set.empty
       DeployBranch = None
       SystemMetrics = None },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+    fetchWorktrees ()
 
 let rng = System.Random()
 
@@ -215,7 +215,7 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick)
 
     | Tick ->
-        model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+        model, fetchWorktrees ()
 
     | StartSync (branch, key) ->
         let syntheticEvent =
