@@ -415,7 +415,7 @@ type ArchiveE2ETests() =
             do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
             let! _ = page.GotoAsync(baseUrl)
 
-            let activeCards = page.Locator(".card-grid .wt-card")
+            let activeCards = page.Locator(".card-grid .wt-card:not(.skeleton)")
             do! activeCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! activeCount = activeCards.CountAsync()
             Assert.That(activeCount, Is.EqualTo(1), "Only non-archived worktrees appear in card grid")
@@ -447,7 +447,7 @@ type ArchiveE2ETests() =
             do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
             let! _ = page.GotoAsync(baseUrl)
 
-            let cards = page.Locator(".wt-card")
+            let cards = page.Locator(".wt-card:not(.skeleton)")
             do! cards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! archiveSectionCount = page.Locator(".archive-section").CountAsync()
@@ -581,7 +581,7 @@ type ArchiveE2ETests() =
             do! setupMockedPage page getJson archiveCalls (System.Collections.Generic.List())
             let! _ = page.GotoAsync(baseUrl)
 
-            let activeCards = page.Locator(".card-grid .wt-card")
+            let activeCards = page.Locator(".card-grid .wt-card:not(.skeleton)")
             do! activeCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! initialActiveCount = activeCards.CountAsync()
             Assert.That(initialActiveCount, Is.EqualTo(2), "Initially both worktrees are active cards")
@@ -595,7 +595,7 @@ type ArchiveE2ETests() =
             let archiveSection = page.Locator(".archive-section")
             do! archiveSection.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let! finalActiveCount = page.Locator(".card-grid .wt-card").CountAsync()
+            let! finalActiveCount = page.Locator(".card-grid .wt-card:not(.skeleton)").CountAsync()
             Assert.That(finalActiveCount, Is.EqualTo(1), "After archive, only one card in main grid")
 
             let! archiveCardCount = page.Locator(".archive-section .archive-card").CountAsync()
@@ -635,8 +635,8 @@ type ArchiveE2ETests() =
             let unarchiveBtn = page.Locator(".archive-card .unarchive-btn").First
             do! unarchiveBtn.ClickAsync()
 
-            let activeCards = page.Locator(".card-grid .wt-card")
-            do! page.WaitForFunctionAsync("() => document.querySelectorAll('.card-grid .wt-card').length === 2", null, PageWaitForFunctionOptions(Timeout = 5000.0f))
+            let activeCards = page.Locator(".card-grid .wt-card:not(.skeleton)")
+            do! page.WaitForFunctionAsync("() => document.querySelectorAll('.card-grid .wt-card:not(.skeleton)').length === 2", null, PageWaitForFunctionOptions(Timeout = 5000.0f))
                 |> Async.AwaitTask
                 |> Async.Ignore
                 |> Async.StartAsTask
@@ -729,7 +729,7 @@ type ArchiveE2ETests() =
             do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
             let! _ = page.GotoAsync(baseUrl)
 
-            let cards = page.Locator(".card-grid .wt-card")
+            let cards = page.Locator(".card-grid .wt-card:not(.skeleton)")
             do! cards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let dashboard = page.Locator(".dashboard")

@@ -83,7 +83,7 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
 let main args =
     let config = parseArgs args
 
-    let serverUrl = $"http://0.0.0.0:{config.Port}"
+    let serverUrl = $"http://localhost:{config.Port}"
 
     Log.init ()
     config.WorktreeRoots |> List.iter (fun root -> Log.log "Startup" $"Worktree root: {root}")
