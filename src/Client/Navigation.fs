@@ -65,104 +65,143 @@ let navigateLinear (direction: int) (targets: FocusTarget list) (current: FocusT
         if idx < 0 then Some targets.Head
         else Some targets[(idx + direction + targets.Length) % targets.Length]
 
+type ScrollHint = Normal | ScrollToTop | ScrollToBottom
+
 let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedElement: FocusTarget option) =
     let sections = repoNavSections repos
     let allTargets = sections |> List.collect (fun s -> s.Header :: s.Cards)
+    let isFirstSection si = si = 0
+    let isLastSection si = si = sections.Length - 1
+    let isOnLastRow si cardIdx = isLastSection si && cardIdx + cols >= sections[si].Cards.Length
+    let isOnFirstRow si cardIdx = isFirstSection si && cardIdx < cols
+    let hintFor si cardIdx =
+        if isOnFirstRow si cardIdx then ScrollToTop
+        elif isOnLastRow si cardIdx then ScrollToBottom
+        else Normal
+    let cardPosition target =
+        sections
+        |> List.tryFindIndex (fun s ->
+            s.Header = target || s.Cards |> List.contains target)
+        |> Option.map (fun si ->
+            let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
+            si, cardIdx)
+    let hintForTarget target =
+        match target with
+        | RepoHeader repoId ->
+            if sections |> List.tryHead |> Option.exists (fun s -> s.RepoId = repoId) then ScrollToTop else Normal
+        | Card _ ->
+            cardPosition target
+            |> Option.map (fun (si, ci) -> hintFor si ci)
+            |> Option.defaultValue Normal
+    let hintOf = Option.map hintForTarget >> Option.defaultValue Normal
+    let repoFor repoId = repos |> List.tryFind (fun r -> r.RepoId = repoId)
     match allTargets, focusedElement with
-    | [], _ -> None, NoAction
-    | _, None -> Some allTargets.Head, NoAction
+    | [], _ -> None, NoAction, Normal
+    | _, None -> Some allTargets.Head, NoAction, ScrollToTop
     | _, Some current ->
-        let cardPosition target =
-            sections
-            |> List.tryFindIndex (fun s ->
-                s.Header = target || s.Cards |> List.contains target)
-            |> Option.map (fun si ->
-                let cardIdx = sections[si].Cards |> List.tryFindIndex ((=) target) |> Option.defaultValue 0
-                si, cardIdx)
-        let repoFor repoId = repos |> List.tryFind (fun r -> r.RepoId = repoId)
         match current, key with
         | RepoHeader repoId, "ArrowLeft" when repoFor repoId |> Option.exists (fun r -> not r.IsCollapsed) ->
-            Some current, CollapseRepo repoId
+            Some current, CollapseRepo repoId, Normal
 
         | RepoHeader repoId, "ArrowRight" when repoFor repoId |> Option.exists _.IsCollapsed ->
-            Some current, ExpandRepo repoId
+            Some current, ExpandRepo repoId, Normal
 
         | RepoHeader _, ("ArrowLeft" | "ArrowRight") ->
-            Some current, NoAction
+            Some current, NoAction, Normal
 
         | RepoHeader _, ("ArrowUp" | "ArrowDown") ->
-            navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current), NoAction
+            let target = navigateLinear (if key = "ArrowDown" then 1 else -1) allTargets (Some current)
+            target, NoAction, hintOf target
 
         | Card _, "ArrowLeft" ->
             match cardPosition current with
-            | None -> Some current, NoAction
+            | None -> Some current, NoAction, Normal
             | Some (si, cardIdx) ->
                 let colPos = cardIdx % cols
                 if colPos > 0 then
-                    Some sections[si].Cards[cardIdx - 1], NoAction
+                    Some sections[si].Cards[cardIdx - 1], NoAction, hintFor si (cardIdx - 1)
                 else
                     if si > 0 then
                         let prev = sections[si - 1]
                         match prev.Cards with
-                        | [] -> Some prev.Header, NoAction
-                        | cards -> Some (List.last cards), NoAction
+                        | [] -> Some prev.Header, NoAction, Normal
+                        | cards ->
+                            let target = List.last cards
+                            Some target, NoAction, hintForTarget target
                     else
-                        Some sections[si].Header, NoAction
+                        Some sections[si].Header, NoAction, ScrollToTop
 
         | Card _, "ArrowRight" ->
             match cardPosition current with
-            | None -> Some current, NoAction
+            | None -> Some current, NoAction, Normal
             | Some (si, cardIdx) ->
                 let section = sections[si]
                 let colPos = cardIdx % cols
                 let rowEnd = colPos >= cols - 1 || cardIdx >= section.Cards.Length - 1
                 if not rowEnd then
-                    Some section.Cards[cardIdx + 1], NoAction
+                    Some section.Cards[cardIdx + 1], NoAction, hintFor si (cardIdx + 1)
                 else
                     let nextRowStart = cardIdx - colPos + cols
                     if nextRowStart < section.Cards.Length then
-                        Some section.Cards[nextRowStart], NoAction
+                        Some section.Cards[nextRowStart], NoAction, hintFor si nextRowStart
                     elif si + 1 < sections.Length then
-                        Some sections[si + 1].Header, NoAction
+                        Some sections[si + 1].Header, NoAction, Normal
                     else
-                        navigateLinear 1 allTargets (Some current), NoAction
+                        let target = navigateLinear 1 allTargets (Some current)
+                        target, NoAction, hintOf target
 
         | Card _, "ArrowDown" ->
             match cardPosition current with
-            | None -> Some current, NoAction
+            | None -> Some current, NoAction, Normal
             | Some (si, cardIdx) ->
                 let targetIdx = cardIdx + cols
                 if targetIdx < sections[si].Cards.Length then
-                    Some sections[si].Cards[targetIdx], NoAction
+                    Some sections[si].Cards[targetIdx], NoAction, hintFor si targetIdx
                 else
                     if si + 1 < sections.Length then
-                        Some sections[si + 1].Header, NoAction
+                        Some sections[si + 1].Header, NoAction, Normal
                     else
-                        Some allTargets.Head, NoAction
+                        Some allTargets.Head, NoAction, ScrollToTop
 
         | Card _, "ArrowUp" ->
             match cardPosition current with
-            | None -> Some current, NoAction
+            | None -> Some current, NoAction, Normal
             | Some (si, cardIdx) ->
                 let targetIdx = cardIdx - cols
                 if targetIdx >= 0 then
-                    Some sections[si].Cards[targetIdx], NoAction
+                    Some sections[si].Cards[targetIdx], NoAction, hintFor si targetIdx
                 else
-                    Some sections[si].Header, NoAction
+                    Some sections[si].Header, NoAction, if isFirstSection si then ScrollToTop else Normal
 
-        | _ -> Some current, NoAction
+        | _ -> Some current, NoAction, Normal
 
-let scrollFocusedIntoView (useCenter: bool) (target: FocusTarget option) =
+let private headerHeight = 36.0
+let private scrollPadding = 50.0
+let private headerOffset = headerHeight + scrollPadding
+
+let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     match target with
     | None -> ()
     | Some _ ->
-        // Delay DOM query until after React renders the updated .focused class
         Dom.window?requestAnimationFrame(fun (_: float) ->
             Dom.document.querySelector ".focused"
             |> Option.ofObj
             |> Option.iter (fun el ->
-                let block = if useCenter then "center" else "nearest"
-                el?scrollIntoView(createObj [ "block" ==> block; "behavior" ==> "smooth" ])))
+                let rect = el?getBoundingClientRect()
+                let rectTop: float = rect?top
+                let rectBottom: float = rect?bottom
+                let viewH: float = Dom.window?innerHeight
+                let scrollY: float = Dom.window?scrollY
+                let elTop = rectTop + scrollY
+                let elBottom = rectBottom + scrollY
+                let docHeight: float = Dom.document.documentElement?scrollHeight
+                let scrollTo top = Dom.window?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
+                match hint with
+                | ScrollToTop -> scrollTo 0
+                | ScrollToBottom -> scrollTo docHeight
+                | Normal when rectTop < headerOffset -> scrollTo (elTop - headerOffset)
+                | Normal when rectBottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
+                | _ -> ()))
 
 let navigateToFirst (repos: RepoModel list) =
     let targets = visibleFocusTargets repos
@@ -175,16 +214,6 @@ let navigateToLast (repos: RepoModel list) =
     match targets with
     | [] -> None
     | _ -> Some (List.last targets)
-
-let isLargeJump (repos: RepoModel list) (oldFocus: FocusTarget option) (newFocus: FocusTarget option) =
-    let targets = visibleFocusTargets repos
-    match oldFocus, newFocus with
-    | None, _ -> true
-    | _, None -> false
-    | Some old, Some nw ->
-        let oldIdx = targets |> List.tryFindIndex ((=) old) |> Option.defaultValue 0
-        let newIdx = targets |> List.tryFindIndex ((=) nw) |> Option.defaultValue 0
-        abs (oldIdx - newIdx) > 3
 
 let adjustFocusAfterCollapse (collapsedRepoId: RepoId) (focusedElement: FocusTarget option) =
     match focusedElement with
