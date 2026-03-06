@@ -41,6 +41,11 @@ let private encodeCommand (command: string) =
     let bytes = System.Text.Encoding.Unicode.GetBytes(command)
     Convert.ToBase64String(bytes)
 
+let private buildScript (nativePath: string) (command: string option) =
+    match command with
+    | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
+    | None -> $"Set-Location '{nativePath}'"
+
 let internal buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")
     match provider |> Option.defaultValue CodingToolProvider.Claude with
@@ -77,11 +82,7 @@ let private spawnWtAndResolve (args: string) (logLabel: string) =
 
 let private spawnWithCommand (worktreePath: string) (command: string option) (logLabel: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let script =
-        match command with
-        | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
-        | None -> $"Set-Location '{nativePath}'"
-    let encoded = encodeCommand script
+    let encoded = buildScript nativePath command |> encodeCommand
     spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" logLabel
 
 let private spawnAndResolve (worktreePath: string) (prompt: string) =
@@ -99,12 +100,7 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command
         if not (Win32.focusWindow hwnd) then
             Log.log "SessionManager" $"Failed to focus HWND={hwnd} for new-tab"
 
-        let script =
-            match command with
-            | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
-            | None -> $"Set-Location '{nativePath}'"
-
-        let encoded = encodeCommand script
+        let encoded = buildScript nativePath command |> encodeCommand
         let psi =
             ProcessStartInfo(
                 "wt.exe",
