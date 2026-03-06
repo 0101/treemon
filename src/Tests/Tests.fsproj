@@ -23,6 +23,7 @@
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
+    <Compile Include="NavigationTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />

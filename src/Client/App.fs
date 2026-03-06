@@ -295,9 +295,8 @@ let update msg model =
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
 
     | KeyPressed (key, hasModifier) ->
-        let scrollToFocus oldFocus newFocus =
-            let useCenter = isLargeJump model.Repos oldFocus newFocus
-            Cmd.ofEffect (fun _ -> scrollFocusedIntoView useCenter newFocus)
+        let scrollToFocus hint newFocus =
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
         if CreateWorktreeModal.isOpen model.CreateModal then
             match key with
             | "Escape" ->
@@ -312,22 +311,22 @@ let update msg model =
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
-            let newFocus, navAction = navigateSpatial key cols model.Repos model.FocusedElement
+            let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
             let actionCmd =
                 match navAction with
                 | NoAction -> Cmd.none
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
             { model with FocusedElement = newFocus },
-            Cmd.batch [ actionCmd; scrollToFocus model.FocusedElement newFocus ]
+            Cmd.batch [ actionCmd; scrollToFocus scrollHint newFocus ]
         | "Home" ->
             let newFocus = navigateToFirst model.Repos
             { model with FocusedElement = newFocus },
-            scrollToFocus model.FocusedElement newFocus
+            scrollToFocus ScrollToTop newFocus
         | "End" ->
             let newFocus = navigateToLast model.Repos
             { model with FocusedElement = newFocus },
-            scrollToFocus model.FocusedElement newFocus
+            scrollToFocus ScrollToBottom newFocus
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -1142,6 +1141,11 @@ let barColor (pct: float) =
     elif pct >= 50.0 then "#f9e2af"
     else "#6c7086"
 
+let labelColor (pct: float) =
+    if pct >= 80.0 then Some "#f38ba8"
+    elif pct >= 50.0 then Some "#f9e2af"
+    else None
+
 let viewMetricBar (pct: float) (label: string) =
     Html.div [
         prop.className "metric-bar-row"
@@ -1158,7 +1162,13 @@ let viewMetricBar (pct: float) (label: string) =
                     ]
                 ]
             ]
-            Html.span [ prop.className "metric-bar-label"; prop.text label ]
+            Html.span [
+                prop.className "metric-bar-label"
+                match labelColor pct with
+                | Some c -> prop.style [ style.color c ]
+                | None -> ()
+                prop.text label
+            ]
         ]
     ]
 
