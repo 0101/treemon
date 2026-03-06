@@ -7,7 +7,6 @@ open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Server.TreemonConfig
 open Navigation
-open Client.Types
 open Shared
 
 [<TestFixture>]

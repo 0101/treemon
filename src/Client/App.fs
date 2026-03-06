@@ -1309,5 +1309,5 @@ open Elmish.React
 
 Program.mkProgram init update view
 |> Program.withSubscription pollingSubscription
-|> Program.withReactSynchronous "app"
+|> Program.withReactBatched "app"
 |> Program.run
