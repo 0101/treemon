@@ -23,10 +23,10 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let codingToolStatus, codingToolProvider, lastUserMsg =
+    let codingToolStatus, codingToolProvider, lastUserMsg, _ =
         repo.CodingToolData
         |> Map.tryFind wt.Path
-        |> Option.defaultValue (CodingToolStatus.Idle, None, None)
+        |> Option.defaultValue (CodingToolStatus.Idle, None, None, None)
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -332,7 +332,7 @@ let worktreeApi
                               let provider =
                                   repo.CodingToolData
                                   |> Map.tryFind wt.Path
-                                  |> Option.bind (fun (_, p, _) -> p)
+                                  |> Option.bind (fun (_, p, _, _) -> p)
                               wt.Path, repoRoot, syncKey, provider))
 
                   match worktreeWithRepo with
@@ -381,6 +381,16 @@ let worktreeApi
                         yield! branchToScopedKey |> Map.keys ]
                       |> List.distinct
 
+                  let cachedLastMessages =
+                      state.Repos
+                      |> Map.toList
+                      |> List.collect (fun (_, repo) ->
+                          repo.CodingToolData
+                          |> Map.toList
+                          |> List.choose (fun (path, (_, _, _, lastMsg)) ->
+                              lastMsg |> Option.map (fun msg -> path, msg)))
+                      |> Map.ofList
+
                   return
                       allKeys
                       |> List.choose (fun key ->
@@ -390,8 +400,9 @@ let worktreeApi
                               |> Option.defaultValue []
 
                           let claudeEvt =
-                              let wtPath = branchToScopedKey |> Map.tryFind key
-                              wtPath |> Option.bind CodingToolStatus.getLastMessage
+                              branchToScopedKey
+                              |> Map.tryFind key
+                              |> Option.bind (fun wtPath -> cachedLastMessages |> Map.tryFind wtPath)
 
                           let merged = (claudeEvt |> Option.toList) @ syncEvts
 

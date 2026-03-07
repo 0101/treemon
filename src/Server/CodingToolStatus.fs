@@ -73,7 +73,7 @@ let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInf
 
     [ claudeResult; copilotResult ]
 
-let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option =
+let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option * CardEvent option =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
     let results = gatherResultsFromFiles worktreePath claudeFiles
@@ -96,23 +96,17 @@ let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvide
             |> List.sortByDescending snd
             |> List.tryHead
 
-    status, provider, lastUserMsg
-
-let getLastMessage (worktreePath: string) : CardEvent option =
-    let configured = readConfiguredProvider worktreePath
-    let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
-
-    let claudeMsg =
-        if configured.IsNone || configured = Some Claude then
+    let lastAssistantMsg =
+        match target with
+        | Some Claude ->
             ClaudeDetector.getLastMessageFromFiles claudeFiles
-        else None
-
-    let copilotMsg =
-        if configured.IsNone || configured = Some Copilot then
+        | Some Copilot ->
             CopilotDetector.getLastMessage worktreePath
-        else None
+        | None ->
+            [ ClaudeDetector.getLastMessageFromFiles claudeFiles
+              CopilotDetector.getLastMessage worktreePath ]
+            |> List.choose id
+            |> List.sortByDescending _.Timestamp
+            |> List.tryHead
 
-    [ claudeMsg; copilotMsg ]
-    |> List.choose id
-    |> List.sortByDescending _.Timestamp
-    |> List.tryHead
+    status, provider, lastUserMsg, lastAssistantMsg

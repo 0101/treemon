@@ -53,6 +53,10 @@ let enumerateFiles (worktreePath: string) =
 let private parentFiles (files: (FileInfo * SessionFileKind) list) =
     files |> List.choose (function (fi, Parent) -> Some fi | _ -> None)
 
+let private tryMaxBy projection = function
+    | [] -> None
+    | items -> items |> List.maxBy projection |> Some
+
 let private readLastLines (filePath: string) (maxLines: int) =
     try
         use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
@@ -295,9 +299,7 @@ let getSessionMtimeFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
     |> parentFiles
     |> List.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
-    |> function
-       | [] -> None
-       | mtimes -> mtimes |> List.max |> Some
+    |> tryMaxBy id
 
 let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
@@ -305,9 +307,7 @@ let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     |> List.choose (fun fi ->
         readLastLines fi.FullName 20
         |> List.tryPick tryParseAssistantText)
-    |> function
-       | [] -> None
-       | messages -> messages |> List.maxBy snd |> Some
+    |> tryMaxBy snd
     |> Option.map (fun (text, timestamp) ->
         { Source = "claude"
           Message = truncateMessage 80 text
@@ -427,8 +427,6 @@ let getLastUserMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
     |> parentFiles
     |> List.choose (fun fi -> scanForUserMessage fi.FullName)
-    |> function
-       | [] -> None
-       | messages -> messages |> List.maxBy snd |> Some
+    |> tryMaxBy snd
     |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
 
