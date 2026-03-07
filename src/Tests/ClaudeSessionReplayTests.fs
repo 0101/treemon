@@ -149,12 +149,12 @@ type ParentAuthoritativeResolutionTests() =
         Assert.That(result, Is.EqualTo(Working))
 
     [<Test>]
-    member _.``Parent Done + subagent WaitingForUser = WaitingForUser``() =
+    member _.``Parent Done + subagent WaitingForUser = Done (subagent WaitingForUser is internal)``() =
         let files =
             [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
               makeFileData Subagent recentTime [ makeWaitingEntry "2026-03-05T14:59:30.000Z" ] ]
         let result = getStatusFromFiles now files
-        Assert.That(result, Is.EqualTo(WaitingForUser))
+        Assert.That(result, Is.EqualTo(Done))
 
     [<Test>]
     member _.``Parent Done + subagent Done = Done``() =
@@ -171,6 +171,14 @@ type ParentAuthoritativeResolutionTests() =
               makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``Parent Idle + subagent WaitingForUser = Idle (subagent WaitingForUser is internal)``() =
+        let files =
+            [ makeFileData Parent recentTime []
+              makeFileData Subagent recentTime [ makeWaitingEntry "2026-03-05T14:59:30.000Z" ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Idle))
 
     [<Test>]
     member _.``No parent files with subagent Working = Working (parent defaults to Idle)``() =

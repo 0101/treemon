@@ -233,7 +233,6 @@ let internal getStatusFromFiles (now: DateTimeOffset) (files: SessionFileData li
             let subagentStatus = bestStatusByKind now Subagent files |> Option.defaultValue Idle
             match subagentStatus with
             | Working -> Working
-            | WaitingForUser -> WaitingForUser
             | _ -> parentStatus
 
 let getStatusFromEnumeratedFiles (files: (FileInfo * SessionFileKind) list) =
