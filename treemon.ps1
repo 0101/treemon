@@ -204,6 +204,7 @@ function Start-DevMode([string[]]$Roots) {
     Write-Host "  Server:  http://localhost:$devApiPort (dotnet watch)" -ForegroundColor Gray
     Write-Host "  Vite:    http://localhost:$devVitePort" -ForegroundColor Gray
     Write-Host "  Press Ctrl+C to stop both processes" -ForegroundColor Gray
+    $Roots | ForEach-Object { Write-Host "  Monitoring: $_" -ForegroundColor Gray }
     Write-Host ""
 
     $env:VITE_PORT = $devVitePort
@@ -221,9 +222,9 @@ function Start-DevMode([string[]]$Roots) {
             -PassThru `
             -NoNewWindow
 
-        $viteProcess = Start-Process -FilePath "npx" `
-            -ArgumentList "vite", "--port", $devVitePort `
-            -WorkingDirectory (Join-Path $ScriptDir "src/Client") `
+        $viteProcess = Start-Process -FilePath "cmd.exe" `
+            -ArgumentList "/c", "npx", "vite", "--port", $devVitePort `
+            -WorkingDirectory $ScriptDir `
             -PassThru `
             -NoNewWindow
 

@@ -1,4 +1,4 @@
-module App
+﻿module App
 
 open Shared
 open Shared.EventUtils
@@ -8,6 +8,7 @@ open Feliz
 open Fable.Remoting.Client
 open Browser
 open Fable.Core.JsInterop
+open ActionButtons
 
 type Model =
     { Repos: RepoModel list
@@ -51,6 +52,8 @@ type Msg =
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
+    | LaunchAction of path: WorktreePath * prompt: string
+    | LaunchActionResult of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
@@ -279,6 +282,12 @@ let update msg model =
     | SessionResult _ ->
         model, fetchWorktrees ()
 
+    | LaunchAction (path, prompt) ->
+        model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult
+
+    | LaunchActionResult _ ->
+        model, fetchWorktrees ()
+
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
 
@@ -435,12 +444,6 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some Copilot -> "Copilot"
     | None -> "Coding tool"
 
-let noFocusProps = [
-    prop.tabIndex -1
-    prop.onMouseDown (fun e -> e.preventDefault())
-    prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
-]
-
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     if isPending then
         Html.button [
@@ -451,7 +454,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         ]
     else
         let syncing = isBranchSyncing branchEvents
-        let claudeBlocked = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
+        let claudeBlocked = isCodingToolBusy wt
         let disabled = syncing || claudeBlocked
         if syncing then
             Html.button [
@@ -711,9 +714,6 @@ let buildBadge (repoName: string) (build: BuildInfo) =
             | None -> ()
         ]
 
-let buildBadges (repoName: string) (builds: BuildInfo list) =
-    React.fragment (builds |> List.map (buildBadge repoName))
-
 let terminalButton dispatch (wt: WorktreeStatus) =
     let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
     let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
@@ -725,13 +725,25 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let editorIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 16, 16)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [ svg.d "M5.002 10L12 3l2 2-7 7H5z" ]
+            Svg.path [ svg.d "M1.094 0C.525 0 0 .503 0 1.063v13.874C0 15.498.525 16 1.094 16h10.812c.558 0 1.074-.485 1.094-1.031V8l-2 2v4H2V2h5l2 2 1.531-1.531L8.344.344A1.12 1.12 0 007.563 0z" ]
+            Svg.path [ svg.d "M14.19 1.011a.513.513 0 00-.364.152l-1.162 1.16 2.004 2.005 1.163-1.162a.514.514 0 000-.728l-1.277-1.275a.514.514 0 00-.364-.152z" ]
+        ]
+    ]
+
 let editorButton dispatch editorName (wt: WorktreeStatus) =
     Html.button [
         prop.className "editor-btn"
         prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
-        prop.text "{⋯}"
+        prop.children [ editorIcon ]
     ]
 
 let newTabButton dispatch (wt: WorktreeStatus) =
@@ -776,7 +788,12 @@ let deleteButton dispatch (wt: WorktreeStatus) =
 
 let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 
-let prBadgeContent (repoName: string) (pr: PrInfo) =
+let prActionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) (icon: ReactElement) =
+    let disabled = isCodingToolBusy wt
+    let disabledTitle = $"{providerDisplayName wt.CodingToolProvider} is active"
+    actionButton (fun () -> dispatch (LaunchAction (wt.Path, prompt))) disabledTitle disabled title icon
+
+let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
             Interop.createElement "a" [
@@ -800,27 +817,44 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                     prop.className (if unresolved = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{unresolved}/{total} threads")
                 ]
+                if unresolved > 0 then
+                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | CountOnly total ->
                 Html.span [
                     prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{total} comments")
                 ]
+                if total > 0 then
+                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | _ -> ()
-            buildBadges repoName pr.Builds
+            yield! pr.Builds |> List.collect (fun build -> [
+                    buildBadge repoName build
+                    if build.Status = Failed then
+                        match build.Url with
+                        | Some url -> prActionButton dispatch wt $"/fix-build {url}" "Fix build" wrenchIcon
+                        | None -> ()
+                ])
     ]
 
-let prSection (repoName: string) (wt: WorktreeStatus) =
+let prSection dispatch (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr with
     | NoPr -> Html.none
-    | HasPr pr -> prBadgeContent repoName pr
+    | HasPr pr -> prBadgeContent dispatch wt repoName pr
 
-let prRow (repoName: string) (wt: WorktreeStatus) =
-    match wt.Pr with
-    | NoPr -> Html.none
-    | HasPr pr ->
+let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
+    match wt.Pr, wt.Branch with
+    | NoPr, ("main" | "master") -> Html.none
+    | NoPr, _ ->
         Html.div [
             prop.className "pr-row"
-            prop.children [ prBadgeContent repoName pr ]
+            prop.children [
+                prActionButton dispatch wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR" createPrIcon
+            ]
+        ]
+    | HasPr pr, _ ->
+        Html.div [
+            prop.className "pr-row"
+            prop.children [ prBadgeContent dispatch wt repoName pr ]
         ]
 
 let workMetricsView = ArchiveViews.workMetricsView
@@ -852,7 +886,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
-                    prSection repoName wt
+                    prSection dispatch wt repoName
                 ]
             ]
         ]
@@ -896,7 +930,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
 
                     mainBehindWithSync dispatch wt branchEvents isPending scopedKey
 
-                    prRow repoName wt
+                    prRow dispatch wt repoName
                 ]
             ]
 

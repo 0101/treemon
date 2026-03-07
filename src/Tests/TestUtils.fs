@@ -99,6 +99,14 @@ let private findPidsOnPortLinux (port: int) =
     |> Array.distinct
     |> Array.toList
 
+let runAsync (a: Async<'T>) =
+    Async.RunSynchronously(a, timeout = 30_000)
+
+let assertOk (result: Result<unit, string>) (message: string) =
+    match result with
+    | Ok() -> ()
+    | Error err -> Assert.Fail($"{message}: {err}")
+
 let killOrphansOnPort (port: int) =
     try
         let pids =

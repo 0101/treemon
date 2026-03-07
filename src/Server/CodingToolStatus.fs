@@ -110,3 +110,9 @@ let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvide
             |> List.tryHead
 
     status, provider, lastUserMsg, lastAssistantMsg
+
+let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
+    let escapedPrompt = prompt.Replace("'", "''")
+    match provider |> Option.defaultValue CodingToolProvider.Claude with
+    | CodingToolProvider.Claude -> $"claude --dangerously-skip-permissions '{escapedPrompt}'"
+    | CodingToolProvider.Copilot -> $"copilot --yolo -i '{escapedPrompt}'"
