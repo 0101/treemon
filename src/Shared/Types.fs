@@ -133,12 +133,15 @@ type DashboardResponse =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       AppVersion: string
-      DeployBranch: string option
-      SystemMetrics: SystemMetrics option
+      SystemMetrics: SystemMetrics option }
+
+type ServerInfo =
+    { DeployBranch: string option
       EditorName: string }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
+      getServerInfo: unit -> Async<ServerInfo>
       openTerminal: WorktreePath -> Async<unit>
       openEditor: WorktreePath -> Async<unit>
       startSync: string -> Async<Result<unit, string>>

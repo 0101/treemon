@@ -35,6 +35,7 @@ type Model =
 type Msg =
     | DataLoaded of DashboardResponse
     | DataFailed of exn
+    | ServerInfoLoaded of ServerInfo
     | ToggleSort
     | ToggleCompact
     | ToggleCollapse of repoId: RepoId
@@ -71,6 +72,9 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.either worktreeApi.getSyncStatus () SyncStatusUpdate (fun _ -> SyncStatusUpdate Map.empty)
 
+let fetchServerInfo () =
+    Cmd.OfAsync.either worktreeApi.getServerInfo () ServerInfoLoaded (fun _ -> Tick)
+
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
     |> Map.exists (fun _ evts ->
@@ -98,7 +102,7 @@ let init () =
       SystemMetrics = None
       LastError = None
       ColumnCount = 1 },
-    fetchWorktrees ()
+    Cmd.batch [ fetchWorktrees (); fetchServerInfo () ]
 
 let rng = System.Random()
 
@@ -172,13 +176,16 @@ let update msg model =
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
-                EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
                 DeletedBranches = stillPending
-                DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
+
+    | ServerInfoLoaded info ->
+        { model with
+            EditorName = info.EditorName
+            DeployBranch = info.DeployBranch }, Cmd.none
 
     | DataFailed ex ->
         { model with
