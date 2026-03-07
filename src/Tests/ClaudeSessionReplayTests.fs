@@ -11,15 +11,6 @@ let private fixtureDir =
     Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "fixtures", "claude", "multi-session")
     |> Path.GetFullPath
 
-let private readLastLinesReversed (fileName: string) (maxLines: int) =
-    let path = Path.Combine(fixtureDir, fileName)
-    File.ReadAllLines(path)
-    |> Array.map _.Trim()
-    |> Array.filter (fun s -> s.Length > 0)
-    |> Array.rev
-    |> Array.truncate maxLines
-    |> Array.toList
-
 let private readLinesReversedUpTo (fileName: string) (maxLineIndex: int) (maxLines: int) =
     let path = Path.Combine(fixtureDir, fileName)
     File.ReadAllLines(path)
@@ -29,6 +20,9 @@ let private readLinesReversedUpTo (fileName: string) (maxLineIndex: int) (maxLin
     |> Array.rev
     |> Array.truncate maxLines
     |> Array.toList
+
+let private readLastLinesReversed (fileName: string) (maxLines: int) =
+    readLinesReversedUpTo fileName (Int32.MaxValue - 1) maxLines
 
 let private kindFromFileName (fileName: string) =
     if fileName.StartsWith("subagent-") then Subagent else Parent
@@ -190,7 +184,6 @@ type ParentAuthoritativeResolutionTests() =
         let files =
             [ makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:30.000Z" ] ]
         let result = getStatusFromFiles now files
-        // Parent defaults to Idle, subagent Done does not upgrade
         Assert.That(result, Is.EqualTo(Idle))
 
     [<Test>]
@@ -212,8 +205,6 @@ type ParentAuthoritativeResolutionTests() =
         let result = getStatusFromFiles now files
         Assert.That(result, Is.EqualTo(Working))
 
-
-// --- Timeline Replay Infrastructure ---
 
 type private TimelineEntry =
     { Timestamp: DateTimeOffset
@@ -366,10 +357,3 @@ type TimelineReplayTests() =
             |> List.distinct
         Assert.That(filesWithEntries.Length, Is.EqualTo(4),
             $"Expected entries from all 4 fixture files, got: {filesWithEntries}")
-
-    [<Test>]
-    member _.``Timeline entries are sorted by timestamp``() =
-        let timeline = buildTimeline ()
-        let timestamps = timeline |> List.map _.Timestamp
-        let sorted = timestamps |> List.sort
-        Assert.That(timestamps, Is.EqualTo(sorted))

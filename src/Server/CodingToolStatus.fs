@@ -5,23 +5,6 @@ open System.IO
 open System.Text.Json
 open Shared
 
-type internal ProviderEntry =
-    { Provider: CodingToolProvider
-      GetStatus: string -> CodingToolStatus
-      GetLastMessage: string -> CardEvent option
-      GetLastUserMessage: string -> (string * DateTimeOffset) option
-      GetSessionMtime: string -> DateTimeOffset option }
-
-let private copilotProvider =
-    { Provider = Copilot
-      GetStatus = CopilotDetector.getStatus
-      GetLastMessage = CopilotDetector.getLastMessage
-      GetLastUserMessage = CopilotDetector.getLastUserMessage
-      GetSessionMtime = CopilotDetector.getSessionMtime }
-
-// Claude is handled explicitly to share file enumeration, so it's not in this list
-let private otherProviders = [ copilotProvider ]
-
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
     let configPath = Path.Combine(worktreePath, ".treemon.json")
 
@@ -83,14 +66,12 @@ let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) 
 let private gatherResults (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) =
     let claudeResult = getClaudeResult claudeFiles
 
-    let otherResults =
-        otherProviders
-        |> List.map (fun entry ->
-            { Provider = entry.Provider
-              Status = entry.GetStatus worktreePath
-              Mtime = entry.GetSessionMtime worktreePath })
+    let copilotResult =
+        { Provider = Copilot
+          Status = CopilotDetector.getStatus worktreePath
+          Mtime = CopilotDetector.getSessionMtime worktreePath }
 
-    claudeResult :: otherResults
+    [ claudeResult; copilotResult ]
 
 let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option =
     let configured = readConfiguredProvider worktreePath
@@ -105,10 +86,10 @@ let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvide
         | Some Claude ->
             ClaudeDetector.getLastUserMessageFromFiles claudeFiles
         | Some Copilot ->
-            copilotProvider.GetLastUserMessage worktreePath
+            CopilotDetector.getLastUserMessage worktreePath
         | None ->
             let claudeMsg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
-            let copilotMsg = copilotProvider.GetLastUserMessage worktreePath
+            let copilotMsg = CopilotDetector.getLastUserMessage worktreePath
 
             [ claudeMsg; copilotMsg ]
             |> List.choose id
@@ -128,7 +109,7 @@ let getLastMessage (worktreePath: string) : CardEvent option =
 
     let copilotMsg =
         if configured.IsNone || configured = Some Copilot then
-            copilotProvider.GetLastMessage worktreePath
+            CopilotDetector.getLastMessage worktreePath
         else None
 
     [ claudeMsg; copilotMsg ]
