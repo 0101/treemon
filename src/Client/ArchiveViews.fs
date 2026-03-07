@@ -90,14 +90,14 @@ let archiveButton dispatch (wt: WorktreeStatus) =
         prop.children [ archiveIcon ]
     ]
 
-let archiveCard dispatch (wt: WorktreeStatus) =
+let archiveCard dispatch (now: System.DateTimeOffset) (wt: WorktreeStatus) =
     Html.div [
         prop.key wt.Branch
         prop.className "archive-card"
         prop.children [
             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
             workMetricsView wt.WorkMetrics
-            Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
+            Html.span [ prop.className "commit-time"; prop.text (relativeTime now wt.LastCommitTime) ]
             Html.button [
                 prop.className "unarchive-btn"
                 prop.title "Unarchive worktree"
@@ -107,11 +107,11 @@ let archiveCard dispatch (wt: WorktreeStatus) =
         ]
     ]
 
-let archiveSection dispatch (archived: WorktreeStatus list) =
+let archiveSection dispatch (now: System.DateTimeOffset) (archived: WorktreeStatus list) =
     match archived with
     | [] -> Html.none
     | worktrees ->
         Html.div [
             prop.className "archive-section"
-            prop.children (worktrees |> List.map (archiveCard dispatch))
+            prop.children (worktrees |> List.map (archiveCard dispatch now))
         ]

@@ -500,7 +500,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.text "Sync"
             ]
 
-let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (now: System.DateTimeOffset) =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
@@ -516,7 +516,7 @@ let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent li
                 prop.className "git-commit-msg"
                 prop.children [
                     Html.text wt.LastCommitMessage
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime now wt.LastCommitTime) ]
                 ]
             ]
         ]
@@ -539,19 +539,19 @@ let stepStatusText (status: StepStatus option) =
     | Some StepStatus.Cancelled -> "cancelled"
     | _ -> ""
 
-let relativeEventTime (dt: System.DateTimeOffset) =
-    let diff = System.DateTimeOffset.Now - dt
+let relativeEventTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
+    let diff = now - dt
     match diff with
     | d when d.TotalSeconds < 60.0 -> $"{int d.TotalSeconds |> max 0}s ago"
     | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
 
-let eventLogEntry (evt: CardEvent) =
+let eventLogEntry (now: System.DateTimeOffset) (evt: CardEvent) =
     Html.div [
         prop.className "event-entry"
         prop.children [
-            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime now evt.Timestamp) ]
             Html.span [ prop.className "event-source"; prop.text evt.Source ]
             Html.span [ prop.className "event-message"; prop.text evt.Message ]
             match evt.Status with
@@ -564,13 +564,13 @@ let eventLogEntry (evt: CardEvent) =
         ]
     ]
 
-let eventLog (events: CardEvent list) =
+let eventLog (now: System.DateTimeOffset) (events: CardEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map eventLogEntry)
+            prop.children (evts |> List.map (eventLogEntry now))
         ]
 
 let knownCategories =
@@ -616,7 +616,7 @@ let stripPrefix (prefix: string) (target: string) =
     then target[prefix.Length..]
     else target
 
-let statusOverviewRow (prefix: string) (latestBySource: Map<string, CardEvent>) (category: string) =
+let statusOverviewRow (now: System.DateTimeOffset) (prefix: string) (latestBySource: Map<string, CardEvent>) (category: string) =
     let label = categoryDisplayName category
     match Map.tryFind category latestBySource with
     | None ->
@@ -640,7 +640,7 @@ let statusOverviewRow (prefix: string) (latestBySource: Map<string, CardEvent>) 
                 match evt.Duration with
                 | Some d -> Html.span [ prop.className "status-duration"; prop.text $"%.1f{d.TotalSeconds}s" ]
                 | None -> Html.span [ prop.className "status-duration" ]
-                Html.span [ prop.className "status-time"; prop.text (relativeEventTime evt.Timestamp) ]
+                Html.span [ prop.className "status-time"; prop.text (relativeEventTime now evt.Timestamp) ]
                 match evt.Status with
                 | Some _ ->
                     Html.span [
@@ -651,11 +651,11 @@ let statusOverviewRow (prefix: string) (latestBySource: Map<string, CardEvent>) 
             ]
         ]
 
-let pinnedErrorEntry (prefix: string) (evt: CardEvent) =
+let pinnedErrorEntry (now: System.DateTimeOffset) (prefix: string) (evt: CardEvent) =
     Html.div [
         prop.className "event-entry pinned-error"
         prop.children [
-            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime now evt.Timestamp) ]
             Html.span [ prop.className "event-source"; prop.text evt.Source ]
             Html.span [ prop.className "event-message"; prop.text (stripPrefix prefix evt.Message) ]
             match evt.Status with
@@ -668,7 +668,7 @@ let pinnedErrorEntry (prefix: string) (evt: CardEvent) =
         ]
     ]
 
-let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCategory: Map<string, CardEvent>) =
+let schedulerFooter (now: System.DateTimeOffset) (repos: RepoModel list) (events: CardEvent list) (latestByCategory: Map<string, CardEvent>) =
     let prefix = repos |> List.map (fun r -> RepoId.value r.RepoId) |> commonPathPrefix
     let errors = pinnedErrors events
     Html.div [
@@ -679,11 +679,11 @@ let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCa
             | errs ->
                 Html.div [
                     prop.className "pinned-errors"
-                    prop.children (errs |> List.map (pinnedErrorEntry prefix))
+                    prop.children (errs |> List.map (pinnedErrorEntry now prefix))
                 ]
             Html.div [
                 prop.className "status-overview"
-                prop.children (knownCategories |> List.map (statusOverviewRow prefix latestByCategory))
+                prop.children (knownCategories |> List.map (statusOverviewRow now prefix latestByCategory))
             ]
         ]
     ]
@@ -889,7 +889,7 @@ let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
 
 let workMetricsView = ArchiveViews.workMetricsView
 
-let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: string) (isFocused: bool) (now: System.DateTimeOffset) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
@@ -903,7 +903,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime now wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
                     editorButton dispatch editorName wt
@@ -922,7 +922,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
         ]
     ]
 
-let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (now: System.DateTimeOffset) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
@@ -958,7 +958,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                             ]
                         ]
 
-                    mainBehindWithSync dispatch wt branchEvents isPending scopedKey
+                    mainBehindWithSync dispatch wt branchEvents isPending scopedKey now
 
                     prRow dispatch wt repoName
                 ]
@@ -972,27 +972,27 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                         Html.div [
                             prop.className "user-prompt"
                             prop.children [
-                                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                                Html.span [ prop.className "event-time"; prop.text (relativeEventTime now ts) ]
                                 Html.span [ prop.text prompt ]
                             ]
                         ]
                     | None -> ()
 
-                    eventLog branchEvents
+                    eventLog now branchEvents
                 ]
             ]
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (now: System.DateTimeOffset) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName events isPending scopedKey isFocused wt
+    if isCompact then compactWorktreeCard dispatch editorName repoName scopedKey isFocused now wt
+    else worktreeCard dispatch editorName repoName events isPending scopedKey isFocused now wt
 
-let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
+let archiveSection dispatch now = ArchiveViews.archiveSection (ArchiveMsg >> dispatch) now
 
 let skeletonCard () =
     Html.div [
@@ -1182,7 +1182,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
         ]
     ]
 
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
+let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (now: System.DateTimeOffset) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -1194,9 +1194,9 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending now))
                     ]
-                    archiveSection dispatch repo.ArchivedWorktrees
+                    archiveSection dispatch now repo.ArchivedWorktrees
         ]
     ]
 
@@ -1297,6 +1297,7 @@ let viewAppHeader model dispatch =
     ]
 
 let view model dispatch =
+    let now = System.DateTimeOffset.Now
     React.fragment [
         match model.LastError with
         | Some msg ->
@@ -1332,10 +1333,10 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending now))
                     ]
 
-                schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+                schedulerFooter now model.Repos model.SchedulerEvents model.LatestByCategory
 
                 CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
             ]
