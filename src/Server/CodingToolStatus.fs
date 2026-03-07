@@ -63,7 +63,7 @@ let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) 
       Status = ClaudeDetector.getStatusFromEnumeratedFiles files
       Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
 
-let private gatherResults (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) =
+let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) =
     let claudeResult = getClaudeResult claudeFiles
 
     let copilotResult =
@@ -76,7 +76,7 @@ let private gatherResults (worktreePath: string) (claudeFiles: (FileInfo * Claud
 let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
-    let results = gatherResults worktreePath claudeFiles
+    let results = gatherResultsFromFiles worktreePath claudeFiles
 
     let status, provider = resolveStatus configured results
     let target = configured |> Option.orElse provider

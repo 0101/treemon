@@ -390,9 +390,8 @@ let worktreeApi
                               |> Option.defaultValue []
 
                           let claudeEvt =
-                              branchToScopedKey
-                              |> Map.tryFind key
-                              |> Option.bind CodingToolStatus.getLastMessage
+                              let wtPath = branchToScopedKey |> Map.tryFind key
+                              wtPath |> Option.bind CodingToolStatus.getLastMessage
 
                           let merged = (claudeEvt |> Option.toList) @ syncEvts
 
