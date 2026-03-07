@@ -46,7 +46,7 @@ type ErrorToastTests() =
     member _.``DeleteCompleted Error sets LastError with prefix``() =
         let model = tryUpdate (DeleteCompleted (Error "branch locked")) defaultModel
         Assert.That(model.LastError, Is.EqualTo(Some "Delete failed: branch locked"))
-        Assert.That(model.DeletedBranches, Is.EqualTo(Set.empty))
+        Assert.That(model.DeletedBranches, Is.Empty)
 
     [<Test>]
     member _.``SessionResult Error sets LastError with prefix``() =
@@ -66,13 +66,11 @@ type ErrorToastTests() =
 
     [<Test>]
     member _.``init starts with LastError None``() =
-        let model, _ = init ()
-        Assert.That(model.LastError, Is.EqualTo(None))
+        Assert.That(defaultModel.LastError, Is.EqualTo(None))
 
     [<Test>]
     member _.``init starts with ColumnCount 1``() =
-        let model, _ = init ()
-        Assert.That(model.ColumnCount, Is.EqualTo(1))
+        Assert.That(defaultModel.ColumnCount, Is.EqualTo(1))
 
     [<Test>]
     member _.``ColumnsChanged updates ColumnCount``() =
