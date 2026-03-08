@@ -3,28 +3,7 @@ module Navigation
 open Shared
 open Browser
 open Fable.Core.JsInterop
-
-type FocusTarget =
-    | RepoHeader of RepoId
-    | Card of scopedKey: string
-
-type RepoModel =
-    { RepoId: RepoId
-      Name: string
-      Worktrees: WorktreeStatus list
-      ArchivedWorktrees: WorktreeStatus list
-      IsReady: bool
-      IsCollapsed: bool }
-
-type NavAction =
-    | NoAction
-    | CollapseRepo of RepoId
-    | ExpandRepo of RepoId
-
-type RepoNav =
-    { RepoId: RepoId
-      Header: FocusTarget
-      Cards: FocusTarget list }
+open Client.Types
 
 let visibleFocusTargets (repos: RepoModel list) =
     repos
@@ -39,7 +18,7 @@ let getColumnCount () =
     Dom.document.querySelector ".card-grid"
     |> Option.ofObj
     |> Option.map (fun el ->
-        let cols: string = Dom.window?getComputedStyle(el)?getPropertyValue("grid-template-columns")
+        let cols: string = Dom.window.getComputedStyle(el).getPropertyValue("grid-template-columns")
         cols.Trim().Split(' ') |> Array.length)
     |> Option.defaultValue 1
 
@@ -64,8 +43,6 @@ let navigateLinear (direction: int) (targets: FocusTarget list) (current: FocusT
             |> Option.defaultValue -1
         if idx < 0 then Some targets.Head
         else Some targets[(idx + direction + targets.Length) % targets.Length]
-
-type ScrollHint = Normal | ScrollToTop | ScrollToBottom
 
 let navigateSpatial (key: string) (cols: int) (repos: RepoModel list) (focusedElement: FocusTarget option) =
     let sections = repoNavSections repos
@@ -183,25 +160,26 @@ let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     match target with
     | None -> ()
     | Some _ ->
-        Dom.window?requestAnimationFrame(fun (_: float) ->
+        Dom.window.requestAnimationFrame(fun (_: float) ->
             Dom.document.querySelector ".focused"
             |> Option.ofObj
             |> Option.iter (fun el ->
-                let rect = el?getBoundingClientRect()
-                let rectTop: float = rect?top
-                let rectBottom: float = rect?bottom
-                let viewH: float = Dom.window?innerHeight
-                let scrollY: float = Dom.window?scrollY
+                let rect = el.getBoundingClientRect()
+                let rectTop = rect.top
+                let rectBottom = rect.bottom
+                let viewH: float = Dom.window.innerHeight
+                let scrollY: float = Dom.window.scrollY
                 let elTop = rectTop + scrollY
                 let elBottom = rectBottom + scrollY
-                let docHeight: float = Dom.document.documentElement?scrollHeight
+                let docHeight: float = Dom.document.documentElement.scrollHeight
+                // Dom.window.scrollTo typed overload only accepts (x, y) — keep dynamic for options object
                 let scrollTo top = Dom.window?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
                 match hint with
                 | ScrollToTop -> scrollTo 0
                 | ScrollToBottom -> scrollTo docHeight
                 | Normal when rectTop < headerOffset -> scrollTo (elTop - headerOffset)
                 | Normal when rectBottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
-                | _ -> ()))
+                | _ -> ())) |> ignore
 
 let navigateToFirst (repos: RepoModel list) =
     let targets = visibleFocusTargets repos

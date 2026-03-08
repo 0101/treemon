@@ -2,6 +2,7 @@ module CreateWorktreeModal
 
 open Shared
 open Navigation
+open Client.Types
 open Elmish
 open Feliz
 
@@ -84,7 +85,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
                   BranchName = BranchName.create (form.Name.Trim())
                   BaseBranch = BranchName.create form.BaseBranch }
             { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
-            Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
+            Cmd.OfAsync.either api.Value.createWorktree request CreateWorktreeCompleted (fun _ -> CreateWorktreeCompleted (Error "Network error"))
         | _ -> just modal
 
     | CreateWorktreeCompleted (Ok _) ->
@@ -152,7 +153,7 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                         prop.children (
                             form.Branches
                             |> List.map (fun b ->
-                                Html.option [ prop.value b; prop.text b ]))
+                                Html.option [ prop.key b; prop.value b; prop.text b ]))
                     ]
                 ]
             ]

@@ -128,3 +128,39 @@ let killOrphansOnPort (port: int) =
                 ())
     with ex ->
         TestContext.Error.WriteLine($"[Cleanup] Failed to scan port {port}: {ex.Message}")
+
+module ElmishTestHelpers =
+    open Shared
+    open Shared.EventUtils
+    open App
+    open Client.Types
+
+    let defaultModel : Model =
+        { Repos = []
+          IsLoading = false
+          HasError = false
+          SortMode = ByActivity
+          IsCompact = false
+          SchedulerEvents = []
+          LatestByCategory = Map.empty
+          BranchEvents = Map.empty
+          SyncPending = Set.empty
+          AppVersion = Some "1.0"
+          DeployBranch = None
+          SystemMetrics = None
+          LastError = None
+          ColumnCount = 1
+          EyeDirection = (0.0, 0.0)
+          FocusedElement = None
+          CreateModal = CreateWorktreeModal.Closed
+          DeletedBranches = Set.empty
+          EditorName = "VS Code" }
+
+    /// Calls update and returns the model. If Fable.Remoting proxy initialization
+    /// throws TypeInitializationException, invokes the fallback handler instead.
+    let tryUpdateModel (fallback: exn -> Msg -> Model -> Model) msg model =
+        try
+            let m, _ = update msg model
+            m
+        with
+        | :? TypeInitializationException as ex -> fallback ex msg model

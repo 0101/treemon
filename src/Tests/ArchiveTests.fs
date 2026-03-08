@@ -7,6 +7,7 @@ open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Server.TreemonConfig
 open Navigation
+open Client.Types
 open Shared
 
 [<TestFixture>]
@@ -354,7 +355,7 @@ type ArchiveE2ETests() =
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":""}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test"}}"""
 
     let emptySyncStatus = "{}"
 
@@ -363,6 +364,9 @@ type ArchiveE2ETests() =
             do! page.RouteAsync("**/IWorktreeApi/getWorktrees", fun route ->
                 let json = getWorktreesJson ()
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)))
+
+            do! page.RouteAsync("**/IWorktreeApi/getServerInfo", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = """{"EditorName":"VS Code"}""")))
 
             do! page.RouteAsync("**/IWorktreeApi/getSyncStatus", fun route ->
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = emptySyncStatus)))

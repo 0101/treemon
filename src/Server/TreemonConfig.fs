@@ -3,6 +3,65 @@ module Server.TreemonConfig
 open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
+open Shared
+
+// --- Config read (coding tool, test solution) ---
+
+type Config =
+    { CodingTool: CodingToolProvider option
+      TestSolution: string option }
+
+let private empty = { CodingTool = None; TestSolution = None }
+
+let private isValidSolutionPath (worktreePath: string) (solutionPath: string) =
+    let isSolutionExtension =
+        solutionPath.EndsWith(".sln", System.StringComparison.OrdinalIgnoreCase)
+        || solutionPath.EndsWith(".slnx", System.StringComparison.OrdinalIgnoreCase)
+
+    let fullPath = Path.Combine(worktreePath, solutionPath) |> Path.GetFullPath
+    let normalizedRoot = Path.GetFullPath(worktreePath)
+
+    isSolutionExtension && fullPath.StartsWith(normalizedRoot, System.StringComparison.OrdinalIgnoreCase) && File.Exists(fullPath)
+
+let read (worktreePath: string) : Config =
+    let configPath = Path.Combine(worktreePath, ".treemon.json")
+
+    if not (File.Exists(configPath)) then
+        empty
+    else
+        try
+            let json = File.ReadAllText(configPath)
+            use doc = JsonDocument.Parse(json)
+            let root = doc.RootElement
+
+            let codingTool =
+                match root.TryGetProperty("codingTool") with
+                | true, elem ->
+                    match elem.GetString().ToLowerInvariant() with
+                    | "claude" -> Some Claude
+                    | "copilot" -> Some Copilot
+                    | other ->
+                        Log.log "TreemonConfig" $"Unknown codingTool value '{other}' in {configPath}"
+                        None
+                | false, _ -> None
+
+            let testSolution =
+                match root.TryGetProperty("testSolution") with
+                | true, elem ->
+                    let solutionPath = elem.GetString()
+                    if isValidSolutionPath worktreePath solutionPath then
+                        Some solutionPath
+                    else
+                        Log.log "TreemonConfig" $"testSolution '{solutionPath}' rejected: must be a .sln/.slnx file within {worktreePath}"
+                        None
+                | false, _ -> None
+
+            { CodingTool = codingTool; TestSolution = testSolution }
+        with ex ->
+            Log.log "TreemonConfig" $"Failed to read .treemon.json: {ex.Message}"
+            empty
+
+// --- Archived branches ---
 
 let private configLock = obj ()
 

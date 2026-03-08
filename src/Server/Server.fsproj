@@ -11,7 +11,9 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="FileUtils.fs" />
     <Compile Include="ProcessRunner.fs" />
+    <Compile Include="JsonHelpers.fs" />
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />
     <Compile Include="SessionManager.fs" />
@@ -19,11 +21,10 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="ClaudeDetector.fs" />
     <Compile Include="CopilotDetector.fs" />
+    <Compile Include="TreemonConfig.fs" />
     <Compile Include="CodingToolStatus.fs" />
-    <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
-    <Compile Include="TreemonConfig.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="SyncEngine.fs" />
     <Compile Include="WorktreeApi.fs" />

@@ -15,10 +15,10 @@ let update (api: Lazy<IWorktreeApi>) msg : UpdateResult * Cmd<Msg> =
     match msg with
     | Archive branch ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.archiveWorktree branch) () OpCompleted
+        Cmd.OfAsync.either (fun () -> api.Value.archiveWorktree branch) () OpCompleted (fun _ -> OpCompleted (Error "Network error"))
     | Unarchive branch ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.unarchiveWorktree branch) () OpCompleted
+        Cmd.OfAsync.either (fun () -> api.Value.unarchiveWorktree branch) () OpCompleted (fun _ -> OpCompleted (Error "Network error"))
     | OpCompleted (Ok _) ->
         { RefreshWorktrees = true }, Cmd.none
     | OpCompleted (Error _) ->
@@ -76,7 +76,7 @@ let archiveIcon =
             ]
             Svg.path [
                 svg.custom ("fillRule", "evenodd")
-                svg.custom ("clipRule", "evenodd")
+                svg.clipRule.evenodd
                 svg.d "M20.0689 8.49993C20.2101 8.49999 20.3551 8.50005 20.5 8.49805V12.9999C20.5 16.7711 20.5 18.6568 19.3284 19.8283C18.1569 20.9999 16.2712 20.9999 12.5 20.9999H11.5C7.72876 20.9999 5.84315 20.9999 4.67157 19.8283C3.5 18.6568 3.5 16.7711 3.5 12.9999V8.49805C3.64488 8.50005 3.78999 8.49999 3.93114 8.49993H20.0689ZM9 11.9999C9 11.5339 9 11.301 9.07612 11.1172C9.17761 10.8722 9.37229 10.6775 9.61732 10.576C9.80109 10.4999 10.0341 10.4999 10.5 10.4999H13.5C13.9659 10.4999 14.1989 10.4999 14.3827 10.576C14.6277 10.6775 14.8224 10.8722 14.9239 11.1172C15 11.301 15 11.5339 15 11.9999C15 12.4658 15 12.6988 14.9239 12.8826C14.8224 13.1276 14.6277 13.3223 14.3827 13.4238C14.1989 13.4999 13.9659 13.4999 13.5 13.4999H10.5C10.0341 13.4999 9.80109 13.4999 9.61732 13.4238C9.37229 13.3223 9.17761 13.1276 9.07612 12.8826C9 12.6988 9 12.4658 9 11.9999Z"
             ]
         ]
@@ -90,14 +90,14 @@ let archiveButton dispatch (wt: WorktreeStatus) =
         prop.children [ archiveIcon ]
     ]
 
-let archiveCard dispatch (wt: WorktreeStatus) =
+let archiveCard dispatch (now: System.DateTimeOffset) (wt: WorktreeStatus) =
     Html.div [
         prop.key wt.Branch
         prop.className "archive-card"
         prop.children [
             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
             workMetricsView wt.WorkMetrics
-            Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
+            Html.span [ prop.className "commit-time"; prop.text (relativeTime now wt.LastCommitTime) ]
             Html.button [
                 prop.className "unarchive-btn"
                 prop.title "Unarchive worktree"
@@ -107,11 +107,11 @@ let archiveCard dispatch (wt: WorktreeStatus) =
         ]
     ]
 
-let archiveSection dispatch (archived: WorktreeStatus list) =
+let archiveSection dispatch (now: System.DateTimeOffset) (archived: WorktreeStatus list) =
     match archived with
     | [] -> Html.none
     | worktrees ->
         Html.div [
             prop.className "archive-section"
-            prop.children (worktrees |> List.map (archiveCard dispatch))
+            prop.children (worktrees |> List.map (archiveCard dispatch now))
         ]

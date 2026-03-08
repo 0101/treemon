@@ -142,9 +142,7 @@ let getWorktrees
               SchedulerEvents = mergeWithPinnedErrors state.SchedulerEvents state.PinnedErrors
               LatestByCategory = state.LatestByCategory
               AppVersion = appVersion
-              DeployBranch = deployBranch
-              SystemMetrics = SystemMetrics.getSystemMetrics ()
-              EditorName = getEditorConfig () |> snd }
+              SystemMetrics = SystemMetrics.getSystemMetrics () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -161,8 +159,8 @@ let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePa
             try
                 let psi =
                     System.Diagnostics.ProcessStartInfo(
-                        "cmd.exe",
-                        $"/c {editor} \"{path}\"",
+                        FileName = editor,
+                        Arguments = $"\"{path}\"",
                         UseShellExecute = false,
                         CreateNoWindow = true
                     )
@@ -302,7 +300,8 @@ let worktreeApi
 
     match fixtures with
     | Some f ->
-        { getWorktrees = fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } }
+        { getWorktrees = fun () -> async { return { f.Worktrees with SystemMetrics = None } }
+          getServerInfo = fun () -> async { return { DeployBranch = None; EditorName = getEditorConfig () |> snd } }
           openTerminal = fun _ -> async { return () }
           openEditor = fun _ -> async { return () }
           startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
@@ -320,6 +319,7 @@ let worktreeApi
           launchAction = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
+          getServerInfo = fun () -> async { return { DeployBranch = deployBranch; EditorName = getEditorConfig () |> snd } }
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun branch ->
