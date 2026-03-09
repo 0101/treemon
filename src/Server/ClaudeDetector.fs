@@ -5,6 +5,13 @@ open System.IO
 open System.Text.Json
 open Shared
 
+type SessionFileKind = Parent | Subagent
+
+type SessionFileData =
+    { Kind: SessionFileKind
+      LastWriteUtc: DateTimeOffset
+      LastLinesReversed: string list }
+
 let private claudeProjectsDir =
     Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -15,50 +22,40 @@ let private claudeProjectsDir =
 let encodeWorktreePath (worktreePath: string) =
     worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
 
-let private findLatestJsonl (projectDir: string) =
+let internal findAllJsonlFiles (projectDir: string) =
     try
         if Directory.Exists(projectDir) then
-            Directory.GetFiles(projectDir, "*.jsonl")
-            |> Array.map (fun f -> FileInfo(f))
-            |> Array.sortByDescending _.LastWriteTimeUtc
-            |> Array.tryHead
+            let topLevel =
+                Directory.GetFiles(projectDir, "*.jsonl")
+                |> Array.map (fun f -> FileInfo(f), Parent)
+            let subagentFiles =
+                Directory.GetDirectories(projectDir)
+                |> Array.collect (fun sessionDir ->
+                    let subagentsDir = Path.Combine(sessionDir, "subagents")
+                    if Directory.Exists(subagentsDir) then
+                        Directory.GetFiles(subagentsDir, "*.jsonl")
+                        |> Array.map (fun f -> FileInfo(f), Subagent)
+                    else
+                        Array.empty)
+            Array.append topLevel subagentFiles
+            |> Array.toList
         else
-            None
+            []
     with ex ->
         Log.log "Claude" $"Failed to list directory {projectDir}: {ex.Message}"
-        None
-
-let private readLastLines (filePath: string) (maxLines: int) =
-    try
-        use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-        if stream.Length = 0L then []
-        else
-            // Read last 64KB or full file if smaller
-            let bufferSize = 64 * 1024
-            let length = stream.Length
-            let start = Math.Max(0L, length - int64 bufferSize)
-            stream.Seek(start, SeekOrigin.Begin) |> ignore
-
-            use reader = new StreamReader(stream)
-            let content = reader.ReadToEnd()
-            let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.None)
-
-            // If we didn't read the whole file, the first line might be partial
-            let linesToProcess =
-                if start > 0L && lines.Length > 0 then
-                    lines[1..]
-                else
-                    lines
-
-            linesToProcess
-            |> Array.map _.Trim()
-            |> Array.filter (fun s -> s.Length > 0)
-            |> Array.rev
-            |> Array.truncate maxLines
-            |> Array.toList
-    with ex ->
-        Log.log "Claude" $"Failed to read JSONL {filePath}: {ex.Message}"
         []
+
+let enumerateFiles (worktreePath: string) =
+    let encoded = encodeWorktreePath worktreePath
+    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+    findAllJsonlFiles projectDir
+
+let private parentFiles (files: (FileInfo * SessionFileKind) list) =
+    files |> List.choose (function (fi, Parent) -> Some fi | _ -> None)
+
+let private tryMaxBy projection = function
+    | [] -> None
+    | items -> items |> List.maxBy projection |> Some
 
 type private EntryKind =
     | UserEntry
@@ -162,41 +159,67 @@ let private statusFromEntry entryKind =
 
 let private stalenessTimeout = TimeSpan.FromMinutes(30.0)
 
-let getStatus (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+let private statusPriority = function
+    | Working -> 3
+    | WaitingForUser -> 2
+    | Done -> 1
+    | Idle -> 0
 
-    match findLatestJsonl projectDir with
-    | Some fi ->
-        try
-            let fileAge = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if fileAge > TimeSpan.FromHours(2.0) then
-                Idle
-            else
-                let parsed =
-                    readLastLines fi.FullName 20
-                    |> List.tryPick tryParseEntryKind
-                    |> Option.map (fun (kind, timestamp) ->
-                        let entryAge =
-                            timestamp
-                            |> Option.map (fun ts -> DateTimeOffset.UtcNow - ts)
-                            |> Option.defaultValue fileAge
-                        statusFromEntry kind, entryAge)
+let private getFileStatus (now: DateTimeOffset) (file: SessionFileData) =
+    let fileAge = now - file.LastWriteUtc
+    if fileAge > TimeSpan.FromHours(2.0) then
+        Idle
+    else
+        let parsed =
+            file.LastLinesReversed
+            |> List.tryPick tryParseEntryKind
+            |> Option.map (fun (kind, timestamp) ->
+                let entryAge =
+                    timestamp
+                    |> Option.map (fun ts -> now - ts)
+                    |> Option.defaultValue fileAge
+                statusFromEntry kind, entryAge)
 
-                match parsed with
-                | Some (Done, _) when fileAge < TimeSpan.FromSeconds(10.0) -> Working
-                | Some (Working, entryAge) when entryAge > stalenessTimeout -> Idle
-                | Some (status, _) -> status
-                | None -> Idle
-        with ex ->
-            Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
-            Idle
-    | None -> Idle
+        match parsed with
+        | Some (Done, _) when fileAge < TimeSpan.FromSeconds(10.0) -> Working
+        | Some (Working, entryAge) when entryAge > stalenessTimeout -> Idle
+        | Some (status, _) -> status
+        | None -> Idle
 
-let private truncateMessage (maxLen: int) (text: string) =
-    let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
-    if singleLine.Length <= maxLen then singleLine
-    else singleLine[..maxLen-1].TrimEnd() + "..."
+let private bestStatusByKind (now: DateTimeOffset) (kind: SessionFileKind) (files: SessionFileData list) =
+    files
+    |> List.filter (fun f -> f.Kind = kind)
+    |> List.map (getFileStatus now)
+    |> function
+       | [] -> None
+       | statuses -> statuses |> List.maxBy statusPriority |> Some
+
+let internal getStatusFromFiles (now: DateTimeOffset) (files: SessionFileData list) =
+    match files with
+    | [] -> Idle
+    | _ ->
+        let parentStatus = bestStatusByKind now Parent files |> Option.defaultValue Idle
+        match parentStatus with
+        | Working | WaitingForUser -> parentStatus
+        | Done | Idle ->
+            let subagentStatus = bestStatusByKind now Subagent files |> Option.defaultValue Idle
+            match subagentStatus with
+            | Working -> Working
+            | _ -> parentStatus
+
+let getStatusFromEnumeratedFiles (files: (FileInfo * SessionFileKind) list) =
+    let sessionFiles =
+        files
+        |> List.choose (fun (fi, kind) ->
+            try
+                let lastWrite = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+                let lines = FileUtils.readLastLines "Claude" fi.FullName 20
+                Some { Kind = kind; LastWriteUtc = lastWrite; LastLinesReversed = lines }
+            with ex ->
+                Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
+                None)
+
+    getStatusFromFiles DateTimeOffset.UtcNow sessionFiles
 
 let private tryParseAssistantText (line: string) =
     try
@@ -235,24 +258,21 @@ let private tryParseAssistantText (line: string) =
         Log.log "Claude" $"Failed to parse assistant text: {ex.Message}"
         None
 
-let getSessionMtime (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
+let getSessionMtimeFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> List.map (fun (fi, _) -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
+    |> tryMaxBy id
 
-    findLatestJsonl projectDir
-    |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
-
-let getLastMessage (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
-
-    findLatestJsonl projectDir
-    |> Option.bind (fun fi ->
-        readLastLines fi.FullName 20
+let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> parentFiles
+    |> List.choose (fun fi ->
+        FileUtils.readLastLines "Claude" fi.FullName 20
         |> List.tryPick tryParseAssistantText)
+    |> tryMaxBy snd
     |> Option.map (fun (text, timestamp) ->
         { Source = "claude"
-          Message = truncateMessage 80 text
+          Message = FileUtils.truncateMessage 80 text
           Timestamp = timestamp
           Status = None
           Duration = None })
@@ -365,10 +385,9 @@ let scanForUserMessage (filePath: string) =
         Log.log "Claude" $"Failed to scan JSONL {filePath}: {ex.Message}"
         None
 
-let getLastUserMessage (worktreePath: string) =
-    let encoded = encodeWorktreePath worktreePath
-    let projectDir = Path.Combine(claudeProjectsDir, encoded)
-
-    findLatestJsonl projectDir
-    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
-    |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
+let getLastUserMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> parentFiles
+    |> List.choose (fun fi -> scanForUserMessage fi.FullName)
+    |> tryMaxBy snd
+    |> Option.map (fun (text, ts) -> FileUtils.truncateMessage 120 text, ts)
