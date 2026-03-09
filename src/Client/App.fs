@@ -991,7 +991,7 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
-let viewEyeOpen (dx: float, dy: float) =
+let viewEyeOpen (pupilColor: string) (dx: float, dy: float) =
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
@@ -1022,7 +1022,7 @@ let viewEyeOpen (dx: float, dy: float) =
                         svg.cx 20
                         svg.cy 10
                         svg.r 3
-                        svg.fill "#1a1b2e"
+                        svg.fill pupilColor
                     ]
                 ]
             ]
@@ -1115,8 +1115,14 @@ let viewEyeClosed =
         ]
     ]
 
-let hasAnyWorking (repos: RepoModel list) =
-    repos |> List.exists (fun r -> r.Worktrees |> List.exists (fun wt -> wt.CodingTool = Working))
+let hasAnyActive (repos: RepoModel list) =
+    repos |> List.exists (fun r ->
+        r.Worktrees |> List.exists (fun wt ->
+            wt.CodingTool = Working || wt.CodingTool = WaitingForUser))
+
+let hasAnyWaiting (repos: RepoModel list) =
+    repos |> List.exists (fun r ->
+        r.Worktrees |> List.exists (fun wt -> wt.CodingTool = WaitingForUser))
 
 let anyRepoReady (repos: RepoModel list) =
     repos |> List.exists _.IsReady
@@ -1233,7 +1239,9 @@ let viewAppHeader model dispatch =
                 prop.className "header-center"
                 prop.children [
                     if model.HasError then viewEyeRolledBack
-                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
+                    elif hasAnyActive model.Repos then
+                        let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
+                        viewEyeOpen pupilColor model.EyeDirection
                     else viewEyeClosed
                 ]
             ]
