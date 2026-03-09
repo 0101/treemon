@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
@@ -26,6 +26,7 @@ if (-not $Command) {
     Write-Host "  status                     Show production server status"
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev <path> [<path>...]     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
+    Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
     Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
     exit 0
 }
@@ -251,6 +252,58 @@ function Start-DevMode([string[]]$Roots) {
     }
 }
 
+function Start-DemoMode {
+    $devApiPort = 5001
+    $devVitePort = 5174
+
+    Write-Host "Starting demo mode..." -ForegroundColor Cyan
+    Write-Host "  Server:  http://localhost:$devApiPort (demo data)" -ForegroundColor Gray
+    Write-Host "  Vite:    http://localhost:$devVitePort" -ForegroundColor Gray
+    Write-Host "  Press Ctrl+C to stop both processes" -ForegroundColor Gray
+    Write-Host ""
+
+    $env:VITE_PORT = $devVitePort
+    $env:API_PORT = $devApiPort
+
+    $serverProcess = $null
+    $viteProcess = $null
+
+    try {
+        $serverProcess = Start-Process -FilePath "dotnet" `
+            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- --demo --port $devApiPort" `
+            -WorkingDirectory $ScriptDir `
+            -PassThru `
+            -NoNewWindow
+
+        $viteProcess = Start-Process -FilePath "cmd.exe" `
+            -ArgumentList "/c", "npx", "vite", "--port", $devVitePort `
+            -WorkingDirectory $ScriptDir `
+            -PassThru `
+            -NoNewWindow
+
+        Write-Host "Demo server started (PID: $($serverProcess.Id)), Vite started (PID: $($viteProcess.Id))" -ForegroundColor Green
+
+        while (-not $serverProcess.HasExited -and -not $viteProcess.HasExited) {
+            Start-Sleep -Milliseconds 500
+        }
+    } finally {
+        Write-Host ""
+        Write-Host "Shutting down demo processes..." -ForegroundColor Yellow
+
+        if ($serverProcess -and -not $serverProcess.HasExited) {
+            Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($viteProcess -and -not $viteProcess.HasExited) {
+            Stop-Process -Id $viteProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+
+        Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
+        Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+
+        Write-Host "Demo mode stopped" -ForegroundColor Green
+    }
+}
+
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
     Build-Frontend
@@ -319,6 +372,9 @@ switch ($Command) {
             }
         }
         Start-DevMode $roots
+    }
+    "demo" {
+        Start-DemoMode
     }
     "deploy" {
         Deploy-Frontend
