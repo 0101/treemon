@@ -37,33 +37,46 @@ let readAppVersion () =
 type ServerConfig =
     { WorktreeRoots: string list
       Port: int
-      TestFixtures: string option }
+      TestFixtures: string option
+      Demo: bool }
 
 let parseArgs (args: string array) =
-    let rec parse roots port testFixtures remaining =
+    let rec parse roots port testFixtures demo remaining =
         match remaining with
         | "--port" :: portStr :: rest ->
             match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots p testFixtures rest
+            | true, p -> parse roots p testFixtures demo rest
             | false, _ ->
                 eprintfn "Invalid port number: %s" portStr
                 exit 1
         | "--test-fixtures" :: path :: rest ->
-            parse roots port (Some path) rest
+            parse roots port (Some path) demo rest
+        | "--demo" :: rest ->
+            parse roots port testFixtures true rest
         | path :: rest when not (path.StartsWith("--")) ->
-            parse (roots @ [ path ]) port testFixtures rest
-        | [] -> roots, port, testFixtures
+            parse (roots @ [ path ]) port testFixtures demo rest
+        | [] -> roots, port, testFixtures, demo
         | unexpected :: _ ->
             eprintfn "Unexpected argument: %s" unexpected
             exit 1
 
-    match args |> Array.toList |> parse [] 5000 None with
-    | roots, port, testFixtures when roots <> [] ->
+    match args |> Array.toList |> parse [] 5000 None false with
+    | _, _, Some _, true ->
+        eprintfn "--demo and --test-fixtures are mutually exclusive"
+        exit 1
+    | _, port, _, true ->
+        { WorktreeRoots = []
+          Port = port
+          TestFixtures = None
+          Demo = true }
+    | roots, port, testFixtures, _ when roots <> [] ->
         { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
           Port = port
-          TestFixtures = testFixtures }
+          TestFixtures = testFixtures
+          Demo = false }
     | _ ->
         eprintfn "Usage: Server <worktree-root-path> [<additional-roots>...] [--port <port>] [--test-fixtures <path>]"
+        eprintfn "       Server --demo [--port <port>]"
         exit 1
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
@@ -78,6 +91,31 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
 
         agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
         Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
+
+let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
+    { getWorktrees = fun () ->
+        async {
+            let frame = DemoFixture.selectFrame startTime System.DateTimeOffset.Now
+            return frame.Worktrees
+        }
+      getSyncStatus = fun () ->
+        async {
+            let frame = DemoFixture.selectFrame startTime System.DateTimeOffset.Now
+            return frame.SyncStatus
+        }
+      openTerminal = fun _ -> async { return () }
+      openEditor = fun _ -> async { return () }
+      startSync = fun _ -> async { return Error "Sync is not available in demo mode" }
+      cancelSync = fun _ -> async { return () }
+      deleteWorktree = fun _ -> async { return Error "Delete is not available in demo mode" }
+      launchSession = fun _ -> async { return Error "Session management is not available in demo mode" }
+      focusSession = fun _ -> async { return Error "Session management is not available in demo mode" }
+      killSession = fun _ -> async { return Error "Session management is not available in demo mode" }
+      archiveWorktree = fun _ -> async { return Error "Archive is not available in demo mode" }
+      unarchiveWorktree = fun _ -> async { return Error "Archive is not available in demo mode" }
+      getBranches = fun _ -> async { return [] }
+      createWorktree = fun _ -> async { return Error "Create is not available in demo mode" }
+      openNewTab = fun _ -> async { return Error "Session management is not available in demo mode" } }
 
 [<EntryPoint>]
 let main args =
@@ -105,22 +143,33 @@ let main args =
     let syncAgent = SyncEngine.createSyncAgent ()
     let sessionAgent = SessionManager.createAgent ()
 
-    match config.TestFixtures with
-    | Some path ->
-        let fixtures = WorktreeApi.loadFixtures path
-        populateAgentFromFixtures agent fixtures
-        Log.log "Startup" "Fixture mode: scheduler background loop skipped"
-    | None ->
-        RefreshScheduler.start agent config.WorktreeRoots cts.Token
-        Log.log "Startup" "Scheduler background loop started"
-
     let remotingApi =
-        Remoting.createApi ()
-        |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch)
-        |> Remoting.withErrorHandler (fun ex routeInfo ->
-            Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
-            Propagate ex.Message)
-        |> Remoting.buildHttpHandler
+        if config.Demo then
+            Log.log "Startup" "Demo mode: serving cycling fixture frames"
+            let demoApi = buildDemoApi System.DateTimeOffset.Now
+
+            Remoting.createApi ()
+            |> Remoting.fromValue demoApi
+            |> Remoting.withErrorHandler (fun ex routeInfo ->
+                Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
+                Propagate ex.Message)
+            |> Remoting.buildHttpHandler
+        else
+            match config.TestFixtures with
+            | Some path ->
+                let fixtures = WorktreeApi.loadFixtures path
+                populateAgentFromFixtures agent fixtures
+                Log.log "Startup" "Fixture mode: scheduler background loop skipped"
+            | None ->
+                RefreshScheduler.start agent config.WorktreeRoots cts.Token
+                Log.log "Startup" "Scheduler background loop started"
+
+            Remoting.createApi ()
+            |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch)
+            |> Remoting.withErrorHandler (fun ex routeInfo ->
+                Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
+                Propagate ex.Message)
+            |> Remoting.buildHttpHandler
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"
