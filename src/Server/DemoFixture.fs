@@ -276,6 +276,45 @@ let private prGithubOpenCanceled =
                 Url = Some "https://github.com/acme/data-pipeline/actions/runs/99002"
                 Failure = None } ] }
 
+let private prAzDoOpenSucceeded =
+    { prAzDoOpen with
+        Builds =
+            [ { Name = "CI Build"
+                Status = Succeeded
+                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88802"
+                Failure = None } ] }
+
+let private prGithubOpenAllGreen =
+    { prGithubOpen with
+        Builds =
+            [ { Name = "test"
+                Status = Succeeded
+                Url = Some "https://github.com/acme/data-pipeline/actions/runs/99003"
+                Failure = None }
+              { Name = "lint"
+                Status = Succeeded
+                Url = Some "https://github.com/acme/data-pipeline/actions/runs/99004"
+                Failure = None } ] }
+
+let private prAzDoOpenBuilding =
+    { prAzDoOpen with
+        Builds =
+            [ { Name = "CI Build"
+                Status = Building
+                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"
+                Failure = None } ] }
+
+let private updateWorktree (repoId: RepoId) (branch: string) (transform: WorktreeStatus -> WorktreeStatus) (repos: RepoWorktrees list) =
+    repos
+    |> List.map (fun repo ->
+        if repo.RepoId = repoId then
+            { repo with
+                Worktrees =
+                    repo.Worktrees
+                    |> List.map (fun wt ->
+                        if wt.Branch = branch then transform wt else wt) }
+        else repo)
+
 let private frame2SchedulerEvents =
     baseSchedulerEvents @
     [ { Source = "sync"
@@ -309,32 +348,15 @@ let private frame2SyncStatus =
 
 let private frame2Repos =
     baseDashboard.Repos
-    |> List.map (fun repo ->
-        match RepoId.value repo.RepoId with
-        | id when id = "C:\\code\\CloudPlatform" ->
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        match wt.Branch with
-                        | "feature/retry-logic" ->
-                            { wt with
-                                CodingTool = WaitingForUser
-                                LastUserMessage = Some ("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
-                                Pr = HasPr prAzDoOpenFailed }
-                        | _ -> wt) }
-        | id when id = "C:\\code\\DataPipeline" ->
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        match wt.Branch with
-                        | "feature/streaming-agg" ->
-                            { wt with
-                                CodingTool = WaitingForUser
-                                Pr = HasPr prGithubOpenCanceled }
-                        | _ -> wt) }
-        | _ -> repo)
+    |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
+        { wt with
+            CodingTool = WaitingForUser
+            LastUserMessage = Some ("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
+            Pr = HasPr prAzDoOpenFailed })
+    |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
+        { wt with
+            CodingTool = WaitingForUser
+            Pr = HasPr prGithubOpenCanceled })
 
 let private frame2: FixtureData =
     { Worktrees =
@@ -365,33 +387,16 @@ let private frame3LatestByCategory =
 
 let private frame3Repos =
     baseDashboard.Repos
-    |> List.map (fun repo ->
-        match RepoId.value repo.RepoId with
-        | id when id = "C:\\code\\CloudPlatform" ->
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        match wt.Branch with
-                        | "feature/retry-logic" ->
-                            { wt with
-                                CodingTool = Working
-                                MainBehindCount = 0
-                                Pr = HasPr { prAzDoOpen with Builds = [ { Name = "CI Build"; Status = Succeeded; Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88802"; Failure = None } ] } }
-                        | _ -> wt) }
-        | id when id = "C:\\code\\DataPipeline" ->
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        match wt.Branch with
-                        | "feature/streaming-agg" ->
-                            { wt with
-                                CodingTool = Done
-                                IsDirty = false
-                                Pr = HasPr { prGithubOpen with Builds = [ { Name = "test"; Status = Succeeded; Url = Some "https://github.com/acme/data-pipeline/actions/runs/99003"; Failure = None }; { Name = "lint"; Status = Succeeded; Url = Some "https://github.com/acme/data-pipeline/actions/runs/99004"; Failure = None } ] } }
-                        | _ -> wt) }
-        | _ -> repo)
+    |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
+        { wt with
+            CodingTool = Working
+            MainBehindCount = 0
+            Pr = HasPr prAzDoOpenSucceeded })
+    |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
+        { wt with
+            CodingTool = Done
+            IsDirty = false
+            Pr = HasPr prGithubOpenAllGreen })
 
 let private frame3: FixtureData =
     { Worktrees =
@@ -404,38 +409,21 @@ let private frame3: FixtureData =
 
 let private frame4Repos =
     baseDashboard.Repos
-    |> List.map (fun repo ->
-        match RepoId.value repo.RepoId with
-        | id when id = "C:\\code\\CloudPlatform" ->
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        match wt.Branch with
-                        | "feature/retry-logic" ->
-                            { wt with
-                                CodingTool = Working
-                                IsDirty = true
-                                LastCommitMessage = "Add jitter to retry delay calculation"
-                                Pr = HasPr { prAzDoOpen with Builds = [ { Name = "CI Build"; Status = Building; Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"; Failure = None } ] } }
-                        | "refactor/config-loading" ->
-                            { wt with
-                                CodingTool = WaitingForUser
-                                CodingToolProvider = Some Claude
-                                LastUserMessage = Some ("review the config changes", baseTimestamp.AddMinutes(-1.0)) }
-                        | _ -> wt) }
-        | id when id = "C:\\code\\DataPipeline" ->
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        match wt.Branch with
-                        | "feature/streaming-agg" ->
-                            { wt with
-                                CodingTool = Idle
-                                CodingToolProvider = Some Copilot }
-                        | _ -> wt) }
-        | _ -> repo)
+    |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
+        { wt with
+            CodingTool = Working
+            IsDirty = true
+            LastCommitMessage = "Add jitter to retry delay calculation"
+            Pr = HasPr prAzDoOpenBuilding })
+    |> updateWorktree azDoRepoId "refactor/config-loading" (fun wt ->
+        { wt with
+            CodingTool = WaitingForUser
+            CodingToolProvider = Some Claude
+            LastUserMessage = Some ("review the config changes", baseTimestamp.AddMinutes(-1.0)) })
+    |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
+        { wt with
+            CodingTool = Idle
+            CodingToolProvider = Some Copilot })
 
 let private frame4: FixtureData =
     { Worktrees =
