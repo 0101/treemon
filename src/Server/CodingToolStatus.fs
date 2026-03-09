@@ -114,3 +114,9 @@ let getLastUserMessage (worktreePath: string) (activeProvider: CodingToolProvide
     candidates
     |> List.choose (fun entry -> entry.GetLastUserMessage worktreePath)
     |> List.tryHead
+
+let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
+    let escapedPrompt = prompt.Replace("'", "''")
+    match provider |> Option.defaultValue CodingToolProvider.Claude with
+    | CodingToolProvider.Claude -> $"claude --dangerously-skip-permissions '{escapedPrompt}'"
+    | CodingToolProvider.Copilot -> $"copilot --yolo -i '{escapedPrompt}'"

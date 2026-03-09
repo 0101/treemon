@@ -68,6 +68,14 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
 
 let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
+let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
+    state.Repos
+    |> Map.values
+    |> Seq.tryPick (fun repo ->
+        repo.CodingToolData
+        |> Map.tryFind path
+        |> Option.bind (fun (_, p, _) -> p))
+
 let private readGlobalConfig () =
     let configPath =
         Path.Combine(
@@ -309,7 +317,8 @@ let worktreeApi
           unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
           getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
           createWorktree = fun _ -> async { return Ok() }
-          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
+          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          launchAction = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
@@ -330,10 +339,7 @@ let worktreeApi
                                   |> Map.tryFind repoId
                                   |> Option.defaultValue (worktreeRoots |> List.head)
                               let syncKey = scopedBranchKey repoId branch
-                              let provider =
-                                  repo.CodingToolData
-                                  |> Map.tryFind wt.Path
-                                  |> Option.bind (fun (_, p, _) -> p)
+                              let provider = resolveProvider state wt.Path
                               wt.Path, repoRoot, syncKey, provider))
 
                   match worktreeWithRepo with
@@ -412,7 +418,13 @@ let worktreeApi
           deleteWorktree = deleteWorktree agent rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
-                  SessionManager.spawnSession sessionAgent req.Path req.Prompt)
+                  async {
+                      let path = WorktreePath.value req.Path
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      return! SessionManager.spawnSession sessionAgent req.Path command
+                  })
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
                   SessionManager.focusSession sessionAgent wtPath)
@@ -467,4 +479,13 @@ let worktreeApi
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
-                  SessionManager.openNewTab sessionAgent wtPath) }
+                  SessionManager.openNewTab sessionAgent wtPath)
+          launchAction = fun req ->
+              withValidatedPath req.Path "launchAction" (fun () ->
+                  async {
+                      let path = WorktreePath.value req.Path
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      return! SessionManager.launchAction sessionAgent req.Path command
+                  }) }

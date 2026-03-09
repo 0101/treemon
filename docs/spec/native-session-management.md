@@ -13,7 +13,7 @@
 
 - Session persistence (detach/reattach) — not achievable with Windows Terminal
 - Reading terminal output — Claude status comes from JSONL session logs, already implemented
-- Tab-based management — each worktree gets its own WT window, not a tab
+- Tab-based session management — each worktree gets its own WT window (not a tab), though `launchAction` may open action tabs in an existing tracked window
 - Cross-machine portability (HWNDs are machine-local)
 
 ## Expected Behavior
@@ -23,10 +23,10 @@
 - **Tracked session exists**: `SetForegroundWindow` to bring window to foreground
 - Single button — no separate launch/focus/kill buttons on the card
 
-### launchSession (API-level, for future contextual actions)
+### launchSession (API-level)
 - Spawns `wt.exe --window new new-tab -d <path> -- <coding-tool> "prompt"`
 - If session already exists for worktree, kills it first (one window per worktree)
-- Not exposed as a card button yet — future contextual actions will use this
+- Used by `launchAction` (see `docs/spec/contextual-actions.md`) when no tracked window exists for the worktree; `launchAction` handles the new-tab-in-existing-window path separately
 
 ### Focus / Kill
 - `focusSession` calls `SetForegroundWindow(hwnd)` with ALT keypress workaround for foreground lock
