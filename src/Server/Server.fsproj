@@ -17,6 +17,7 @@
     <Compile Include="SessionManager.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
+    <Compile Include="FileUtils.fs" />
     <Compile Include="ClaudeDetector.fs" />
     <Compile Include="CopilotDetector.fs" />
     <Compile Include="CodingToolStatus.fs" />
