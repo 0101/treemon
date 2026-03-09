@@ -93,14 +93,26 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
         Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
 
 let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
+    let cachedFrame = ref (None: (int * FixtureData) option)
+
+    let getFrame () =
+        let elapsed = System.DateTimeOffset.Now - startTime
+        let positionSeconds = int elapsed.TotalSeconds
+        match cachedFrame.Value with
+        | Some (cached, frame) when cached = positionSeconds -> frame
+        | _ ->
+            let frame = DemoFixture.selectFrame startTime System.DateTimeOffset.Now
+            cachedFrame.Value <- Some (positionSeconds, frame)
+            frame
+
     { getWorktrees = fun () ->
         async {
-            let frame = DemoFixture.selectFrame startTime System.DateTimeOffset.Now
+            let frame = getFrame ()
             return frame.Worktrees
         }
       getSyncStatus = fun () ->
         async {
-            let frame = DemoFixture.selectFrame startTime System.DateTimeOffset.Now
+            let frame = getFrame ()
             return frame.SyncStatus
         }
       openTerminal = fun _ -> async { return () }
@@ -139,9 +151,6 @@ let main args =
     config.WorktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
     let cts = new CancellationTokenSource()
-    let agent = RefreshScheduler.createAgent ()
-    let syncAgent = SyncEngine.createSyncAgent ()
-    let sessionAgent = SessionManager.createAgent ()
 
     let remotingApi =
         if config.Demo then
@@ -155,6 +164,10 @@ let main args =
                 Propagate ex.Message)
             |> Remoting.buildHttpHandler
         else
+            let agent = RefreshScheduler.createAgent ()
+            let syncAgent = SyncEngine.createSyncAgent ()
+            let sessionAgent = SessionManager.createAgent ()
+
             match config.TestFixtures with
             | Some path ->
                 let fixtures = WorktreeApi.loadFixtures path
