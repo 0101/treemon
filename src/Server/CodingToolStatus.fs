@@ -28,6 +28,12 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
             Log.log "CodingTool" $"Failed to read .treemon.json: {ex.Message}"
             None
 
+type CodingToolResult =
+    { Status: CodingToolStatus
+      Provider: CodingToolProvider option
+      LastUserMessage: (string * DateTimeOffset) option
+      LastAssistantMessage: CardEvent option }
+
 type internal ProviderResult =
     { Provider: CodingToolProvider
       Status: CodingToolStatus
@@ -73,7 +79,7 @@ let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInf
 
     [ claudeResult; copilotResult ]
 
-let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvider option * (string * DateTimeOffset) option * CardEvent option =
+let getRefreshData (worktreePath: string) : CodingToolResult =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
     let results = gatherResultsFromFiles worktreePath claudeFiles
@@ -109,7 +115,7 @@ let getRefreshData (worktreePath: string) : CodingToolStatus * CodingToolProvide
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
 
-    status, provider, lastUserMsg, lastAssistantMsg
+    { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg }
 
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")

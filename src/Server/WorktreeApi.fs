@@ -23,10 +23,14 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let codingToolStatus, codingToolProvider, lastUserMsg, _ =
+    let codingToolData =
         repo.CodingToolData
         |> Map.tryFind wt.Path
-        |> Option.defaultValue (CodingToolStatus.Idle, None, None, None)
+        |> Option.defaultValue
+            { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
+              Provider = None
+              LastUserMessage = None
+              LastAssistantMessage = None }
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -35,9 +39,9 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
-      CodingTool = codingToolStatus
-      CodingToolProvider = codingToolProvider
-      LastUserMessage = lastUserMsg
+      CodingTool = codingToolData.Status
+      CodingToolProvider = codingToolData.Provider
+      LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -74,7 +78,7 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
     |> Seq.tryPick (fun repo ->
         repo.CodingToolData
         |> Map.tryFind path
-        |> Option.bind (fun (_, p, _, _) -> p))
+        |> Option.bind _.Provider)
 
 let private readGlobalConfig () =
     let configPath =
@@ -393,8 +397,8 @@ let worktreeApi
                       |> List.collect (fun (_, repo) ->
                           repo.CodingToolData
                           |> Map.toList
-                          |> List.choose (fun (path, (_, _, _, lastMsg)) ->
-                              lastMsg |> Option.map (fun msg -> path, msg)))
+                          |> List.choose (fun (path, data) ->
+                              data.LastAssistantMessage |> Option.map (fun msg -> path, msg)))
                       |> Map.ofList
 
                   return
