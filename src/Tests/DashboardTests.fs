@@ -1390,25 +1390,15 @@ type DashboardTests() =
     [<Test>]
     member this.``Delete button triggers confirm dialog``() =
         task {
-            // Use TaskCompletionSource to wait for dialog
-            let tcs = System.Threading.Tasks.TaskCompletionSource<bool>()
-
-            this.Page.Dialog.Add(fun dialog ->
-                tcs.TrySetResult(true) |> ignore
-                dialog.DismissAsync() |> ignore)
-
             let deleteBtn = this.Page.Locator(".wt-card .delete-btn").First
             do! Assertions.Expect(deleteBtn).ToBeVisibleAsync()
             do! deleteBtn.ClickAsync()
 
-            // Wait for dialog with timeout
-            let! dialogShown =
-                System.Threading.Tasks.Task.WhenAny(
-                    tcs.Task,
-                    System.Threading.Tasks.Task.Delay(5000))
+            let modal = this.Page.Locator(".modal-overlay .modal-dialog")
+            do! Assertions.Expect(modal).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
 
-            Assert.That(tcs.Task.IsCompletedSuccessfully, Is.True,
-                "Clicking delete button should trigger a confirm dialog within timeout")
+            let header = modal.Locator(".modal-header")
+            do! Assertions.Expect(header).ToHaveTextAsync("Remove worktree")
         }
 
     [<Test>]
@@ -3324,11 +3314,14 @@ type DashboardTests() =
             let! preDeleteCount = targetCard.CountAsync()
             Assert.That(preDeleteCount, Is.EqualTo(1), $"Card for {targetBranch} should exist before delete")
 
-            page.Dialog.Add(fun dialog ->
-                dialog.AcceptAsync() |> ignore)
-
             let deleteBtn = targetCard.Locator(".delete-btn")
             do! deleteBtn.ClickAsync()
+
+            let modal = page.Locator(".modal-overlay .modal-dialog")
+            do! Assertions.Expect(modal).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
+
+            let confirmBtn = modal.Locator(".modal-btn.danger").First
+            do! confirmBtn.ClickAsync()
 
             do! System.Threading.Tasks.Task.Delay(200)
 
