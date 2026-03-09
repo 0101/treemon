@@ -137,6 +137,10 @@ type DashboardResponse =
       SystemMetrics: SystemMetrics option
       EditorName: string }
 
+type FixtureData =
+    { Worktrees: DashboardResponse
+      SyncStatus: Map<string, CardEvent list> }
+
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>

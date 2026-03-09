@@ -66,7 +66,7 @@ let parseArgs (args: string array) =
         eprintfn "Usage: Server <worktree-root-path> [<additional-roots>...] [--port <port>] [--test-fixtures <path>]"
         exit 1
 
-let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: WorktreeApi.FixtureData) =
+let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
     |> List.iter (fun repo ->
         let worktreeInfos =

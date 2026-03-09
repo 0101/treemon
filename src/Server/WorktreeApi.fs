@@ -6,10 +6,6 @@ open Shared
 open Shared.EventUtils
 open Newtonsoft.Json
 
-type FixtureData =
-    { Worktrees: DashboardResponse
-      SyncStatus: Map<string, CardEvent list> }
-
 let loadFixtures (path: string) =
     let json = File.ReadAllText(path)
     let converter = Fable.Remoting.Json.FableJsonConverter()
