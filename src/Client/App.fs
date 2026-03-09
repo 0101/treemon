@@ -10,11 +10,6 @@ open Browser
 open Fable.Core.JsInterop
 open ActionButtons
 
-type ConfirmModal =
-    | NoConfirm
-    | ConfirmDelete of branch: string * path: WorktreePath * hasSession: bool
-    | ConfirmArchive of branch: string * path: WorktreePath
-
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -30,7 +25,7 @@ type Model =
       EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
-      ConfirmModal: ConfirmModal
+      ConfirmModal: ConfirmModal.ConfirmModal
       DeletedBranches: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option }
@@ -50,12 +45,9 @@ type Msg =
     | CancelSync of string
     | SyncTick
     | ConfirmDeleteWorktree of branch: string
-    | DeleteWorktree of string
-    | DeleteAndCloseSession of path: WorktreePath * branch: string
-    | DeleteCompleted of Result<unit, string>
     | ConfirmArchiveWorktree of branch: string
-    | ArchiveAndCloseSession of path: WorktreePath * branch: string
-    | DismissConfirm
+    | ConfirmMsg of ConfirmModal.Msg
+    | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
     | SessionResult of Result<unit, string>
@@ -98,7 +90,7 @@ let init () =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
-      ConfirmModal = NoConfirm
+      ConfirmModal = ConfirmModal.NoConfirm
       DeletedBranches = Set.empty
       DeployBranch = None
       SystemMetrics = None },
@@ -268,49 +260,52 @@ let update msg model =
     | ConfirmDeleteWorktree branch ->
         match findWorktreeByBranch branch model with
         | Some wt ->
-            { model with ConfirmModal = ConfirmDelete (branch, wt.Path, wt.HasActiveSession) }, Cmd.none
+            { model with ConfirmModal = ConfirmModal.ConfirmDelete (branch, wt.Path, wt.HasActiveSession) }, Cmd.none
         | None -> model, Cmd.none
 
-    | DeleteWorktree branch ->
-        let updatedRepos =
-            model.Repos
-            |> List.map (fun r ->
-                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
-        let updatedModel =
-            { model with
-                Repos = updatedRepos
-                ConfirmModal = NoConfirm
-                DeletedBranches = model.DeletedBranches |> Set.add branch }
-        { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+    | ConfirmArchiveWorktree branch ->
+        match findWorktreeByBranch branch model with
+        | Some wt when wt.HasActiveSession ->
+            { model with ConfirmModal = ConfirmModal.ConfirmArchive (branch, wt.Path) }, Cmd.none
+        | Some _ ->
+            model, Cmd.ofMsg (ConfirmMsg (ConfirmModal.ArchiveWorktree branch))
+        | None -> model, Cmd.none
 
-    | DeleteAndCloseSession (path, branch) ->
-        { model with ConfirmModal = NoConfirm },
-        Cmd.batch [
-            Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> Tick)
-            Cmd.ofMsg (DeleteWorktree branch) ]
+    | ConfirmMsg confirmMsg ->
+        match confirmMsg with
+        | ConfirmModal.DeleteWorktree branch ->
+            let updatedRepos =
+                model.Repos
+                |> List.map (fun r ->
+                    { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
+            let updatedModel =
+                { model with
+                    Repos = updatedRepos
+                    ConfirmModal = ConfirmModal.NoConfirm
+                    DeletedBranches = model.DeletedBranches |> Set.add branch }
+            { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
+            Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+        | ConfirmModal.DeleteAndCloseSession (path, branch) ->
+            { model with ConfirmModal = ConfirmModal.NoConfirm },
+            Cmd.batch [
+                Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> Tick)
+                Cmd.ofMsg (ConfirmMsg (ConfirmModal.DeleteWorktree branch)) ]
+        | ConfirmModal.ArchiveWorktree branch ->
+            { model with ConfirmModal = ConfirmModal.NoConfirm },
+            Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch)))
+        | ConfirmModal.ArchiveAndCloseSession (path, branch) ->
+            { model with ConfirmModal = ConfirmModal.NoConfirm },
+            Cmd.batch [
+                Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> Tick)
+                Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch))) ]
+        | ConfirmModal.DismissConfirm ->
+            { model with ConfirmModal = ConfirmModal.NoConfirm }, Cmd.none
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error _) ->
         { model with DeletedBranches = Set.empty }, fetchWorktrees ()
-
-    | ConfirmArchiveWorktree branch ->
-        match findWorktreeByBranch branch model with
-        | Some wt when wt.HasActiveSession ->
-            { model with ConfirmModal = ConfirmArchive (branch, wt.Path) }, Cmd.none
-        | _ ->
-            model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch)))
-
-    | ArchiveAndCloseSession (path, branch) ->
-        { model with ConfirmModal = NoConfirm },
-        Cmd.batch [
-            Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> Tick)
-            Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch))) ]
-
-    | DismissConfirm ->
-        { model with ConfirmModal = NoConfirm }, Cmd.none
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
@@ -345,9 +340,9 @@ let update msg model =
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
-        if model.ConfirmModal <> NoConfirm then
+        if model.ConfirmModal <> ConfirmModal.NoConfirm then
             match key with
-            | "Escape" -> { model with ConfirmModal = NoConfirm }, Cmd.none
+            | "Escape" -> { model with ConfirmModal = ConfirmModal.NoConfirm }, Cmd.none
             | _ -> model, Cmd.none
         elif CreateWorktreeModal.isOpen model.CreateModal then
             match key with
@@ -1316,98 +1311,6 @@ let viewAppHeader model dispatch =
         ]
     ]
 
-let confirmModalView dispatch (confirm: ConfirmModal) =
-    match confirm with
-    | NoConfirm -> Html.none
-    | ConfirmDelete (branch, path, hasSession) ->
-        Html.div [
-            prop.className "modal-overlay"
-            prop.onClick (fun _ -> dispatch DismissConfirm)
-            prop.children [
-                Html.div [
-                    prop.className "modal-dialog"
-                    prop.onClick (fun e -> e.stopPropagation())
-                    prop.children [
-                        Html.div [ prop.className "modal-header"; prop.text "Remove worktree" ]
-                        Html.div [
-                            prop.className "modal-body"
-                            prop.children [
-                                Html.span [ prop.text $"Remove worktree " ]
-                                Html.code [ prop.text branch ]
-                                Html.span [ prop.text "? This will delete the worktree folder and local branch." ]
-                            ]
-                        ]
-                        Html.div [
-                            prop.className "modal-footer"
-                            prop.children [
-                                Html.button [
-                                    prop.className "modal-btn cancel"
-                                    prop.onClick (fun _ -> dispatch DismissConfirm)
-                                    prop.text "Cancel"
-                                ]
-                                Html.button [
-                                    prop.className "modal-btn danger"
-                                    if not hasSession then prop.autoFocus true
-                                    prop.onClick (fun _ -> dispatch (DeleteWorktree branch))
-                                    prop.text "Delete"
-                                ]
-                                if hasSession then
-                                    Html.button [
-                                        prop.className "modal-btn danger"
-                                        prop.autoFocus true
-                                        prop.onClick (fun _ -> dispatch (DeleteAndCloseSession (path, branch)))
-                                        prop.text "Delete and close terminal"
-                                    ]
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]
-    | ConfirmArchive (branch, path) ->
-        Html.div [
-            prop.className "modal-overlay"
-            prop.onClick (fun _ -> dispatch DismissConfirm)
-            prop.children [
-                Html.div [
-                    prop.className "modal-dialog"
-                    prop.onClick (fun e -> e.stopPropagation())
-                    prop.children [
-                        Html.div [ prop.className "modal-header"; prop.text "Archive worktree" ]
-                        Html.div [
-                            prop.className "modal-body"
-                            prop.children [
-                                Html.span [ prop.text "This worktree has an active terminal session." ]
-                            ]
-                        ]
-                        Html.div [
-                            prop.className "modal-footer"
-                            prop.children [
-                                Html.button [
-                                    prop.className "modal-btn cancel"
-                                    prop.onClick (fun _ -> dispatch DismissConfirm)
-                                    prop.text "Cancel"
-                                ]
-                                Html.button [
-                                    prop.className "modal-btn submit"
-                                    prop.onClick (fun _ ->
-                                        dispatch DismissConfirm
-                                        dispatch (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch))))
-                                    prop.text "Archive"
-                                ]
-                                Html.button [
-                                    prop.className "modal-btn danger"
-                                    prop.autoFocus true
-                                    prop.onClick (fun _ -> dispatch (ArchiveAndCloseSession (path, branch)))
-                                    prop.text "Archive and close terminal"
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-        ]
-
 let view model dispatch =
     React.fragment [
         viewAppHeader model dispatch
@@ -1439,7 +1342,7 @@ let view model dispatch =
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
                 CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
-                confirmModalView dispatch model.ConfirmModal
+                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
             ]
         ]
     ]

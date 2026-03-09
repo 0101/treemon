@@ -27,7 +27,7 @@ let private defaultModel : Model =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = Modal.Closed
-      ConfirmModal = NoConfirm
+      ConfirmModal = ConfirmModal.NoConfirm
       DeletedBranches = Set.empty
       EditorName = "VS Code" }
 
