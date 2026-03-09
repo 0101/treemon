@@ -105,29 +105,18 @@ let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
             cachedFrame.Value <- Some (positionSeconds, frame)
             frame
 
-    { getWorktrees = fun () ->
-        async {
-            let frame = getFrame ()
-            return frame.Worktrees
-        }
-      getSyncStatus = fun () ->
-        async {
-            let frame = getFrame ()
-            return frame.SyncStatus
-        }
-      openTerminal = fun _ -> async { return () }
-      openEditor = fun _ -> async { return () }
-      startSync = fun _ -> async { return Error "Sync is not available in demo mode" }
-      cancelSync = fun _ -> async { return () }
-      deleteWorktree = fun _ -> async { return Error "Delete is not available in demo mode" }
-      launchSession = fun _ -> async { return Error "Session management is not available in demo mode" }
-      focusSession = fun _ -> async { return Error "Session management is not available in demo mode" }
-      killSession = fun _ -> async { return Error "Session management is not available in demo mode" }
-      archiveWorktree = fun _ -> async { return Error "Archive is not available in demo mode" }
-      unarchiveWorktree = fun _ -> async { return Error "Archive is not available in demo mode" }
-      getBranches = fun _ -> async { return [] }
-      createWorktree = fun _ -> async { return Error "Create is not available in demo mode" }
-      openNewTab = fun _ -> async { return Error "Session management is not available in demo mode" } }
+    WorktreeApi.readOnlyApi
+        "demo mode"
+        (fun () -> async { return (getFrame ()).Worktrees })
+        (fun () -> async { return (getFrame ()).SyncStatus })
+
+let private buildRemotingHandler (api: IWorktreeApi) =
+    Remoting.createApi ()
+    |> Remoting.fromValue api
+    |> Remoting.withErrorHandler (fun ex routeInfo ->
+        Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
+        Propagate ex.Message)
+    |> Remoting.buildHttpHandler
 
 [<EntryPoint>]
 let main args =
@@ -155,14 +144,7 @@ let main args =
     let remotingApi =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            let demoApi = buildDemoApi System.DateTimeOffset.Now
-
-            Remoting.createApi ()
-            |> Remoting.fromValue demoApi
-            |> Remoting.withErrorHandler (fun ex routeInfo ->
-                Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
-                Propagate ex.Message)
-            |> Remoting.buildHttpHandler
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler
         else
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = SyncEngine.createSyncAgent ()
@@ -177,12 +159,8 @@ let main args =
                 RefreshScheduler.start agent config.WorktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            Remoting.createApi ()
-            |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch)
-            |> Remoting.withErrorHandler (fun ex routeInfo ->
-                Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
-                Propagate ex.Message)
-            |> Remoting.buildHttpHandler
+            WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch
+            |> buildRemotingHandler
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"

@@ -11,6 +11,27 @@ let loadFixtures (path: string) =
     let converter = Fable.Remoting.Json.FableJsonConverter()
     JsonConvert.DeserializeObject<FixtureData>(json, converter)
 
+let readOnlyApi
+    (modeName: string)
+    (getWorktrees: unit -> Async<DashboardResponse>)
+    (getSyncStatus: unit -> Async<Map<string, CardEvent list>>)
+    : IWorktreeApi =
+    { getWorktrees = getWorktrees
+      getSyncStatus = getSyncStatus
+      openTerminal = fun _ -> async { return () }
+      openEditor = fun _ -> async { return () }
+      startSync = fun _ -> async { return Error $"Sync is not available in {modeName}" }
+      cancelSync = fun _ -> async { return () }
+      deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
+      launchSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      focusSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      killSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      archiveWorktree = fun _ -> async { return Error $"Archive is not available in {modeName}" }
+      unarchiveWorktree = fun _ -> async { return Error $"Archive is not available in {modeName}" }
+      getBranches = fun _ -> async { return [] }
+      createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
+      openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
+
 let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
@@ -290,21 +311,13 @@ let worktreeApi
 
     match fixtures with
     | Some f ->
-        { getWorktrees = fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } }
-          openTerminal = fun _ -> async { return () }
-          openEditor = fun _ -> async { return () }
-          startSync = fun _ -> async { return Error "Sync is not available in fixture mode" }
-          cancelSync = fun _ -> async { return () }
-          getSyncStatus = fun () -> async { return f.SyncStatus }
-          deleteWorktree = fun _ -> async { return Error "Delete is not available in fixture mode" }
-          launchSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
-          focusSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
-          killSession = fun _ -> async { return Error "Session management is not available in fixture mode" }
-          archiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
-          unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
-          getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
-          createWorktree = fun _ -> async { return Ok() }
-          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
+        { readOnlyApi
+            "fixture mode"
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } })
+            (fun () -> async { return f.SyncStatus })
+          with
+            getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
+            createWorktree = fun _ -> async { return Ok() } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
