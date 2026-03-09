@@ -111,7 +111,8 @@ let private tryParseEntryKind (line: string) =
                 let text = extractTextFromMessage root
                 match text with
                 | Some t when isSystemNoise t -> None
-                | _ -> Some(UserEntry, timestamp)
+                | Some _ -> Some(UserEntry, timestamp)
+                | None -> None
             | "assistant" ->
                 match root.TryGetProperty("message") with
                 | true, msg ->
