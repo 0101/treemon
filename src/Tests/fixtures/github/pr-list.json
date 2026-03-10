@@ -5,9 +5,7 @@
     "state": "open",
     "draft": false,
     "merged_at": null,
-    "head": { "ref": "test/add-editorconfig" },
-    "comments": 0,
-    "review_comments": 0
+    "head": { "ref": "test/add-editorconfig" }
   },
   {
     "number": 1,
@@ -15,8 +13,6 @@
     "state": "open",
     "draft": false,
     "merged_at": null,
-    "head": { "ref": "test/add-health-endpoint" },
-    "comments": 1,
-    "review_comments": 3
+    "head": { "ref": "test/add-health-endpoint" }
   }
 ]

@@ -1,0 +1,10 @@
+{
+  "number": 1,
+  "title": "Add contributing guide and CI workflow",
+  "state": "open",
+  "draft": false,
+  "merged_at": null,
+  "head": { "ref": "test/add-health-endpoint" },
+  "comments": 1,
+  "review_comments": 3
+}

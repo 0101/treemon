@@ -5,9 +5,7 @@
     "state": "closed",
     "draft": false,
     "merged_at": "2026-02-20T10:00:00Z",
-    "head": { "ref": "feature/merged-branch" },
-    "comments": 2,
-    "review_comments": 1
+    "head": { "ref": "feature/merged-branch" }
   },
   {
     "number": 4,
@@ -15,8 +13,6 @@
     "state": "open",
     "draft": true,
     "merged_at": null,
-    "head": { "ref": "feature/draft-work" },
-    "comments": 0,
-    "review_comments": 0
+    "head": { "ref": "feature/draft-work" }
   }
 ]
