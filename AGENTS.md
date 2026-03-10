@@ -49,13 +49,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 
 ## Code Review
 
-This project uses [focused-review](https://github.com/0101/focused-review) for automated code review. Install it:
-
-```
-claude mcp add-from-claude-plugin 0101/focused-review
-```
-
-The `review/` directory contains 18 review rules covering: immutability, no-loops, no-null, security, simplicity, pure functions, domain-driven design, and more. Run with `/focused-review` after making changes.
+This project uses [focused-review](https://github.com/0101/focused-review) for automated code review. The `review/` directory contains 18 review rules covering: immutability, no-loops, no-null, security, simplicity, pure functions, domain-driven design, and more.
 
 ## Ports
 
