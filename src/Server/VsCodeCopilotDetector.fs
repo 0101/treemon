@@ -1,14 +1,9 @@
 module Server.VsCodeCopilotDetector
 
 open System
-open System.Collections.Generic
 open System.IO
 open System.Text.Json
 open Shared
-
-// VS Code stores per-workspace chat sessions under:
-//   %APPDATA%\Code\User\workspaceStorage\{hash}\chatSessions\{session-guid}.jsonl
-// The workspace.json in that same hash dir maps the hash to the workspace folder URI.
 
 let private vsCodeWorkspaceStorageDir =
     Path.Combine(
@@ -18,58 +13,59 @@ let private vsCodeWorkspaceStorageDir =
         "workspaceStorage"
     )
 
-// Index: normalized local path → chatSessions directory
 type private WorkspaceIndex =
-    { PathToChatSessions: Dictionary<string, string>
+    { PathToChatSessions: Map<string, string>
       BuiltAt: DateTimeOffset }
 
 let private workspaceIndex =
     ref
-        { PathToChatSessions = Dictionary(StringComparer.OrdinalIgnoreCase)
+        { PathToChatSessions = Map.empty
           BuiltAt = DateTimeOffset.MinValue }
 
 let private tryDecodeLocalPath (folderUri: string) =
     try
-        // e.g. "file:///q%3A/src/AITestAgent" — the %3A-encoded colon prevents .NET from
-        // recognising the Windows drive root, so decode first to get "file:///q:/src/AITestAgent"
-        // and then Uri.LocalPath returns the correct "q:\src\AITestAgent".
         let decoded = Uri.UnescapeDataString(folderUri)
         Some(Uri(decoded).LocalPath)
-    with _ ->
+    with ex ->
+        Log.log "VsCodeCopilot" $"Failed to decode folder URI '{folderUri}': {ex.Message}"
+        None
+
+let private normalizePath (path: string) =
+    Path.GetFullPath(path)
+        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+let private tryReadFolderUri (workspaceJson: string) =
+    try
+        let json = File.ReadAllText(workspaceJson)
+        use doc = JsonDocument.Parse(json)
+        match doc.RootElement.TryGetProperty("folder") with
+        | true, p -> Some(p.GetString())
+        | _ -> None
+    with ex ->
+        Log.log "VsCodeCopilot" $"Failed to parse {workspaceJson}: {ex.Message}"
         None
 
 let private buildWorkspaceIndex () =
-    let index = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    let index =
+        try
+            if Directory.Exists(vsCodeWorkspaceStorageDir) then
+                Directory.GetDirectories(vsCodeWorkspaceStorageDir)
+                |> Array.choose (fun hashDir ->
+                    let workspaceJson = Path.Combine(hashDir, "workspace.json")
+                    let chatSessionsDir = Path.Combine(hashDir, "chatSessions")
 
-    try
-        if Directory.Exists(vsCodeWorkspaceStorageDir) then
-            Directory.GetDirectories(vsCodeWorkspaceStorageDir)
-            |> Array.iter (fun hashDir ->
-                let workspaceJson = Path.Combine(hashDir, "workspace.json")
-                let chatSessionsDir = Path.Combine(hashDir, "chatSessions")
-
-                if File.Exists(workspaceJson) && Directory.Exists(chatSessionsDir) then
-                    try
-                        let json = File.ReadAllText(workspaceJson)
-                        use doc = JsonDocument.Parse(json)
-
-                        let folderUri =
-                            match doc.RootElement.TryGetProperty("folder") with
-                            | true, p -> Some(p.GetString())
-                            | _ -> None
-
-                        folderUri
+                    if File.Exists(workspaceJson) && Directory.Exists(chatSessionsDir) then
+                        tryReadFolderUri workspaceJson
                         |> Option.bind tryDecodeLocalPath
-                        |> Option.iter (fun localPath ->
-                            let normalized =
-                                Path.GetFullPath(localPath)
-                                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-
-                            index[normalized] <- chatSessionsDir)
-                    with _ ->
-                        ())
-    with ex ->
-        Log.log "VsCodeCopilot" $"Failed to scan workspaceStorage: {ex.Message}"
+                        |> Option.map (fun localPath -> normalizePath localPath, chatSessionsDir)
+                    else
+                        None)
+                |> Map.ofArray
+            else
+                Map.empty
+        with ex ->
+            Log.log "VsCodeCopilot" $"Failed to scan workspaceStorage: {ex.Message}"
+            Map.empty
 
     Log.log "VsCodeCopilot" $"Index built: {index.Count} workspace(s) with chatSessions mapped"
     { PathToChatSessions = index; BuiltAt = DateTimeOffset.UtcNow }
@@ -87,15 +83,8 @@ let private refreshIndex () =
 
 let private getChatSessionsDir (worktreePath: string) =
     let index = refreshIndex ()
-
-    let normalized =
-        Path.GetFullPath(worktreePath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-
-    match index.PathToChatSessions.TryGetValue(normalized) with
-    | true, dir -> Some dir
-    | false, _ ->
-        None
+    let normalized = normalizePath worktreePath
+    Map.tryFind normalized index.PathToChatSessions
 
 let private findMostRecentSessionFile (chatSessionsDir: string) =
     try
@@ -106,114 +95,88 @@ let private findMostRecentSessionFile (chatSessionsDir: string) =
             Directory.GetFiles(chatSessionsDir, "*.jsonl")
                 |> Array.choose (fun path ->
                     try Some(FileInfo(path))
-                    with _ -> None)
+                    with ex ->
+                        Log.log "VsCodeCopilot" $"Failed to get FileInfo for {path}: {ex.Message}"
+                        None)
                 |> Array.sortByDescending _.LastWriteTimeUtc
                 |> Array.tryHead
     with ex ->
         Log.log "VsCodeCopilot" $"Failed to scan chatSessions dir: {ex.Message}"
         None
 
-/// Reads the last N lines of a file. Opens with FileAccess.Read + FileShare.ReadWrite
-/// so VS Code's exclusive append handle is not blocked.
-let private readLastLines (filePath: string) (maxLines: int) =
-    try
-        use stream =
-            new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+// VS Code JSONL mutation log format:
+//   kind=0: Full session snapshot (.v = ISerializableChatData3)
+//   kind=1: Set value at path (.k = path, .v = new value)
+//   kind=2: Push/splice array (.k = path, .v = items, .i? = truncate index)
+//   kind=3: Delete property (.k = path) -- intentionally unhandled
 
-        if stream.Length = 0L then
-            []
-        else
-            let bufferSize = 64 * 1024
-            let length = stream.Length
-            let start = Math.Max(0L, length - int64 bufferSize)
-            stream.Seek(start, SeekOrigin.Begin) |> ignore
+type ModelState = InProgress | Complete
 
-            use reader = new StreamReader(stream)
-            let content = reader.ReadToEnd()
-            let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.None)
+type internal ReqState =
+    { ModelState: ModelState option
+      CompletedAt: DateTimeOffset option
+      ResponseText: string option
+      ResponseKinds: string list
+      UserText: string option }
 
-            let linesToProcess =
-                if start > 0L && lines.Length > 0 then lines[1..] else lines
+let private emptyReq =
+    { ModelState = None; CompletedAt = None; ResponseText = None; ResponseKinds = []; UserText = None }
 
-            linesToProcess
-            |> Array.map _.Trim()
-            |> Array.filter (fun s -> s.Length > 0)
-            |> Array.rev
-            |> Array.truncate maxLines
-            |> Array.toList
-    with ex ->
-        Log.log "VsCodeCopilot" $"Failed to read session file {filePath}: {ex.Message}"
-        []
+let internal modelStateFromInt = function
+    | 0 -> InProgress
+    | _ -> Complete
 
-// ── JSONL operation-log format (objectMutationLog.ts) ────────────────────────
-//
-//  kind=0  Initial: full session snapshot (.v = ISerializableChatData3)
-//  kind=1  Set:     replace value at path  (.k = path array, .v = new value)
-//  kind=2  Push:    append/splice array    (.k = path array, .v = items, .i? = truncate index)
-//  kind=3  Delete:  remove property        (.k = path array)
-//
-//  Text and modelState always arrive on separate lines:
-//    kind=2, k=["requests",N,"response"], v=[...parts]
-//      → response parts pushed incrementally; plain text = {value:"..."} (no "kind" field)
-//    kind=1, k=["requests",N,"modelState"], v={value:0|1|4, completedAt?:<ms>}
-//      → 0=in-progress, 1/4=complete
-//    kind=2, k=["requests"], v=[{...new request object...}]
-//      → new request appended
-//
-//  To get last-request state we must reconstruct by replaying all mutations.
-
-type private ReqState =
-    { mutable ModelStateValue: int option
-      mutable CompletedAt: DateTimeOffset option
-      mutable ResponseText: string option
-      mutable ResponseKinds: string list
-      mutable UserText: string option }
-
-let private emptyReq () =
-    { ModelStateValue = None; CompletedAt = None; ResponseText = None; ResponseKinds = []; UserText = None }
-
-let private applyResponseParts (parts: JsonElement) (s: ReqState) =
-    if parts.ValueKind = JsonValueKind.Array then
-        for item in parts.EnumerateArray() do
-            match item.TryGetProperty("kind") with
-            | true, k ->
+let private applyResponseParts (parts: JsonElement) (state: ReqState) =
+    if parts.ValueKind <> JsonValueKind.Array then state
+    else
+        parts.EnumerateArray()
+        |> Seq.fold (fun acc item ->
+            match item.TryGetProperty("kind"), item.TryGetProperty("value") with
+            | (true, k), _ ->
                 let kv = k.GetString()
-                if not (List.contains kv s.ResponseKinds) then
-                    s.ResponseKinds <- kv :: s.ResponseKinds
-            | false, _ ->
-                // No "kind" field = IMarkdownString plain text response
-                match item.TryGetProperty("value") with
-                | true, v when v.ValueKind = JsonValueKind.String ->
-                    let text = v.GetString()
-                    if not (String.IsNullOrWhiteSpace(text)) then
-                        s.ResponseText <- Some text
-                | _ -> ()
+                if List.contains kv acc.ResponseKinds then acc
+                else { acc with ResponseKinds = kv :: acc.ResponseKinds }
+            | _, (true, v) when v.ValueKind = JsonValueKind.String ->
+                let text = v.GetString()
+                if String.IsNullOrWhiteSpace(text) then acc
+                else { acc with ResponseText = Some text }
+            | _ -> acc
+        ) state
 
-let private applyModelState (ms: JsonElement) (s: ReqState) =
-    match ms.TryGetProperty("value") with
-    | true, v -> s.ModelStateValue <- Some(v.GetInt32())
-    | _ -> ()
-    match ms.TryGetProperty("completedAt") with
-    | true, ca -> s.CompletedAt <- Some(DateTimeOffset.FromUnixTimeMilliseconds(ca.GetInt64()))
-    | _ -> ()
+let private applyModelState (ms: JsonElement) (state: ReqState) =
+    let modelState =
+        match ms.TryGetProperty("value") with
+        | true, v -> Some(modelStateFromInt (v.GetInt32()))
+        | _ -> state.ModelState
 
-let private applyRequestObject (req: JsonElement) (s: ReqState) =
-    match req.TryGetProperty("modelState") with
-    | true, ms -> applyModelState ms s
-    | _ -> ()
-    match req.TryGetProperty("response") with
-    | true, r -> applyResponseParts r s
-    | _ -> ()
+    let completedAt =
+        match ms.TryGetProperty("completedAt") with
+        | true, ca -> Some(DateTimeOffset.FromUnixTimeMilliseconds(ca.GetInt64()))
+        | _ -> state.CompletedAt
+
+    { state with ModelState = modelState; CompletedAt = completedAt }
+
+let private applyRequestObject (req: JsonElement) (state: ReqState) =
+    let withModel =
+        match req.TryGetProperty("modelState") with
+        | true, ms -> applyModelState ms state
+        | _ -> state
+
+    let withResponse =
+        match req.TryGetProperty("response") with
+        | true, r -> applyResponseParts r withModel
+        | _ -> withModel
+
     match req.TryGetProperty("message") with
     | true, msg ->
         match msg.TryGetProperty("text") with
         | true, t ->
             let text = t.GetString()
-            if not (String.IsNullOrWhiteSpace(text)) then s.UserText <- Some text
-        | _ -> ()
-    | _ -> ()
+            if String.IsNullOrWhiteSpace(text) then withResponse
+            else { withResponse with UserText = Some text }
+        | _ -> withResponse
+    | _ -> withResponse
 
-/// Reads all lines of a file forward in order (for state reconstruction).
 let private readAllLines (filePath: string) =
     try
         use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
@@ -226,76 +189,87 @@ let private readAllLines (filePath: string) =
         Log.log "VsCodeCopilot" $"Failed to read session file {filePath}: {ex.Message}"
         []
 
-/// Replay all JSONL mutations and return the final state of the last request.
-let private reconstructLastRequest (lines: string list) : ReqState option =
-    let requests = System.Collections.Generic.List<ReqState>()
+let private getPath (root: JsonElement) =
+    match root.TryGetProperty("k") with
+    | true, k when k.ValueKind = JsonValueKind.Array ->
+        k.EnumerateArray() |> Seq.map (fun e -> e.GetRawText().Trim('"')) |> Seq.toArray |> Some
+    | _ -> None
 
-    let getOrCreate i =
-        while requests.Count <= i do
-            requests.Add(emptyReq ())
-        requests[i]
+type private ReconstructionState =
+    { Requests: ReqState list }
 
-    for line in lines do
-        try
-            use doc = JsonDocument.Parse(line)
-            let root = doc.RootElement
+let private applySnapshotLine (root: JsonElement) =
+    match root.TryGetProperty("v") with
+    | true, v ->
+        match v.TryGetProperty("requests") with
+        | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
+            let requests =
+                reqs.EnumerateArray()
+                |> Seq.map (fun req -> applyRequestObject req emptyReq)
+                |> Seq.toList
+            Some { Requests = requests }
+        | _ -> None
+    | _ -> None
 
-            match root.TryGetProperty("kind") with
-            | true, kp ->
-                match kp.GetInt32() with
-                | 0 ->
-                    // Full snapshot — rebuild requests list
-                    match root.TryGetProperty("v") with
-                    | true, v ->
-                        match v.TryGetProperty("requests") with
-                        | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
-                            requests.Clear()
-                            let arr = reqs.EnumerateArray() |> Seq.toArray
-                            for i in 0 .. arr.Length - 1 do
-                                applyRequestObject arr[i] (getOrCreate i)
-                        | _ -> ()
-                    | _ -> ()
+let private ensureIndex (idx: int) (requests: ReqState list) =
+    if idx < requests.Length then requests
+    else requests @ List.init (idx + 1 - requests.Length) (fun _ -> emptyReq)
 
-                | 1 ->
-                    // Set value at path
-                    match root.TryGetProperty("k"), root.TryGetProperty("v") with
-                    | (true, k), (true, v) when k.ValueKind = JsonValueKind.Array ->
-                        let path = k.EnumerateArray() |> Seq.map (fun e -> e.GetRawText().Trim('"')) |> Seq.toArray
+let private updateAt (idx: int) (f: ReqState -> ReqState) (requests: ReqState list) =
+    requests
+    |> List.mapi (fun i req -> if i = idx then f req else req)
 
-                        if path.Length = 3 && path[0] = "requests" && path[2] = "modelState" then
-                            match Int32.TryParse(path[1]) with
-                            | true, idx -> applyModelState v (getOrCreate idx)
-                            | _ -> ()
-                    | _ -> ()
+let private applySetLine (root: JsonElement) (acc: ReconstructionState) =
+    match getPath root, root.TryGetProperty("v") with
+    | Some path, (true, v) when path.Length = 3 && path[0] = "requests" && path[2] = "modelState" ->
+        match Int32.TryParse(path[1]) with
+        | true, idx ->
+            let reqs = ensureIndex idx acc.Requests
+            { Requests = updateAt idx (applyModelState v) reqs }
+        | _ -> acc
+    | _ -> acc
 
-                | 2 ->
-                    // Push/splice
-                    match root.TryGetProperty("k"), root.TryGetProperty("v") with
-                    | (true, k), (true, v) when k.ValueKind = JsonValueKind.Array && v.ValueKind = JsonValueKind.Array ->
-                        let path = k.EnumerateArray() |> Seq.map (fun e -> e.GetRawText().Trim('"')) |> Seq.toArray
+let private applyPushLine (root: JsonElement) (acc: ReconstructionState) =
+    match getPath root, root.TryGetProperty("v") with
+    | Some path, (true, v) when v.ValueKind = JsonValueKind.Array ->
+        if path.Length = 1 && path[0] = "requests" then
+            let newReqs =
+                v.EnumerateArray()
+                |> Seq.fold (fun reqs req ->
+                    reqs @ [ applyRequestObject req emptyReq ]
+                ) acc.Requests
+            { Requests = newReqs }
+        elif path.Length = 3 && path[0] = "requests" && path[2] = "response" then
+            match Int32.TryParse(path[1]) with
+            | true, idx ->
+                let reqs = ensureIndex idx acc.Requests
+                { Requests = updateAt idx (applyResponseParts v) reqs }
+            | _ -> acc
+        else acc
+    | _ -> acc
 
-                        if path.Length = 1 && path[0] = "requests" then
-                            // Append new full request objects
-                            for req in v.EnumerateArray() do
-                                applyRequestObject req (getOrCreate requests.Count)
-                        elif path.Length = 3 && path[0] = "requests" && path[2] = "response" then
-                            // Push response parts to specific request
-                            match Int32.TryParse(path[1]) with
-                            | true, idx -> applyResponseParts v (getOrCreate idx)
-                            | _ -> ()
-                    | _ -> ()
+let private applyLine (acc: ReconstructionState) (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
 
-                | _ -> ()
-            | _ -> ()
-        with _ ->
-            ()
+        match root.TryGetProperty("kind") with
+        | true, kp ->
+            match kp.GetInt32() with
+            | 0 -> applySnapshotLine root |> Option.defaultValue acc
+            | 1 -> applySetLine root acc
+            | 2 -> applyPushLine root acc
+            | _ -> acc
+        | _ -> acc
+    with ex ->
+        Log.log "VsCodeCopilot" $"Failed to parse JSONL line: {ex.Message}"
+        acc
 
-    if requests.Count = 0 then None
-    else Some(requests[requests.Count - 1])
+let internal reconstructLastRequest (lines: string list) : ReqState option =
+    let finalState =
+        lines |> List.fold applyLine { Requests = [] }
 
-// ── Per-file reconstruction cache ────────────────────────────────────────────
-// Reconstruction is shared between getStatus / getLastMessage / getLastUserMessage
-// so the file is only read and parsed once per mtime change.
+    finalState.Requests |> List.tryLast
 
 type private CachedReq =
     { Req: ReqState option
@@ -308,8 +282,7 @@ let private getReconstructed (fi: FileInfo) : ReqState option =
     let mtime = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
     let key = fi.FullName
 
-    let cached = reqCache.TryGetValue(key)
-    match cached with
+    match reqCache.TryGetValue(key) with
     | true, c when c.FileMtime = mtime -> c.Req
     | _ ->
         let lines = readAllLines fi.FullName
@@ -317,7 +290,41 @@ let private getReconstructed (fi: FileInfo) : ReqState option =
         reqCache[key] <- { Req = req; FileMtime = mtime; CachedAt = DateTimeOffset.UtcNow }
         req
 
-// ── Public API ────────────────────────────────────────────────────────────────
+let private twoHours = TimeSpan.FromHours(2.0)
+
+let private tryGetActiveSession (worktreePath: string) =
+    getChatSessionsDir worktreePath
+    |> Option.bind findMostRecentSessionFile
+    |> Option.bind (fun fi ->
+        let mtime = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+        let age = DateTimeOffset.UtcNow - mtime
+        if age > twoHours then None
+        else Some(fi, mtime))
+
+let private statusFromReqState = function
+    | { ModelState = Some InProgress } -> Working
+    | { ModelState = None } -> Working
+    | _ -> Done
+
+let private toLastMessageEvent (req: ReqState) (fileMtime: DateTimeOffset) =
+    match req.ModelState with
+    | Some InProgress | None ->
+        Some { Source = "copilot-vscode"
+               Message = "Working..."
+               Timestamp = fileMtime
+               Status = Some StepStatus.Running
+               Duration = None }
+    | Some Complete ->
+        req.ResponseText
+        |> Option.map (fun text ->
+            let ts = req.CompletedAt |> Option.defaultValue fileMtime
+            { Source = "copilot-vscode"
+              Message = FileUtils.truncateMessage 80 text
+              Timestamp = ts
+              Status = None
+              Duration = None })
+
+// Public API
 
 let getSessionMtime (worktreePath: string) : DateTimeOffset option =
     getChatSessionsDir worktreePath
@@ -325,55 +332,18 @@ let getSessionMtime (worktreePath: string) : DateTimeOffset option =
     |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
 
 let getStatus (worktreePath: string) : CodingToolStatus =
-    match getChatSessionsDir worktreePath |> Option.bind findMostRecentSessionFile with
+    match tryGetActiveSession worktreePath with
     | None -> Idle
-    | Some fi ->
-        let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-        if age > TimeSpan.FromHours(2.0) then Idle
-        else
-            match getReconstructed fi with
-            | None -> Idle
-            | Some req ->
-                match req.ModelStateValue with
-                | Some 0 -> Working        // explicit in-progress
-                | None   -> Working        // no completion patch yet = active turn
-                | Some _ -> Done           // 1=complete, 4=complete+tools, etc.
-
-let private truncateMessage (maxLen: int) (text: string) =
-    let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
-    if singleLine.Length <= maxLen then singleLine
-    else singleLine[..maxLen - 1].TrimEnd() + "..."
+    | Some (fi, _) ->
+        match getReconstructed fi with
+        | None -> Idle
+        | Some req -> statusFromReqState req
 
 let getLastMessage (worktreePath: string) : CardEvent option =
-    match getChatSessionsDir worktreePath |> Option.bind findMostRecentSessionFile with
-    | None -> None
-    | Some fi ->
-        let fileMtime = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-        let age = DateTimeOffset.UtcNow - fileMtime
-        if age > TimeSpan.FromHours(2.0) then None
-        else
-            match getReconstructed fi with
-            | None -> None
-            | Some req ->
-                match req.ModelStateValue with
-                | Some 0 | None ->
-                    // Active turn in progress (explicit state=0 or no completion patch yet)
-                    Some { Source = "copilot-vscode"
-                           Message = "Working..."
-                           Timestamp = fileMtime
-                           Status = Some StepStatus.Running
-                           Duration = None }
-                | Some _ ->
-                    // Completed — return last response text if present
-                    match req.ResponseText with
-                    | None -> None
-                    | Some text ->
-                        let ts = req.CompletedAt |> Option.defaultValue fileMtime
-                        Some { Source = "copilot-vscode"
-                               Message = truncateMessage 80 text
-                               Timestamp = ts
-                               Status = None
-                               Duration = None }
+    tryGetActiveSession worktreePath
+    |> Option.bind (fun (fi, fileMtime) ->
+        getReconstructed fi
+        |> Option.bind (fun req -> toLastMessageEvent req fileMtime))
 
 let getLastUserMessage (worktreePath: string) : (string * DateTimeOffset) option =
     match getChatSessionsDir worktreePath |> Option.bind findMostRecentSessionFile with
@@ -384,5 +354,4 @@ let getLastUserMessage (worktreePath: string) : (string * DateTimeOffset) option
         |> Option.bind (fun req ->
             req.UserText
             |> Option.map (fun text ->
-                let ts = req.CompletedAt |> Option.defaultValue fileMtime
-                truncateMessage 120 text, ts))
+                FileUtils.truncateMessage 120 text, fileMtime))
