@@ -379,7 +379,7 @@ let worktreeApi
                       |> List.collect (fun (repoId, repo) ->
                           repo.WorktreeList
                           |> List.map (fun wt ->
-                              let branch = wt.Branch |> Option.defaultValue "(detached)"
+                              let branch = wt.Branch |> Option.defaultValue $"(detached@{wt.Path})"
                               let key = scopedBranchKey repoId branch
                               key, wt.Path))
                       |> Map.ofList
