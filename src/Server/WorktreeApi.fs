@@ -348,10 +348,11 @@ let worktreeApi
 
                   match worktreeInRepo with
                   | None -> return Error $"No worktree found at path '{path}'"
-                  | Some (_, wt) when wt.Branch.IsNone ->
-                      return Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
                   | Some (repoId, wt) ->
-                      let branch = wt.Branch.Value
+                      match wt.Branch with
+                      | None ->
+                          return Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
+                      | Some branch ->
                       let repoRoot =
                           rootPaths
                           |> Map.tryFind repoId
@@ -384,10 +385,12 @@ let worktreeApi
                   match worktreeInRepo with
                   | None ->
                       Log.log "API" $"cancelSync: no worktree found at path '{path}'"
-                  | Some (_, wt) when wt.Branch.IsNone ->
-                      Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
                   | Some (repoId, wt) ->
-                      let syncKey = scopedBranchKey repoId wt.Branch.Value
+                      match wt.Branch with
+                      | None ->
+                          Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
+                      | Some branch ->
+                      let syncKey = scopedBranchKey repoId branch
                       syncAgent.Post(SyncEngine.CancelSync syncKey)
               }
           getSyncStatus = fun () ->
