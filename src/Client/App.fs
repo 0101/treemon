@@ -791,23 +791,13 @@ let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 let conflictIcon =
     Svg.svg [
         svg.className "conflict-icon"
-        svg.viewBox (0, 0, 24, 24)
-        svg.fill "none"
+        svg.viewBox (0, 0, 1920, 1920)
         svg.custom ("role", "img")
         svg.children [
             Svg.title "Merge conflicts"
-            Svg.circle [ svg.cx 12; svg.cy 17; svg.r 1 ]
             Svg.path [
-                svg.d "M12 10L12 14"
-                svg.custom ("strokeWidth", "2")
-                svg.custom ("strokeLinecap", "round")
-                svg.custom ("strokeLinejoin", "round")
-            ]
-            Svg.path [
-                svg.d "M3.44722 18.1056L10.2111 4.57771C10.9482 3.10361 13.0518 3.10362 13.7889 4.57771L20.5528 18.1056C21.2177 19.4354 20.2507 21 18.7639 21H5.23607C3.7493 21 2.78231 19.4354 3.44722 18.1056Z"
-                svg.custom ("strokeWidth", "2")
-                svg.custom ("strokeLinecap", "round")
-                svg.custom ("strokeLinejoin", "round")
+                svg.d "m1359.36 1279.51-79.85 79.85L960 1039.85l-319.398 319.51-79.85-79.85L880.152 960 560.753 640.602l79.85-79.85L960 880.152l319.51-319.398 79.85 79.85L1039.85 960l319.51 319.51ZM960 0C430.645 0 0 430.645 0 960s430.645 960 960 960 960-430.645 960-960S1489.355 0 960 0Z"
+                svg.custom ("fillRule", "evenodd")
             ]
         ]
     ]
@@ -833,9 +823,11 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                 prop.title pr.Title
                 prop.href pr.Url
                 prop.target "_blank"
-                prop.text ($"PR #{pr.Id}")
+                prop.children [
+                    Html.text $"PR #{pr.Id}"
+                    if pr.HasConflicts then conflictIcon
+                ]
             ]
-            if pr.HasConflicts then conflictIcon
             match pr.Comments with
             | WithResolution (unresolved, total) when total > 0 ->
                 Html.span [
