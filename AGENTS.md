@@ -57,6 +57,18 @@ claude mcp add-from-claude-plugin 0101/focused-review
 
 The `review/` directory contains 18 review rules covering: immutability, no-loops, no-null, security, simplicity, pure functions, domain-driven design, and more. Run with `/focused-review` after making changes.
 
+## Ports
+
+| Environment | Port |
+|---|---|
+| Production server | 5000 |
+| Dev server (API) | 5001 |
+| Dev client (Vite) | 5174 |
+
+## Operations
+
+`treemon.ps1` manages the application lifecycle: `dev`, `deploy`, `start`, `stop`, `restart`, `status`, `log`.
+
 ## Architecture & Specs
 
 For project architecture, domain types, and implementation details read `docs/spec/worktree-monitor.md`. Domain types are in `src/Shared/Types.fs`.
