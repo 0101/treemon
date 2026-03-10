@@ -213,7 +213,6 @@ let private deleteWorktree
         match worktree with
         | None -> return Error $"No worktree found at path '{path}'"
         | Some wt ->
-            let branch = wt.Branch |> Option.defaultValue ""
             let repoId = findRepoForPath state wt.Path
 
             let repoRoot =
@@ -223,7 +222,7 @@ let private deleteWorktree
             match repoId, repoRoot with
             | Some rid, Some root ->
                 agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(rid, wt.Path))
-                let! result = GitWorktree.removeWorktree root wt.Path branch
+                let! result = GitWorktree.removeWorktree root wt.Path wt.Branch
                 return result
             | _ ->
                 return Error $"Could not identify repo root for worktree at '{wt.Path}'"
@@ -339,32 +338,34 @@ let worktreeApi
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  let worktreeWithRepo =
+                  let worktreeInRepo =
                       state.Repos
                       |> Map.toList
                       |> List.tryPick (fun (repoId, repo) ->
                           repo.WorktreeList
                           |> List.tryFind (fun wt -> wt.Path = path)
-                          |> Option.bind (fun wt ->
-                              wt.Branch |> Option.map (fun branch ->
-                                  let repoRoot =
-                                      rootPaths
-                                      |> Map.tryFind repoId
-                                      |> Option.defaultValue (worktreeRoots |> List.head)
-                                  let syncKey = scopedBranchKey repoId branch
-                                  let provider = resolveProvider state wt.Path
-                                  wt.Path, repoRoot, syncKey, provider)))
+                          |> Option.map (fun wt -> repoId, wt))
 
-                  match worktreeWithRepo with
+                  match worktreeInRepo with
                   | None -> return Error $"No worktree found at path '{path}'"
-                  | Some (wtPathStr, repoRoot, syncKey, provider) ->
+                  | Some (_, wt) when wt.Branch.IsNone ->
+                      return Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
+                  | Some (repoId, wt) ->
+                      let branch = wt.Branch.Value
+                      let repoRoot =
+                          rootPaths
+                          |> Map.tryFind repoId
+                          |> Option.defaultValue (worktreeRoots |> List.head)
+                      let syncKey = scopedBranchKey repoId branch
+                      let provider = resolveProvider state wt.Path
+
                       let! beginResult = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
 
                       match beginResult with
                       | Error msg -> return Error msg
                       | Ok ct ->
                           let post = syncAgent.Post
-                          Async.Start(SyncEngine.executeSyncPipeline post syncKey wtPathStr repoRoot provider ct, ct)
+                          Async.Start(SyncEngine.executeSyncPipeline post syncKey wt.Path repoRoot provider ct, ct)
                           return Ok ()
               }
           cancelSync = fun wtPath ->
@@ -372,14 +373,22 @@ let worktreeApi
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  state.Repos
-                  |> Map.toList
-                  |> List.tryPick (fun (repoId, repo) ->
-                      repo.WorktreeList
-                      |> List.tryFind (fun wt -> wt.Path = path)
-                      |> Option.bind (fun wt ->
-                          wt.Branch |> Option.map (fun branch -> scopedBranchKey repoId branch)))
-                  |> Option.iter (fun key -> syncAgent.Post(SyncEngine.CancelSync key))
+                  let worktreeInRepo =
+                      state.Repos
+                      |> Map.toList
+                      |> List.tryPick (fun (repoId, repo) ->
+                          repo.WorktreeList
+                          |> List.tryFind (fun wt -> wt.Path = path)
+                          |> Option.map (fun wt -> repoId, wt))
+
+                  match worktreeInRepo with
+                  | None ->
+                      Log.log "API" $"cancelSync: no worktree found at path '{path}'"
+                  | Some (_, wt) when wt.Branch.IsNone ->
+                      Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
+                  | Some (repoId, wt) ->
+                      let syncKey = scopedBranchKey repoId wt.Branch.Value
+                      syncAgent.Post(SyncEngine.CancelSync syncKey)
               }
           getSyncStatus = fun () ->
               async {
