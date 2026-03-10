@@ -28,7 +28,7 @@ type SnapshotTests() =
         let result = reconstructLastRequest (readFixture "snapshot-complete.jsonl")
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
-        Assert.That(req.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(req.ModelState, Is.EqualTo(Complete))
         Assert.That(req.UserText, Is.EqualTo(Some "Write a hello world program"))
         Assert.That(req.ResponseText.IsSome, Is.True)
         Assert.That(req.ResponseText.Value, Does.Contain("hello world"))
@@ -39,7 +39,7 @@ type SnapshotTests() =
         let result = reconstructLastRequest (readFixture "snapshot-in-progress.jsonl")
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
-        Assert.That(req.ModelState, Is.EqualTo(Some InProgress))
+        Assert.That(req.ModelState, Is.EqualTo(InProgress))
         Assert.That(req.UserText, Is.EqualTo(Some "Refactor the authentication module"))
         Assert.That(req.ResponseText.IsSome, Is.True)
 
@@ -54,7 +54,7 @@ type SnapshotTests() =
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
         Assert.That(req.UserText, Is.EqualTo(Some "New snapshot request"))
-        Assert.That(req.ModelState, Is.EqualTo(Some InProgress))
+        Assert.That(req.ModelState, Is.EqualTo(InProgress))
 
     [<Test>]
     member _.``Snapshot without user message text has None UserText``() =
@@ -62,7 +62,7 @@ type SnapshotTests() =
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
         Assert.That(req.UserText, Is.EqualTo(None))
-        Assert.That(req.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(req.ModelState, Is.EqualTo(Complete))
         Assert.That(req.ResponseText.IsSome, Is.True)
 
     [<Test>]
@@ -81,7 +81,7 @@ type SetValueTests() =
         let result = reconstructLastRequest (readFixture "set-model-state.jsonl")
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
-        Assert.That(req.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(req.ModelState, Is.EqualTo(Complete))
         Assert.That(req.CompletedAt.IsSome, Is.True)
         Assert.That(req.UserText, Is.EqualTo(Some "Fix the failing tests"))
 
@@ -92,7 +92,7 @@ type SetValueTests() =
               """{"kind":1,"k":["requests","2","modelState"],"v":{"value":4,"completedAt":1710100000000}}""" ]
         let result = reconstructLastRequest lines
         Assert.That(result.IsSome, Is.True)
-        Assert.That(result.Value.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(result.Value.ModelState, Is.EqualTo(Complete))
 
     [<Test>]
     member _.``Kind 1 set with non-numeric index is ignored``() =
@@ -101,7 +101,7 @@ type SetValueTests() =
               """{"kind":1,"k":["requests","abc","modelState"],"v":{"value":4,"completedAt":1710100000000}}""" ]
         let result = reconstructLastRequest lines
         Assert.That(result.IsSome, Is.True)
-        Assert.That(result.Value.ModelState, Is.EqualTo(Some InProgress))
+        Assert.That(result.Value.ModelState, Is.EqualTo(InProgress))
 
 
 [<TestFixture>]
@@ -115,7 +115,7 @@ type PushSpliceTests() =
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
         Assert.That(req.UserText, Is.EqualTo(Some "Second question"))
-        Assert.That(req.ModelState, Is.EqualTo(Some InProgress))
+        Assert.That(req.ModelState, Is.EqualTo(InProgress))
 
     [<Test>]
     member _.``Kind 2 push to response adds response parts``() =
@@ -132,7 +132,7 @@ type PushSpliceTests() =
         Assert.That(result.IsSome, Is.True)
         let req = result.Value
         Assert.That(req.UserText, Is.EqualTo(Some "Third request"))
-        Assert.That(req.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(req.ModelState, Is.EqualTo(Complete))
         Assert.That(req.CompletedAt.IsSome, Is.True)
         Assert.That(req.ResponseText.IsSome, Is.True)
         Assert.That(req.ResponseKinds, Does.Contain("inlineReference"))
@@ -145,7 +145,7 @@ type PushSpliceTests() =
         Assert.That(req.ResponseKinds, Does.Contain("markdownContent"))
         Assert.That(req.ResponseText.IsSome, Is.True)
         Assert.That(req.ResponseText.Value, Does.Contain("closure"))
-        Assert.That(req.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(req.ModelState, Is.EqualTo(Complete))
         Assert.That(req.UserText, Is.EqualTo(Some "Explain closures"))
 
     [<Test>]
@@ -191,7 +191,7 @@ type StatusDerivationTests() =
             [ """{"kind":0,"v":{"requests":[{"message":{"text":"Do something"},"modelState":{"value":0},"response":[]}]}}""" ]
         let result = reconstructLastRequest lines
         Assert.That(result.IsSome, Is.True)
-        Assert.That(result.Value.ModelState, Is.EqualTo(Some InProgress))
+        Assert.That(result.Value.ModelState, Is.EqualTo(InProgress))
 
     [<Test>]
     member _.``Complete model state from reconstructed request``() =
@@ -199,7 +199,7 @@ type StatusDerivationTests() =
             [ """{"kind":0,"v":{"requests":[{"message":{"text":"Do something"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"value":"Done"}]}]}}""" ]
         let result = reconstructLastRequest lines
         Assert.That(result.IsSome, Is.True)
-        Assert.That(result.Value.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(result.Value.ModelState, Is.EqualTo(Complete))
         Assert.That(result.Value.ResponseText, Is.EqualTo(Some "Done"))
 
     [<Test>]
@@ -208,7 +208,7 @@ type StatusDerivationTests() =
             [ """{"kind":0,"v":{"requests":[{"message":{"text":"Something"},"response":[]}]}}""" ]
         let result = reconstructLastRequest lines
         Assert.That(result.IsSome, Is.True)
-        Assert.That(result.Value.ModelState, Is.EqualTo(None))
+        Assert.That(result.Value.ModelState, Is.EqualTo(Unknown))
 
 
 [<TestFixture>]
@@ -233,7 +233,7 @@ type EdgeCaseTests() =
         let result = reconstructLastRequest lines
         Assert.That(result.IsSome, Is.True)
         Assert.That(result.Value.UserText, Is.EqualTo(Some "My request"))
-        Assert.That(result.Value.ModelState, Is.EqualTo(Some InProgress))
+        Assert.That(result.Value.ModelState, Is.EqualTo(InProgress))
 
     [<Test>]
     member _.``Unknown kind values are ignored``() =

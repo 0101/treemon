@@ -49,7 +49,7 @@
 
 ### Coding Tool Detection
 
-- Supports multiple providers: Claude Code, Copilot CLI. Adding a new provider = one detector module + registration in orchestrator.
+- Supports multiple providers: Claude Code, Copilot CLI, VS Code Copilot. Adding a new provider = one detector module + registration in orchestrator. Both CLI and VS Code Copilot report as `Provider = Copilot`; `pickActiveProvider` selects the most recently active one.
 - Every 15s refresh cycle checks all registered providers for each worktree
 - Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Done/Idle)
 - Orchestrator picks the most recently active non-Idle provider (by session file mtime)
@@ -57,6 +57,7 @@
 - Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
 - Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
+- VS Code Copilot: reads `%APPDATA%/Code/User/workspaceStorage/{hash}/chatSessions/*.jsonl` mutation logs, maps workspace storage hash dirs to worktree paths via `workspace.json` folder URIs, replays JSONL mutation log (kind 0/1/2/3) to reconstruct last request's model state and response
 
 #### Claude Parent/Subagent Detection
 
@@ -166,6 +167,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
 | `src/Server/ClaudeDetector.fs` | Claude Code session file scanning, parent/subagent detection |
 | `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
+| `src/Server/VsCodeCopilotDetector.fs` | VS Code Copilot workspace storage scanning, JSONL mutation log replay |
 | `src/Server/CodingToolStatus.fs` | Coding tool orchestrator: config override, provider dispatch, winner selection |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
