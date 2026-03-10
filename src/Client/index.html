@@ -81,7 +81,7 @@
         }
         .terminal-btn { margin-left: auto; font-size: 0.78em; padding-top: 2px; padding-bottom: 2px; }
         .new-tab-btn { font-size: 1em; }
-        .editor-btn { font-family: inherit; font-size: 0.78em; padding: 1px 1px 2px; }
+        .editor-btn { padding: 3px 4px; }
         .delete-btn { padding: 3px 4px; }
         .terminal-btn:hover, .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
         .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
@@ -138,6 +138,15 @@
         .build-badge.building { background: #3a3020; color: #f9e2af; }
         .build-badge.partial { background: #3a2e20; color: #fab387; }
         .build-badge.canceled { background: #313244; color: #7f849c; }
+
+        .action-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer;
+            padding: 3px 4px; line-height: 1.2; transition: color 0.15s, border-color 0.15s, opacity 0.15s;
+        }
+        .action-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .action-btn.disabled { opacity: 0.4; cursor: not-allowed; }
 
         .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #7f849c; padding: 8px 0 4px; }
 

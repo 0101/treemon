@@ -153,4 +153,5 @@ type IWorktreeApi =
       unarchiveWorktree: BranchName -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
-      openNewTab: WorktreePath -> Async<Result<unit, string>> }
+      openNewTab: WorktreePath -> Async<Result<unit, string>>
+      launchAction: LaunchRequest -> Async<Result<unit, string>> }

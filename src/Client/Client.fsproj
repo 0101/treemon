@@ -8,6 +8,7 @@
     <Compile Include="Navigation.fs" />
     <Compile Include="CreateWorktreeModal.fs" />
     <Compile Include="ArchiveViews.fs" />
+    <Compile Include="ActionButtons.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 

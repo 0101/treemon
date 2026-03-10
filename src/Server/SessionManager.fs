@@ -7,9 +7,10 @@ open System.Text.Json
 open Shared
 
 type private SessionMsg =
-    | Spawn of worktreePath: WorktreePath * prompt: string * AsyncReplyChannel<Result<unit, string>>
+    | Spawn of worktreePath: WorktreePath * command: string * AsyncReplyChannel<Result<unit, string>>
     | SpawnTerminal of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | OpenNewTab of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
+    | LaunchAction of worktreePath: WorktreePath * command: string * AsyncReplyChannel<Result<unit, string>>
     | Focus of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | Kill of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
@@ -40,6 +41,11 @@ let private encodeCommand (command: string) =
     let bytes = System.Text.Encoding.Unicode.GetBytes(command)
     Convert.ToBase64String(bytes)
 
+let private buildScript (nativePath: string) (command: string option) =
+    match command with
+    | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
+    | None -> $"Set-Location '{nativePath}'"
+
 let private spawnWtAndResolve (args: string) (logLabel: string) =
     let beforeWindows = Win32.listWindowsTerminalWindows () |> Set.ofList
     Log.log "SessionManager" $"Spawning {logLabel}: wt.exe {args}"
@@ -68,18 +74,18 @@ let private spawnWtAndResolve (args: string) (logLabel: string) =
         Log.log "SessionManager" $"Failed to spawn {logLabel} wt.exe: {ex.Message}"
         Error $"Failed to spawn {logLabel}: {ex.Message}"
 
-let private spawnAndResolve (worktreePath: string) (prompt: string) =
+let private spawnWithCommand (worktreePath: string) (command: string option) (logLabel: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let escapedPrompt = prompt.Replace("'", "''")
-    let encoded = encodeCommand $"Set-Location '{nativePath}'; claude '{escapedPrompt}'"
-    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "session"
+    let encoded = buildScript nativePath command |> encodeCommand
+    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" logLabel
+
+let private spawnAndResolve (worktreePath: string) (command: string) =
+    spawnWithCommand worktreePath (Some command) "session"
 
 let private spawnTerminalAndResolve (worktreePath: string) =
-    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let encoded = encodeCommand $"Set-Location '{nativePath}'"
-    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "terminal"
+    spawnWithCommand worktreePath None "terminal"
 
-let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) =
+let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command: string option) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
     if not (Win32.isWindowValid hwnd) then
         Error "Tracked window is no longer valid"
@@ -87,7 +93,7 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) =
         if not (Win32.focusWindow hwnd) then
             Log.log "SessionManager" $"Failed to focus HWND={hwnd} for new-tab"
 
-        let encoded = encodeCommand $"Set-Location '{nativePath}'"
+        let encoded = buildScript nativePath command |> encodeCommand
         let psi =
             ProcessStartInfo(
                 "wt.exe",
@@ -178,9 +184,9 @@ let private spawnAndTrack (validated: Map<string, nativeint>) path spawnFn (repl
 
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     match msg with
-    | Spawn(wtPath, prompt, reply) ->
+    | Spawn(wtPath, command, reply) ->
         let path = WorktreePath.value wtPath
-        spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path prompt) reply
+        spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path command) reply
 
     | SpawnTerminal(wtPath, reply) ->
         let path = WorktreePath.value wtPath
@@ -192,12 +198,31 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
 
         match validated |> Map.tryFind path with
         | Some hwnd ->
-            let result = openNewTabInWindow hwnd path
+            let result = openNewTabInWindow hwnd path None
             reply.Reply(result)
             validated
         | None ->
             reply.Reply(Error "No active session for this worktree")
             validated
+
+    | LaunchAction(wtPath, command, reply) ->
+        let path = WorktreePath.value wtPath
+        let validated = validateSessions sessions
+
+        match validated |> Map.tryFind path with
+        | Some hwnd ->
+            let result = openNewTabInWindow hwnd path (Some command)
+            reply.Reply(result)
+            validated
+        | None ->
+            let spawnResult = spawnWithCommand path (Some command) "action"
+            match spawnResult with
+            | Ok hwnd ->
+                reply.Reply(Ok())
+                validated |> Map.add path hwnd
+            | Error msg ->
+                reply.Reply(Error msg)
+                validated
 
     | Focus(wtPath, reply) ->
         let path = WorktreePath.value wtPath
@@ -253,6 +278,7 @@ let createAgent () =
                             | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | OpenNewTab(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                            | LaunchAction(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
                             | GetActiveSessions reply -> reply.Reply(sessions)
@@ -272,8 +298,8 @@ let createAgent () =
 
     { Agent = agent }
 
-let spawnSession (agent: SessionAgent) (worktreePath: WorktreePath) (prompt: string) =
-    agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, prompt, reply)), timeout = 30_000)
+let spawnSession (agent: SessionAgent) (worktreePath: WorktreePath) (command: string) =
+    agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, command, reply)), timeout = 30_000)
 
 let spawnTerminal (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminal(worktreePath, reply)), timeout = 30_000)
@@ -286,6 +312,9 @@ let killSession (agent: SessionAgent) (worktreePath: WorktreePath) =
 
 let openNewTab (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)
+
+let launchAction (agent: SessionAgent) (worktreePath: WorktreePath) (command: string) =
+    agent.Agent.PostAndAsyncReply((fun reply -> LaunchAction(worktreePath, command, reply)), timeout = 30_000)
 
 let getActiveSessions (agent: SessionAgent) =
     agent.Agent.PostAndAsyncReply(GetActiveSessions, timeout = 10_000)

@@ -38,6 +38,7 @@
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (last 3 events), sync/cancel/terminal/delete actions
 - Green left border on cards with active terminal sessions
+- Contextual action buttons: fix PR comments, fix failed build, create PR (see `docs/spec/contextual-actions.md`)
 
 ### Branch Sync
 
@@ -56,6 +57,40 @@
 - Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
 - Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
+
+#### Claude Parent/Subagent Detection
+
+Claude Code spawns subagent sessions (via the Task tool) that write to nested JSONL files:
+
+```
+~/.claude/projects/{encoded-path}/
++-- {sessionUuid}.jsonl                          <- parent session
++-- {sessionUuid}/subagents/agent-{id}.jsonl     <- subagent files
+```
+
+`SessionFileKind` (Parent | Subagent) is determined by path: any `.jsonl` inside a `subagents/` subdirectory is a subagent; top-level `.jsonl` files are parent sessions.
+
+**Status resolution rules:**
+
+1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
+2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
+3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
+4. If parent status is `Done` or `Idle` -- check subagent files: if any subagent is `Working`, return `Working` (parent file hasn't been written to while the subagent runs)
+5. Otherwise return the parent status
+
+Parent `WaitingForUser` is never overridden by subagent activity. Only `Done`/`Idle` can be upgraded to `Working` by an active subagent.
+
+**Scoping rules:**
+- `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
+- File enumeration is consolidated: `enumerateFiles` runs once per poll cycle, results passed to status/message functions
+
+#### Claude Status Detection (Pure Logic)
+
+Status detection is split into pure logic and I/O:
+- **Pure core** (`getStatusFromFiles`): takes `now: DateTimeOffset` and `SessionFileData list` (kind, mtime, last lines reversed), returns `CodingToolStatus`. Testable without filesystem access.
+- **I/O wrapper** (`getStatus`): discovers all `.jsonl` files, reads last N lines, calls `getStatusFromFiles` with current time.
+
+Timeline replay tests verify status transitions against checked-in fixture data (`src/Tests/fixtures/claude/multi-session/expected-statuses.jsonl`). The fixture captures a real session with parent + 3 subagents; the test replays entries chronologically through `getStatusFromFiles` and asserts each status change matches recorded expectations.
 
 ### Create Worktree
 
@@ -129,7 +164,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
-| `src/Server/ClaudeDetector.fs` | Claude Code session file scanning |
+| `src/Server/ClaudeDetector.fs` | Claude Code session file scanning, parent/subagent detection |
 | `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
 | `src/Server/CodingToolStatus.fs` | Coding tool orchestrator: config override, provider dispatch, winner selection |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
@@ -141,7 +176,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app, repo sections, card rendering |
 | `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
-| `src/Tests/fixtures/` | Captured AzDo, GitHub, and Copilot data for offline parsing tests |
+| `src/Tests/fixtures/` | Captured AzDo, GitHub, Copilot, and Claude session data for offline parsing/replay tests |
 
 ## Decisions
 
@@ -155,6 +190,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Repo ID = folder name: simple, human-readable, no config needed
 - `CommentSummary` DU over nullable fields: cleanly models provider capability differences
 - Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
+- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
+- Claude subagent detection is path-based only (directory structure), no content parsing needed
+- Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
@@ -164,3 +202,4 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
+- `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges

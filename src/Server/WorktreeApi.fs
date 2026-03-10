@@ -23,10 +23,14 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let codingToolStatus, codingToolProvider, lastUserMsg =
+    let codingToolData =
         repo.CodingToolData
         |> Map.tryFind wt.Path
-        |> Option.defaultValue (CodingToolStatus.Idle, None, None)
+        |> Option.defaultValue
+            { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
+              Provider = None
+              LastUserMessage = None
+              LastAssistantMessage = None }
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -35,9 +39,9 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
-      CodingTool = codingToolStatus
-      CodingToolProvider = codingToolProvider
-      LastUserMessage = lastUserMsg
+      CodingTool = codingToolData.Status
+      CodingToolProvider = codingToolData.Provider
+      LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -67,6 +71,14 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
         else None)
 
 let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
+
+let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
+    state.Repos
+    |> Map.values
+    |> Seq.tryPick (fun repo ->
+        repo.CodingToolData
+        |> Map.tryFind path
+        |> Option.bind _.Provider)
 
 let private readGlobalConfig () =
     let configPath =
@@ -308,7 +320,8 @@ let worktreeApi
           unarchiveWorktree = fun _ -> async { return Error "Archive is not available in fixture mode" }
           getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
           createWorktree = fun _ -> async { return Ok() }
-          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" } }
+          openNewTab = fun _ -> async { return Error "Session management is not available in fixture mode" }
+          launchAction = fun _ -> async { return Error "Session management is not available in fixture mode" } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
@@ -329,10 +342,7 @@ let worktreeApi
                                   |> Map.tryFind repoId
                                   |> Option.defaultValue (worktreeRoots |> List.head)
                               let syncKey = scopedBranchKey repoId branch
-                              let provider =
-                                  repo.CodingToolData
-                                  |> Map.tryFind wt.Path
-                                  |> Option.bind (fun (_, p, _) -> p)
+                              let provider = resolveProvider state wt.Path
                               wt.Path, repoRoot, syncKey, provider))
 
                   match worktreeWithRepo with
@@ -381,6 +391,16 @@ let worktreeApi
                         yield! branchToScopedKey |> Map.keys ]
                       |> List.distinct
 
+                  let cachedLastMessages =
+                      state.Repos
+                      |> Map.toList
+                      |> List.collect (fun (_, repo) ->
+                          repo.CodingToolData
+                          |> Map.toList
+                          |> List.choose (fun (path, data) ->
+                              data.LastAssistantMessage |> Option.map (fun msg -> path, msg)))
+                      |> Map.ofList
+
                   return
                       allKeys
                       |> List.choose (fun key ->
@@ -392,7 +412,7 @@ let worktreeApi
                           let claudeEvt =
                               branchToScopedKey
                               |> Map.tryFind key
-                              |> Option.bind CodingToolStatus.getLastMessage
+                              |> Option.bind (fun wtPath -> cachedLastMessages |> Map.tryFind wtPath)
 
                           let merged = (claudeEvt |> Option.toList) @ syncEvts
 
@@ -411,7 +431,13 @@ let worktreeApi
           deleteWorktree = deleteWorktree agent rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
-                  SessionManager.spawnSession sessionAgent req.Path req.Prompt)
+                  async {
+                      let path = WorktreePath.value req.Path
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      return! SessionManager.spawnSession sessionAgent req.Path command
+                  })
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
                   SessionManager.focusSession sessionAgent wtPath)
@@ -466,4 +492,13 @@ let worktreeApi
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
-                  SessionManager.openNewTab sessionAgent wtPath) }
+                  SessionManager.openNewTab sessionAgent wtPath)
+          launchAction = fun req ->
+              withValidatedPath req.Path "launchAction" (fun () ->
+                  async {
+                      let path = WorktreePath.value req.Path
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      return! SessionManager.launchAction sessionAgent req.Path command
+                  }) }
