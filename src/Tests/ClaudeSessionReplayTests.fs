@@ -214,6 +214,16 @@ type ParentAuthoritativeResolutionTests() =
         Assert.That(result, Is.EqualTo(Done))
 
     [<Test>]
+    member _.``Parent Done + subagent with Warmup user entry = Done (not false Working)``() =
+        let warmupEntry =
+            """{"type":"user","timestamp":"2026-03-05T14:59:30.000Z","message":{"role":"user","content":"Warmup"},"isSidechain":true,"userType":"external"}"""
+        let files =
+            [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
+              makeFileData Subagent recentTime [ warmupEntry ] ]
+        let result = getStatusFromFiles now files
+        Assert.That(result, Is.EqualTo(Done))
+
+    [<Test>]
     member _.``Parent Done + one subagent Working among Done subagents = Working``() =
         let files =
             [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
