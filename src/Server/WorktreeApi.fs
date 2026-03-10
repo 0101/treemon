@@ -240,8 +240,7 @@ let private updateArchivedBranches
             return Error $"No worktree found at path '{path}'"
         | Some { Branch = None; Worktree = wt } ->
             return Error $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
-        | Some ctx ->
-            let branch = ctx.Branch.Value
+        | Some ({ Branch = Some branch } as ctx) ->
             let liveBranches =
                 state.Repos
                 |> Map.tryFind ctx.RepoId
@@ -321,8 +320,7 @@ let worktreeApi
                   | None -> return Error $"No worktree found at path '{path}'"
                   | Some { Branch = None } ->
                       return Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
-                  | Some ctx ->
-                      let branch = ctx.Branch.Value
+                  | Some ({ Branch = Some branch } as ctx) ->
                       let syncKey = scopedBranchKey ctx.RepoId branch
                       let provider = resolveProvider state ctx.Worktree.Path
 
@@ -345,8 +343,8 @@ let worktreeApi
                       Log.log "API" $"cancelSync: no worktree found at path '{path}'"
                   | Some { Branch = None } ->
                       Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
-                  | Some ctx ->
-                      let syncKey = scopedBranchKey ctx.RepoId ctx.Branch.Value
+                  | Some ({ Branch = Some branch } as ctx) ->
+                      let syncKey = scopedBranchKey ctx.RepoId branch
                       syncAgent.Post(SyncEngine.CancelSync syncKey)
               }
           getSyncStatus = fun () ->
