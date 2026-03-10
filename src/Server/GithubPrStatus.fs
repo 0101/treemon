@@ -143,6 +143,21 @@ let private fetchFailedStepName (remote: GithubRemote) (runId: int64) =
         return output |> Option.bind parseFailedJobs
     }
 
+let internal parsePrMergeability (json: string) =
+    try
+        use doc = JsonDocument.Parse(json)
+        let mergeable = doc.RootElement |> tryBool "mergeable"
+        mergeable = Some false
+    with ex ->
+        Log.log "GH" $"Failed to parse GitHub PR mergeability JSON: {ex.Message}"
+        false
+
+let private fetchMergeability (remote: GithubRemote) (prNumber: int) =
+    async {
+        let! output = runGh $"api /repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}"
+        return output |> Option.map parsePrMergeability |> Option.defaultValue false
+    }
+
 let private fetchActionRuns (remote: GithubRemote) (branch: string) =
     async {
         let! output =
@@ -218,11 +233,17 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                 relevant
                 |> List.map (fun pr ->
                     async {
-                        let! builds =
+                        let! builds, hasConflicts =
                             if pr.IsMerged then
-                                async { return [] }
+                                async { return [], false }
                             else
-                                fetchActionRuns remote pr.BranchName
+                                async {
+                                    let! buildsChild = Async.StartChild(fetchActionRuns remote pr.BranchName)
+                                    let! mergeabilityChild = Async.StartChild(fetchMergeability remote pr.PrNumber)
+                                    let! b = buildsChild
+                                    let! c = mergeabilityChild
+                                    return b, c
+                                }
 
                         let! commentCount = fetchPrCommentCount remote pr.PrNumber
 
@@ -238,7 +259,8 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                   IsDraft = pr.IsDraft
                                   Comments = CountOnly commentCount
                                   Builds = builds
-                                  IsMerged = pr.IsMerged }
+                                  IsMerged = pr.IsMerged
+                                  HasConflicts = hasConflicts }
                     })
                 |> Async.Parallel
 

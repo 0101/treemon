@@ -5,6 +5,7 @@
     "isDraft": false,
     "sourceRefName": "refs/heads/feature/auth",
     "status": "active",
+    "mergeStatus": "conflicts",
     "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
   },
   {
@@ -13,6 +14,7 @@
     "isDraft": true,
     "sourceRefName": "refs/heads/fix/login-style",
     "status": "active",
+    "mergeStatus": "succeeded",
     "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
   },
   {
