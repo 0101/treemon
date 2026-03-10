@@ -27,7 +27,8 @@ type Model =
       CreateModal: CreateWorktreeModal.ModalState
       DeletedBranches: Set<string>
       DeployBranch: string option
-      SystemMetrics: SystemMetrics option }
+      SystemMetrics: SystemMetrics option
+      LastError: string option }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -55,6 +56,7 @@ type Msg =
     | LaunchAction of path: WorktreePath * prompt: string
     | LaunchActionResult of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
+    | DismissError
 
 let worktreeApi =
     Remoting.createApi ()
@@ -64,7 +66,7 @@ let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.getWorktrees () DataLoaded DataFailed
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.either worktreeApi.getSyncStatus () SyncStatusUpdate DataFailed
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
@@ -90,7 +92,8 @@ let init () =
       CreateModal = CreateWorktreeModal.Closed
       DeletedBranches = Set.empty
       DeployBranch = None
-      SystemMetrics = None },
+      SystemMetrics = None
+      LastError = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -173,10 +176,11 @@ let update msg model =
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
-    | DataFailed _ ->
+    | DataFailed ex ->
         { model with
             IsLoading = false
-            HasError = true },
+            HasError = true
+            LastError = Some ex.Message },
         Cmd.none
 
     | ToggleSort ->
@@ -210,12 +214,12 @@ let update msg model =
         Cmd.none
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
+        model, Cmd.OfAsync.either worktreeApi.openTerminal path (fun _ -> Tick) DataFailed
     | OpenEditor path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick)
+        model, Cmd.OfAsync.either worktreeApi.openEditor path (fun _ -> Tick) DataFailed
 
     | Tick ->
-        model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+        model, fetchWorktrees ()
 
     | StartSync (branch, key) ->
         let syntheticEvent =
@@ -230,7 +234,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync branch (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.either worktreeApi.startSync branch (fun r -> SyncStarted (key, r)) DataFailed
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -245,7 +249,7 @@ let update msg model =
         { model with BranchEvents = events }, Cmd.none
 
     | CancelSync branch ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync branch (fun _ -> Tick)
+        model, Cmd.OfAsync.either worktreeApi.cancelSync branch (fun _ -> Tick) DataFailed
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -265,28 +269,34 @@ let update msg model =
                 Repos = updatedRepos
                 DeletedBranches = model.DeletedBranches |> Set.add branch }
         { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+        Cmd.OfAsync.either worktreeApi.deleteWorktree branch DeleteCompleted DataFailed
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
-    | DeleteCompleted (Error _) ->
-        { model with DeletedBranches = Set.empty }, fetchWorktrees ()
+    | DeleteCompleted (Error msg) ->
+        { model with DeletedBranches = Set.empty; LastError = Some $"Delete failed: {msg}" }, fetchWorktrees ()
 
     | FocusSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult DataFailed
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.openNewTab path SessionResult DataFailed
 
-    | SessionResult _ ->
+    | SessionResult (Ok _) ->
         model, fetchWorktrees ()
+
+    | SessionResult (Error msg) ->
+        { model with LastError = Some $"Session failed: {msg}" }, fetchWorktrees ()
 
     | LaunchAction (path, prompt) ->
-        model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult
+        model, Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult DataFailed
 
-    | LaunchActionResult _ ->
+    | LaunchActionResult (Ok _) ->
         model, fetchWorktrees ()
+
+    | LaunchActionResult (Error msg) ->
+        { model with LastError = Some $"Launch failed: {msg}" }, fetchWorktrees ()
 
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
@@ -302,6 +312,9 @@ let update msg model =
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
+
+    | DismissError ->
+        { model with LastError = None }, Cmd.none
 
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
@@ -359,11 +372,18 @@ let pollingSubscription (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    if hasSyncRunning model.BranchEvents then
-        [ [ "polling" ], worktreePolling
-          [ "sync-polling" ], syncPolling ]
-    else
-        [ [ "polling" ], worktreePolling ]
+    let errorDismiss (dispatch: Dispatch<Msg>) =
+        let timeoutId =
+            Fable.Core.JS.setTimeout (fun () -> dispatch DismissError) 8000
+        { new System.IDisposable with
+            member _.Dispose() = Fable.Core.JS.clearTimeout timeoutId }
+
+    [ [ "polling" ], worktreePolling
+      if hasSyncRunning model.BranchEvents then
+          [ "sync-polling" ], syncPolling
+      match model.LastError with
+      | Some msg -> [ "error-dismiss"; msg ], errorDismiss
+      | None -> () ]
 
 let relativeTime = ArchiveViews.relativeTime
 
@@ -1274,6 +1294,22 @@ let viewAppHeader model dispatch =
         ]
     ]
 
+let errorToast dispatch (error: string option) =
+    match error with
+    | None -> Html.none
+    | Some msg ->
+        Html.div [
+            prop.className "error-toast"
+            prop.children [
+                Html.span [ prop.text msg ]
+                Html.button [
+                    prop.className "toast-dismiss"
+                    prop.onClick (fun _ -> dispatch DismissError)
+                    prop.text "\u00D7"
+                ]
+            ]
+        ]
+
 let view model dispatch =
     React.fragment [
         viewAppHeader model dispatch
@@ -1307,6 +1343,7 @@ let view model dispatch =
                 CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
             ]
         ]
+        errorToast dispatch model.LastError
     ]
 
 open Elmish.React
