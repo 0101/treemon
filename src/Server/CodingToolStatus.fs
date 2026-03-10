@@ -46,6 +46,8 @@ let internal pickActiveProvider (results: ProviderResult list) : ProviderResult 
     |> List.sortByDescending (fun r -> r.Mtime |> Option.defaultValue DateTimeOffset.MinValue)
     |> List.tryHead
 
+// Uses pickActiveProvider (filter non-Idle, pick most recent) instead of tryFind
+// so that when multiple providers report status, the most recently active wins.
 let internal resolveStatus
     (configuredProvider: CodingToolProvider option)
     (providerResults: ProviderResult list)

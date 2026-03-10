@@ -132,6 +132,14 @@ let private applyResponseParts (parts: JsonElement) (state: ReqState) =
         parts.EnumerateArray()
         |> Seq.fold (fun acc item ->
             match item.TryGetProperty("kind"), item.TryGetProperty("value") with
+            | (true, k), (true, v) when v.ValueKind = JsonValueKind.String ->
+                let kv = k.GetString()
+                let text = v.GetString()
+                let withKind =
+                    if List.contains kv acc.ResponseKinds then acc
+                    else { acc with ResponseKinds = kv :: acc.ResponseKinds }
+                if String.IsNullOrWhiteSpace(text) then withKind
+                else { withKind with ResponseText = Some text }
             | (true, k), _ ->
                 let kv = k.GetString()
                 if List.contains kv acc.ResponseKinds then acc

@@ -138,6 +138,17 @@ type PushSpliceTests() =
         Assert.That(req.ResponseKinds, Does.Contain("inlineReference"))
 
     [<Test>]
+    member _.``Kind 2 push with combined kind and value captures both``() =
+        let result = reconstructLastRequest (readFixture "push-typed-response-parts.jsonl")
+        Assert.That(result.IsSome, Is.True)
+        let req = result.Value
+        Assert.That(req.ResponseKinds, Does.Contain("markdownContent"))
+        Assert.That(req.ResponseText.IsSome, Is.True)
+        Assert.That(req.ResponseText.Value, Does.Contain("closure"))
+        Assert.That(req.ModelState, Is.EqualTo(Some Complete))
+        Assert.That(req.UserText, Is.EqualTo(Some "Explain closures"))
+
+    [<Test>]
     member _.``Kind 2 push with non-array value is ignored``() =
         let lines =
             [ """{"kind":0,"v":{"requests":[{"message":{"text":"Only"},"modelState":{"value":0},"response":[]}]}}"""
@@ -267,6 +278,15 @@ type EdgeCaseTests() =
         let markdownCount =
             result.Value.ResponseKinds |> List.filter (fun k -> k = "markdownContent") |> List.length
         Assert.That(markdownCount, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``Response part with both kind and value captures text``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"Q"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"kind":"markdownContent","value":"Combined text here"}]}]}}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.ResponseKinds, Does.Contain("markdownContent"))
+        Assert.That(result.Value.ResponseText, Is.EqualTo(Some "Combined text here"))
 
 
 [<TestFixture>]
