@@ -1,15 +1,25 @@
 param(
     [Parameter(Mandatory=$true, Position=0)]
-    [string]$Branch
+    [string]$Branch,
+    [string]$Remote = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = $PSScriptRoot
-$worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-$Branch"
 
-Write-Host "Creating worktree at $worktreePath with branch $Branch..."
-git worktree add -b $Branch $worktreePath
+if ($Remote) {
+    $worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-review-$Branch"
+    Write-Host "Fetching from $Remote..."
+    git fetch $Remote
+    $localBranch = "review/$Branch"
+    Write-Host "Creating review worktree at $worktreePath (branch $localBranch tracking $Remote/$Branch)..."
+    git worktree add -b $localBranch $worktreePath "$Remote/$Branch"
+} else {
+    $worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-$Branch"
+    Write-Host "Creating worktree at $worktreePath with branch $Branch..."
+    git worktree add -b $Branch $worktreePath
+}
 Set-Location $worktreePath
 
 Write-Host "Creating .claude symlink..."
