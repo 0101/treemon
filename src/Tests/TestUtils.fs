@@ -138,7 +138,6 @@ let killOrphansOnPort (port: int) =
 let defaultModel : Model =
     { Repos = []
       IsLoading = false
-      HasError = false
       SortMode = ByActivity
       IsCompact = false
       SchedulerEvents = []

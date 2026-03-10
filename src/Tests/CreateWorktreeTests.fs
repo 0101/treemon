@@ -33,7 +33,6 @@ type OpenCreateWorktreeTests() =
         let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
 
         Assert.That(model.IsLoading, Is.EqualTo(defaultModel.IsLoading))
-        Assert.That(model.HasError, Is.EqualTo(defaultModel.HasError))
         Assert.That(model.Repos, Is.EqualTo(defaultModel.Repos))
 
 

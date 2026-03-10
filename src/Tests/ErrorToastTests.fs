@@ -17,6 +17,14 @@ type ErrorToastTests() =
         Assert.That(model.LastError, Is.EqualTo(Some "connection refused"))
 
     [<Test>]
+    member _.``ActionFailed sets LastError without changing IsLoading``() =
+        let loadingModel = { defaultModel with IsLoading = true }
+        let model, _ = update (ActionFailed (exn "terminal not found")) loadingModel
+
+        Assert.That(model.LastError, Is.EqualTo(Some "terminal not found"))
+        Assert.That(model.IsLoading, Is.True)
+
+    [<Test>]
     member _.``DeleteCompleted Error sets LastError with prefix``() =
         let model = tryUpdateModel (DeleteCompleted (Error "branch not found")) defaultModel
 

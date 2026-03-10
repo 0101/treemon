@@ -13,7 +13,6 @@ open ActionButtons
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
-      HasError: bool
       SortMode: SortMode
       IsCompact: bool
       SchedulerEvents: CardEvent list
@@ -55,6 +54,7 @@ type Msg =
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * prompt: string
     | LaunchActionResult of Result<unit, string>
+    | ActionFailed of exn
     | ModalMsg of CreateWorktreeModal.Msg
     | DismissError
 
@@ -78,7 +78,6 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
 let init () =
     { Repos = []
       IsLoading = true
-      HasError = false
       SortMode = ByActivity
       IsCompact = false
       SchedulerEvents = []
@@ -164,7 +163,6 @@ let update msg model =
             { model with
                 Repos = repos
                 IsLoading = false
-                HasError = false
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
@@ -179,9 +177,11 @@ let update msg model =
     | DataFailed ex ->
         { model with
             IsLoading = false
-            HasError = true
             LastError = Some ex.Message },
         Cmd.none
+
+    | ActionFailed ex ->
+        { model with LastError = Some ex.Message }, Cmd.none
 
     | ToggleSort ->
         let newSort =
@@ -214,9 +214,9 @@ let update msg model =
         Cmd.none
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.either worktreeApi.openTerminal path (fun _ -> Tick) DataFailed
+        model, Cmd.OfAsync.either worktreeApi.openTerminal path (fun _ -> Tick) ActionFailed
     | OpenEditor path ->
-        model, Cmd.OfAsync.either worktreeApi.openEditor path (fun _ -> Tick) DataFailed
+        model, Cmd.OfAsync.either worktreeApi.openEditor path (fun _ -> Tick) ActionFailed
 
     | Tick ->
         model, fetchWorktrees ()
@@ -234,7 +234,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.either worktreeApi.startSync branch (fun r -> SyncStarted (key, r)) DataFailed
+        Cmd.OfAsync.either worktreeApi.startSync branch (fun r -> SyncStarted (key, r)) ActionFailed
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -249,7 +249,7 @@ let update msg model =
         { model with BranchEvents = events }, Cmd.none
 
     | CancelSync branch ->
-        model, Cmd.OfAsync.either worktreeApi.cancelSync branch (fun _ -> Tick) DataFailed
+        model, Cmd.OfAsync.either worktreeApi.cancelSync branch (fun _ -> Tick) ActionFailed
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -269,7 +269,7 @@ let update msg model =
                 Repos = updatedRepos
                 DeletedBranches = model.DeletedBranches |> Set.add branch }
         { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.either worktreeApi.deleteWorktree branch DeleteCompleted DataFailed
+        Cmd.OfAsync.either worktreeApi.deleteWorktree branch DeleteCompleted ActionFailed
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
@@ -278,10 +278,10 @@ let update msg model =
         { model with DeletedBranches = Set.empty; LastError = Some $"Delete failed: {msg}" }, fetchWorktrees ()
 
     | FocusSession path ->
-        model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult DataFailed
+        model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult ActionFailed
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.either worktreeApi.openNewTab path SessionResult DataFailed
+        model, Cmd.OfAsync.either worktreeApi.openNewTab path SessionResult ActionFailed
 
     | SessionResult (Ok _) ->
         model, fetchWorktrees ()
@@ -290,7 +290,7 @@ let update msg model =
         { model with LastError = Some $"Session failed: {msg}" }, fetchWorktrees ()
 
     | LaunchAction (path, prompt) ->
-        model, Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult DataFailed
+        model, Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult ActionFailed
 
     | LaunchActionResult (Ok _) ->
         model, fetchWorktrees ()
@@ -1258,7 +1258,7 @@ let viewAppHeader model dispatch =
             Html.div [
                 prop.className "header-center"
                 prop.children [
-                    if model.HasError then viewEyeRolledBack
+                    if model.LastError.IsSome then viewEyeRolledBack
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
                         viewEyeOpen pupilColor model.EyeDirection
