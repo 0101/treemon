@@ -29,9 +29,7 @@ type internal ParsedGithubPr =
       PrNumber: int
       Title: string
       IsDraft: bool
-      IsMerged: bool
-      CommentCount: int
-      ReviewCommentCount: int }
+      IsMerged: bool }
 
 let internal parsePrList (json: string) =
     try
@@ -45,20 +43,31 @@ let internal parsePrList (json: string) =
                 let isDraft = el |> tryBool "draft" |> Option.defaultValue false
                 let isMerged = el |> tryProp "merged_at" |> Option.isSome
                 let branchName = el.GetProperty("head").GetProperty("ref").GetString()
-                let comments = el |> tryInt "comments" |> Option.defaultValue 0
-                let reviewComments = el |> tryInt "review_comments" |> Option.defaultValue 0
-
                 Some
                     { BranchName = branchName
                       PrNumber = number
                       Title = title
                       IsDraft = isDraft
-                      IsMerged = isMerged
-                      CommentCount = comments
-                      ReviewCommentCount = reviewComments })
+                      IsMerged = isMerged })
     with ex ->
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
         []
+
+let internal parsePrCommentCounts (json: string) =
+    try
+        use doc = JsonDocument.Parse(json)
+        let comments = doc.RootElement |> tryInt "comments" |> Option.defaultValue 0
+        let reviewComments = doc.RootElement |> tryInt "review_comments" |> Option.defaultValue 0
+        comments + reviewComments
+    with ex ->
+        Log.log "GH" $"Failed to parse GitHub PR detail JSON: {ex.Message}"
+        0
+
+let private fetchPrCommentCount (remote: GithubRemote) (prNumber: int) =
+    async {
+        let! output = runGh $"api repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}"
+        return output |> Option.map parsePrCommentCounts |> Option.defaultValue 0
+    }
 
 let private mapConclusion (conclusion: string option) =
     match conclusion with
@@ -236,7 +245,7 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                     return b, c
                                 }
 
-                        let commentCount = pr.CommentCount + pr.ReviewCommentCount
+                        let! commentCount = fetchPrCommentCount remote pr.PrNumber
 
                         let url =
                             $"https://github.com/{remote.Owner}/{remote.Repo}/pull/{pr.PrNumber}"
