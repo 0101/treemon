@@ -141,15 +141,15 @@ type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
       openEditor: WorktreePath -> Async<unit>
-      startSync: string -> Async<Result<unit, string>>
-      cancelSync: string -> Async<unit>
+      startSync: WorktreePath -> Async<Result<unit, string>>
+      cancelSync: WorktreePath -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
-      deleteWorktree: string -> Async<Result<unit, string>>
+      deleteWorktree: WorktreePath -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<unit, string>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>
-      archiveWorktree: BranchName -> Async<Result<unit, string>>
-      unarchiveWorktree: BranchName -> Async<Result<unit, string>>
+      archiveWorktree: WorktreePath -> Async<Result<unit, string>>
+      unarchiveWorktree: WorktreePath -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
