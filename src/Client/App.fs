@@ -24,7 +24,7 @@ type Model =
       EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
-      DeletedBranches: Set<string>
+      DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       LastError: string option }
@@ -38,13 +38,13 @@ type Msg =
     | Tick
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
-    | StartSync of branch: string * scopedKey: string
+    | StartSync of path: WorktreePath * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of string
+    | CancelSync of WorktreePath
     | SyncTick
-    | ConfirmDeleteWorktree of branch: string
-    | DeleteWorktree of string
+    | ConfirmDeleteWorktree of WorktreePath
+    | DeleteWorktree of WorktreePath
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
@@ -89,7 +89,7 @@ let init () =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
-      DeletedBranches = Set.empty
+      DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None
       LastError = None },
@@ -102,12 +102,12 @@ let randomEyeDirection () =
     let dy = rng.NextDouble() * 2.0 - 1.0
     (dx, dy)
 
-let filterDeletedBranches (deleted: Set<string>) (repos: RepoModel list) =
+let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
     else
         repos
         |> List.map (fun r ->
-            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains wt.Branch deleted)) })
+            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains (WorktreePath.value wt.Path) deleted)) })
 
 let findWorktree (scopedKey: string) (model: Model) =
     let parts = scopedKey.Split('/', 2)
@@ -124,11 +124,11 @@ let terminalAction (wt: WorktreeStatus) =
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
-    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive (BranchName.create wt.Branch)))
-    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
+    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive wt.Path))
+    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Path)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
@@ -144,11 +144,11 @@ let update msg model =
                 model.Repos
                 |> List.map (fun r -> r.RepoId, r.IsCollapsed)
                 |> Map.ofList
-            let serverBranches =
+            let serverPaths =
                 response.Repos
-                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> WorktreePath.value wt.Path))
                 |> Set.ofList
-            let stillPending = Set.intersect model.DeletedBranches serverBranches
+            let stillPending = Set.intersect model.DeletedPaths serverPaths
             let repos =
                 response.Repos
                 |> List.map (fun r ->
@@ -159,7 +159,7 @@ let update msg model =
                       ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
-                |> filterDeletedBranches stillPending
+                |> filterDeletedPaths stillPending
             { model with
                 Repos = repos
                 IsLoading = false
@@ -168,7 +168,7 @@ let update msg model =
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
-                DeletedBranches = stillPending
+                DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
@@ -221,7 +221,7 @@ let update msg model =
     | Tick ->
         model, fetchWorktrees ()
 
-    | StartSync (branch, key) ->
+    | StartSync (path, key) ->
         let syntheticEvent =
             { Source = "Sync"
               Message = "Sync starting"
@@ -234,7 +234,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.either worktreeApi.startSync branch (fun r -> SyncStarted (key, r)) ActionFailed
+        Cmd.OfAsync.either worktreeApi.startSync path (fun r -> SyncStarted (key, r)) ActionFailed
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -248,34 +248,36 @@ let update msg model =
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
 
-    | CancelSync branch ->
-        model, Cmd.OfAsync.either worktreeApi.cancelSync branch (fun _ -> Tick) ActionFailed
+    | CancelSync path ->
+        model, Cmd.OfAsync.either worktreeApi.cancelSync path (fun _ -> Tick) ActionFailed
 
     | SyncTick ->
         model, fetchSyncStatus ()
 
-    | ConfirmDeleteWorktree branch ->
+    | ConfirmDeleteWorktree path ->
+        let pathStr = WorktreePath.value path
         model, Cmd.ofEffect (fun dispatch ->
-            if Dom.window.confirm $"Remove worktree {branch}? This will delete the worktree folder and local branch." then
-                dispatch (DeleteWorktree branch))
+            if Dom.window.confirm $"Remove worktree {pathStr}? This will delete the worktree folder and local branch." then
+                dispatch (DeleteWorktree path))
 
-    | DeleteWorktree branch ->
+    | DeleteWorktree path ->
+        let pathStr = WorktreePath.value path
         let updatedRepos =
             model.Repos
             |> List.map (fun r ->
-                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
+                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
         let updatedModel =
             { model with
                 Repos = updatedRepos
-                DeletedBranches = model.DeletedBranches |> Set.add branch }
+                DeletedPaths = model.DeletedPaths |> Set.add pathStr }
         { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.either worktreeApi.deleteWorktree branch DeleteCompleted ActionFailed
+        Cmd.OfAsync.either worktreeApi.deleteWorktree path DeleteCompleted ActionFailed
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error msg) ->
-        { model with DeletedBranches = Set.empty; LastError = Some $"Delete failed: {msg}" }, fetchWorktrees ()
+        { model with DeletedPaths = Set.empty; LastError = Some $"Delete failed: {msg}" }, fetchWorktrees ()
 
     | FocusSession path ->
         model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult ActionFailed
@@ -480,7 +482,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
             Html.button [
                 prop.className "sync-cancel-btn"
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Path))
                 prop.text "Cancel"
             ]
         else
@@ -488,7 +490,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
                 prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
                 prop.text "Sync"
             ]
@@ -802,7 +804,7 @@ let deleteButton dispatch (wt: WorktreeStatus) =
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
-            dispatch (ConfirmDeleteWorktree wt.Branch))
+            dispatch (ConfirmDeleteWorktree wt.Path))
         prop.children [ binIcon ]
     ]
 

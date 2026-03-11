@@ -150,7 +150,7 @@ let defaultModel : Model =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = Modal.Closed
-      DeletedBranches = Set.empty
+      DeletedPaths = Set.empty
       EditorName = "VS Code"
       LastError = None }
 
@@ -177,7 +177,7 @@ let tryUpdateModel msg model =
             let restored = Modal.repoId model.CreateModal |> Option.map RepoHeader
             { model with CreateModal = Modal.Closed; FocusedElement = restored |> Option.orElse model.FocusedElement }
         | DeleteCompleted (Error msg) ->
-            { model with DeletedBranches = Set.empty; LastError = Some $"Delete failed: {msg}" }
+            { model with DeletedPaths = Set.empty; LastError = Some $"Delete failed: {msg}" }
         | SessionResult (Error msg) ->
             { model with LastError = Some $"Session failed: {msg}" }
         | LaunchActionResult (Error msg) ->
