@@ -1,7 +1,6 @@
 ---
 autofix: false
 model: sonnet
-source: "built-in"
 ---
 # Code Duplication
 

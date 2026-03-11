@@ -2,7 +2,6 @@
 autofix: false
 model: sonnet
 applies-to: "*.fs"
-source: "global CLAUDE.md"
 ---
 # Pure Functions
 

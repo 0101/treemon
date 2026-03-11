@@ -2,7 +2,6 @@
 autofix: false
 model: haiku
 applies-to: "*.fs"
-source: ".claude/CLAUDE.md"
 ---
 # No Loops
 
