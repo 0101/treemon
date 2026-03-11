@@ -2,7 +2,6 @@
 autofix: false
 model: inherit
 applies-to: "**/*Tests*.fs"
-source: "CLAUDE.md"
 ---
 # Zero-Value Tests
 

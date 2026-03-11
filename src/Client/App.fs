@@ -790,6 +790,20 @@ let deleteButton dispatch (wt: WorktreeStatus) =
 
 let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 
+let conflictIcon =
+    Svg.svg [
+        svg.className "conflict-icon"
+        svg.viewBox (0, 0, 1920, 1920)
+        svg.custom ("role", "img")
+        svg.children [
+            Svg.title "Merge conflicts"
+            Svg.path [
+                svg.d "m1359.36 1279.51-79.85 79.85L960 1039.85l-319.398 319.51-79.85-79.85L880.152 960 560.753 640.602l79.85-79.85L960 880.152l319.51-319.398 79.85 79.85L1039.85 960l319.51 319.51ZM960 0C430.645 0 0 430.645 0 960s430.645 960 960 960 960-430.645 960-960S1489.355 0 960 0Z"
+                svg.custom ("fillRule", "evenodd")
+            ]
+        ]
+    ]
+
 let prActionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) (icon: ReactElement) =
     let disabled = isCodingToolBusy wt
     let disabledTitle = $"{providerDisplayName wt.CodingToolProvider} is active"
@@ -811,7 +825,10 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                 prop.title pr.Title
                 prop.href pr.Url
                 prop.target "_blank"
-                prop.text ($"PR #{pr.Id}")
+                prop.children [
+                    Html.text $"PR #{pr.Id}"
+                    if pr.HasConflicts then conflictIcon
+                ]
             ]
             match pr.Comments with
             | WithResolution (unresolved, total) when total > 0 ->

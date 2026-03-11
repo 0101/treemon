@@ -1,7 +1,6 @@
 ---
 autofix: false
 model: inherit
-source: "contribution-skill"
 ---
 # Security Review
 
