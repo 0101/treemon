@@ -466,7 +466,7 @@ let adjustTimestamps (now: DateTimeOffset) (fixture: FixtureData) : FixtureData 
             SchedulerEvents =
                 fixture.Worktrees.SchedulerEvents |> List.map adjustEvent
             LatestByCategory =
-                fixture.Worktrees.LatestByCategory |> Map.map (fun _ -> adjustEvent) }
+                fixture.Worktrees.LatestByCategory |> Map.map (fun _ evt -> adjustEvent evt) }
       SyncStatus =
         fixture.SyncStatus
         |> Map.map (fun _ events -> events |> List.map adjustEvent) }
