@@ -3323,13 +3323,13 @@ type DashboardTests() =
             let confirmBtn = modal.Locator(".modal-btn.danger").First
             do! confirmBtn.ClickAsync()
 
-            do! System.Threading.Tasks.Task.Delay(200)
+            do! Assertions.Expect(targetCard).ToHaveCountAsync(0, LocatorAssertionsToHaveCountOptions(Timeout = 5000.0f))
 
             let! postDeleteCount = targetCard.CountAsync()
             Assert.That(postDeleteCount, Is.EqualTo(0),
                 $"Card for {targetBranch} should be removed immediately after delete confirmation (optimistic removal)")
 
-            do! System.Threading.Tasks.Task.Delay(2000)
+            do! page.WaitForTimeoutAsync(2000.0f)
 
             let! laterCount = targetCard.CountAsync()
             Assert.That(laterCount, Is.EqualTo(0),

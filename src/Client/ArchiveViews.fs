@@ -82,14 +82,6 @@ let archiveIcon =
         ]
     ]
 
-let archiveButton dispatch (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "archive-btn"
-        prop.title "Archive worktree (A)"
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (Archive (BranchName.create wt.Branch)))
-        prop.children [ archiveIcon ]
-    ]
-
 let archiveCard dispatch (wt: WorktreeStatus) =
     Html.div [
         prop.key wt.Branch
