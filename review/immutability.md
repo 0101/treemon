@@ -2,7 +2,6 @@
 autofix: false
 model: haiku
 applies-to: "*.fs"
-source: "global CLAUDE.md, .claude/CLAUDE.md"
 ---
 # Immutability
 
