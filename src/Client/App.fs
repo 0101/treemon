@@ -1,4 +1,4 @@
-module App
+﻿module App
 
 open Shared
 open Shared.EventUtils
@@ -8,6 +8,7 @@ open Feliz
 open Fable.Remoting.Client
 open Browser
 open Fable.Core.JsInterop
+open ActionButtons
 
 type Model =
     { Repos: RepoModel list
@@ -24,7 +25,7 @@ type Model =
       EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
-      DeletedBranches: Set<string>
+      DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option }
 
@@ -37,13 +38,13 @@ type Msg =
     | Tick
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
-    | StartSync of branch: string * scopedKey: string
+    | StartSync of path: WorktreePath * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of string
+    | CancelSync of WorktreePath
     | SyncTick
-    | ConfirmDeleteWorktree of branch: string
-    | DeleteWorktree of string
+    | ConfirmDeleteWorktree of WorktreePath
+    | DeleteWorktree of WorktreePath
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
@@ -51,6 +52,8 @@ type Msg =
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
+    | LaunchAction of path: WorktreePath * prompt: string
+    | LaunchActionResult of Result<unit, string>
     | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
@@ -85,7 +88,7 @@ let init () =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
-      DeletedBranches = Set.empty
+      DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -97,12 +100,12 @@ let randomEyeDirection () =
     let dy = rng.NextDouble() * 2.0 - 1.0
     (dx, dy)
 
-let filterDeletedBranches (deleted: Set<string>) (repos: RepoModel list) =
+let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
     else
         repos
         |> List.map (fun r ->
-            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains wt.Branch deleted)) })
+            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains (WorktreePath.value wt.Path) deleted)) })
 
 let findWorktree (scopedKey: string) (model: Model) =
     let parts = scopedKey.Split('/', 2)
@@ -119,11 +122,11 @@ let terminalAction (wt: WorktreeStatus) =
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
-    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive (BranchName.create wt.Branch)))
-    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Branch)
+    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive wt.Path))
+    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Path)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
@@ -139,11 +142,11 @@ let update msg model =
                 model.Repos
                 |> List.map (fun r -> r.RepoId, r.IsCollapsed)
                 |> Map.ofList
-            let serverBranches =
+            let serverPaths =
                 response.Repos
-                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> WorktreePath.value wt.Path))
                 |> Set.ofList
-            let stillPending = Set.intersect model.DeletedBranches serverBranches
+            let stillPending = Set.intersect model.DeletedPaths serverPaths
             let repos =
                 response.Repos
                 |> List.map (fun r ->
@@ -154,7 +157,7 @@ let update msg model =
                       ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
-                |> filterDeletedBranches stillPending
+                |> filterDeletedPaths stillPending
             { model with
                 Repos = repos
                 IsLoading = false
@@ -164,7 +167,7 @@ let update msg model =
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
-                DeletedBranches = stillPending
+                DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
@@ -214,7 +217,7 @@ let update msg model =
     | Tick ->
         model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
-    | StartSync (branch, key) ->
+    | StartSync (path, key) ->
         let syntheticEvent =
             { Source = "Sync"
               Message = "Sync starting"
@@ -227,7 +230,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync branch (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.perform worktreeApi.startSync path (fun r -> SyncStarted (key, r))
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -241,34 +244,36 @@ let update msg model =
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
 
-    | CancelSync branch ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync branch (fun _ -> Tick)
+    | CancelSync path ->
+        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick)
 
     | SyncTick ->
         model, fetchSyncStatus ()
 
-    | ConfirmDeleteWorktree branch ->
+    | ConfirmDeleteWorktree path ->
+        let pathStr = WorktreePath.value path
         model, Cmd.ofEffect (fun dispatch ->
-            if Dom.window.confirm $"Remove worktree {branch}? This will delete the worktree folder and local branch." then
-                dispatch (DeleteWorktree branch))
+            if Dom.window.confirm $"Remove worktree {pathStr}? This will delete the worktree folder and local branch." then
+                dispatch (DeleteWorktree path))
 
-    | DeleteWorktree branch ->
+    | DeleteWorktree path ->
+        let pathStr = WorktreePath.value path
         let updatedRepos =
             model.Repos
             |> List.map (fun r ->
-                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
+                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
         let updatedModel =
             { model with
                 Repos = updatedRepos
-                DeletedBranches = model.DeletedBranches |> Set.add branch }
+                DeletedPaths = model.DeletedPaths |> Set.add pathStr }
         { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
+        Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error _) ->
-        { model with DeletedBranches = Set.empty }, fetchWorktrees ()
+        { model with DeletedPaths = Set.empty }, fetchWorktrees ()
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
@@ -277,6 +282,12 @@ let update msg model =
         model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
 
     | SessionResult _ ->
+        model, fetchWorktrees ()
+
+    | LaunchAction (path, prompt) ->
+        model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult
+
+    | LaunchActionResult _ ->
         model, fetchWorktrees ()
 
     | SetFocus target ->
@@ -435,12 +446,6 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some Copilot -> "Copilot"
     | None -> "Coding tool"
 
-let noFocusProps = [
-    prop.tabIndex -1
-    prop.onMouseDown (fun e -> e.preventDefault())
-    prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
-]
-
 let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     if isPending then
         Html.button [
@@ -451,13 +456,13 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         ]
     else
         let syncing = isBranchSyncing branchEvents
-        let claudeBlocked = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
+        let claudeBlocked = isCodingToolBusy wt
         let disabled = syncing || claudeBlocked
         if syncing then
             Html.button [
                 prop.className "sync-cancel-btn"
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Path))
                 prop.text "Cancel"
             ]
         else
@@ -465,7 +470,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
                 prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
                 prop.text "Sync"
             ]
@@ -711,9 +716,6 @@ let buildBadge (repoName: string) (build: BuildInfo) =
             | None -> ()
         ]
 
-let buildBadges (repoName: string) (builds: BuildInfo list) =
-    React.fragment (builds |> List.map (buildBadge repoName))
-
 let terminalButton dispatch (wt: WorktreeStatus) =
     let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
     let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
@@ -725,13 +727,25 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
+let editorIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 16, 16)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [ svg.d "M5.002 10L12 3l2 2-7 7H5z" ]
+            Svg.path [ svg.d "M1.094 0C.525 0 0 .503 0 1.063v13.874C0 15.498.525 16 1.094 16h10.812c.558 0 1.074-.485 1.094-1.031V8l-2 2v4H2V2h5l2 2 1.531-1.531L8.344.344A1.12 1.12 0 007.563 0z" ]
+            Svg.path [ svg.d "M14.19 1.011a.513.513 0 00-.364.152l-1.162 1.16 2.004 2.005 1.163-1.162a.514.514 0 000-.728l-1.277-1.275a.514.514 0 00-.364-.152z" ]
+        ]
+    ]
+
 let editorButton dispatch editorName (wt: WorktreeStatus) =
     Html.button [
         prop.className "editor-btn"
         prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
-        prop.text "{⋯}"
+        prop.children [ editorIcon ]
     ]
 
 let newTabButton dispatch (wt: WorktreeStatus) =
@@ -770,13 +784,32 @@ let deleteButton dispatch (wt: WorktreeStatus) =
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
-            dispatch (ConfirmDeleteWorktree wt.Branch))
+            dispatch (ConfirmDeleteWorktree wt.Path))
         prop.children [ binIcon ]
     ]
 
 let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
 
-let prBadgeContent (repoName: string) (pr: PrInfo) =
+let conflictIcon =
+    Svg.svg [
+        svg.className "conflict-icon"
+        svg.viewBox (0, 0, 1920, 1920)
+        svg.custom ("role", "img")
+        svg.children [
+            Svg.title "Merge conflicts"
+            Svg.path [
+                svg.d "m1359.36 1279.51-79.85 79.85L960 1039.85l-319.398 319.51-79.85-79.85L880.152 960 560.753 640.602l79.85-79.85L960 880.152l319.51-319.398 79.85 79.85L1039.85 960l319.51 319.51ZM960 0C430.645 0 0 430.645 0 960s430.645 960 960 960 960-430.645 960-960S1489.355 0 960 0Z"
+                svg.custom ("fillRule", "evenodd")
+            ]
+        ]
+    ]
+
+let prActionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) (icon: ReactElement) =
+    let disabled = isCodingToolBusy wt
+    let disabledTitle = $"{providerDisplayName wt.CodingToolProvider} is active"
+    actionButton (fun () -> dispatch (LaunchAction (wt.Path, prompt))) disabledTitle disabled title icon
+
+let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
             Interop.createElement "a" [
@@ -792,7 +825,10 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                 prop.title pr.Title
                 prop.href pr.Url
                 prop.target "_blank"
-                prop.text ($"PR #{pr.Id}")
+                prop.children [
+                    Html.text $"PR #{pr.Id}"
+                    if pr.HasConflicts then conflictIcon
+                ]
             ]
             match pr.Comments with
             | WithResolution (unresolved, total) when total > 0 ->
@@ -800,27 +836,44 @@ let prBadgeContent (repoName: string) (pr: PrInfo) =
                     prop.className (if unresolved = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{unresolved}/{total} threads")
                 ]
+                if unresolved > 0 then
+                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | CountOnly total ->
                 Html.span [
                     prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
                     prop.text ($"{total} comments")
                 ]
+                if total > 0 then
+                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | _ -> ()
-            buildBadges repoName pr.Builds
+            yield! pr.Builds |> List.collect (fun build -> [
+                    buildBadge repoName build
+                    if build.Status = Failed then
+                        match build.Url with
+                        | Some url -> prActionButton dispatch wt $"/fix-build {url}" "Fix build" wrenchIcon
+                        | None -> ()
+                ])
     ]
 
-let prSection (repoName: string) (wt: WorktreeStatus) =
+let prSection dispatch (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr with
     | NoPr -> Html.none
-    | HasPr pr -> prBadgeContent repoName pr
+    | HasPr pr -> prBadgeContent dispatch wt repoName pr
 
-let prRow (repoName: string) (wt: WorktreeStatus) =
-    match wt.Pr with
-    | NoPr -> Html.none
-    | HasPr pr ->
+let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
+    match wt.Pr, wt.Branch with
+    | NoPr, ("main" | "master") -> Html.none
+    | NoPr, _ ->
         Html.div [
             prop.className "pr-row"
-            prop.children [ prBadgeContent repoName pr ]
+            prop.children [
+                prActionButton dispatch wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR" createPrIcon
+            ]
+        ]
+    | HasPr pr, _ ->
+        Html.div [
+            prop.className "pr-row"
+            prop.children [ prBadgeContent dispatch wt repoName pr ]
         ]
 
 let workMetricsView = ArchiveViews.workMetricsView
@@ -852,7 +905,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
-                    prSection repoName wt
+                    prSection dispatch wt repoName
                 ]
             ]
         ]
@@ -896,7 +949,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
 
                     mainBehindWithSync dispatch wt branchEvents isPending scopedKey
 
-                    prRow repoName wt
+                    prRow dispatch wt repoName
                 ]
             ]
 
@@ -957,7 +1010,7 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
-let viewEyeOpen (dx: float, dy: float) =
+let viewEyeOpen (pupilColor: string) (dx: float, dy: float) =
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
@@ -988,7 +1041,7 @@ let viewEyeOpen (dx: float, dy: float) =
                         svg.cx 20
                         svg.cy 10
                         svg.r 3
-                        svg.fill "#1a1b2e"
+                        svg.fill pupilColor
                     ]
                 ]
             ]
@@ -1081,8 +1134,14 @@ let viewEyeClosed =
         ]
     ]
 
-let hasAnyWorking (repos: RepoModel list) =
-    repos |> List.exists (fun r -> r.Worktrees |> List.exists (fun wt -> wt.CodingTool = Working))
+let hasAnyActive (repos: RepoModel list) =
+    repos |> List.exists (fun r ->
+        r.Worktrees |> List.exists (fun wt ->
+            wt.CodingTool = Working || wt.CodingTool = WaitingForUser))
+
+let hasAnyWaiting (repos: RepoModel list) =
+    repos |> List.exists (fun r ->
+        r.Worktrees |> List.exists (fun wt -> wt.CodingTool = WaitingForUser))
 
 let anyRepoReady (repos: RepoModel list) =
     repos |> List.exists _.IsReady
@@ -1199,7 +1258,9 @@ let viewAppHeader model dispatch =
                 prop.className "header-center"
                 prop.children [
                     if model.HasError then viewEyeRolledBack
-                    elif hasAnyWorking model.Repos then viewEyeOpen model.EyeDirection
+                    elif hasAnyActive model.Repos then
+                        let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
+                        viewEyeOpen pupilColor model.EyeDirection
                     else viewEyeClosed
                 ]
             ]

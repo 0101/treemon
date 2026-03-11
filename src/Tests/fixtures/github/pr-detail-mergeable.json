@@ -1,0 +1,11 @@
+{
+  "number": 6,
+  "title": "Clean feature branch",
+  "state": "open",
+  "draft": false,
+  "merged_at": null,
+  "mergeable": true,
+  "head": { "ref": "feature/clean-branch" },
+  "comments": 0,
+  "review_comments": 0
+}

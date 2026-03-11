@@ -34,10 +34,11 @@
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
-- PR badge linking to PR page; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
+- PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (last 3 events), sync/cancel/terminal/delete actions
 - Green left border on cards with active terminal sessions
+- Contextual action buttons: fix PR comments, fix failed build, create PR (see `docs/spec/contextual-actions.md`)
 
 ### Branch Sync
 
@@ -57,6 +58,40 @@
 - Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
 
+#### Claude Parent/Subagent Detection
+
+Claude Code spawns subagent sessions (via the Task tool) that write to nested JSONL files:
+
+```
+~/.claude/projects/{encoded-path}/
++-- {sessionUuid}.jsonl                          <- parent session
++-- {sessionUuid}/subagents/agent-{id}.jsonl     <- subagent files
+```
+
+`SessionFileKind` (Parent | Subagent) is determined by path: any `.jsonl` inside a `subagents/` subdirectory is a subagent; top-level `.jsonl` files are parent sessions.
+
+**Status resolution rules:**
+
+1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
+2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
+3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
+4. If parent status is `Done` or `Idle` -- check subagent files: if any subagent is `Working`, return `Working` (parent file hasn't been written to while the subagent runs)
+5. Otherwise return the parent status
+
+Parent `WaitingForUser` is never overridden by subagent activity. Only `Done`/`Idle` can be upgraded to `Working` by an active subagent.
+
+**Scoping rules:**
+- `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
+- File enumeration is consolidated: `enumerateFiles` runs once per poll cycle, results passed to status/message functions
+
+#### Claude Status Detection (Pure Logic)
+
+Status detection is split into pure logic and I/O:
+- **Pure core** (`getStatusFromFiles`): takes `now: DateTimeOffset` and `SessionFileData list` (kind, mtime, last lines reversed), returns `CodingToolStatus`. Testable without filesystem access.
+- **I/O wrapper** (`getStatus`): discovers all `.jsonl` files, reads last N lines, calls `getStatusFromFiles` with current time.
+
+Timeline replay tests verify status transitions against checked-in fixture data (`src/Tests/fixtures/claude/multi-session/expected-statuses.jsonl`). The fixture captures a real session with parent + 3 subagents; the test replays entries chronologically through `getStatusFromFiles` and asserts each status change matches recorded expectations.
+
 ### Create Worktree
 
 A "+" button on each repo header opens a modal to create new worktrees without leaving the dashboard.
@@ -75,6 +110,15 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - Auto-detected from git remote URL alongside AzDo
 - Fetched via `gh api`: open + recent closed PRs, comment counts from PR fields (`CommentSummary.CountOnly`)
 - GitHub Actions workflow runs mapped to `BuildInfo` / `BuildStatus`; failed runs fetch job details for step name
+- Per open PR, an extra detail fetch (`/repos/{owner}/{repo}/pulls/{number}`) retrieves `mergeable` status; run in parallel with Actions fetch, adding no sequential latency
+
+### Merge Conflict Detection
+
+- `HasConflicts: bool` on `PrInfo` — `true` when the PR has merge conflicts
+- AzDo: parsed from `mergeStatus` field in existing `az repos pr list` response (`"conflicts"` → true, all others → false)
+- GitHub: parsed from `mergeable` field in per-PR detail response (`false` → conflicts, `true`/`null` → no conflicts)
+- Merged PRs always have `HasConflicts = false`; unknown/computing states treated as no conflicts (resolves on next poll)
+- Client renders an inline conflict icon (⚔) on the PR badge when `HasConflicts = true`
 
 ### Resilience
 
@@ -129,7 +173,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
-| `src/Server/ClaudeDetector.fs` | Claude Code session file scanning |
+| `src/Server/ClaudeDetector.fs` | Claude Code session file scanning, parent/subagent detection |
 | `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
 | `src/Server/CodingToolStatus.fs` | Coding tool orchestrator: config override, provider dispatch, winner selection |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
@@ -141,7 +185,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app, repo sections, card rendering |
 | `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
-| `src/Tests/fixtures/` | Captured AzDo, GitHub, and Copilot data for offline parsing tests |
+| `src/Tests/fixtures/` | Captured AzDo, GitHub, Copilot, and Claude session data for offline parsing/replay tests |
 
 ## Decisions
 
@@ -155,6 +199,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Repo ID = folder name: simple, human-readable, no config needed
 - `CommentSummary` DU over nullable fields: cleanly models provider capability differences
 - Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
+- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
+- Claude subagent detection is path-based only (directory structure), no content parsing needed
+- Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
@@ -164,3 +211,4 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
+- `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges

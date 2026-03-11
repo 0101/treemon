@@ -26,7 +26,8 @@ let private prAzDoOpen: PrInfo =
             Status = Building
             Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88801"
             Failure = None } ]
-      IsMerged = false }
+      IsMerged = false
+      HasConflicts = false }
 
 let private prAzDoDraft: PrInfo =
     { Id = 4199
@@ -39,7 +40,8 @@ let private prAzDoDraft: PrInfo =
             Status = Succeeded
             Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88790"
             Failure = None } ]
-      IsMerged = false }
+      IsMerged = false
+      HasConflicts = false }
 
 let private prGithubOpen: PrInfo =
     { Id = 312
@@ -56,7 +58,8 @@ let private prGithubOpen: PrInfo =
             Status = PartiallySucceeded
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/99002"
             Failure = None } ]
-      IsMerged = false }
+      IsMerged = false
+      HasConflicts = true }
 
 let private prGithubMerged: PrInfo =
     { Id = 308
@@ -69,7 +72,8 @@ let private prGithubMerged: PrInfo =
             Status = Succeeded
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/98800"
             Failure = None } ]
-      IsMerged = true }
+      IsMerged = true
+      HasConflicts = false }
 
 let private wtAzDoMain: WorktreeStatus =
     { Path = azDoPath "main"

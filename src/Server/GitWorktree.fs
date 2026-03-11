@@ -209,7 +209,9 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
         let upstreamBranch =
             upstream
             |> Option.map (fun u ->
-                if u.StartsWith("origin/") then u["origin/".Length..] else u)
+                match u.IndexOf('/') with
+                | -1 -> u
+                | i -> u[(i + 1)..])
 
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with
@@ -231,18 +233,19 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
               WorkMetrics = workMetrics }
     }
 
-let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string) =
+let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =
     async {
         let! removeResult = runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
-        let! branchResult =
-            match removeResult with
-            | Ok _ -> runGitResult repoRoot $"branch -D -- \"{branch}\""
-            | Error _ -> async { return removeResult }
 
-        match removeResult, branchResult with
+        match removeResult, branch with
         | Error msg, _ -> return Error $"git worktree remove failed: {msg}"
-        | Ok _, Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
-        | Ok _, Ok _ -> return Ok ()
+        | Ok _, None -> return Ok ()
+        | Ok _, Some b ->
+            let! branchResult = runGitResult repoRoot $"branch -D -- \"{b}\""
+
+            match branchResult with
+            | Ok _ -> return Ok ()
+            | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
     }
 
 let branchSortKey (name: string) =

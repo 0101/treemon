@@ -2,7 +2,6 @@
 autofix: false
 model: sonnet
 applies-to: "*.fs"
-source: ".claude/CLAUDE.md"
 ---
 # Tuple Matching
 

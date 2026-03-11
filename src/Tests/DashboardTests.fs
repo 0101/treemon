@@ -3340,7 +3340,7 @@ type DashboardTests() =
 
             let! laterCount = targetCard.CountAsync()
             Assert.That(laterCount, Is.EqualTo(0),
-                $"Card for {targetBranch} should not reappear after polling (ghost suppression via DeletedBranches)")
+                $"Card for {targetBranch} should not reappear after polling (ghost suppression via DeletedPaths)")
 
             do! page.CloseAsync()
         }
