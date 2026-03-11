@@ -176,8 +176,7 @@ let getLastMessage (worktreePath: string) =
 
     findMostRecentEventsFile sessionDirs
     |> Option.bind (fun fi ->
-        FileUtils.readLastLines "Copilot" fi.FullName 20
-        |> List.tryPick tryParseAssistantContent)
+        FileUtils.scanBackward "Copilot" fi.FullName tryParseAssistantContent)
     |> Option.map (fun (text, timestamp) ->
         { Source = "copilot"
           Message = FileUtils.truncateMessage 80 text
@@ -246,8 +245,7 @@ let internal getLastMessageFromEventsFile (eventsPath: string) =
     try
         if not (File.Exists(eventsPath)) then None
         else
-            FileUtils.readLastLines "Copilot" eventsPath 20
-            |> List.tryPick tryParseAssistantContent
+            FileUtils.scanBackward "Copilot" eventsPath tryParseAssistantContent
             |> Option.map (fun (text, timestamp) ->
                 { Source = "copilot"
                   Message = FileUtils.truncateMessage 80 text

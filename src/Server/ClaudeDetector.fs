@@ -269,8 +269,7 @@ let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
     |> parentFiles
     |> List.choose (fun fi ->
-        FileUtils.readLastLines "Claude" fi.FullName 20
-        |> List.tryPick tryParseAssistantText)
+        FileUtils.scanBackward "Claude" fi.FullName tryParseAssistantText)
     |> tryMaxBy snd
     |> Option.map (fun (text, timestamp) ->
         { Source = "claude"
