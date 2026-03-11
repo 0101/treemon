@@ -141,12 +141,12 @@ type ParentAuthoritativeResolutionTests() =
         Assert.That(result, Is.EqualTo(WaitingForUser))
 
     [<Test>]
-    member _.``Parent Done + subagent Working = Working``() =
+    member _.``Parent Done + subagent Working = Done (parent Done is authoritative)``() =
         let files =
             [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
               makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ] ]
         let result = getStatusFromFiles now files
-        Assert.That(result, Is.EqualTo(Working))
+        Assert.That(result, Is.EqualTo(Done))
 
     [<Test>]
     member _.``Parent Done + subagent WaitingForUser = Done (subagent WaitingForUser is internal)``() =
@@ -224,14 +224,14 @@ type ParentAuthoritativeResolutionTests() =
         Assert.That(result, Is.EqualTo(Done))
 
     [<Test>]
-    member _.``Parent Done + one subagent Working among Done subagents = Working``() =
+    member _.``Parent Done + one subagent Working among Done subagents = Done (parent Done is authoritative)``() =
         let files =
             [ makeFileData Parent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
               makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ]
               makeFileData Subagent recentTime [ makeWorkingEntry "2026-03-05T14:59:30.000Z" ]
               makeFileData Subagent recentTime [ makeDoneEntry "2026-03-05T14:59:20.000Z" ] ]
         let result = getStatusFromFiles now files
-        Assert.That(result, Is.EqualTo(Working))
+        Assert.That(result, Is.EqualTo(Done))
 
 
 type private TimelineEntry =
