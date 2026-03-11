@@ -108,27 +108,18 @@ type ParseThreadCountsFixtureTests() =
 
     [<Test>]
     member _.``Counts unresolved threads as active plus pending``() =
-        let result = readFixture "threads.json" |> parseThreadCounts
-        match result with
-        | WithResolution(unresolved, total) ->
-            Assert.That(unresolved, Is.EqualTo(3))
-        | _ -> Assert.Fail("Expected WithResolution")
+        let (WithResolution(unresolved, _)) = readFixture "threads.json" |> parseThreadCounts
+        Assert.That(unresolved, Is.EqualTo(3))
 
     [<Test>]
     member _.``Excludes deleted threads from total``() =
-        let result = readFixture "threads.json" |> parseThreadCounts
-        match result with
-        | WithResolution(_, total) ->
-            Assert.That(total, Is.EqualTo(5))
-        | _ -> Assert.Fail("Expected WithResolution")
+        let (WithResolution(_, total)) = readFixture "threads.json" |> parseThreadCounts
+        Assert.That(total, Is.EqualTo(5))
 
     [<Test>]
     member _.``Excludes threads without status from total``() =
-        let result = readFixture "threads.json" |> parseThreadCounts
-        match result with
-        | WithResolution(_, total) ->
-            Assert.That(total, Is.EqualTo(5))
-        | _ -> Assert.Fail("Expected WithResolution")
+        let (WithResolution(_, total)) = readFixture "threads.json" |> parseThreadCounts
+        Assert.That(total, Is.EqualTo(5))
 
     [<Test>]
     member _.``Invalid JSON returns zero counts``() =

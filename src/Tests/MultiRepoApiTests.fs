@@ -178,7 +178,6 @@ type MultiRepoApiTests() =
 
             match githubPr.Comments with
             | WithResolution _ -> Assert.Pass("GitHub PR correctly uses WithResolution comment format")
-            | CountOnly _ -> Assert.Fail("GitHub PR should use WithResolution, not CountOnly")
         }
 
     [<Test>]
@@ -198,5 +197,4 @@ type MultiRepoApiTests() =
 
             match azdoPr.Comments with
             | WithResolution _ -> Assert.Pass("AzDo PR correctly uses WithResolution comment format")
-            | CountOnly _ -> Assert.Fail("AzDo PR should use WithResolution, not CountOnly")
         }

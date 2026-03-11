@@ -838,13 +838,6 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                 ]
                 if unresolved > 0 then
                     prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
-            | CountOnly total ->
-                Html.span [
-                    prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
-                    prop.text ($"{total} comments")
-                ]
-                if total > 0 then
-                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | _ -> ()
             yield! pr.Builds |> List.collect (fun build -> [
                     buildBadge repoName build

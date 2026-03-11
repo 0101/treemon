@@ -108,7 +108,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 ### GitHub PRs
 
 - Auto-detected from git remote URL alongside AzDo
-- Fetched via `gh api`: open + recent closed PRs, comment counts from PR fields (`CommentSummary.CountOnly`)
+- Fetched via `gh api graphql`: open + recent closed PRs, review thread resolution counts (`CommentSummary.WithResolution`)
 - GitHub Actions workflow runs mapped to `BuildInfo` / `BuildStatus`; failed runs fetch job details for step name
 - Per open PR, an extra detail fetch (`/repos/{owner}/{repo}/pulls/{number}`) retrieves `mergeable` status; run in parallel with Actions fetch, adding no sequential latency
 
@@ -152,9 +152,8 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 
 ### CommentSummary
 
-- `WithResolution of unresolved * total` — AzDo thread status tracking
-- `CountOnly of total` — GitHub comment count (no native resolution tracking)
-- Client renders differently per case; dimmed when all resolved / no comments
+- `WithResolution of unresolved * total` — thread resolution tracking (both AzDo and GitHub)
+- Client renders thread count badge; dimmed when all resolved; hidden when total = 0
 
 ### Startup Burst
 

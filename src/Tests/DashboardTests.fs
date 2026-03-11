@@ -249,7 +249,7 @@ type DashboardTests() =
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
             let! threadText = threadBadges.First.TextContentAsync()
-            Assert.That(threadText, Does.Match(@"\d+/\d+ threads").Or.Match(@"\d+ comments"))
+            Assert.That(threadText, Does.Match(@"\d+/\d+ threads"))
         }
 
     [<Test>]
