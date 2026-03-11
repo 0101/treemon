@@ -15,6 +15,21 @@ type Msg =
     | ArchiveAndCloseSession of path: WorktreePath * branch: string
     | DismissConfirm
 
+type Action =
+    | NoAction
+    | Delete of branch: string
+    | DeleteAfterKillSession of path: WorktreePath
+    | Archive of branch: string
+    | ArchiveAfterKillSession of path: WorktreePath
+
+let update (msg: Msg) : ConfirmModal * Action =
+    match msg with
+    | DeleteWorktree branch -> NoConfirm, Delete branch
+    | DeleteAndCloseSession (path, _) -> NoConfirm, DeleteAfterKillSession path
+    | ArchiveWorktree branch -> NoConfirm, Archive branch
+    | ArchiveAndCloseSession (path, _) -> NoConfirm, ArchiveAfterKillSession path
+    | DismissConfirm -> NoConfirm, NoAction
+
 let view (dispatch: Msg -> unit) (confirm: ConfirmModal) =
     match confirm with
     | NoConfirm -> Html.none
