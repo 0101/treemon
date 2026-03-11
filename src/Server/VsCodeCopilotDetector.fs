@@ -1,6 +1,7 @@
 module Server.VsCodeCopilotDetector
 
 open System
+open System.Collections.Generic
 open System.IO
 open System.Text.Json
 open Shared
@@ -14,12 +15,12 @@ let private vsCodeWorkspaceStorageDir =
     )
 
 type private WorkspaceIndex =
-    { PathToChatSessions: Map<string, string>
+    { PathToChatSessions: Dictionary<string, string>
       BuiltAt: DateTimeOffset }
 
 let private workspaceIndex =
     ref
-        { PathToChatSessions = Map.empty
+        { PathToChatSessions = Dictionary(StringComparer.OrdinalIgnoreCase)
           BuiltAt = DateTimeOffset.MinValue }
 
 let private tryDecodeLocalPath (folderUri: string) =
@@ -46,26 +47,22 @@ let private tryReadFolderUri (workspaceJson: string) =
         None
 
 let private buildWorkspaceIndex () =
-    let index =
-        try
-            if Directory.Exists(vsCodeWorkspaceStorageDir) then
-                Directory.GetDirectories(vsCodeWorkspaceStorageDir)
-                |> Array.choose (fun hashDir ->
-                    let workspaceJson = Path.Combine(hashDir, "workspace.json")
-                    let chatSessionsDir = Path.Combine(hashDir, "chatSessions")
+    let index = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
 
-                    if File.Exists(workspaceJson) && Directory.Exists(chatSessionsDir) then
-                        tryReadFolderUri workspaceJson
-                        |> Option.bind tryDecodeLocalPath
-                        |> Option.map (fun localPath -> normalizePath localPath, chatSessionsDir)
-                    else
-                        None)
-                |> Map.ofArray
-            else
-                Map.empty
-        with ex ->
-            Log.log "VsCodeCopilot" $"Failed to scan workspaceStorage: {ex.Message}"
-            Map.empty
+    try
+        if Directory.Exists(vsCodeWorkspaceStorageDir) then
+            Directory.GetDirectories(vsCodeWorkspaceStorageDir)
+            |> Array.iter (fun hashDir ->
+                let workspaceJson = Path.Combine(hashDir, "workspace.json")
+                let chatSessionsDir = Path.Combine(hashDir, "chatSessions")
+
+                if File.Exists(workspaceJson) && Directory.Exists(chatSessionsDir) then
+                    tryReadFolderUri workspaceJson
+                    |> Option.bind tryDecodeLocalPath
+                    |> Option.iter (fun localPath ->
+                        index[normalizePath localPath] <- chatSessionsDir))
+    with ex ->
+        Log.log "VsCodeCopilot" $"Failed to scan workspaceStorage: {ex.Message}"
 
     Log.log "VsCodeCopilot" $"Index built: {index.Count} workspace(s) with chatSessions mapped"
     { PathToChatSessions = index; BuiltAt = DateTimeOffset.UtcNow }
@@ -76,7 +73,9 @@ let private refreshIndex () =
 let private getChatSessionsDir (worktreePath: string) =
     let index = refreshIndex ()
     let normalized = normalizePath worktreePath
-    Map.tryFind normalized index.PathToChatSessions
+    match index.PathToChatSessions.TryGetValue(normalized) with
+    | true, dir -> Some dir
+    | false, _ -> None
 
 let private findMostRecentSessionFile (chatSessionsDir: string) =
     try
@@ -99,8 +98,8 @@ let private findMostRecentSessionFile (chatSessionsDir: string) =
 // VS Code JSONL mutation log format:
 //   kind=0: Full session snapshot (.v = ISerializableChatData3)
 //   kind=1: Set value at path (.k = path, .v = new value)
-//   kind=2: Push/splice array (.k = path, .v = items, .i? = truncate index)
-//   kind=3: Delete property (.k = path) -- intentionally unhandled
+//   kind=2: Push/splice array (.k = path, .v = items, .i = truncate index before push)
+//   kind=3: Delete property (.k = path) — intentionally unhandled (no effect on status)
 
 type ModelState = Unknown | InProgress | Complete
 
@@ -192,7 +191,11 @@ let private readAllLines (filePath: string) =
 let private getPath (root: JsonElement) =
     match root.TryGetProperty("k") with
     | true, k when k.ValueKind = JsonValueKind.Array ->
-        k.EnumerateArray() |> Seq.map (fun e -> e.GetRawText().Trim('"')) |> Seq.toArray |> Some
+        k.EnumerateArray()
+        |> Seq.map (fun e ->
+            if e.ValueKind = JsonValueKind.String then e.GetString()
+            else e.GetRawText())
+        |> Seq.toArray |> Some
     | _ -> None
 
 let private applySnapshotLine (root: JsonElement) =
@@ -229,10 +232,15 @@ let private applyPushLine (root: JsonElement) (acc: ReqState list) =
     match getPath root, root.TryGetProperty("v") with
     | Some path, (true, v) when v.ValueKind = JsonValueKind.Array ->
         if path.Length = 1 && path[0] = "requests" then
-            v.EnumerateArray()
-            |> Seq.fold (fun reqs req ->
-                reqs @ [ applyRequestObject req emptyReq ]
-            ) acc
+            let truncated =
+                match root.TryGetProperty("i") with
+                | true, i -> acc |> List.truncate (i.GetInt32())
+                | _ -> acc
+            let newItems =
+                v.EnumerateArray()
+                |> Seq.map (fun req -> applyRequestObject req emptyReq)
+                |> Seq.toList
+            truncated @ newItems
         elif path.Length = 3 && path[0] = "requests" && path[2] = "response" then
             match Int32.TryParse(path[1]) with
             | true, idx ->
@@ -255,7 +263,9 @@ let private applyLine (acc: ReqState list) (line: string) =
             | 2 -> applyPushLine root acc
             | _ -> acc
         | _ -> acc
-    with _ -> acc
+    with ex ->
+        Log.log "VsCodeCopilot" $"Failed to parse JSONL line: {ex.Message}"
+        acc
 
 let internal reconstructLastRequest (lines: string list) : ReqState option =
     lines |> List.fold applyLine [] |> List.tryLast
@@ -340,5 +350,4 @@ let getLastUserMessage (worktreePath: string) : (string * DateTimeOffset) option
         |> Option.bind (fun req ->
             req.UserText
             |> Option.map (fun text ->
-                let ts = req.CompletedAt |> Option.defaultValue fileMtime
-                FileUtils.truncateMessage 120 text, ts))
+                FileUtils.truncateMessage 120 text, fileMtime))

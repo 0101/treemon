@@ -4,6 +4,7 @@ open System
 open System.IO
 open NUnit.Framework
 open Server.VsCodeCopilotDetector
+open Server.WorktreeApi
 open Shared
 
 let private fixtureDir =
@@ -157,6 +158,25 @@ type PushSpliceTests() =
         Assert.That(result.IsSome, Is.True)
         Assert.That(result.Value.UserText, Is.EqualTo(Some "Only"))
 
+    [<Test>]
+    member _.``Kind 2 push with truncation index replaces requests from that index``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"First"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"value":"R1"}]},{"message":{"text":"Second"},"modelState":{"value":0},"response":[]}]}}"""
+              """{"kind":2,"k":["requests"],"i":1,"v":[{"message":{"text":"Replacement"},"modelState":{"value":0},"response":[]}]}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.UserText, Is.EqualTo(Some "Replacement"))
+        Assert.That(result.Value.ModelState, Is.EqualTo(InProgress))
+
+    [<Test>]
+    member _.``Kind 2 push with truncation index 0 replaces all requests``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"Old1"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"value":"R1"}]},{"message":{"text":"Old2"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"value":"R2"}]}]}}"""
+              """{"kind":2,"k":["requests"],"i":0,"v":[{"message":{"text":"Fresh start"},"modelState":{"value":0},"response":[]}]}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.UserText, Is.EqualTo(Some "Fresh start"))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -294,11 +314,11 @@ type EdgeCaseTests() =
 [<Category("Fast")>]
 type DetachedHeadKeyTests() =
 
-    let scopedBranchKey (repoId: string) (branch: string) = $"{repoId}/{branch}"
+    let repoId = RepoId.create "myrepo"
 
     let buildKey (path: string) (branch: string option) =
-        let b = branch |> Option.defaultValue $"(detached@{path})"
-        scopedBranchKey "myrepo" b
+        let b = branch |> Option.defaultValue (detachedBranchLabel path)
+        scopedBranchKey repoId b
 
     [<Test>]
     member _.``Multiple detached worktrees produce distinct keys``() =
@@ -325,7 +345,7 @@ type DetachedHeadKeyTests() =
     member _.``Old pattern with plain detached would collide``() =
         let buildOldKey (path: string) (branch: string option) =
             let b = branch |> Option.defaultValue "(detached)"
-            scopedBranchKey "myrepo" b
+            scopedBranchKey repoId b
 
         let oldKeys =
             [ buildOldKey @"Q:\code\project\wt1" None

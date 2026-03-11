@@ -35,7 +35,7 @@ let private assembleFromState
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
     { Path = WorktreePath.create wt.Path
-      Branch = wt.Branch |> Option.defaultValue "(detached)"
+      Branch = wt.Branch |> Option.defaultValue GitWorktree.DetachedBranchName
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
@@ -70,7 +70,9 @@ let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: stri
         if Set.contains path repo.KnownPaths then Some repoId
         else None)
 
-let private scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
+let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
+
+let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 
 let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
     state.Repos
@@ -379,7 +381,7 @@ let worktreeApi
                       |> List.collect (fun (repoId, repo) ->
                           repo.WorktreeList
                           |> List.map (fun wt ->
-                              let branch = wt.Branch |> Option.defaultValue $"(detached@{wt.Path})"
+                              let branch = wt.Branch |> Option.defaultValue (detachedBranchLabel wt.Path)
                               let key = scopedBranchKey repoId branch
                               key, wt.Path))
                       |> Map.ofList

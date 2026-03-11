@@ -4,6 +4,8 @@ open System
 open System.IO
 open System.Runtime.InteropServices
 
+let [<Literal>] DetachedBranchName = "(detached)"
+
 type WorktreeInfo =
     { Path: string
       Head: string
@@ -222,7 +224,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
 
         return
             { Path = worktreePath
-              Branch = branch |> Option.defaultValue "(detached)"
+              Branch = branch |> Option.defaultValue DetachedBranchName
               LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch
