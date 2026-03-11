@@ -52,23 +52,36 @@ let private assembleFromState
         |> Option.map (fun b -> Set.contains b archivedBranches)
         |> Option.defaultValue false }
 
-let private allWorktrees (state: RefreshScheduler.DashboardState) =
+type WorktreeContext =
+    { Worktree: GitWorktree.WorktreeInfo
+      RepoId: RepoId
+      RepoRoot: string
+      Branch: string option }
+
+let private tryResolveWorktreeContext
+    (rootPaths: Map<RepoId, string>)
+    (state: RefreshScheduler.DashboardState)
+    (path: string)
+    =
     state.Repos
-    |> Map.values
-    |> Seq.collect _.WorktreeList
-    |> Seq.toList
+    |> Map.toList
+    |> List.tryPick (fun (repoId, repo) ->
+        repo.WorktreeList
+        |> List.tryFind (fun wt -> wt.Path = path)
+        |> Option.bind (fun wt ->
+            rootPaths
+            |> Map.tryFind repoId
+            |> Option.map (fun root ->
+                { Worktree = wt
+                  RepoId = repoId
+                  RepoRoot = root
+                  Branch = wt.Branch })))
 
 let private allKnownPaths (state: RefreshScheduler.DashboardState) =
     state.Repos
     |> Map.values
     |> Seq.collect _.KnownPaths
     |> Set.ofSeq
-
-let private findRepoForPath (state: RefreshScheduler.DashboardState) (path: string) =
-    state.Repos
-    |> Map.tryPick (fun repoId repo ->
-        if Set.contains path repo.KnownPaths then Some repoId
-        else None)
 
 let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
@@ -201,77 +214,49 @@ let private openTerminal
 let private deleteWorktree
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
-    (branch: string)
+    (wtPath: WorktreePath)
     =
+    let path = WorktreePath.value wtPath
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-        let worktrees = allWorktrees state
 
-        let worktree =
-            worktrees
-            |> List.tryFind (fun wt -> wt.Branch = Some branch)
-
-        match worktree with
-        | None -> return Error $"No worktree found for branch '{branch}'"
-        | Some wt ->
-            let repoId = findRepoForPath state wt.Path
-
-            let repoRoot =
-                repoId
-                |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
-
-            match repoId, repoRoot with
-            | Some rid, Some root ->
-                agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(rid, wt.Path))
-                let! result = GitWorktree.removeWorktree root wt.Path branch
-                return result
-            | _ ->
-                return Error $"Could not identify repo root for worktree at '{wt.Path}'"
+        match tryResolveWorktreeContext rootPaths state path with
+        | None -> return Error $"No worktree found at path '{path}'"
+        | Some ctx ->
+            agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
+            return! GitWorktree.removeWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
     }
 
 let private updateArchivedBranches
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (setOp: string -> Set<string> -> Set<string>)
-    (branchName: BranchName)
+    (wtPath: WorktreePath)
     =
-    let branch = BranchName.value branchName
+    let path = WorktreePath.value wtPath
     async {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-        let worktrees = allWorktrees state
 
-        let worktree =
-            worktrees
-            |> List.tryFind (fun wt -> wt.Branch = Some branch)
-
-        let repoId =
-            worktree
-            |> Option.bind (fun wt -> findRepoForPath state wt.Path)
-
-        let repoRoot =
-            repoId
-            |> Option.bind (fun rid -> rootPaths |> Map.tryFind rid)
-
-        match worktree, repoId, repoRoot with
-        | Some _, Some rid, Some root ->
+        match tryResolveWorktreeContext rootPaths state path with
+        | None ->
+            return Error $"No worktree found at path '{path}'"
+        | Some { Branch = None; Worktree = wt } ->
+            return Error $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
+        | Some ({ Branch = Some branch } as ctx) ->
             let liveBranches =
                 state.Repos
-                |> Map.tryFind rid
+                |> Map.tryFind ctx.RepoId
                 |> Option.map (fun repo -> repo.WorktreeList |> List.choose _.Branch |> Set.ofList)
                 |> Option.defaultValue Set.empty
 
-            TreemonConfig.modifyArchivedBranches root (fun existing ->
+            TreemonConfig.modifyArchivedBranches ctx.RepoRoot (fun existing ->
                 existing
                 |> Set.ofList
                 |> setOp branch
                 |> Set.intersect liveBranches
                 |> Set.toList)
-            agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh rid)
+            agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh ctx.RepoId)
             return Ok ()
-        | Some wt, _, _ ->
-            return Error $"Could not identify repo root for worktree at '{wt.Path}'"
-        | None, _, _ ->
-            return Error $"No worktree found for branch '{branch}'"
     }
 
 let worktreeApi
@@ -328,48 +313,41 @@ let worktreeApi
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
-          startSync = fun branch ->
+          startSync = fun wtPath ->
+              let path = WorktreePath.value wtPath
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  let worktreeWithRepo =
-                      state.Repos
-                      |> Map.toList
-                      |> List.tryPick (fun (repoId, repo) ->
-                          repo.WorktreeList
-                          |> List.tryFind (fun wt -> wt.Branch = Some branch)
-                          |> Option.map (fun wt ->
-                              let repoRoot =
-                                  rootPaths
-                                  |> Map.tryFind repoId
-                                  |> Option.defaultValue (worktreeRoots |> List.head)
-                              let syncKey = scopedBranchKey repoId branch
-                              let provider = resolveProvider state wt.Path
-                              wt.Path, repoRoot, syncKey, provider))
+                  match tryResolveWorktreeContext rootPaths state path with
+                  | None -> return Error $"No worktree found at path '{path}'"
+                  | Some { Branch = None } ->
+                      return Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
+                  | Some ({ Branch = Some branch } as ctx) ->
+                      let syncKey = scopedBranchKey ctx.RepoId branch
+                      let provider = resolveProvider state ctx.Worktree.Path
 
-                  match worktreeWithRepo with
-                  | None -> return Error $"No worktree found for branch '{branch}'"
-                  | Some (path, repoRoot, syncKey, provider) ->
                       let! beginResult = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
 
                       match beginResult with
                       | Error msg -> return Error msg
                       | Ok ct ->
                           let post = syncAgent.Post
-                          Async.Start(SyncEngine.executeSyncPipeline post syncKey path repoRoot provider ct, ct)
+                          Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider ct, ct)
                           return Ok ()
               }
-          cancelSync = fun branch ->
+          cancelSync = fun wtPath ->
+              let path = WorktreePath.value wtPath
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  state.Repos
-                  |> Map.toList
-                  |> List.tryPick (fun (repoId, repo) ->
-                      repo.WorktreeList
-                      |> List.tryFind (fun wt -> wt.Branch = Some branch)
-                      |> Option.map (fun _ -> scopedBranchKey repoId branch))
-                  |> Option.iter (fun key -> syncAgent.Post(SyncEngine.CancelSync key))
+                  match tryResolveWorktreeContext rootPaths state path with
+                  | None ->
+                      Log.log "API" $"cancelSync: no worktree found at path '{path}'"
+                  | Some { Branch = None } ->
+                      Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
+                  | Some ({ Branch = Some branch } as ctx) ->
+                      let syncKey = scopedBranchKey ctx.RepoId branch
+                      syncAgent.Post(SyncEngine.CancelSync syncKey)
               }
           getSyncStatus = fun () ->
               async {
