@@ -117,12 +117,7 @@ type ParseThreadCountsFixtureTests() =
         Assert.That(total, Is.EqualTo(5))
 
     [<Test>]
-    member _.``Excludes threads without status from total``() =
-        let (WithResolution(_, total)) = readFixture "threads.json" |> parseThreadCounts
-        Assert.That(total, Is.EqualTo(5))
-
-    [<Test>]
-    member _.``Invalid JSON returns zero counts``() =
+    member _.``Invalid JSON returns zero counts``()=
         let result = parseThreadCounts "not json"
         Assert.That(result, Is.EqualTo(WithResolution(0, 0)))
 
