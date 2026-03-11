@@ -69,9 +69,8 @@ let internal parseReviewThreads (json: string) =
 
         let unresolved =
             nodes
-            |> List.filter (fun node ->
-                node.GetProperty("isResolved").GetBoolean() |> not)
-            |> List.length
+            |> List.sumBy (fun node ->
+                if node.GetProperty("isResolved").GetBoolean() then 0 else 1)
 
         WithResolution(unresolved, nodes.Length)
     with ex ->
@@ -81,7 +80,11 @@ let internal parseReviewThreads (json: string) =
 let private fetchPrThreadCounts (remote: GithubRemote) (prNumber: int) =
     async {
         let query =
-            $"{{ repository(owner: \\\"{remote.Owner}\\\", name: \\\"{remote.Repo}\\\") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"
+            sprintf
+                """{ repository(owner: \"%s\", name: \"%s\") { pullRequest(number: %d) { reviewThreads(first: 100) { nodes { isResolved } } } } }"""
+                remote.Owner
+                remote.Repo
+                prNumber
 
         let! output = runGh $"api graphql -f query=\"{query}\""
         return output |> Option.map parseReviewThreads |> Option.defaultValue (WithResolution(0, 0))
