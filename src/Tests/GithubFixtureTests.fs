@@ -166,6 +166,12 @@ type ParseReviewThreadsTests() =
         Assert.That(result, Is.EqualTo(CommentSummary.WithResolution(0, 0)))
 
     [<Test>]
+    member _.``All resolved threads returns WithResolution(0, N)``() =
+        let json = """{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true},{"isResolved":true},{"isResolved":true}]}}}}}"""
+        let result = parseReviewThreads json
+        Assert.That(result, Is.EqualTo(CommentSummary.WithResolution(0, 3)))
+
+    [<Test>]
     member _.``Invalid JSON returns WithResolution(0, 0)``() =
         let result = parseReviewThreads "not json"
         Assert.That(result, Is.EqualTo(CommentSummary.WithResolution(0, 0)))
