@@ -1,0 +1,2 @@
+{"kind":0,"v":{"requests":[{"message":{"text":"Explain monads"},"modelState":{"value":0},"response":[]}]}}
+{"kind":2,"k":["requests","0","response"],"v":[{"kind":"markdownContent"},{"value":"A monad is a design pattern in functional programming."}]}

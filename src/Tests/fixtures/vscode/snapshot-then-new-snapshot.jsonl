@@ -1,0 +1,2 @@
+{"kind":0,"v":{"requests":[{"message":{"text":"Old request"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"kind":"markdownContent"},{"value":"Old response"}]}]}}
+{"kind":0,"v":{"requests":[{"message":{"text":"New snapshot request"},"modelState":{"value":0},"response":[{"kind":"markdownContent"},{"value":"New snapshot working..."}]}]}}

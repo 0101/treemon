@@ -50,15 +50,7 @@ let private buildWorkspaceIndex () =
     { PathToSessionDirs = index; BuiltAt = DateTimeOffset.UtcNow }
 
 let private refreshIndex () =
-    let current = workspaceIndex.Value
-    let age = DateTimeOffset.UtcNow - current.BuiltAt
-
-    if age > TimeSpan.FromSeconds(60.0) then
-        let newIndex = buildWorkspaceIndex ()
-        workspaceIndex.Value <- newIndex
-        newIndex
-    else
-        current
+    FileUtils.refreshIfStale (TimeSpan.FromSeconds(60.0)) workspaceIndex _.BuiltAt buildWorkspaceIndex
 
 let private getSessionDirsForPath (worktreePath: string) =
     let index = refreshIndex ()
