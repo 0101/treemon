@@ -109,12 +109,35 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command
             Log.log "SessionManager" $"Failed to open new tab: {ex.Message}"
             Error $"Failed to open new tab: {ex.Message}"
 
-let private killByHwnd (hwnd: nativeint) =
+let private closeWindowFireAndForget (hwnd: nativeint) =
     if Win32.isWindowValid hwnd then
         if Win32.closeWindow hwnd then
-            Log.log "SessionManager" $"Closed window HWND={hwnd}"
+            Log.log "SessionManager" $"Sent WM_CLOSE to HWND={hwnd}"
         else
-            Log.log "SessionManager" $"Failed to close window HWND={hwnd}"
+            Log.log "SessionManager" $"Failed to send WM_CLOSE to HWND={hwnd}"
+
+let private killByHwnd (hwnd: nativeint) =
+    async {
+        if not (Win32.isWindowValid hwnd) then
+            return true
+        elif not (Win32.closeWindow hwnd) then
+            Log.log "SessionManager" $"Failed to send WM_CLOSE to HWND={hwnd}"
+            return false
+        else
+            Log.log "SessionManager" $"Sent WM_CLOSE to HWND={hwnd}, waiting for close..."
+            let rec wait remaining =
+                async {
+                    if not (Win32.isWindowValid hwnd) then return true
+                    elif remaining <= 0 then return false
+                    else
+                        do! Async.Sleep 250
+                        return! wait (remaining - 1)
+                }
+            let! closed = wait 60
+            if closed then Log.log "SessionManager" $"Window HWND={hwnd} closed"
+            else Log.log "SessionManager" $"Window HWND={hwnd} did not close within timeout"
+            return closed
+    }
 
 let private validateSessions (sessions: Map<string, nativeint>) =
     sessions
@@ -171,7 +194,7 @@ let internal loadSessions () =
 
 let private spawnAndTrack (validated: Map<string, nativeint>) path spawnFn (reply: AsyncReplyChannel<Result<unit, string>>) =
     match validated |> Map.tryFind path with
-    | Some existingHwnd -> killByHwnd existingHwnd
+    | Some existingHwnd -> closeWindowFireAndForget existingHwnd
     | None -> ()
 
     match spawnFn () with
@@ -183,14 +206,15 @@ let private spawnAndTrack (validated: Map<string, nativeint>) path spawnFn (repl
         validated |> Map.remove path
 
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
+    async {
     match msg with
     | Spawn(wtPath, command, reply) ->
         let path = WorktreePath.value wtPath
-        spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path command) reply
+        return spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path command) reply
 
     | SpawnTerminal(wtPath, reply) ->
         let path = WorktreePath.value wtPath
-        spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
+        return spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
 
     | OpenNewTab(wtPath, reply) ->
         let path = WorktreePath.value wtPath
@@ -200,10 +224,10 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
         | Some hwnd ->
             let result = openNewTabInWindow hwnd path None
             reply.Reply(result)
-            validated
+            return validated
         | None ->
             reply.Reply(Error "No active session for this worktree")
-            validated
+            return validated
 
     | LaunchAction(wtPath, command, reply) ->
         let path = WorktreePath.value wtPath
@@ -213,16 +237,16 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
         | Some hwnd ->
             let result = openNewTabInWindow hwnd path (Some command)
             reply.Reply(result)
-            validated
+            return validated
         | None ->
             let spawnResult = spawnWithCommand path (Some command) "action"
             match spawnResult with
             | Ok hwnd ->
                 reply.Reply(Ok())
-                validated |> Map.add path hwnd
+                return validated |> Map.add path hwnd
             | Error msg ->
                 reply.Reply(Error msg)
-                validated
+                return validated
 
     | Focus(wtPath, reply) ->
         let path = WorktreePath.value wtPath
@@ -235,10 +259,10 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
             else
                 reply.Reply(Error "SetForegroundWindow failed")
 
-            validated
+            return validated
         | None ->
             reply.Reply(Error "No active session for this worktree")
-            validated
+            return validated
 
     | Kill(wtPath, reply) ->
         let path = WorktreePath.value wtPath
@@ -246,17 +270,22 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
 
         match validated |> Map.tryFind path with
         | Some hwnd ->
-            killByHwnd hwnd
-            reply.Reply(Ok())
-            validated |> Map.remove path
+            let! closed = killByHwnd hwnd
+            if closed then
+                reply.Reply(Ok())
+                return validated |> Map.remove path
+            else
+                reply.Reply(Error "Terminal did not close — the user may have cancelled")
+                return validated
         | None ->
             reply.Reply(Error "No active session for this worktree")
-            validated
+            return validated
 
     | GetActiveSessions reply ->
         let validated = validateSessions sessions
         reply.Reply(validated)
-        validated
+        return validated
+    }
 
 let createAgent () =
     let initialSessions = loadSessions ()
@@ -268,22 +297,24 @@ let createAgent () =
                 async {
                     let! msg = inbox.Receive()
 
-                    let newSessions =
-                        try
-                            processMessage sessions msg
-                        with ex ->
-                            Log.log "SessionManager" $"processMessage crashed: {ex}"
+                    let! newSessions =
+                        async {
+                            try
+                                return! processMessage sessions msg
+                            with ex ->
+                                Log.log "SessionManager" $"processMessage crashed: {ex}"
 
-                            match msg with
-                            | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | OpenNewTab(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | LaunchAction(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-                            | GetActiveSessions reply -> reply.Reply(sessions)
+                                match msg with
+                                | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                                | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                                | OpenNewTab(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                                | LaunchAction(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                                | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                                | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
+                                | GetActiveSessions reply -> reply.Reply(sessions)
 
-                            sessions
+                                return sessions
+                        }
 
                     if newSessions <> sessions then
                         persistSessions newSessions
@@ -308,7 +339,7 @@ let focusSession (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> Focus(worktreePath, reply)), timeout = 10_000)
 
 let killSession (agent: SessionAgent) (worktreePath: WorktreePath) =
-    agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 10_000)
+    agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 20_000)
 
 let openNewTab (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)

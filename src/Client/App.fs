@@ -290,16 +290,25 @@ let update msg model =
         let confirmModal, action = ConfirmModal.update confirmMsg
         let model = { model with ConfirmModal = confirmModal }
         match action with
-        | ConfirmModal.NoAction -> model, Cmd.none
+        | ConfirmModal.NoAction ->
+            model,
+            Cmd.ofEffect (fun _ ->
+                Dom.document.querySelector ".dashboard"
+                |> Option.ofObj
+                |> Option.iter (fun el -> el?focus()))
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
             Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
         | ConfirmModal.DeleteAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.killSession path (fun _ -> SessionKilledForDelete path)
+            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+                | Ok () -> SessionKilledForDelete path
+                | Error _ -> Tick)
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.killSession path (fun _ -> SessionKilledForArchive path)
+            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+                | Ok () -> SessionKilledForArchive path
+                | Error _ -> Tick)
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
@@ -349,7 +358,12 @@ let update msg model =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
         if model.ConfirmModal <> ConfirmModal.NoConfirm then
             match key with
-            | "Escape" -> { model with ConfirmModal = ConfirmModal.NoConfirm }, Cmd.none
+            | "Escape" ->
+                { model with ConfirmModal = ConfirmModal.NoConfirm },
+                Cmd.ofEffect (fun _ ->
+                    Dom.document.querySelector ".dashboard"
+                    |> Option.ofObj
+                    |> Option.iter (fun el -> el?focus()))
             | _ -> model, Cmd.none
         elif CreateWorktreeModal.isOpen model.CreateModal then
             match key with

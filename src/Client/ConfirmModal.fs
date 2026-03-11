@@ -39,9 +39,11 @@ let view (dispatch: Msg -> unit) (confirm: ConfirmModal) =
             Html.div [
                 prop.className "modal-body"
                 prop.children [
-                    Html.span [ prop.text $"Remove worktree " ]
-                    Html.code [ prop.text branch ]
-                    Html.span [ prop.text "? This will delete the worktree folder and local branch." ]
+                    Html.p [
+                        Html.text "Remove worktree "
+                        Html.code [ prop.text branch ]
+                        Html.text "? This will delete the worktree folder and local branch."
+                    ]
                 ]
             ]
             Html.div [
