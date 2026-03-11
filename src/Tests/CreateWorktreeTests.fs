@@ -13,8 +13,6 @@ module Modal = CreateWorktreeModal
 let private testRepoId = RepoId.create "TestRepo"
 
 
-
-
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]

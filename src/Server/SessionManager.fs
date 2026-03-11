@@ -131,12 +131,35 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command
                 return Error $"Failed to open new tab: {ex.Message}"
     }
 
-let private killByHwnd (hwnd: nativeint) =
+let private closeWindowFireAndForget (hwnd: nativeint) =
     if Win32.isWindowValid hwnd then
         if Win32.closeWindow hwnd then
-            Log.log "SessionManager" $"Closed window HWND={hwnd}"
+            Log.log "SessionManager" $"Sent WM_CLOSE to HWND={hwnd}"
         else
-            Log.log "SessionManager" $"Failed to close window HWND={hwnd}"
+            Log.log "SessionManager" $"Failed to send WM_CLOSE to HWND={hwnd}"
+
+let private killByHwnd (hwnd: nativeint) =
+    async {
+        if not (Win32.isWindowValid hwnd) then
+            return true
+        elif not (Win32.closeWindow hwnd) then
+            Log.log "SessionManager" $"Failed to send WM_CLOSE to HWND={hwnd}"
+            return false
+        else
+            Log.log "SessionManager" $"Sent WM_CLOSE to HWND={hwnd}, waiting for close..."
+            let rec wait remaining =
+                async {
+                    if not (Win32.isWindowValid hwnd) then return true
+                    elif remaining <= 0 then return false
+                    else
+                        do! Async.Sleep 250
+                        return! wait (remaining - 1)
+                }
+            let! closed = wait 60
+            if closed then Log.log "SessionManager" $"Window HWND={hwnd} closed"
+            else Log.log "SessionManager" $"Window HWND={hwnd} did not close within timeout"
+            return closed
+    }
 
 let private validateSessions (sessions: Map<string, nativeint>) =
     sessions
@@ -278,9 +301,13 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
 
             match validated |> Map.tryFind path with
             | Some hwnd ->
-                killByHwnd hwnd
-                reply.Reply(Ok())
-                return validated |> Map.remove path
+                let! closed = killByHwnd hwnd
+                if closed then
+                    reply.Reply(Ok())
+                    return validated |> Map.remove path
+                else
+                    reply.Reply(Error "Terminal did not close — the user may have cancelled")
+                    return validated
             | None ->
                 reply.Reply(Error "No active session for this worktree")
                 return validated
@@ -334,7 +361,7 @@ let focusSession (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> Focus(worktreePath, reply)), timeout = 10_000)
 
 let killSession (agent: SessionAgent) (worktreePath: WorktreePath) =
-    agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 10_000)
+    agent.Agent.PostAndAsyncReply((fun reply -> Kill(worktreePath, reply)), timeout = 20_000)
 
 let openNewTab (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)

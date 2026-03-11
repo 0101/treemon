@@ -6,9 +6,11 @@
 
   <ItemGroup>
     <Compile Include="Navigation.fs" />
+    <Compile Include="ModalOverlay.fs" />
     <Compile Include="CreateWorktreeModal.fs" />
     <Compile Include="ArchiveViews.fs" />
     <Compile Include="ActionButtons.fs" />
+    <Compile Include="ConfirmModal.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 
