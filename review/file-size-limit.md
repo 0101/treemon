@@ -1,7 +1,6 @@
 ---
 autofix: false
 model: sonnet
-source: "user request"
 ---
 # File Size Limit
 

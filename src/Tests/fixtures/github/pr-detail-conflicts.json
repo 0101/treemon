@@ -1,0 +1,11 @@
+{
+  "number": 5,
+  "title": "Feature with merge conflicts",
+  "state": "open",
+  "draft": false,
+  "merged_at": null,
+  "mergeable": false,
+  "head": { "ref": "feature/conflict-branch" },
+  "comments": 2,
+  "review_comments": 1
+}

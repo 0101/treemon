@@ -211,7 +211,9 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
         let upstreamBranch =
             upstream
             |> Option.map (fun u ->
-                if u.StartsWith("origin/") then u["origin/".Length..] else u)
+                match u.IndexOf('/') with
+                | -1 -> u
+                | i -> u[(i + 1)..])
 
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with

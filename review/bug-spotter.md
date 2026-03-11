@@ -1,7 +1,6 @@
 ---
 autofix: false
 model: inherit
-source: "built-in"
 ---
 # Bug Spotter
 

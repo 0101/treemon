@@ -71,6 +71,7 @@ let isSystemNoise (text: string) =
     || text.Contains("[Request interrupted by user]")
     || (text.StartsWith("# ") && text.Length > 200)
     || (text.StartsWith("**") && text.Length > 200)
+    || text = "Warmup"
 
 let private extractTextFromMessage (root: JsonElement) =
     match root.TryGetProperty("message") with

@@ -34,7 +34,7 @@
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
-- PR badge linking to PR page; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
+- PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
 - Event log (last 3 events), sync/cancel/terminal/delete actions
 - Green left border on cards with active terminal sessions
@@ -111,6 +111,15 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - Auto-detected from git remote URL alongside AzDo
 - Fetched via `gh api`: open + recent closed PRs, comment counts from PR fields (`CommentSummary.CountOnly`)
 - GitHub Actions workflow runs mapped to `BuildInfo` / `BuildStatus`; failed runs fetch job details for step name
+- Per open PR, an extra detail fetch (`/repos/{owner}/{repo}/pulls/{number}`) retrieves `mergeable` status; run in parallel with Actions fetch, adding no sequential latency
+
+### Merge Conflict Detection
+
+- `HasConflicts: bool` on `PrInfo` — `true` when the PR has merge conflicts
+- AzDo: parsed from `mergeStatus` field in existing `az repos pr list` response (`"conflicts"` → true, all others → false)
+- GitHub: parsed from `mergeable` field in per-PR detail response (`false` → conflicts, `true`/`null` → no conflicts)
+- Merged PRs always have `HasConflicts = false`; unknown/computing states treated as no conflicts (resolves on next poll)
+- Client renders an inline conflict icon (⚔) on the PR badge when `HasConflicts = true`
 
 ### Resilience
 
