@@ -152,22 +152,23 @@ type ParseFailedJobsFixtureTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type ParsePrCommentCountsTests() =
+type ParseReviewThreadsTests() =
 
     [<Test>]
-    member _.``Sums comments and review_comments from PR detail``() =
-        let count = readFixture "pr-detail.json" |> parsePrCommentCounts
-        Assert.That(count, Is.EqualTo(4))
+    member _.``Counts unresolved and total threads from fixture``() =
+        let result = readFixture "review-threads.json" |> parseReviewThreads
+        Assert.That(result, Is.EqualTo(CommentSummary.WithResolution(2, 5)))
 
     [<Test>]
-    member _.``Returns zero for invalid JSON``() =
-        let count = parsePrCommentCounts "not json"
-        Assert.That(count, Is.EqualTo(0))
+    member _.``Empty threads returns WithResolution(0, 0)``() =
+        let json = """{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}"""
+        let result = parseReviewThreads json
+        Assert.That(result, Is.EqualTo(CommentSummary.WithResolution(0, 0)))
 
     [<Test>]
-    member _.``Returns zero when fields are missing``() =
-        let count = parsePrCommentCounts """{"number": 1}"""
-        Assert.That(count, Is.EqualTo(0))
+    member _.``Invalid JSON returns WithResolution(0, 0)``() =
+        let result = parseReviewThreads "not json"
+        Assert.That(result, Is.EqualTo(CommentSummary.WithResolution(0, 0)))
 
 
 [<TestFixture>]

@@ -53,20 +53,38 @@ let internal parsePrList (json: string) =
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
         []
 
-let internal parsePrCommentCounts (json: string) =
+let internal parseReviewThreads (json: string) =
     try
         use doc = JsonDocument.Parse(json)
-        let comments = doc.RootElement |> tryInt "comments" |> Option.defaultValue 0
-        let reviewComments = doc.RootElement |> tryInt "review_comments" |> Option.defaultValue 0
-        comments + reviewComments
-    with ex ->
-        Log.log "GH" $"Failed to parse GitHub PR detail JSON: {ex.Message}"
-        0
 
-let private fetchPrCommentCount (remote: GithubRemote) (prNumber: int) =
+        let nodes =
+            doc.RootElement
+                .GetProperty("data")
+                .GetProperty("repository")
+                .GetProperty("pullRequest")
+                .GetProperty("reviewThreads")
+                .GetProperty("nodes")
+                .EnumerateArray()
+            |> Seq.toList
+
+        let unresolved =
+            nodes
+            |> List.filter (fun node ->
+                node.GetProperty("isResolved").GetBoolean() |> not)
+            |> List.length
+
+        WithResolution(unresolved, nodes.Length)
+    with ex ->
+        Log.log "GH" $"Failed to parse GitHub review threads JSON: {ex.Message}"
+        WithResolution(0, 0)
+
+let private fetchPrThreadCounts (remote: GithubRemote) (prNumber: int) =
     async {
-        let! output = runGh $"api repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}"
-        return output |> Option.map parsePrCommentCounts |> Option.defaultValue 0
+        let query =
+            $"{{ repository(owner: \\\"{remote.Owner}\\\", name: \\\"{remote.Repo}\\\") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"
+
+        let! output = runGh $"api graphql -f query=\"{query}\""
+        return output |> Option.map parseReviewThreads |> Option.defaultValue (WithResolution(0, 0))
     }
 
 let private mapConclusion (conclusion: string option) =
@@ -245,7 +263,11 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                     return b, c
                                 }
 
-                        let! commentCount = fetchPrCommentCount remote pr.PrNumber
+                        let! threadCounts =
+                            if pr.IsMerged then
+                                async { return WithResolution(0, 0) }
+                            else
+                                fetchPrThreadCounts remote pr.PrNumber
 
                         let url =
                             $"https://github.com/{remote.Owner}/{remote.Repo}/pull/{pr.PrNumber}"
@@ -257,7 +279,7 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                   Title = pr.Title
                                   Url = url
                                   IsDraft = pr.IsDraft
-                                  Comments = CountOnly commentCount
+                                  Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged
                                   HasConflicts = hasConflicts }

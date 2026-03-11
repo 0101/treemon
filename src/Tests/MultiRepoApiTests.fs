@@ -162,7 +162,7 @@ type MultiRepoApiTests() =
         }
 
     [<Test>]
-    member _.``GitHub PR uses CountOnly comment format``() =
+    member _.``GitHub PR uses WithResolution comment format``() =
         task {
             let! dashboard = fetchDashboard ()
 
@@ -177,8 +177,8 @@ type MultiRepoApiTests() =
                     | _ -> None)
 
             match githubPr.Comments with
-            | CountOnly _ -> Assert.Pass("GitHub PR correctly uses CountOnly comment format")
-            | WithResolution _ -> Assert.Fail("GitHub PR should use CountOnly, not WithResolution")
+            | WithResolution _ -> Assert.Pass("GitHub PR correctly uses WithResolution comment format")
+            | CountOnly _ -> Assert.Fail("GitHub PR should use WithResolution, not CountOnly")
         }
 
     [<Test>]
