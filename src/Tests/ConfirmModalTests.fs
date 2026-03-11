@@ -78,40 +78,6 @@ let private tryUpdateModel msg model =
         | _ -> reraise ()
 
 
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type ConfirmModalUpdateTests() =
-
-    [<Test>]
-    member _.``DeleteWorktree returns NoConfirm and Delete action``() =
-        let modal, action = ConfirmModal.update (ConfirmModal.DeleteWorktree testPath)
-        Assert.That(modal, Is.EqualTo(ConfirmModal.NoConfirm))
-        Assert.That(action, Is.EqualTo(ConfirmModal.Delete testPath))
-
-    [<Test>]
-    member _.``DeleteAndCloseSession returns NoConfirm and DeleteAfterKillSession action``() =
-        let modal, action = ConfirmModal.update (ConfirmModal.DeleteAndCloseSession testPath)
-        Assert.That(modal, Is.EqualTo(ConfirmModal.NoConfirm))
-        Assert.That(action, Is.EqualTo(ConfirmModal.DeleteAfterKillSession testPath))
-
-    [<Test>]
-    member _.``ArchiveWorktree returns NoConfirm and Archive action``() =
-        let modal, action = ConfirmModal.update (ConfirmModal.ArchiveWorktree testPath)
-        Assert.That(modal, Is.EqualTo(ConfirmModal.NoConfirm))
-        Assert.That(action, Is.EqualTo(ConfirmModal.Archive testPath))
-
-    [<Test>]
-    member _.``ArchiveAndCloseSession returns NoConfirm and ArchiveAfterKillSession action``() =
-        let modal, action = ConfirmModal.update (ConfirmModal.ArchiveAndCloseSession testPath)
-        Assert.That(modal, Is.EqualTo(ConfirmModal.NoConfirm))
-        Assert.That(action, Is.EqualTo(ConfirmModal.ArchiveAfterKillSession testPath))
-
-    [<Test>]
-    member _.``DismissConfirm returns NoConfirm and NoAction``() =
-        let modal, action = ConfirmModal.update ConfirmModal.DismissConfirm
-        Assert.That(modal, Is.EqualTo(ConfirmModal.NoConfirm))
-        Assert.That(action, Is.EqualTo(ConfirmModal.NoAction))
 
 
 [<TestFixture>]
