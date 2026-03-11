@@ -254,23 +254,19 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                 relevant
                 |> List.map (fun pr ->
                     async {
-                        let! builds, hasConflicts =
+                        let! builds, hasConflicts, threadCounts =
                             if pr.IsMerged then
-                                async { return [], false }
+                                async { return [], false, WithResolution(0, 0) }
                             else
                                 async {
                                     let! buildsChild = Async.StartChild(fetchActionRuns remote pr.BranchName)
                                     let! mergeabilityChild = Async.StartChild(fetchMergeability remote pr.PrNumber)
+                                    let! threadsChild = Async.StartChild(fetchPrThreadCounts remote pr.PrNumber)
                                     let! b = buildsChild
                                     let! c = mergeabilityChild
-                                    return b, c
+                                    let! t = threadsChild
+                                    return b, c, t
                                 }
-
-                        let! threadCounts =
-                            if pr.IsMerged then
-                                async { return WithResolution(0, 0) }
-                            else
-                                fetchPrThreadCounts remote pr.PrNumber
 
                         let url =
                             $"https://github.com/{remote.Owner}/{remote.Repo}/pull/{pr.PrNumber}"
