@@ -5,20 +5,20 @@ open Elmish
 open Feliz
 
 type Msg =
-    | Archive of BranchName
-    | Unarchive of BranchName
+    | Archive of WorktreePath
+    | Unarchive of WorktreePath
     | OpCompleted of Result<unit, string>
 
 type UpdateResult = { RefreshWorktrees: bool }
 
 let update (api: Lazy<IWorktreeApi>) msg : UpdateResult * Cmd<Msg> =
     match msg with
-    | Archive branch ->
+    | Archive path ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.archiveWorktree branch) () OpCompleted
-    | Unarchive branch ->
+        Cmd.OfAsync.perform (fun () -> api.Value.archiveWorktree path) () OpCompleted
+    | Unarchive path ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.unarchiveWorktree branch) () OpCompleted
+        Cmd.OfAsync.perform (fun () -> api.Value.unarchiveWorktree path) () OpCompleted
     | OpCompleted (Ok _) ->
         { RefreshWorktrees = true }, Cmd.none
     | OpCompleted (Error _) ->
@@ -93,7 +93,7 @@ let archiveCard dispatch (wt: WorktreeStatus) =
             Html.button [
                 prop.className "unarchive-btn"
                 prop.title "Unarchive worktree"
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (Unarchive (BranchName.create wt.Branch)))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (Unarchive wt.Path))
                 prop.children [ archiveIcon ]
             ]
         ]

@@ -28,7 +28,7 @@ let private defaultModel : Model =
       FocusedElement = None
       CreateModal = Modal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
-      DeletedBranches = Set.empty
+      DeletedPaths = Set.empty
       EditorName = "VS Code" }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where

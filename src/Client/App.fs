@@ -26,7 +26,7 @@ type Model =
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
-      DeletedBranches: Set<string>
+      DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option }
 
@@ -39,16 +39,16 @@ type Msg =
     | Tick
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
-    | StartSync of branch: string * scopedKey: string
+    | StartSync of path: WorktreePath * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of string
+    | CancelSync of WorktreePath
     | SyncTick
     | ConfirmDeleteWorktree of scopedKey: string
     | ConfirmArchiveWorktree of scopedKey: string
     | ConfirmMsg of ConfirmModal.Msg
-    | SessionKilledForDelete of branch: string
-    | SessionKilledForArchive of branch: string
+    | SessionKilledForDelete of path: WorktreePath
+    | SessionKilledForArchive of path: WorktreePath
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
@@ -93,7 +93,7 @@ let init () =
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
-      DeletedBranches = Set.empty
+      DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
@@ -105,12 +105,12 @@ let randomEyeDirection () =
     let dy = rng.NextDouble() * 2.0 - 1.0
     (dx, dy)
 
-let filterDeletedBranches (deleted: Set<string>) (repos: RepoModel list) =
+let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
     else
         repos
         |> List.map (fun r ->
-            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains wt.Branch deleted)) })
+            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains (WorktreePath.value wt.Path) deleted)) })
 
 let findWorktree (scopedKey: string) (model: Model) =
     let parts = scopedKey.Split('/', 2)
@@ -127,7 +127,7 @@ let terminalAction (wt: WorktreeStatus) =
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Branch, scopedKey))
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
@@ -147,11 +147,11 @@ let update msg model =
                 model.Repos
                 |> List.map (fun r -> r.RepoId, r.IsCollapsed)
                 |> Map.ofList
-            let serverBranches =
+            let serverPaths =
                 response.Repos
-                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+                |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> WorktreePath.value wt.Path))
                 |> Set.ofList
-            let stillPending = Set.intersect model.DeletedBranches serverBranches
+            let stillPending = Set.intersect model.DeletedPaths serverPaths
             let repos =
                 response.Repos
                 |> List.map (fun r ->
@@ -162,7 +162,7 @@ let update msg model =
                       ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false })
-                |> filterDeletedBranches stillPending
+                |> filterDeletedPaths stillPending
             { model with
                 Repos = repos
                 IsLoading = false
@@ -172,7 +172,7 @@ let update msg model =
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
                 EyeDirection = randomEyeDirection ()
-                DeletedBranches = stillPending
+                DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
@@ -222,7 +222,7 @@ let update msg model =
     | Tick ->
         model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
-    | StartSync (branch, key) ->
+    | StartSync (path, key) ->
         let syntheticEvent =
             { Source = "Sync"
               Message = "Sync starting"
@@ -235,7 +235,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync branch (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.perform worktreeApi.startSync path (fun r -> SyncStarted (key, r))
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -249,8 +249,8 @@ let update msg model =
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
 
-    | CancelSync branch ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync branch (fun _ -> Tick)
+    | CancelSync path ->
+        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick)
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -266,7 +266,7 @@ let update msg model =
         | Some wt when wt.HasActiveSession ->
             { model with ConfirmModal = ConfirmModal.ConfirmArchive (wt.Branch, wt.Path) }, Cmd.none
         | Some wt ->
-            model, Cmd.ofMsg (ConfirmMsg (ConfirmModal.ArchiveWorktree wt.Branch))
+            model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive wt.Path))
         | None -> model, Cmd.none
 
     | ConfirmMsg confirmMsg ->
@@ -276,22 +276,38 @@ let update msg model =
                 model.Repos
                 |> List.map (fun r ->
                     { r with Worktrees = r.Worktrees |> List.filter (fun wt -> wt.Branch <> branch) })
+            let path =
+                model.Repos
+                |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
+                |> Option.map (fun wt -> wt.Path)
+            let pathStr = path |> Option.map WorktreePath.value |> Option.defaultValue ""
             let updatedModel =
                 { model with
                     Repos = updatedRepos
                     ConfirmModal = ConfirmModal.NoConfirm
-                    DeletedBranches = model.DeletedBranches |> Set.add branch }
-            { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-            Cmd.OfAsync.perform worktreeApi.deleteWorktree branch DeleteCompleted
-        | ConfirmModal.DeleteAndCloseSession (path, branch) ->
+                    DeletedPaths = model.DeletedPaths |> Set.add pathStr }
+            match path with
+            | Some p ->
+                { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
+                Cmd.OfAsync.perform worktreeApi.deleteWorktree p DeleteCompleted
+            | None -> updatedModel, Cmd.none
+        | ConfirmModal.DeleteAndCloseSession (path, _) ->
             { model with ConfirmModal = ConfirmModal.NoConfirm },
-            Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> SessionKilledForDelete branch)
+            Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> SessionKilledForDelete path)
         | ConfirmModal.ArchiveWorktree branch ->
+            let path =
+                model.Repos
+                |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
+                |> Option.map (fun wt -> wt.Path)
+            match path with
+            | Some p ->
+                { model with ConfirmModal = ConfirmModal.NoConfirm },
+                Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive p))
+            | None ->
+                { model with ConfirmModal = ConfirmModal.NoConfirm }, Cmd.none
+        | ConfirmModal.ArchiveAndCloseSession (path, _) ->
             { model with ConfirmModal = ConfirmModal.NoConfirm },
-            Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch)))
-        | ConfirmModal.ArchiveAndCloseSession (path, branch) ->
-            { model with ConfirmModal = ConfirmModal.NoConfirm },
-            Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> SessionKilledForArchive branch)
+            Cmd.OfAsync.attempt worktreeApi.killSession path (fun _ -> SessionKilledForArchive path)
         | ConfirmModal.DismissConfirm ->
             { model with ConfirmModal = ConfirmModal.NoConfirm }, Cmd.none
 
@@ -299,13 +315,23 @@ let update msg model =
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error _) ->
-        { model with DeletedBranches = Set.empty }, fetchWorktrees ()
+        { model with DeletedPaths = Set.empty }, fetchWorktrees ()
 
-    | SessionKilledForDelete branch ->
-        model, Cmd.ofMsg (ConfirmMsg (ConfirmModal.DeleteWorktree branch))
+    | SessionKilledForDelete path ->
+        let pathStr = WorktreePath.value path
+        let updatedRepos =
+            model.Repos
+            |> List.map (fun r ->
+                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
+        let updatedModel =
+            { model with
+                Repos = updatedRepos
+                DeletedPaths = model.DeletedPaths |> Set.add pathStr }
+        { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
+        Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
 
-    | SessionKilledForArchive branch ->
-        model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive (BranchName.create branch)))
+    | SessionKilledForArchive path ->
+        model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
@@ -498,7 +524,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
             Html.button [
                 prop.className "sync-cancel-btn"
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Branch))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Path))
                 prop.text "Cancel"
             ]
         else
@@ -506,7 +532,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Branch, scopedKey)))
+                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
                 prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
                 prop.text "Sync"
             ]
