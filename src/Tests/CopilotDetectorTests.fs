@@ -148,13 +148,8 @@ let private makeTurnEnd (timestamp: string) =
 let private makeToolEvent (timestamp: string) =
     $"""{{"type":"tool.execution_complete","data":{{"name":"powershell"}},"timestamp":"{timestamp}"}}"""
 
-let private withTempEventsFile (content: string) (action: string -> 'a) =
-    let tempFile = Path.Combine(Path.GetTempPath(), $"copilot-test-{Guid.NewGuid()}.jsonl")
-    try
-        File.WriteAllText(tempFile, content)
-        action tempFile
-    finally
-        if File.Exists(tempFile) then File.Delete(tempFile)
+let private withTempEventsFile content action =
+    TestUtils.withTempFile "copilot-test" content action
 
 
 [<TestFixture>]

@@ -99,6 +99,14 @@ let private findPidsOnPortLinux (port: int) =
     |> Array.distinct
     |> Array.toList
 
+let withTempFile (prefix: string) (content: string) (action: string -> 'a) =
+    let tempFile = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}.jsonl")
+    try
+        File.WriteAllText(tempFile, content)
+        action tempFile
+    finally
+        if File.Exists(tempFile) then File.Delete(tempFile)
+
 let runAsync (a: Async<'T>) =
     Async.RunSynchronously(a, timeout = 30_000)
 

@@ -44,6 +44,19 @@ let refreshIfStale (maxAge: TimeSpan) (cache: 'T ref) (getAge: 'T -> DateTimeOff
     else
         current
 
+let findInLines (tryParse: string -> 'a option) (lines: string array) : 'a option =
+    lines
+    |> Array.map _.Trim()
+    |> Array.filter (fun s -> s.Length > 0)
+    |> Array.rev
+    |> Array.tryPick tryParse
+
+let readChunk (stream: FileStream) (position: int64) (length: int) : string =
+    stream.Seek(position, SeekOrigin.Begin) |> ignore
+    let buffer = Array.zeroCreate length
+    let bytesRead = stream.Read(buffer, 0, length)
+    System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
+
 let scanBackward (logTag: string) (filePath: string) (tryParse: string -> 'a option) : 'a option =
     let chunkSize = 64L * 1024L
     let overlap = 1024L
@@ -64,24 +77,14 @@ let scanBackward (logTag: string) (filePath: string) (tryParse: string -> 'a opt
                     if readLength <= 0 then None
                     else
                         let isAtFileStart = chunkStart = 0L
-                        stream.Seek(chunkStart, SeekOrigin.Begin) |> ignore
-                        let buffer = Array.zeroCreate readLength
-                        let bytesRead = stream.Read(buffer, 0, readLength)
-                        let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
+                        let content = readChunk stream chunkStart readLength
                         let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
 
                         let trimmedLines =
                             if isAtFileStart || lines.Length = 0 then lines
                             else lines[1..]
 
-                        let result =
-                            trimmedLines
-                            |> Array.map _.Trim()
-                            |> Array.filter (fun s -> s.Length > 0)
-                            |> Array.rev
-                            |> Array.tryPick tryParse
-
-                        match result with
+                        match findInLines tryParse trimmedLines with
                         | Some _ as r -> r
                         | None when isAtFileStart -> None
                         | None -> scanChunk (chunkIndex + 1)
