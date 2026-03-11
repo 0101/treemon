@@ -33,6 +33,17 @@ let readLastLines (logTag: string) (filePath: string) (maxLines: int) =
         Log.log logTag $"Failed to read JSONL {filePath}: {ex.Message}"
         []
 
+let refreshIfStale (maxAge: TimeSpan) (cache: 'T ref) (getAge: 'T -> DateTimeOffset) (rebuild: unit -> 'T) =
+    let current = cache.Value
+    let age = DateTimeOffset.UtcNow - getAge current
+
+    if age > maxAge then
+        let newValue = rebuild ()
+        cache.Value <- newValue
+        newValue
+    else
+        current
+
 let truncateMessage (maxLen: int) (text: string) =
     let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
     if singleLine.Length <= maxLen then singleLine
