@@ -35,7 +35,7 @@ type PersistSessionsTests() =
             let dataDir = Path.Combine(tempDir, "data")
             Assert.That(Directory.Exists(dataDir), Is.False, "data/ should not exist before persist")
 
-            persistSessions Map.empty
+            persistSessions Map.empty |> Async.RunSynchronously
 
             Assert.That(Directory.Exists(dataDir), Is.True, "data/ should be created by persistSessions"))
 
@@ -47,7 +47,7 @@ type PersistSessionsTests() =
                   @"Q:\code\repo-feat", nativeint 67890 ]
                 |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
 
             let filePath = Path.Combine("data", "sessions.json")
             Assert.That(File.Exists(filePath), Is.True, "sessions.json should exist after persist")
@@ -70,7 +70,7 @@ type PersistSessionsTests() =
                   @"Q:\code\repo-feat", nativeint 67890 ]
                 |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
 
             let json = File.ReadAllText(Path.Combine("data", "sessions.json"))
             use doc = JsonDocument.Parse(json)
@@ -90,7 +90,7 @@ type PersistSessionsTests() =
     [<Test>]
     member _.``persistSessions writes empty sessions object for empty map``() =
         withTempDir (fun _ ->
-            persistSessions Map.empty
+            persistSessions Map.empty |> Async.RunSynchronously
 
             let json = File.ReadAllText(Path.Combine("data", "sessions.json"))
             use doc = JsonDocument.Parse(json)
@@ -103,10 +103,10 @@ type PersistSessionsTests() =
     member _.``persistSessions overwrites previous file``() =
         withTempDir (fun _ ->
             let first = [ @"Q:\code\old", nativeint 111 ] |> Map.ofList
-            persistSessions first
+            persistSessions first |> Async.RunSynchronously
 
             let second = [ @"Q:\code\new", nativeint 222 ] |> Map.ofList
-            persistSessions second
+            persistSessions second |> Async.RunSynchronously
 
             let json = File.ReadAllText(Path.Combine("data", "sessions.json"))
             use doc = JsonDocument.Parse(json)
@@ -176,7 +176,7 @@ type LoadSessionsTests() =
                   @"Q:\code\repo-feat", nativeint 88888888 ]
                 |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
 
             let result = loadSessions ()
             Assert.That(result, Is.EqualTo(emptySessionMap),
@@ -198,7 +198,7 @@ type RoundTripTests() =
             let realHwnd = realWindows |> List.head
             let sessions = [ @"Q:\code\test-worktree", realHwnd ] |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
             let loaded = loadSessions ()
 
             Assert.That(loaded.Count, Is.EqualTo(1), "One valid HWND should survive round-trip")
@@ -221,7 +221,7 @@ type RoundTripTests() =
                   @"Q:\code\repo-b", hwnd2 ]
                 |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
             let loaded = loadSessions ()
 
             Assert.That(loaded.Count, Is.EqualTo(2))
@@ -244,7 +244,7 @@ type RoundTripTests() =
                   @"Q:\code\invalid", fakeHwnd ]
                 |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
             let loaded = loadSessions ()
 
             Assert.That(loaded.Count, Is.EqualTo(1), "Only the valid HWND should survive")
@@ -265,7 +265,7 @@ type JsonFormatTests() =
                   @"Q:\code\AITestAgent-wt-def", nativeint 87654321 ]
                 |> Map.ofList
 
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
 
             let json = File.ReadAllText(Path.Combine("data", "sessions.json"))
             use doc = JsonDocument.Parse(json)
@@ -291,7 +291,7 @@ type JsonFormatTests() =
     member _.``JSON values are integers not floats``() =
         withTempDir (fun _ ->
             let sessions = [ @"Q:\code\test", nativeint 42 ] |> Map.ofList
-            persistSessions sessions
+            persistSessions sessions |> Async.RunSynchronously
 
             let json = File.ReadAllText(Path.Combine("data", "sessions.json"))
             Assert.That(json.Contains("42"), Is.True, "HWND should appear as integer 42")
