@@ -215,13 +215,14 @@ let private tryParseUserContent (line: string) =
         Log.log "Copilot" $"Failed to parse user content: {ex.Message}"
         None
 
+let internal scanForUserMessage (eventsPath: string) =
+    FileUtils.scanBackward "Copilot" eventsPath tryParseUserContent
+
 let getLastUserMessage (worktreePath: string) =
     let sessionDirs = getSessionDirsForPath worktreePath
 
     findMostRecentEventsFile sessionDirs
-    |> Option.bind (fun fi ->
-        FileUtils.readLastLines "Copilot" fi.FullName 20
-        |> List.tryPick tryParseUserContent)
+    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
     |> Option.map (fun (text, ts) -> FileUtils.truncateMessage 120 text, ts)
 
 let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
