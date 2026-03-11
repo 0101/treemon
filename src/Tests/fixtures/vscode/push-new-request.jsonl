@@ -1,0 +1,2 @@
+{"kind":0,"v":{"requests":[{"message":{"text":"First question"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"kind":"markdownContent"},{"value":"First response"}]}]}}
+{"kind":2,"k":["requests"],"v":[{"message":{"text":"Second question"},"modelState":{"value":0},"response":[{"kind":"markdownContent"},{"value":"Working on second..."}]}]}

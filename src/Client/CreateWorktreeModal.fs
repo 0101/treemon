@@ -101,17 +101,8 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
         { Modal = Closed; RestoredFocus = restored; RefreshWorktrees = false }, Cmd.none
 
 let private modalOverlay (dispatch: Msg -> unit) (dismissible: bool) (children: ReactElement list) =
-    Html.div [
-        prop.className "modal-overlay"
-        if dismissible then prop.onClick (fun _ -> dispatch CloseCreateModal)
-        prop.children [
-            Html.div [
-                prop.className "modal-dialog"
-                if dismissible then prop.onClick (fun e -> e.stopPropagation())
-                prop.children children
-            ]
-        ]
-    ]
+    let onDismiss = if dismissible then Some (fun () -> dispatch CloseCreateModal) else None
+    ModalOverlay.modalOverlay onDismiss children
 
 let view (dispatch: Msg -> unit) (modal: ModalState) =
     match modal with
