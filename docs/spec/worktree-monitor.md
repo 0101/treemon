@@ -27,6 +27,12 @@
 - Scheduler picks most-overdue task globally across all repos
 - Branch events scoped by `{repoId}/{branch}` to prevent cross-repo collisions
 
+### Worktree Identification
+
+- All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
+- Server resolves repo and branch from path internally; archive persistence still stores branch names per repo in `.treemon.json`
+- Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
+
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
@@ -204,6 +210,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
 - Claude subagent detection is path-based only (directory structure), no content parsing needed
 - Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
+- `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
