@@ -25,6 +25,7 @@ type Model =
       EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
+      ConfirmModal: ConfirmModal.ConfirmModal
       DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option }
@@ -43,8 +44,11 @@ type Msg =
     | SyncStatusUpdate of Map<string, CardEvent list>
     | CancelSync of WorktreePath
     | SyncTick
-    | ConfirmDeleteWorktree of WorktreePath
-    | DeleteWorktree of WorktreePath
+    | ConfirmDeleteWorktree of scopedKey: string
+    | ConfirmArchiveWorktree of scopedKey: string
+    | ConfirmMsg of ConfirmModal.Msg
+    | SessionKilledForDelete of path: WorktreePath
+    | SessionKilledForArchive of path: WorktreePath
     | DeleteCompleted of Result<unit, string>
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
@@ -88,6 +92,7 @@ let init () =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
+      ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None },
@@ -116,6 +121,23 @@ let findWorktree (scopedKey: string) (model: Model) =
         |> List.tryFind (fun r -> RepoId.value r.RepoId = repoId)
         |> Option.bind (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
 
+let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
+    let pathStr = WorktreePath.value path
+    repos
+    |> List.map (fun r ->
+        { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
+
+let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
+    deletedPaths |> Set.add (WorktreePath.value path)
+
+let removeWorktreeByPath (path: WorktreePath) (model: Model) =
+    let updatedRepos = removeFromRepos path model.Repos
+    let updatedModel =
+        { model with
+            Repos = updatedRepos
+            DeletedPaths = markDeleted path model.DeletedPaths }
+    { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
+
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
 
@@ -125,8 +147,8 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
-    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun wt -> ArchiveMsg (ArchiveViews.Archive wt.Path))
-    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun wt -> ConfirmDeleteWorktree wt.Path)
+    | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
+    | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmDeleteWorktree scopedKey)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
@@ -250,30 +272,56 @@ let update msg model =
     | SyncTick ->
         model, fetchSyncStatus ()
 
-    | ConfirmDeleteWorktree path ->
-        let pathStr = WorktreePath.value path
-        model, Cmd.ofEffect (fun dispatch ->
-            if Dom.window.confirm $"Remove worktree {pathStr}? This will delete the worktree folder and local branch." then
-                dispatch (DeleteWorktree path))
+    | ConfirmDeleteWorktree scopedKey ->
+        match findWorktree scopedKey model with
+        | Some wt ->
+            { model with ConfirmModal = ConfirmModal.ConfirmDelete (wt.Branch, wt.Path, wt.HasActiveSession) }, Cmd.none
+        | None -> model, Cmd.none
 
-    | DeleteWorktree path ->
-        let pathStr = WorktreePath.value path
-        let updatedRepos =
-            model.Repos
-            |> List.map (fun r ->
-                { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
-        let updatedModel =
-            { model with
-                Repos = updatedRepos
-                DeletedPaths = model.DeletedPaths |> Set.add pathStr }
-        { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement },
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+    | ConfirmArchiveWorktree scopedKey ->
+        match findWorktree scopedKey model with
+        | Some wt when wt.HasActiveSession ->
+            { model with ConfirmModal = ConfirmModal.ConfirmArchive (wt.Branch, wt.Path) }, Cmd.none
+        | Some wt ->
+            model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive wt.Path))
+        | None -> model, Cmd.none
+
+    | ConfirmMsg confirmMsg ->
+        let confirmModal, action = ConfirmModal.update confirmMsg
+        let model = { model with ConfirmModal = confirmModal }
+        match action with
+        | ConfirmModal.NoAction ->
+            model,
+            Cmd.ofEffect (fun _ ->
+                Dom.document.querySelector ".dashboard"
+                |> Option.ofObj
+                |> Option.iter (fun el -> el?focus()))
+        | ConfirmModal.Delete path ->
+            removeWorktreeByPath path model,
+            Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+        | ConfirmModal.DeleteAfterKillSession path ->
+            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+                | Ok () -> SessionKilledForDelete path
+                | Error _ -> Tick)
+        | ConfirmModal.Archive path ->
+            model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
+        | ConfirmModal.ArchiveAfterKillSession path ->
+            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+                | Ok () -> SessionKilledForArchive path
+                | Error _ -> Tick)
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
     | DeleteCompleted (Error _) ->
         { model with DeletedPaths = Set.empty }, fetchWorktrees ()
+
+    | SessionKilledForDelete path ->
+        removeWorktreeByPath path model,
+        Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+
+    | SessionKilledForArchive path ->
+        model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
 
     | FocusSession path ->
         model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
@@ -308,7 +356,16 @@ let update msg model =
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
-        if CreateWorktreeModal.isOpen model.CreateModal then
+        if model.ConfirmModal <> ConfirmModal.NoConfirm then
+            match key with
+            | "Escape" ->
+                { model with ConfirmModal = ConfirmModal.NoConfirm },
+                Cmd.ofEffect (fun _ ->
+                    Dom.document.querySelector ".dashboard"
+                    |> Option.ofObj
+                    |> Option.iter (fun el -> el?focus()))
+            | _ -> model, Cmd.none
+        elif CreateWorktreeModal.isOpen model.CreateModal then
             match key with
             | "Escape" ->
                 let restoredFocus =
@@ -777,18 +834,25 @@ let binIcon =
         ]
     ]
 
-let deleteButton dispatch (wt: WorktreeStatus) =
+let deleteButton dispatch scopedKey (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
         prop.title "Remove worktree (Del)"
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
-            dispatch (ConfirmDeleteWorktree wt.Path))
+            dispatch (ConfirmDeleteWorktree scopedKey))
         prop.children [ binIcon ]
     ]
 
-let archiveButton dispatch = ArchiveViews.archiveButton (ArchiveMsg >> dispatch)
+let archiveButton dispatch scopedKey (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "archive-btn"
+        prop.title "Archive worktree (A)"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (ConfirmArchiveWorktree scopedKey))
+        prop.children [ ArchiveViews.archiveIcon ]
+    ]
 
 let conflictIcon =
     Svg.svg [
@@ -896,8 +960,8 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
                     editorButton dispatch editorName wt
-                    archiveButton dispatch wt
-                    deleteButton dispatch wt
+                    archiveButton dispatch scopedKey wt
+                    deleteButton dispatch scopedKey wt
                 ]
             ]
             Html.div [
@@ -933,8 +997,8 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                             terminalButton dispatch wt
                             if wt.HasActiveSession then newTabButton dispatch wt
                             editorButton dispatch editorName wt
-                            archiveButton dispatch wt
-                            deleteButton dispatch wt
+                            archiveButton dispatch scopedKey wt
+                            deleteButton dispatch scopedKey wt
                         ]
                     ]
 
@@ -1324,6 +1388,7 @@ let view model dispatch =
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
                 CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
             ]
         ]
     ]
