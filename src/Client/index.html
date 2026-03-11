@@ -122,12 +122,15 @@
         .progress-segment.seg-closed { background: #a6e3a1; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
-        .pr-badge { background: #2e3452; color: #b4befe; padding: 1px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; text-decoration: none; cursor: pointer; }
+        .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }
         .pr-badge.draft { background: #313244; color: #7f849c; }
         .pr-badge.merged { background: #2e3245; color: #cba6f7; }
         .thread-badge { background: #3b2030; color: #f38ba8; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
         .thread-badge.dimmed { background: #313244; color: #7f849c; font-weight: 400; }
+
+        .conflict-icon { width: 1em; height: 1em; flex-shrink: 0; margin-left: 4px; }
+        .conflict-icon path { fill: #e06c75; }
 
         .build-badge { padding: 1px 6px; border-radius: 4px; font-size: 0.82em; font-weight: 500; white-space: nowrap; }
         .build-badge.succeeded { background: #1e3a2f; color: #a6e3a1; }

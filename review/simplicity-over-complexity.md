@@ -1,7 +1,6 @@
 ---
 autofix: false
 model: inherit
-source: "global CLAUDE.md"
 ---
 # Simplicity Over Complexity
 
