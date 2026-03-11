@@ -9,25 +9,25 @@ type ConfirmModal =
     | ConfirmArchive of branch: string * path: WorktreePath
 
 type Msg =
-    | DeleteWorktree of branch: string
-    | DeleteAndCloseSession of path: WorktreePath * branch: string
-    | ArchiveWorktree of branch: string
-    | ArchiveAndCloseSession of path: WorktreePath * branch: string
+    | DeleteWorktree of path: WorktreePath
+    | DeleteAndCloseSession of path: WorktreePath
+    | ArchiveWorktree of path: WorktreePath
+    | ArchiveAndCloseSession of path: WorktreePath
     | DismissConfirm
 
 type Action =
     | NoAction
-    | Delete of branch: string
+    | Delete of path: WorktreePath
     | DeleteAfterKillSession of path: WorktreePath
-    | Archive of branch: string
+    | Archive of path: WorktreePath
     | ArchiveAfterKillSession of path: WorktreePath
 
 let update (msg: Msg) : ConfirmModal * Action =
     match msg with
-    | DeleteWorktree branch -> NoConfirm, Delete branch
-    | DeleteAndCloseSession (path, _) -> NoConfirm, DeleteAfterKillSession path
-    | ArchiveWorktree branch -> NoConfirm, Archive branch
-    | ArchiveAndCloseSession (path, _) -> NoConfirm, ArchiveAfterKillSession path
+    | DeleteWorktree path -> NoConfirm, Delete path
+    | DeleteAndCloseSession path -> NoConfirm, DeleteAfterKillSession path
+    | ArchiveWorktree path -> NoConfirm, Archive path
+    | ArchiveAndCloseSession path -> NoConfirm, ArchiveAfterKillSession path
     | DismissConfirm -> NoConfirm, NoAction
 
 let view (dispatch: Msg -> unit) (confirm: ConfirmModal) =
@@ -55,14 +55,14 @@ let view (dispatch: Msg -> unit) (confirm: ConfirmModal) =
                     Html.button [
                         prop.className "modal-btn danger"
                         if not hasSession then prop.autoFocus true
-                        prop.onClick (fun _ -> dispatch (DeleteWorktree branch))
+                        prop.onClick (fun _ -> dispatch (DeleteWorktree path))
                         prop.text "Delete"
                     ]
                     if hasSession then
                         Html.button [
                             prop.className "modal-btn danger"
                             prop.autoFocus true
-                            prop.onClick (fun _ -> dispatch (DeleteAndCloseSession (path, branch)))
+                            prop.onClick (fun _ -> dispatch (DeleteAndCloseSession path))
                             prop.text "Delete and close terminal"
                         ]
                 ]
@@ -87,13 +87,13 @@ let view (dispatch: Msg -> unit) (confirm: ConfirmModal) =
                     ]
                     Html.button [
                         prop.className "modal-btn submit"
-                        prop.onClick (fun _ -> dispatch (ArchiveWorktree branch))
+                        prop.onClick (fun _ -> dispatch (ArchiveWorktree path))
                         prop.text "Archive"
                     ]
                     Html.button [
                         prop.className "modal-btn danger"
                         prop.autoFocus true
-                        prop.onClick (fun _ -> dispatch (ArchiveAndCloseSession (path, branch)))
+                        prop.onClick (fun _ -> dispatch (ArchiveAndCloseSession path))
                         prop.text "Archive and close terminal"
                     ]
                 ]

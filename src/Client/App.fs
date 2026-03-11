@@ -121,21 +121,21 @@ let findWorktree (scopedKey: string) (model: Model) =
         |> List.tryFind (fun r -> RepoId.value r.RepoId = repoId)
         |> Option.bind (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
 
-let findPathByBranch (branch: string) (model: Model) =
-    model.Repos
-    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
-    |> Option.map (fun wt -> wt.Path)
+let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
+    let pathStr = WorktreePath.value path
+    repos
+    |> List.map (fun r ->
+        { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
+
+let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
+    deletedPaths |> Set.add (WorktreePath.value path)
 
 let removeWorktreeByPath (path: WorktreePath) (model: Model) =
-    let pathStr = WorktreePath.value path
-    let updatedRepos =
-        model.Repos
-        |> List.map (fun r ->
-            { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
+    let updatedRepos = removeFromRepos path model.Repos
     let updatedModel =
         { model with
             Repos = updatedRepos
-            DeletedPaths = model.DeletedPaths |> Set.add pathStr }
+            DeletedPaths = markDeleted path model.DeletedPaths }
     { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
 
 let terminalAction (wt: WorktreeStatus) =
@@ -291,18 +291,13 @@ let update msg model =
         let model = { model with ConfirmModal = confirmModal }
         match action with
         | ConfirmModal.NoAction -> model, Cmd.none
-        | ConfirmModal.Delete branch ->
-            match findPathByBranch branch model with
-            | Some path ->
-                removeWorktreeByPath path model,
-                Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
-            | None -> model, Cmd.none
+        | ConfirmModal.Delete path ->
+            removeWorktreeByPath path model,
+            Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
         | ConfirmModal.DeleteAfterKillSession path ->
             model, Cmd.OfAsync.perform worktreeApi.killSession path (fun _ -> SessionKilledForDelete path)
-        | ConfirmModal.Archive branch ->
-            match findPathByBranch branch model with
-            | Some p -> model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive p))
-            | None -> model, Cmd.none
+        | ConfirmModal.Archive path ->
+            model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
             model, Cmd.OfAsync.perform worktreeApi.killSession path (fun _ -> SessionKilledForArchive path)
 
