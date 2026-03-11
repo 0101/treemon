@@ -56,3 +56,4 @@ The focused-review plugin (published at `github.com/0101/focused-review`):
 - **Approach**: gh-aw with focused-review plugin, not a from-scratch workflow
 - **Both repos may change**: this repo (workflow file) and `0101/focused-review` (plugin fixes)
 - **No autofix in CI**: `--no-autofix` flag prevents the agent from modifying files during review
+- **COPILOT_GITHUB_TOKEN must be a fine-grained PAT** (not OAuth): The validation script checks the token prefix and rejects `gho_*` tokens. Must be created manually at `https://github.com/settings/personal-access-tokens/new` with "Copilot Requests: Read" permission, then set via `gh secret set COPILOT_GITHUB_TOKEN -R 0101/treemon`. The account owning the token must have an active Copilot license.
