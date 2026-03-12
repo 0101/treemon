@@ -270,8 +270,7 @@ let getLastMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
     |> parentFiles
     |> List.choose (fun fi ->
-        FileUtils.readLastLines "Claude" fi.FullName 20
-        |> List.tryPick tryParseAssistantText)
+        FileUtils.scanBackward "Claude" fi.FullName tryParseAssistantText)
     |> tryMaxBy snd
     |> Option.map (fun (text, timestamp) ->
         { Source = "claude"
@@ -341,52 +340,8 @@ let private tryParseUserText (line: string) =
         Log.log "Claude" $"Failed to parse user text: {ex.Message}"
         None
 
-let private findUserMessageInLines (lines: string array) =
-    lines
-    |> Array.map _.Trim()
-    |> Array.filter (fun s -> s.Length > 0)
-    |> Array.rev
-    |> Array.tryPick tryParseUserText
-
 let scanForUserMessage (filePath: string) =
-    let chunkSize = 64L * 1024L
-    let overlap = 1024L
-    let stepSize = chunkSize - overlap
-    let maxChunks = 16
-
-    try
-        use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-        let fileLength = stream.Length
-        if fileLength = 0L then None
-        else
-            let rec scanChunk chunkIndex =
-                if chunkIndex >= maxChunks then None
-                else
-                    let rawStart = fileLength - chunkSize - (int64 chunkIndex) * stepSize
-                    let chunkStart = Math.Max(0L, rawStart)
-                    let readLength = int (Math.Min(chunkSize, fileLength - chunkStart))
-                    if readLength <= 0 then None
-                    else
-                        let isAtFileStart = chunkStart = 0L
-                        stream.Seek(chunkStart, SeekOrigin.Begin) |> ignore
-                        let buffer = Array.zeroCreate readLength
-                        let bytesRead = stream.Read(buffer, 0, readLength)
-                        let content = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead)
-                        let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
-
-                        let trimmedLines =
-                            if isAtFileStart || lines.Length = 0 then lines
-                            else lines[1..]
-
-                        match findUserMessageInLines trimmedLines with
-                        | Some _ as result -> result
-                        | None when isAtFileStart -> None
-                        | None -> scanChunk (chunkIndex + 1)
-
-            scanChunk 0
-    with ex ->
-        Log.log "Claude" $"Failed to scan JSONL {filePath}: {ex.Message}"
-        None
+    FileUtils.scanBackward "Claude" filePath tryParseUserText
 
 let getLastUserMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     files
