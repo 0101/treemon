@@ -82,10 +82,10 @@ Claude Code spawns subagent sessions (via the Task tool) that write to nested JS
 1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
 2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
 3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
-4. If parent status is `Done` or `Idle` -- check subagent files: if any subagent is `Working`, return `Working` (parent file hasn't been written to while the subagent runs)
-5. Otherwise return the parent status
+4. If parent status is `Done` -- return `Done` (parent Done is authoritative; all subagents have completed before parent reaches end_turn)
+5. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle`
 
-Parent `WaitingForUser` is never overridden by subagent activity. Only `Done`/`Idle` can be upgraded to `Working` by an active subagent.
+Parent `Done` and `WaitingForUser` are never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
 
 **Scoping rules:**
 - `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
