@@ -11,6 +11,8 @@ dotnet test src/Tests/Tests.fsproj --filter "Category=Fast" # fast suite (<60s)
 dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 .\treemon.ps1 dev "Q:\code\AITestAgent"                     # dev mode
 .\treemon.ps1 deploy                                        # build + restart production
+.\treemon.ps1 add "Q:\code\OtherProject"                    # add a root to config
+.\treemon.ps1 remove "Q:\code\OtherProject"                 # remove a root from config
 ```
 
 ## F# Style Guide
@@ -61,7 +63,7 @@ This project uses [focused-review](https://github.com/0101/focused-review) for a
 
 ## Operations
 
-`treemon.ps1` manages the application lifecycle: `dev`, `deploy`, `start`, `stop`, `restart`, `status`, `log`.
+`treemon.ps1` manages the application lifecycle: `dev`, `deploy`, `start`, `stop`, `restart`, `status`, `log`, `add`, `remove`.
 
 ## Architecture & Specs
 
