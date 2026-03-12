@@ -94,7 +94,7 @@ type DeleteWithSessionSequencingTests() =
 
         let branches =
             model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
 
         Assert.That(branches, Does.Not.Contain("feature-branch"),
             "Worktree should be removed optimistically from model on direct Delete")
@@ -107,7 +107,7 @@ type DeleteWithSessionSequencingTests() =
 
         let branches =
             model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
 
         Assert.That(branches, Does.Contain("feature-branch"),
             "Worktree should NOT be removed yet — must wait for session kill to succeed")
@@ -120,7 +120,7 @@ type DeleteWithSessionSequencingTests() =
 
         let branches =
             model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
 
         Assert.That(branches, Does.Not.Contain("feature-branch"),
             "Worktree should be removed after session kill confirmed")
@@ -132,7 +132,7 @@ type DeleteWithSessionSequencingTests() =
 
         let branches =
             model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
 
         Assert.That(branches, Does.Contain("feature-branch"),
             "Worktree should remain when user cancels")
@@ -153,7 +153,7 @@ type DeleteWithSessionSequencingTests() =
 
         let branches =
             model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map (fun wt -> wt.Branch))
+            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
 
         Assert.That(branches, Does.Contain("feature-branch"),
             "Worktree should remain after Escape")
