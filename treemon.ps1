@@ -259,7 +259,7 @@ function Add-Roots([string[]]$NewRoots) {
 
     $added = @()
     foreach ($root in $NewRoots) {
-        $normalized = $root.TrimEnd('\', '/')
+        $normalized = (Resolve-Path $root).Path.TrimEnd('\', '/')
         if ($existing -contains $normalized) {
             Write-Host "Already monitored: $normalized" -ForegroundColor Yellow
         } else {
@@ -285,21 +285,31 @@ function Add-Roots([string[]]$NewRoots) {
     }
 }
 
-function Remove-Root([string]$RootToRemove) {
+function Remove-Roots([string[]]$RootsToRemove) {
     $config = Get-SavedConfig
     if (-not $config) {
         Write-Host "No roots configured" -ForegroundColor Yellow
         return
     }
 
-    $normalized = $RootToRemove.TrimEnd('\', '/')
     $existing = @($config.WorktreeRoots)
-    $remaining = @($existing | Where-Object { $_ -ne $normalized })
+    $removed = @()
+    $remaining = $existing
 
-    if ($remaining.Count -eq $existing.Count) {
-        Write-Host "Root not found: $normalized" -ForegroundColor Yellow
-        Write-Host "Current roots:" -ForegroundColor Gray
-        $existing | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    foreach ($root in $RootsToRemove) {
+        $normalized = (Resolve-Path $root).Path.TrimEnd('\', '/')
+        $filtered = @($remaining | Where-Object { $_ -ne $normalized })
+        if ($filtered.Count -eq $remaining.Count) {
+            Write-Host "Root not found: $normalized" -ForegroundColor Yellow
+            Write-Host "Current roots:" -ForegroundColor Gray
+            $existing | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        } else {
+            $remaining = $filtered
+            $removed += $normalized
+        }
+    }
+
+    if ($removed.Count -eq 0) {
         return
     }
 
@@ -309,7 +319,7 @@ function Remove-Root([string]$RootToRemove) {
     }
 
     Save-Config $remaining
-    Write-Host "Removed: $normalized" -ForegroundColor Green
+    $removed | ForEach-Object { Write-Host "Removed: $_" -ForegroundColor Green }
 
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -408,10 +418,16 @@ switch ($Command) {
     }
     "remove" {
         if (-not $WorktreeRoots -or $WorktreeRoots.Count -eq 0) {
-            Write-Host "Error: specify the path to remove" -ForegroundColor Red
-            Write-Host "Usage: .\treemon.ps1 remove <path>" -ForegroundColor Gray
+            Write-Host "Error: specify at least one path to remove" -ForegroundColor Red
+            Write-Host "Usage: .\treemon.ps1 remove <path> [<path>...]" -ForegroundColor Gray
             exit 1
         }
-        Remove-Root $WorktreeRoots[0]
+        $WorktreeRoots | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                Write-Host "Error: path does not exist: $_" -ForegroundColor Red
+                exit 1
+            }
+        }
+        Remove-Roots $WorktreeRoots
     }
 }
