@@ -22,7 +22,7 @@
 
 Create `.github/workflows/focused-review.md` with frontmatter:
 - **Trigger**: `pull_request: [opened, synchronize]`
-- **Engine**: `copilot` (uses `GITHUB_TOKEN` via engine.env override -- no PAT needed)
+- **Engine**: `copilot` (requires `COPILOT_GITHUB_TOKEN` repo secret -- a fine-grained PAT with Copilot Requests permission)
 - **Plugins**: `0101/focused-review` (compiled into install step automatically)
 - **Tools**: `github` (for PR review safe-outputs), `bash: [":"]` (unrestricted, needed for Python script execution and git)
 - **Safe-outputs**: `create-pull-request-review-comment` (max 30), `submit-pull-request-review` (max 1)
@@ -52,8 +52,9 @@ The focused-review plugin (published at `github.com/0101/focused-review`):
 
 ## Decisions
 
-- **Engine**: Copilot (uses built-in `GITHUB_TOKEN` via `engine.env` override, no separate PAT required)
+- **Engine**: Copilot (requires `COPILOT_GITHUB_TOKEN` repo secret)
 - **Approach**: gh-aw with focused-review plugin, not a from-scratch workflow
 - **Both repos may change**: this repo (workflow file) and `0101/focused-review` (plugin fixes)
 - **No autofix in CI**: `--no-autofix` flag prevents the agent from modifying files during review
-- **GITHUB_TOKEN auth**: The compiled workflow passes `secrets.GITHUB_TOKEN` as `COPILOT_GITHUB_TOKEN` env var to Copilot CLI. This avoids requiring a separate fine-grained PAT. The Copilot CLI accepts this token for authentication in GitHub Actions contexts.
+- **COPILOT_GITHUB_TOKEN must be a fine-grained PAT** (not `GITHUB_TOKEN`): The `validate_multi_secret.sh` script checks token prefix and rejects anything not starting with `github_pat_`. The built-in `GITHUB_TOKEN` (`ghs_*`) is rejected. Create a PAT at `https://github.com/settings/personal-access-tokens/new` with "Copilot Requests: Read" permission, set via `gh secret set COPILOT_GITHUB_TOKEN -R 0101/treemon`. The account owning the token must have an active Copilot license.
+- **engine.env override was attempted**: Using `engine.env.COPILOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` correctly passes the token but fails format validation.
