@@ -1729,8 +1729,8 @@ type DashboardTests() =
 
             let threadBadges = ghCards.Locator(".thread-badge")
             let! badgeCount = threadBadges.CountAsync()
-            Assert.That(badgeCount, Is.LessThan(cardCount),
-                "Not every GitHub PR card should have a thread badge; PR with 0 total threads should have none")
+            Assert.That(badgeCount, Is.EqualTo(1),
+                "Exactly one GitHub PR card should have a thread badge; PR with 0 total threads should have none")
         }
 
     [<Test>]

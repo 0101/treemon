@@ -80,11 +80,7 @@ let internal parseReviewThreads (json: string) =
 let private fetchPrThreadCounts (remote: GithubRemote) (prNumber: int) =
     async {
         let query =
-            sprintf
-                """{ repository(owner: \"%s\", name: \"%s\") { pullRequest(number: %d) { reviewThreads(first: 100) { nodes { isResolved } } } } }"""
-                remote.Owner
-                remote.Repo
-                prNumber
+            $"""{{ repository(owner: \"{remote.Owner}\", name: \"{remote.Repo}\") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"""
 
         let! output = runGh $"api graphql -f query=\"{query}\""
         return output |> Option.map parseReviewThreads |> Option.defaultValue (WithResolution(0, 0))

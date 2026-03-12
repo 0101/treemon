@@ -162,7 +162,7 @@ type MultiRepoApiTests() =
         }
 
     [<Test>]
-    member _.``GitHub PR uses WithResolution comment format``() =
+    member _.``GitHub PR has valid thread counts``() =
         task {
             let! dashboard = fetchDashboard ()
 
@@ -176,12 +176,13 @@ type MultiRepoApiTests() =
                     | HasPr info when info.Url.Contains("github.com") -> Some info
                     | _ -> None)
 
-            match githubPr.Comments with
-            | WithResolution _ -> Assert.Pass("GitHub PR correctly uses WithResolution comment format")
+            let (WithResolution(unresolved, total)) = githubPr.Comments
+            Assert.That(total, Is.GreaterThan(0), "GitHub PR fixture should have review threads")
+            Assert.That(unresolved, Is.LessThanOrEqualTo(total), "Unresolved threads should not exceed total")
         }
 
     [<Test>]
-    member _.``AzDo PR uses WithResolution comment format``() =
+    member _.``AzDo PR has valid thread counts``() =
         task {
             let! dashboard = fetchDashboard ()
 
@@ -195,6 +196,7 @@ type MultiRepoApiTests() =
                     | HasPr info when info.Url.Contains("dev.azure.com") -> Some info
                     | _ -> None)
 
-            match azdoPr.Comments with
-            | WithResolution _ -> Assert.Pass("AzDo PR correctly uses WithResolution comment format")
+            let (WithResolution(unresolved, total)) = azdoPr.Comments
+            Assert.That(total, Is.GreaterThan(0), "AzDo PR fixture should have review threads")
+            Assert.That(unresolved, Is.LessThanOrEqualTo(total), "Unresolved threads should not exceed total")
         }
