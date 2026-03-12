@@ -433,6 +433,13 @@ let ctClassName =
     | Done           -> "done"
     | Idle           -> "idle"
 
+let ctTooltip =
+    function
+    | Working        -> "Working"
+    | WaitingForUser -> "Waiting for user"
+    | Done           -> "Done"
+    | Idle           -> "Idle"
+
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
     | HasPr pr -> pr.IsMerged
@@ -953,7 +960,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
+                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
@@ -991,7 +998,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                     Html.div [
                         prop.className "card-header"
                         prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
                             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                             workMetricsView wt.WorkMetrics
                             terminalButton dispatch wt
@@ -1230,7 +1237,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
                     prop.children (
                         repo.Worktrees
                         |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
                 ]
             Html.button [
                 prop.className "create-wt-btn"

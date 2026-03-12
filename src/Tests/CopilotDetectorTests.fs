@@ -134,3 +134,77 @@ type LastMessageTests() =
         let msg = getLastMessageFromEventsFile (eventsPath "done-session")
         Assert.That(msg.IsSome, Is.True)
         Assert.That(msg.Value.Timestamp.Year, Is.EqualTo(2026))
+
+
+let private makeUserEvent (text: string) (timestamp: string) =
+    $"""{{"type":"user.message","data":{{"content":"{text}"}},"timestamp":"{timestamp}"}}"""
+
+let private makeAssistantEvent (text: string) (timestamp: string) =
+    $"""{{"type":"assistant.message","data":{{"content":"{text}","toolRequests":[]}},"timestamp":"{timestamp}"}}"""
+
+let private makeTurnEnd (timestamp: string) =
+    $"""{{"type":"assistant.turn_end","data":{{"turnId":"0"}},"timestamp":"{timestamp}"}}"""
+
+let private makeToolEvent (timestamp: string) =
+    $"""{{"type":"tool.execution_complete","data":{{"name":"powershell"}},"timestamp":"{timestamp}"}}"""
+
+let private withTempEventsFile content action =
+    TestUtils.withTempFile "copilot-test" content action
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ScanForUserMessageTests() =
+
+    [<Test>]
+    member _.``Finds user message near end of file``() =
+        let content =
+            [ makeUserEvent "hello copilot" "2026-03-01T10:00:00Z"
+              makeAssistantEvent "hi there" "2026-03-01T10:00:01Z"
+              makeTurnEnd "2026-03-01T10:00:02Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            let result = scanForUserMessage path
+            Assert.That(result.IsSome, Is.True)
+            let text, _ = result.Value
+            Assert.That(text, Is.EqualTo("hello copilot")))
+
+    [<Test>]
+    member _.``Finds user message buried under many tool events``() =
+        let toolEvents =
+            Seq.init 200 (fun i ->
+                let ts = $"2026-03-01T10:%02d{(i / 60) + 1}:%02d{i % 60}Z"
+                makeToolEvent ts)
+            |> Seq.toList
+
+        let content =
+            [ makeUserEvent "my deep question" "2026-03-01T10:00:00Z" ]
+            @ toolEvents
+            @ [ makeAssistantEvent "done" "2026-03-01T10:05:00Z"
+                makeTurnEnd "2026-03-01T10:05:01Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            let result = scanForUserMessage path
+            Assert.That(result.IsSome, Is.True)
+            let text, _ = result.Value
+            Assert.That(text, Is.EqualTo("my deep question")))
+
+    [<Test>]
+    member _.``Returns None for empty file``() =
+        withTempEventsFile "" (fun path ->
+            let result = scanForUserMessage path
+            Assert.That(result, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``Returns None when no user message exists``() =
+        let content =
+            [ makeAssistantEvent "orphan message" "2026-03-01T10:00:00Z"
+              makeTurnEnd "2026-03-01T10:00:01Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            let result = scanForUserMessage path
+            Assert.That(result, Is.EqualTo(None)))

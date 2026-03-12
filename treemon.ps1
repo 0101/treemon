@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
@@ -28,6 +28,8 @@ if (-not $Command) {
     Write-Host "  dev <path> [<path>...]     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
     Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
+    Write-Host "  add <path> [<path>...]      Add watched root(s) to config"
+    Write-Host "  remove <path>              Remove a watched root from config"
     exit 0
 }
 
@@ -261,6 +263,83 @@ function Start-DemoMode {
     Start-DualProcess -ServerArgs "--demo" -ModeName "Demo" -ServerLabel "demo data"
 }
 
+function Add-Roots([string[]]$NewRoots) {
+    $config = Get-SavedConfig
+    $existing = if ($config) { @($config.WorktreeRoots) } else { @() }
+
+    $added = @()
+    foreach ($root in $NewRoots) {
+        $normalized = (Resolve-Path $root).Path.TrimEnd('\', '/')
+        if ($existing -contains $normalized) {
+            Write-Host "Already monitored: $normalized" -ForegroundColor Yellow
+        } else {
+            $existing += $normalized
+            $added += $normalized
+        }
+    }
+
+    if ($added.Count -eq 0) {
+        Write-Host "No new roots to add" -ForegroundColor Yellow
+        return
+    }
+
+    Save-Config $existing
+    $added | ForEach-Object { Write-Host "Added: $_" -ForegroundColor Green }
+
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer $existing
+    }
+}
+
+function Remove-Roots([string[]]$RootsToRemove) {
+    $config = Get-SavedConfig
+    if (-not $config) {
+        Write-Host "No roots configured" -ForegroundColor Yellow
+        return
+    }
+
+    $existing = @($config.WorktreeRoots)
+    $removed = @()
+    $remaining = $existing
+
+    foreach ($root in $RootsToRemove) {
+        $normalized = (Resolve-Path $root).Path.TrimEnd('\', '/')
+        $filtered = @($remaining | Where-Object { $_ -ne $normalized })
+        if ($filtered.Count -eq $remaining.Count) {
+            Write-Host "Root not found: $normalized" -ForegroundColor Yellow
+            Write-Host "Current roots:" -ForegroundColor Gray
+            $existing | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        } else {
+            $remaining = $filtered
+            $removed += $normalized
+        }
+    }
+
+    if ($removed.Count -eq 0) {
+        return
+    }
+
+    if ($remaining.Count -eq 0) {
+        Write-Host "Error: cannot remove the last root" -ForegroundColor Red
+        return
+    }
+
+    Save-Config $remaining
+    $removed | ForEach-Object { Write-Host "Removed: $_" -ForegroundColor Green }
+
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer $remaining
+    }
+}
+
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
     Build-Frontend
@@ -335,5 +414,33 @@ switch ($Command) {
     }
     "deploy" {
         Deploy-Frontend
+    }
+    "add" {
+        if (-not $WorktreeRoots -or $WorktreeRoots.Count -eq 0) {
+            Write-Host "Error: specify at least one path to add" -ForegroundColor Red
+            Write-Host "Usage: .\treemon.ps1 add <path> [<path>...]" -ForegroundColor Gray
+            exit 1
+        }
+        $WorktreeRoots | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                Write-Host "Error: path does not exist: $_" -ForegroundColor Red
+                exit 1
+            }
+        }
+        Add-Roots $WorktreeRoots
+    }
+    "remove" {
+        if (-not $WorktreeRoots -or $WorktreeRoots.Count -eq 0) {
+            Write-Host "Error: specify at least one path to remove" -ForegroundColor Red
+            Write-Host "Usage: .\treemon.ps1 remove <path> [<path>...]" -ForegroundColor Gray
+            exit 1
+        }
+        $WorktreeRoots | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                Write-Host "Error: path does not exist: $_" -ForegroundColor Red
+                exit 1
+            }
+        }
+        Remove-Roots $WorktreeRoots
     }
 }

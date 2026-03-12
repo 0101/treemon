@@ -1,5 +1,5 @@
 .agents/
-.claude/
+.claude
 logs/
 
 # .NET
@@ -30,4 +30,4 @@ wwwroot/
 *.beads*.db
 
 # Server runtime data
-data/
+data
