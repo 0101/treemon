@@ -275,7 +275,14 @@ function Add-Roots([string[]]$NewRoots) {
 
     Save-Config $existing
     $added | ForEach-Object { Write-Host "Added: $_" -ForegroundColor Green }
-    Write-Host "Run '.\treemon.ps1 restart' to pick up changes" -ForegroundColor Cyan
+
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer $existing
+    }
 }
 
 function Remove-Root([string]$RootToRemove) {
@@ -303,7 +310,14 @@ function Remove-Root([string]$RootToRemove) {
 
     Save-Config $remaining
     Write-Host "Removed: $normalized" -ForegroundColor Green
-    Write-Host "Run '.\treemon.ps1 restart' to pick up changes" -ForegroundColor Cyan
+
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer $remaining
+    }
 }
 
 function Deploy-Frontend {
