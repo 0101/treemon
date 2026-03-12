@@ -11,7 +11,10 @@ permissions:
   contents: read
   pull-requests: read
 
-engine: copilot
+engine:
+  id: copilot
+  env:
+    COPILOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 plugins:
   - 0101/focused-review
