@@ -18,13 +18,8 @@ let private makePadding (byteCount: int) =
     Seq.init repetitions (fun _ -> entry)
     |> String.concat Environment.NewLine
 
-let private withTempJsonl (content: string) (action: string -> 'a) =
-    let tempFile = Path.Combine(Path.GetTempPath(), $"claude-test-{Guid.NewGuid()}.jsonl")
-    try
-        File.WriteAllText(tempFile, content)
-        action tempFile
-    finally
-        if File.Exists(tempFile) then File.Delete(tempFile)
+let private withTempJsonl content action =
+    TestUtils.withTempFile "claude-test" content action
 
 
 [<TestFixture>]

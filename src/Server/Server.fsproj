@@ -15,6 +15,7 @@
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />
     <Compile Include="SessionManager.fs" />
+    <Compile Include="TreemonConfig.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
@@ -25,7 +26,6 @@
     <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
-    <Compile Include="TreemonConfig.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="SyncEngine.fs" />
     <Compile Include="WorktreeApi.fs" />

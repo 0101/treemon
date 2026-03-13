@@ -1,0 +1,17 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "nodes": [
+            { "isResolved": false },
+            { "isResolved": true },
+            { "isResolved": false },
+            { "isResolved": true },
+            { "isResolved": true }
+          ]
+        }
+      }
+    }
+  }
+}

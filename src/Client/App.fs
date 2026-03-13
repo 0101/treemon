@@ -453,6 +453,13 @@ let ctClassName =
     | Done           -> "done"
     | Idle           -> "idle"
 
+let ctTooltip =
+    function
+    | Working        -> "Working"
+    | WaitingForUser -> "Waiting for user"
+    | Done           -> "Done"
+    | Idle           -> "Idle"
+
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
     | HasPr pr -> pr.IsMerged
@@ -922,13 +929,6 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                 ]
                 if unresolved > 0 then
                     prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
-            | CountOnly total ->
-                Html.span [
-                    prop.className (if total = 0 then "thread-badge dimmed" else "thread-badge")
-                    prop.text ($"{total} comments")
-                ]
-                if total > 0 then
-                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | _ -> ()
             yield! pr.Builds |> List.collect (fun build -> [
                     buildBadge repoName build
@@ -973,7 +973,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
+                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                     workMetricsView wt.WorkMetrics
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
@@ -1011,7 +1011,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
                     Html.div [
                         prop.className "card-header"
                         prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
                             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                             workMetricsView wt.WorkMetrics
                             terminalButton dispatch wt
@@ -1250,7 +1250,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
                     prop.children (
                         repo.Worktrees
                         |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}") ]))
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
                 ]
             Html.button [
                 prop.className "create-wt-btn"
