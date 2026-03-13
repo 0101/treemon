@@ -1,6 +1,5 @@
 module ActionButtons
 
-open Shared
 open Feliz
 
 let noFocusProps = [
@@ -8,9 +7,6 @@ let noFocusProps = [
     prop.onMouseDown (fun e -> e.preventDefault())
     prop.onKeyDown (fun e -> if e.key = "Enter" || e.key = " " then e.preventDefault())
 ]
-
-let isCodingToolBusy (wt: WorktreeStatus) =
-    wt.CodingTool = Working || wt.CodingTool = WaitingForUser
 
 let commentIcon =
     Svg.svg [
@@ -45,12 +41,3 @@ let createPrIcon =
         ]
     ]
 
-let actionButton (onAction: unit -> unit) (disabledTitle: string) (disabled: bool) (title: string) (icon: ReactElement) =
-    Html.button [
-        prop.className (if disabled then "action-btn disabled" else "action-btn")
-        prop.disabled disabled
-        yield! noFocusProps
-        prop.title (if disabled then disabledTitle else title)
-        prop.onClick (fun e -> e.stopPropagation(); if not disabled then onAction ())
-        prop.children [ icon ]
-    ]
