@@ -27,7 +27,8 @@ let private defaultModel : Model =
       EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = Modal.Closed
-      DeletedBranches = Set.empty
+      ConfirmModal = ConfirmModal.NoConfirm
+      DeletedPaths = Set.empty
       EditorName = "VS Code" }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
@@ -572,7 +573,8 @@ type EnterKeySuppressedWhileModalOpenTests() =
           Worktrees = []
           ArchivedWorktrees = []
           IsReady = true
-          IsCollapsed = false }
+          IsCollapsed = false
+          Provider = None }
 
     let openForm =
         Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }

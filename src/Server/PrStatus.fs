@@ -83,6 +83,7 @@ type internal ParsedPr =
       Title: string
       IsDraft: bool
       IsMerged: bool
+      HasConflicts: bool
       ClosedDate: DateTimeOffset option }
 
 let internal parsePrList (json: string) =
@@ -123,12 +124,16 @@ let internal parsePrList (json: string) =
                             | true, dt -> Some dt
                             | _ -> None)
 
+                    let hasConflicts =
+                        el |> tryString "mergeStatus" = Some "conflicts"
+
                     Some
                         { BranchName = branchName
                           PrId = prId
                           Title = title
                           IsDraft = isDraft
                           IsMerged = isMerged
+                          HasConflicts = hasConflicts
                           ClosedDate = closedDate }
                 with ex ->
                     Log.log "PR" $"Failed to parse PR entry: {ex.Message}"
@@ -418,7 +423,8 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   IsDraft = pr.IsDraft
                                   Comments = threadCounts
                                   Builds = builds
-                                  IsMerged = pr.IsMerged }
+                                  IsMerged = pr.IsMerged
+                                  HasConflicts = pr.HasConflicts }
                     })
                 |> Async.Parallel
 

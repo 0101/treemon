@@ -5,24 +5,6 @@ open System.IO
 open System.Text.Json
 open Shared
 
-type internal ProviderEntry =
-    { Provider: CodingToolProvider
-      GetStatus: string -> CodingToolStatus
-      GetLastMessage: string -> CardEvent option
-      GetLastUserMessage: string -> (string * DateTimeOffset) option
-      GetSessionMtime: string -> DateTimeOffset option }
-
-let private providers =
-    [ { Provider = Claude
-        GetStatus = ClaudeDetector.getStatus
-        GetLastMessage = ClaudeDetector.getLastMessage
-        GetLastUserMessage = ClaudeDetector.getLastUserMessage
-        GetSessionMtime = ClaudeDetector.getSessionMtime }
-      { Provider = Copilot
-        GetStatus = CopilotDetector.getStatus
-        GetLastMessage = CopilotDetector.getLastMessage
-        GetLastUserMessage = CopilotDetector.getLastUserMessage
-        GetSessionMtime = CopilotDetector.getSessionMtime } ]
 
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
     let configPath = Path.Combine(worktreePath, ".treemon.json")
@@ -47,6 +29,12 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
             Log.log "CodingTool" $"Failed to read .treemon.json: {ex.Message}"
             None
 
+type CodingToolResult =
+    { Status: CodingToolStatus
+      Provider: CodingToolProvider option
+      LastUserMessage: (string * DateTimeOffset) option
+      LastAssistantMessage: CardEvent option }
+
 type internal ProviderResult =
     { Provider: CodingToolProvider
       Status: CodingToolStatus
@@ -58,6 +46,8 @@ let internal pickActiveProvider (results: ProviderResult list) : ProviderResult 
     |> List.sortByDescending (fun r -> r.Mtime |> Option.defaultValue DateTimeOffset.MinValue)
     |> List.tryHead
 
+// Uses pickActiveProvider (filter non-Idle, pick most recent) instead of tryFind
+// so that when multiple providers report status, the most recently active wins.
 let internal resolveStatus
     (configuredProvider: CodingToolProvider option)
     (providerResults: ProviderResult list)
@@ -65,55 +55,86 @@ let internal resolveStatus
 
     match configuredProvider with
     | Some provider ->
-        let result =
-            providerResults
-            |> List.tryFind (fun r -> r.Provider = provider)
-            |> Option.map _.Status
-            |> Option.defaultValue Idle
+        let matching = providerResults |> List.filter (fun r -> r.Provider = provider)
 
-        result, Some provider
+        match pickActiveProvider matching with
+        | Some r -> r.Status, Some provider
+        | None -> Idle, Some provider
     | None ->
         match pickActiveProvider providerResults with
         | Some r -> r.Status, Some r.Provider
         | None -> Idle, None
 
-let private gatherResults (worktreePath: string) (entries: ProviderEntry list) =
-    entries
-    |> List.map (fun entry ->
-        { Provider = entry.Provider
-          Status = entry.GetStatus worktreePath
-          Mtime = entry.GetSessionMtime worktreePath })
+let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) list) =
+    { Provider = Claude
+      Status = ClaudeDetector.getStatusFromEnumeratedFiles files
+      Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
 
-let getStatus (worktreePath: string) : CodingToolStatus * CodingToolProvider option =
+let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) =
+    let claudeResult = getClaudeResult claudeFiles
+
+    let copilotResult =
+        { Provider = Copilot
+          Status = CopilotDetector.getStatus worktreePath
+          Mtime = CopilotDetector.getSessionMtime worktreePath }
+
+    let vsCodeCopilotResult =
+        { Provider = Copilot
+          Status = VsCodeCopilotDetector.getStatus worktreePath
+          Mtime = VsCodeCopilotDetector.getSessionMtime worktreePath }
+
+    [ claudeResult; copilotResult; vsCodeCopilotResult ]
+
+let getRefreshData (worktreePath: string) : CodingToolResult =
     let configured = readConfiguredProvider worktreePath
-    let results = gatherResults worktreePath providers
-    resolveStatus configured results
+    let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
+    let results = gatherResultsFromFiles worktreePath claudeFiles
 
-let getLastMessage (worktreePath: string) : CardEvent option =
-    let configured = readConfiguredProvider worktreePath
+    let status, provider = resolveStatus configured results
+    let target = configured |> Option.orElse provider
 
-    let candidates =
-        match configured with
-        | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
-        | None -> providers
-
-    candidates
-    |> List.choose (fun entry -> entry.GetLastMessage worktreePath)
-    |> List.sortByDescending _.Timestamp
-    |> List.tryHead
-
-let getLastUserMessage (worktreePath: string) (activeProvider: CodingToolProvider option) : (string * DateTimeOffset) option =
-    let configured = readConfiguredProvider worktreePath
-    let target = configured |> Option.orElse activeProvider
-
-    let candidates =
+    let lastUserMsg =
         match target with
-        | Some provider -> providers |> List.filter (fun e -> e.Provider = provider)
-        | None -> providers
+        | Some Claude ->
+            ClaudeDetector.getLastUserMessageFromFiles claudeFiles
+        | Some Copilot ->
+            let cliMsg = CopilotDetector.getLastUserMessage worktreePath
+            let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
 
-    candidates
-    |> List.choose (fun entry -> entry.GetLastUserMessage worktreePath)
-    |> List.tryHead
+            [ cliMsg; vsCodeMsg ]
+            |> List.choose id
+            |> List.sortByDescending snd
+            |> List.tryHead
+        | None ->
+            let claudeMsg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
+            let copilotMsg = CopilotDetector.getLastUserMessage worktreePath
+
+            let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
+
+            [ claudeMsg; copilotMsg; vsCodeMsg ]
+            |> List.choose id
+            |> List.sortByDescending snd
+            |> List.tryHead
+
+    let lastAssistantMsg =
+        match target with
+        | Some Claude ->
+            ClaudeDetector.getLastMessageFromFiles claudeFiles
+        | Some Copilot ->
+            [ CopilotDetector.getLastMessage worktreePath
+              VsCodeCopilotDetector.getLastMessage worktreePath ]
+            |> List.choose id
+            |> List.sortByDescending _.Timestamp
+            |> List.tryHead
+        | None ->
+            [ ClaudeDetector.getLastMessageFromFiles claudeFiles
+              CopilotDetector.getLastMessage worktreePath
+              VsCodeCopilotDetector.getLastMessage worktreePath ]
+            |> List.choose id
+            |> List.sortByDescending _.Timestamp
+            |> List.tryHead
+
+    { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg }
 
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")

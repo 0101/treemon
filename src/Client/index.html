@@ -122,12 +122,15 @@
         .progress-segment.seg-closed { background: #a6e3a1; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
-        .pr-badge { background: #2e3452; color: #b4befe; padding: 1px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; text-decoration: none; cursor: pointer; }
+        .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }
         .pr-badge.draft { background: #313244; color: #7f849c; }
         .pr-badge.merged { background: #2e3245; color: #cba6f7; }
         .thread-badge { background: #3b2030; color: #f38ba8; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
         .thread-badge.dimmed { background: #313244; color: #7f849c; font-weight: 400; }
+
+        .conflict-icon { width: 1em; height: 1em; flex-shrink: 0; margin-left: 4px; }
+        .conflict-icon path { fill: #e06c75; }
 
         .build-badge { padding: 1px 6px; border-radius: 4px; font-size: 0.82em; font-weight: 500; white-space: nowrap; }
         .build-badge.succeeded { background: #1e3a2f; color: #a6e3a1; }
@@ -333,7 +336,7 @@
         }
         .modal-dialog {
             background: #2a2a3c; border: 1px solid #45475a; border-radius: 10px;
-            width: 360px; max-width: 90vw;
+            width: 420px; max-width: 90vw;
             box-shadow: 0 8px 32px rgba(0,0,0,0.5);
         }
         .modal-header {
@@ -341,6 +344,7 @@
         }
         .modal-header.error { color: #f38ba8; }
         .modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+        .modal-body code { color: #89b4fa; font-family: 'Consolas', 'Cascadia Mono', monospace; }
         .modal-body.creating {
             flex-direction: row; align-items: center; justify-content: center;
             gap: 4px; padding: 28px 18px; font-size: 0.95em; color: #a6adc8;
@@ -359,7 +363,7 @@
             outline: none; cursor: pointer;
         }
         .modal-select:focus { border-color: #89b4fa; }
-        .modal-footer { padding: 0 18px 14px; display: flex; justify-content: flex-end; gap: 8px; }
+        .modal-footer { padding: 0 18px 14px; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
         .modal-btn {
             border-radius: 6px; padding: 6px 14px; cursor: pointer;
             font-family: inherit; font-size: 0.88em; transition: background 0.15s;
@@ -373,6 +377,10 @@
         }
         .modal-btn.submit:hover { background: #3b4068; }
         .modal-btn.submit:disabled { opacity: 0.4; cursor: not-allowed; }
+        .modal-btn.danger {
+            background: #3b2030; border: 1px solid #f38ba8; color: #f38ba8; font-weight: 600;
+        }
+        .modal-btn.danger:hover { background: #4a2540; }
         .modal-error-message {
             color: #f38ba8; font-size: 0.9em; white-space: pre-wrap; word-break: break-word;
             background: #1e1e2e; padding: 10px; border-radius: 6px;

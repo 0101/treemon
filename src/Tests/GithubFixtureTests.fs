@@ -44,20 +44,6 @@ type ParsePrListFixtureTests() =
         Assert.That(pr1.Title, Is.EqualTo("Add contributing guide and CI workflow"))
 
     [<Test>]
-    member _.``Sums comments and review_comments``() =
-        let prs = readFixture "pr-list.json" |> parsePrList
-        let pr1 = prs |> List.find (fun pr -> pr.PrNumber = 1)
-        Assert.That(pr1.CommentCount, Is.EqualTo(1))
-        Assert.That(pr1.ReviewCommentCount, Is.EqualTo(3))
-
-    [<Test>]
-    member _.``PR with zero comments has zero counts``() =
-        let prs = readFixture "pr-list.json" |> parsePrList
-        let pr2 = prs |> List.find (fun pr -> pr.PrNumber = 2)
-        Assert.That(pr2.CommentCount, Is.EqualTo(0))
-        Assert.That(pr2.ReviewCommentCount, Is.EqualTo(0))
-
-    [<Test>]
     member _.``Open PRs are not merged``() =
         let prs = readFixture "pr-list.json" |> parsePrList
         Assert.That(prs |> List.forall (fun pr -> not pr.IsMerged), Is.True)
@@ -161,3 +147,55 @@ type ParseFailedJobsFixtureTests() =
     member _.``Invalid JSON returns None``() =
         let result = parseFailedJobs "not json"
         Assert.That(result, Is.EqualTo(None))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ParsePrCommentCountsTests() =
+
+    [<Test>]
+    member _.``Sums comments and review_comments from PR detail``() =
+        let count = readFixture "pr-detail.json" |> parsePrCommentCounts
+        Assert.That(count, Is.EqualTo(4))
+
+    [<Test>]
+    member _.``Returns zero for invalid JSON``() =
+        let count = parsePrCommentCounts "not json"
+        Assert.That(count, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``Returns zero when fields are missing``() =
+        let count = parsePrCommentCounts """{"number": 1}"""
+        Assert.That(count, Is.EqualTo(0))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ParsePrMergeabilityTests() =
+
+    [<Test>]
+    member _.``PR with mergeable false has conflicts``() =
+        let result = readFixture "pr-detail-conflicts.json" |> parsePrMergeability
+        Assert.That(result, Is.True)
+
+    [<Test>]
+    member _.``PR with mergeable true has no conflicts``() =
+        let result = readFixture "pr-detail-mergeable.json" |> parsePrMergeability
+        Assert.That(result, Is.False)
+
+    [<Test>]
+    member _.``PR with mergeable null has no conflicts``() =
+        let result = readFixture "pr-detail-null-mergeable.json" |> parsePrMergeability
+        Assert.That(result, Is.False)
+
+    [<Test>]
+    member _.``Invalid JSON returns false``() =
+        let result = parsePrMergeability "not json"
+        Assert.That(result, Is.False)
+
+    [<Test>]
+    member _.``JSON without mergeable field returns false``() =
+        let result = parsePrMergeability """{"number": 1, "title": "test"}"""
+        Assert.That(result, Is.False)

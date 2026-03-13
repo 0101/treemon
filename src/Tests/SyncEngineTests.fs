@@ -88,8 +88,8 @@ type ProcessMessageTests() =
         Assert.That(newState.Events.ContainsKey("feature"), Is.True, "Should have events for branch")
         let featureEvents = newState.Events |> Map.find "feature"
         Assert.That(featureEvents.Length, Is.EqualTo(1), "Should have one initial event")
-        Assert.That(featureEvents.[0].Source, Is.EqualTo("sync"))
-        Assert.That(featureEvents.[0].Status, Is.EqualTo(Some StepStatus.Running))
+        Assert.That(featureEvents[0].Source, Is.EqualTo("sync"))
+        Assert.That(featureEvents[0].Status, Is.EqualTo(Some StepStatus.Running))
         Assert.That(effects, Is.Empty, "BeginSync should not produce side effects")
 
     [<Test>]
@@ -111,7 +111,7 @@ type ProcessMessageTests() =
         let newState, effects = processMessage state (CompleteSync("feature", StepStatus.Succeeded))
 
         Assert.That(effects.Length, Is.EqualTo(1), "Should have one side effect")
-        match effects.[0] with
+        match effects[0] with
         | DisposeCts disposedCts -> Assert.That(Object.ReferenceEquals(disposedCts, cts), Is.True, "Should dispose the original CTS")
         | other -> Assert.Fail($"Expected DisposeCts but got {other}")
 
@@ -151,10 +151,10 @@ type ProcessMessageTests() =
         let newState, effects = processMessage state (CancelSync "feature")
 
         Assert.That(effects.Length, Is.EqualTo(2), "Should emit LogMessage and CancelCts")
-        match effects.[0] with
+        match effects[0] with
         | LogMessage msg -> Assert.That(msg, Does.Contain("feature"), "Log message should mention branch")
         | other -> Assert.Fail($"Expected LogMessage but got {other}")
-        match effects.[1] with
+        match effects[1] with
         | CancelCts cancelledCts -> Assert.That(Object.ReferenceEquals(cancelledCts, cts), Is.True, "Should cancel the original CTS")
         | other -> Assert.Fail($"Expected CancelCts but got {other}")
 
@@ -190,8 +190,8 @@ type ProcessMessageTests() =
         Assert.That(effects, Is.Empty)
         let events = newState.Events |> Map.find "feature"
         Assert.That(events.Length, Is.EqualTo(2))
-        Assert.That(events.[0].Message, Is.EqualTo("second"), "New event should be prepended (cons)")
-        Assert.That(events.[1].Message, Is.EqualTo("first"))
+        Assert.That(events[0].Message, Is.EqualTo("second"), "New event should be prepended (cons)")
+        Assert.That(events[1].Message, Is.EqualTo("first"))
 
     [<Test>]
     member _.``PushEvent creates branch entry if not present``() =

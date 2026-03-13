@@ -14,6 +14,7 @@
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
     <Compile Include="ClaudeDetectorTests.fs" />
+    <Compile Include="ClaudeSessionReplayTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
     <Compile Include="GithubParsingTests.fs" />
     <Compile Include="GithubFixtureTests.fs" />
@@ -22,14 +23,17 @@
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
+    <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
+    <Compile Include="WorktreePathResolutionTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="ActionLaunchSpawnTests.fs" />
     <Compile Include="CommandBuilderTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SerializationTests.fs" />
+    <Compile Include="VsCodeCopilotDetectorTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>

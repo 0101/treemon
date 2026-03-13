@@ -50,15 +50,7 @@ let private buildWorkspaceIndex () =
     { PathToSessionDirs = index; BuiltAt = DateTimeOffset.UtcNow }
 
 let private refreshIndex () =
-    let current = workspaceIndex.Value
-    let age = DateTimeOffset.UtcNow - current.BuiltAt
-
-    if age > TimeSpan.FromSeconds(60.0) then
-        let newIndex = buildWorkspaceIndex ()
-        workspaceIndex.Value <- newIndex
-        newIndex
-    else
-        current
+    FileUtils.refreshIfStale (TimeSpan.FromSeconds(60.0)) workspaceIndex _.BuiltAt buildWorkspaceIndex
 
 let private getSessionDirsForPath (worktreePath: string) =
     let index = refreshIndex ()
@@ -67,36 +59,6 @@ let private getSessionDirsForPath (worktreePath: string) =
     match index.PathToSessionDirs.TryGetValue(normalized) with
     | true, dirs -> dirs
     | false, _ -> []
-
-let private readLastLines (filePath: string) (maxLines: int) =
-    try
-        use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-        if stream.Length = 0L then []
-        else
-            let bufferSize = 64 * 1024
-            let length = stream.Length
-            let start = Math.Max(0L, length - int64 bufferSize)
-            stream.Seek(start, SeekOrigin.Begin) |> ignore
-
-            use reader = new StreamReader(stream)
-            let content = reader.ReadToEnd()
-            let lines = content.Split([| '\r'; '\n' |], StringSplitOptions.None)
-
-            let linesToProcess =
-                if start > 0L && lines.Length > 0 then
-                    lines[1..]
-                else
-                    lines
-
-            linesToProcess
-            |> Array.map _.Trim()
-            |> Array.filter (fun s -> s.Length > 0)
-            |> Array.rev
-            |> Array.truncate maxLines
-            |> Array.toList
-    with ex ->
-        Log.log "Copilot" $"Failed to read events JSONL {filePath}: {ex.Message}"
-        []
 
 type private EventKind =
     | UserMessage
@@ -173,16 +135,11 @@ let getStatus (worktreePath: string) =
         if age > TimeSpan.FromHours(2.0) then
             Idle
         else
-            readLastLines fi.FullName 20
+            FileUtils.readLastLines "Copilot" fi.FullName 20
             |> List.tryPick tryParseEventKind
             |> Option.map statusFromEvent
             |> Option.defaultValue Idle
     | None -> Idle
-
-let private truncateMessage (maxLen: int) (text: string) =
-    let singleLine = text.Replace("\r", "").Replace("\n", " ").Trim()
-    if singleLine.Length <= maxLen then singleLine
-    else singleLine[..maxLen-1].TrimEnd() + "..."
 
 let private tryParseAssistantContent (line: string) =
     try
@@ -219,11 +176,10 @@ let getLastMessage (worktreePath: string) =
 
     findMostRecentEventsFile sessionDirs
     |> Option.bind (fun fi ->
-        readLastLines fi.FullName 20
-        |> List.tryPick tryParseAssistantContent)
+        FileUtils.scanBackward "Copilot" fi.FullName tryParseAssistantContent)
     |> Option.map (fun (text, timestamp) ->
         { Source = "copilot"
-          Message = truncateMessage 80 text
+          Message = FileUtils.truncateMessage 80 text
           Timestamp = timestamp
           Status = None
           Duration = None })
@@ -258,16 +214,16 @@ let private tryParseUserContent (line: string) =
         Log.log "Copilot" $"Failed to parse user content: {ex.Message}"
         None
 
+let internal scanForUserMessage (eventsPath: string) =
+    FileUtils.scanBackward "Copilot" eventsPath tryParseUserContent
+
 let getLastUserMessage (worktreePath: string) =
     let sessionDirs = getSessionDirsForPath worktreePath
 
     findMostRecentEventsFile sessionDirs
-    |> Option.bind (fun fi ->
-        readLastLines fi.FullName 20
-        |> List.tryPick tryParseUserContent)
-    |> Option.map (fun (text, ts) -> truncateMessage 120 text, ts)
+    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
+    |> Option.map (fun (text, ts) -> FileUtils.truncateMessage 120 text, ts)
 
-/// For testing: parse events from a specific directory (bypasses workspace index)
 let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
     try
         let fi = FileInfo(eventsPath)
@@ -277,7 +233,7 @@ let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) 
             if age > TimeSpan.FromHours(2.0) then
                 Idle
             else
-                readLastLines eventsPath 20
+                FileUtils.readLastLines "Copilot" eventsPath 20
                 |> List.tryPick tryParseEventKind
                 |> Option.map statusFromEvent
                 |> Option.defaultValue Idle
@@ -285,16 +241,14 @@ let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) 
         Log.log "Copilot" $"Failed to read status from {eventsPath}: {ex.Message}"
         Idle
 
-/// For testing: parse last message from a specific events file
 let internal getLastMessageFromEventsFile (eventsPath: string) =
     try
         if not (File.Exists(eventsPath)) then None
         else
-            readLastLines eventsPath 20
-            |> List.tryPick tryParseAssistantContent
+            FileUtils.scanBackward "Copilot" eventsPath tryParseAssistantContent
             |> Option.map (fun (text, timestamp) ->
                 { Source = "copilot"
-                  Message = truncateMessage 80 text
+                  Message = FileUtils.truncateMessage 80 text
                   Timestamp = timestamp
                   Status = None
                   Duration = None })
@@ -302,5 +256,4 @@ let internal getLastMessageFromEventsFile (eventsPath: string) =
         Log.log "Copilot" $"Failed to read last message from {eventsPath}: {ex.Message}"
         None
 
-/// For testing: parse workspace.yaml cwd
 let internal parseCwd (yamlPath: string) = parseCwdFromYaml yamlPath
