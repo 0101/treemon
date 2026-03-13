@@ -15,6 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Fable.Browser.Css" Version="2.*" />
     <PackageReference Include="Fable.Browser.Dom" Version="2.*" />
     <PackageReference Include="Fable.Core" Version="4.*" />
     <PackageReference Include="Fable.Elmish" Version="4.*" />
