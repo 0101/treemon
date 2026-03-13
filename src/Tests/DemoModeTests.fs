@@ -169,12 +169,11 @@ type DemoModeTests() =
         }
 
     [<Test>]
-    member this.``Demo mode shows DeployBranch``() =
+    member this.``Demo mode does not show DeployBranch``() =
         task {
             let deployBranch = this.Page.Locator(".deploy-branch")
-            do! deployBranch.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! text = deployBranch.TextContentAsync()
-            Assert.That(text, Is.EqualTo("feature/retry-logic"), "DeployBranch should show the demo branch name")
+            let! count = deployBranch.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "DeployBranch should not be rendered in demo mode")
         }
 
     [<Test>]
@@ -282,15 +281,14 @@ type DemoModeTests() =
         }
 
     [<Test>]
-    member this.``Demo mode API returns DeployBranch``() =
+    member this.``Demo mode API returns no DeployBranch``() =
         task {
             use client = new HttpClient()
             let content = new StringContent("[]", Encoding.UTF8, "application/json")
             let! response = client.PostAsync($"{demoServerUrl}/IWorktreeApi/getWorktrees", content)
             let! body = response.Content.ReadAsStringAsync()
             let dashboard = deserializeDashboard body
-            Assert.That(dashboard.DeployBranch.IsSome, Is.True, "Demo mode should include DeployBranch")
-            Assert.That(dashboard.DeployBranch.Value, Is.EqualTo("feature/retry-logic"))
+            Assert.That(dashboard.DeployBranch.IsNone, Is.True, "Demo mode should not include DeployBranch")
         }
 
     [<Test>]

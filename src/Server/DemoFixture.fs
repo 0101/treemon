@@ -75,6 +75,20 @@ let private prGithubMerged: PrInfo =
       IsMerged = true
       HasConflicts = false }
 
+let private prAzDoAuth: PrInfo =
+    { Id = 4203
+      Title = "Add JWT auth middleware for API endpoints"
+      Url = "https://dev.azure.com/contoso/CloudPlatform/_git/CloudPlatform/pullrequest/4203"
+      IsDraft = false
+      Comments = CountOnly 3
+      Builds =
+        [ { Name = "CI Build"
+            Status = Succeeded
+            Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88810"
+            Failure = None } ]
+      IsMerged = false
+      HasConflicts = false }
+
 let private wtAzDoMain: WorktreeStatus =
     { Path = azDoPath "main"
       Branch = "main"
@@ -121,6 +135,22 @@ let private wtAzDoConfig: WorktreeStatus =
       IsDirty = false
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
       HasActiveSession = false
+      IsArchived = false }
+
+let private wtAzDoAuth: WorktreeStatus =
+    { Path = azDoPath "feature-auth"
+      Branch = "feature/auth-middleware"
+      LastCommitMessage = "Add JWT validation and claims extraction"
+      LastCommitTime = baseTimestamp.AddMinutes(-8.0)
+      Beads = { Open = 2; InProgress = 1; Closed = 3 }
+      CodingTool = Working
+      CodingToolProvider = Some Copilot
+      LastUserMessage = Some ("add token validation for api routes", baseTimestamp.AddMinutes(-12.0))
+      Pr = HasPr prAzDoAuth
+      MainBehindCount = 1
+      IsDirty = true
+      WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
+      HasActiveSession = true
       IsArchived = false }
 
 let private wtAzDoArchived: WorktreeStatus =
@@ -243,7 +273,7 @@ let private baseDashboard: DashboardResponse =
     { Repos =
         [ { RepoId = azDoRepoId
             RootFolderName = "CloudPlatform"
-            Worktrees = [ wtAzDoMain; wtAzDoRetry; wtAzDoConfig; wtAzDoArchived ]
+            Worktrees = [ wtAzDoMain; wtAzDoRetry; wtAzDoConfig; wtAzDoAuth; wtAzDoArchived ]
             IsReady = true }
           { RepoId = githubRepoId
             RootFolderName = "DataPipeline"
@@ -252,7 +282,7 @@ let private baseDashboard: DashboardResponse =
       SchedulerEvents = baseSchedulerEvents
       LatestByCategory = baseLatestByCategory
       AppVersion = "demo|0"
-      DeployBranch = Some "feature/retry-logic"
+      DeployBranch = None
       SystemMetrics = Some baseMetrics
       EditorName = "VS Code" }
 
@@ -308,6 +338,14 @@ let private prAzDoOpenBuilding =
                 Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"
                 Failure = None } ] }
 
+let private prAzDoAuthBuilding =
+    { prAzDoAuth with
+        Builds =
+            [ { Name = "CI Build"
+                Status = Building
+                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88811"
+                Failure = None } ] }
+
 let private updateWorktree (repoId: RepoId) (branch: string) (transform: WorktreeStatus -> WorktreeStatus) (repos: RepoWorktrees list) =
     repos
     |> List.map (fun repo ->
@@ -335,6 +373,12 @@ let private frame2LatestByCategory =
           Timestamp = baseTimestamp.AddSeconds(3.0)
           Status = Some (StepStatus.Failed "bd: database locked")
           Duration = Some (TimeSpan.FromSeconds(5.0)) }
+    |> Map.add "CodingToolRefresh"
+        { Source = "CodingToolRefresh"
+          Message = "5 agents checked"
+          Timestamp = baseTimestamp.AddSeconds(2.5)
+          Status = Some StepStatus.Succeeded
+          Duration = Some (TimeSpan.FromSeconds(1.2)) }
 
 let private frame2SyncStatus =
     baseSyncStatus
@@ -343,23 +387,19 @@ let private frame2SyncStatus =
             Message = "feature/retry-logic: pulling latest"
             Timestamp = baseTimestamp.AddSeconds(3.0)
             Status = Some StepStatus.Running
-            Duration = None }
-          { Source = "sync"
-            Message = "feature/retry-logic: sync started"
-            Timestamp = baseTimestamp.AddSeconds(3.0)
-            Status = Some StepStatus.Running
             Duration = None } ]
 
 let private frame2Repos =
     baseDashboard.Repos
     |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
         { wt with
-            CodingTool = WaitingForUser
-            LastUserMessage = Some ("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
             Pr = HasPr prAzDoOpenFailed })
+    |> updateWorktree azDoRepoId "feature/auth-middleware" (fun wt ->
+        { wt with
+            Pr = HasPr prAzDoAuthBuilding })
     |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
         { wt with
-            CodingTool = WaitingForUser
+            CodingTool = Done
             Pr = HasPr prGithubOpenCanceled })
 
 let private frame2: FixtureData =
@@ -388,6 +428,12 @@ let private frame3LatestByCategory =
           Timestamp = baseTimestamp.AddSeconds(6.0)
           Status = Some StepStatus.Succeeded
           Duration = Some (TimeSpan.FromSeconds(0.3)) }
+    |> Map.add "PrFetch"
+        { Source = "PrFetch"
+          Message = "4 PRs fetched"
+          Timestamp = baseTimestamp.AddSeconds(5.5)
+          Status = Some StepStatus.Succeeded
+          Duration = Some (TimeSpan.FromSeconds(1.8)) }
 
 let private frame3Repos =
     baseDashboard.Repos
@@ -396,6 +442,14 @@ let private frame3Repos =
             CodingTool = Working
             MainBehindCount = 0
             Pr = HasPr prAzDoOpenSucceeded })
+    |> updateWorktree azDoRepoId "refactor/config-loading" (fun wt ->
+        { wt with
+            CodingTool = Working
+            HasActiveSession = true })
+    |> updateWorktree azDoRepoId "feature/auth-middleware" (fun wt ->
+        { wt with
+            CodingTool = Done
+            IsDirty = false })
     |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
         { wt with
             CodingTool = Done
@@ -421,9 +475,15 @@ let private frame4Repos =
             Pr = HasPr prAzDoOpenBuilding })
     |> updateWorktree azDoRepoId "refactor/config-loading" (fun wt ->
         { wt with
-            CodingTool = WaitingForUser
-            CodingToolProvider = Some Claude
-            LastUserMessage = Some ("review the config changes", baseTimestamp.AddMinutes(-1.0)) })
+            CodingTool = Working
+            HasActiveSession = true
+            IsDirty = true })
+    |> updateWorktree azDoRepoId "feature/auth-middleware" (fun wt ->
+        { wt with
+            CodingTool = Working
+            LastCommitMessage = "Add role-based authorization checks"
+            LastUserMessage = Some ("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-1.0))
+            WorkMetrics = Some { CommitCount = 6; LinesAdded = 275; LinesRemoved = 41 } })
     |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
         { wt with
             CodingTool = Idle
