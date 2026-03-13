@@ -1,0 +1,3 @@
+{"kind":0,"v":{"requests":[{"message":{"text":"Explain closures"},"modelState":{"value":0},"response":[]}]}}
+{"kind":2,"k":["requests","0","response"],"v":[{"kind":"markdownContent","value":"A closure captures variables from its enclosing scope."}]}
+{"kind":1,"k":["requests","0","modelState"],"v":{"value":4,"completedAt":1710200000000}}

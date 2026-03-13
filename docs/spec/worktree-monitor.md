@@ -27,6 +27,12 @@
 - Scheduler picks most-overdue task globally across all repos
 - Branch events scoped by `{repoId}/{branch}` to prevent cross-repo collisions
 
+### Worktree Identification
+
+- All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
+- Server resolves repo and branch from path internally; archive persistence still stores branch names per repo in `.treemon.json`
+- Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
+
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
@@ -49,7 +55,7 @@
 
 ### Coding Tool Detection
 
-- Supports multiple providers: Claude Code, Copilot CLI. Adding a new provider = one detector module + registration in orchestrator.
+- Supports multiple providers: Claude Code, Copilot CLI, VS Code Copilot. Adding a new provider = one detector module + registration in orchestrator. Both CLI and VS Code Copilot report as `Provider = Copilot`; `pickActiveProvider` selects the most recently active one.
 - Every 15s refresh cycle checks all registered providers for each worktree
 - Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Done/Idle)
 - Orchestrator picks the most recently active non-Idle provider (by session file mtime)
@@ -57,6 +63,7 @@
 - Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
 - Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
+- VS Code Copilot: reads `%APPDATA%/Code/User/workspaceStorage/{hash}/chatSessions/*.jsonl` mutation logs, maps workspace storage hash dirs to worktree paths via `workspace.json` folder URIs, replays JSONL mutation log (kind 0: snapshot, 1: set, 2: push/splice; kind 3 delete intentionally ignored) to reconstruct last request's model state and response
 
 #### Claude Parent/Subagent Detection
 
@@ -75,10 +82,10 @@ Claude Code spawns subagent sessions (via the Task tool) that write to nested JS
 1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
 2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
 3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
-4. If parent status is `Done` or `Idle` -- check subagent files: if any subagent is `Working`, return `Working` (parent file hasn't been written to while the subagent runs)
-5. Otherwise return the parent status
+4. If parent status is `Done` -- return `Done` (parent Done is authoritative; all subagents have completed before parent reaches end_turn)
+5. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle`
 
-Parent `WaitingForUser` is never overridden by subagent activity. Only `Done`/`Idle` can be upgraded to `Working` by an active subagent.
+Parent `Done` and `WaitingForUser` are never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
 
 **Scoping rules:**
 - `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
@@ -178,6 +185,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
 | `src/Server/ClaudeDetector.fs` | Claude Code session file scanning, parent/subagent detection |
 | `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
+| `src/Server/VsCodeCopilotDetector.fs` | VS Code Copilot workspace storage scanning, JSONL mutation log replay |
 | `src/Server/CodingToolStatus.fs` | Coding tool orchestrator: config override, provider dispatch, winner selection |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
@@ -205,6 +213,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
 - Claude subagent detection is path-based only (directory structure), no content parsing needed
 - Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
+- `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable

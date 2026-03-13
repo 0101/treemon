@@ -50,15 +50,7 @@ let private buildWorkspaceIndex () =
     { PathToSessionDirs = index; BuiltAt = DateTimeOffset.UtcNow }
 
 let private refreshIndex () =
-    let current = workspaceIndex.Value
-    let age = DateTimeOffset.UtcNow - current.BuiltAt
-
-    if age > TimeSpan.FromSeconds(60.0) then
-        let newIndex = buildWorkspaceIndex ()
-        workspaceIndex.Value <- newIndex
-        newIndex
-    else
-        current
+    FileUtils.refreshIfStale (TimeSpan.FromSeconds(60.0)) workspaceIndex _.BuiltAt buildWorkspaceIndex
 
 let private getSessionDirsForPath (worktreePath: string) =
     let index = refreshIndex ()
@@ -184,8 +176,7 @@ let getLastMessage (worktreePath: string) =
 
     findMostRecentEventsFile sessionDirs
     |> Option.bind (fun fi ->
-        FileUtils.readLastLines "Copilot" fi.FullName 20
-        |> List.tryPick tryParseAssistantContent)
+        FileUtils.scanBackward "Copilot" fi.FullName tryParseAssistantContent)
     |> Option.map (fun (text, timestamp) ->
         { Source = "copilot"
           Message = FileUtils.truncateMessage 80 text
@@ -223,13 +214,14 @@ let private tryParseUserContent (line: string) =
         Log.log "Copilot" $"Failed to parse user content: {ex.Message}"
         None
 
+let internal scanForUserMessage (eventsPath: string) =
+    FileUtils.scanBackward "Copilot" eventsPath tryParseUserContent
+
 let getLastUserMessage (worktreePath: string) =
     let sessionDirs = getSessionDirsForPath worktreePath
 
     findMostRecentEventsFile sessionDirs
-    |> Option.bind (fun fi ->
-        FileUtils.readLastLines "Copilot" fi.FullName 20
-        |> List.tryPick tryParseUserContent)
+    |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
     |> Option.map (fun (text, ts) -> FileUtils.truncateMessage 120 text, ts)
 
 let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
@@ -253,8 +245,7 @@ let internal getLastMessageFromEventsFile (eventsPath: string) =
     try
         if not (File.Exists(eventsPath)) then None
         else
-            FileUtils.readLastLines "Copilot" eventsPath 20
-            |> List.tryPick tryParseAssistantContent
+            FileUtils.scanBackward "Copilot" eventsPath tryParseAssistantContent
             |> Option.map (fun (text, timestamp) ->
                 { Source = "copilot"
                   Message = FileUtils.truncateMessage 80 text
