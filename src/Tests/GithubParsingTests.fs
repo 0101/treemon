@@ -178,10 +178,6 @@ type CommentSummaryRenderingTests() =
             let text = $"{u}/{t} threads"
             let dimmed = (u = 0)
             Some(text, dimmed)
-        | CountOnly c ->
-            let text = $"{c} comments"
-            let dimmed = (c = 0)
-            Some(text, dimmed)
         | _ -> None
 
     [<Test>]
@@ -204,19 +200,3 @@ type CommentSummaryRenderingTests() =
     member _.``WithResolution zero total returns None``() =
         let result = formatComments (WithResolution(0, 0))
         Assert.That(result, Is.EqualTo(None))
-
-    [<Test>]
-    member _.``CountOnly shows comments format``() =
-        match formatComments (CountOnly 5) with
-        | Some(text, isDimmed) ->
-            Assert.That(text, Is.EqualTo("5 comments"))
-            Assert.That(isDimmed, Is.False)
-        | None -> Assert.Fail("Expected Some result")
-
-    [<Test>]
-    member _.``CountOnly zero is dimmed``() =
-        match formatComments (CountOnly 0) with
-        | Some(text, isDimmed) ->
-            Assert.That(text, Is.EqualTo("0 comments"))
-            Assert.That(isDimmed, Is.True)
-        | None -> Assert.Fail("Expected Some result")

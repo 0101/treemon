@@ -118,8 +118,7 @@ type MultiRepoApiTests() =
             let! dashboard = fetchDashboard ()
 
             let allBranches =
-                dashboard.Repos
-                |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+                dashboard.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
             Assert.That(allBranches.Length, Is.EqualTo(allBranches |> List.distinct |> List.length),
                 "Branch names should be distinct across all repos in fixture data")
@@ -162,7 +161,7 @@ type MultiRepoApiTests() =
         }
 
     [<Test>]
-    member _.``GitHub PR uses CountOnly comment format``() =
+    member _.``GitHub PR has valid thread counts``() =
         task {
             let! dashboard = fetchDashboard ()
 
@@ -176,13 +175,13 @@ type MultiRepoApiTests() =
                     | HasPr info when info.Url.Contains("github.com") -> Some info
                     | _ -> None)
 
-            match githubPr.Comments with
-            | CountOnly _ -> Assert.Pass("GitHub PR correctly uses CountOnly comment format")
-            | WithResolution _ -> Assert.Fail("GitHub PR should use CountOnly, not WithResolution")
+            let (WithResolution(unresolved, total)) = githubPr.Comments
+            Assert.That(total, Is.GreaterThan(0), "GitHub PR fixture should have review threads")
+            Assert.That(unresolved, Is.LessThanOrEqualTo(total), "Unresolved threads should not exceed total")
         }
 
     [<Test>]
-    member _.``AzDo PR uses WithResolution comment format``() =
+    member _.``AzDo PR has valid thread counts``() =
         task {
             let! dashboard = fetchDashboard ()
 
@@ -196,7 +195,7 @@ type MultiRepoApiTests() =
                     | HasPr info when info.Url.Contains("dev.azure.com") -> Some info
                     | _ -> None)
 
-            match azdoPr.Comments with
-            | WithResolution _ -> Assert.Pass("AzDo PR correctly uses WithResolution comment format")
-            | CountOnly _ -> Assert.Fail("AzDo PR should use WithResolution, not CountOnly")
+            let (WithResolution(unresolved, total)) = azdoPr.Comments
+            Assert.That(total, Is.GreaterThan(0), "AzDo PR fixture should have review threads")
+            Assert.That(unresolved, Is.LessThanOrEqualTo(total), "Unresolved threads should not exceed total")
         }

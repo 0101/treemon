@@ -249,7 +249,7 @@ type DashboardTests() =
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with PR threads; thread badges should be present")
 
             let! threadText = threadBadges.First.TextContentAsync()
-            Assert.That(threadText, Does.Match(@"\d+/\d+ threads").Or.Match(@"\d+ comments"))
+            Assert.That(threadText, Does.Match(@"\d+/\d+ threads"))
         }
 
     [<Test>]
@@ -1679,50 +1679,48 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``GitHub PR comment badge shows N comments format``() =
+    member this.``GitHub PR thread badge shows N slash M threads format``() =
         task {
             let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
             do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let commentBadges = ghCards.Locator(".thread-badge")
-            do! commentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = commentBadges.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR cards should have comment badges")
+            let threadBadges = ghCards.Locator(".thread-badge")
+            do! threadBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = threadBadges.CountAsync()
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR cards should have thread badges")
 
-            let! allUseCommentsFormat =
-                commentBadges.EvaluateAllAsync<bool>(
-                    "els => els.every(el => el.textContent.includes('comments'))")
-            Assert.That(allUseCommentsFormat, Is.True,
-                "GitHub PR comment badges should use 'N comments' format (not 'N/M threads')")
+            let! allUseThreadsFormat =
+                threadBadges.EvaluateAllAsync<bool>(
+                    "els => els.every(el => el.textContent.includes('threads'))")
+            Assert.That(allUseThreadsFormat, Is.True,
+                "GitHub PR thread badges should use 'N/M threads' format")
         }
 
     [<Test>]
-    member this.``GitHub PR with comments shows non-dimmed comment badge``() =
+    member this.``GitHub PR with unresolved threads shows non-dimmed thread badge``() =
         task {
             let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
             do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let nonDimmedBadges = ghCards.Locator(".thread-badge:not(.dimmed)")
             let! count = nonDimmedBadges.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR with comments should have non-dimmed badge")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "GitHub PR with unresolved threads should have non-dimmed badge")
 
             let! text = nonDimmedBadges.First.TextContentAsync()
-            Assert.That(text, Does.Match(@"^\d+ comments$"), "Non-dimmed comment badge should show count with 'comments' suffix")
-            Assert.That(text, Does.Not.StartWith("0"), "Non-dimmed comment badge should have non-zero count")
+            Assert.That(text, Does.Match(@"^\d+/\d+ threads$"), "Non-dimmed thread badge should show 'N/M threads' format")
         }
 
     [<Test>]
-    member this.``GitHub PR with zero comments shows dimmed comment badge``() =
+    member this.``GitHub PR with zero threads shows no thread badge``() =
         task {
             let ghCards = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon')) .wt-card")
             do! ghCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! cardCount = ghCards.CountAsync()
 
-            let dimmedBadges = ghCards.Locator(".thread-badge.dimmed")
-            let! count = dimmedBadges.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has GitHub PR with 0 comments; dimmed badge should be present")
-
-            let! text = dimmedBadges.First.TextContentAsync()
-            Assert.That(text, Is.EqualTo("0 comments"), "Dimmed comment badge should show '0 comments'")
+            let threadBadges = ghCards.Locator(".thread-badge")
+            let! badgeCount = threadBadges.CountAsync()
+            Assert.That(badgeCount, Is.EqualTo(1),
+                "Exactly one GitHub PR card should have a thread badge; PR with 0 total threads should have none")
         }
 
     [<Test>]
@@ -1929,7 +1927,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``AzDo PR uses threads format while GitHub uses comments format``() =
+    member this.``Both AzDo and GitHub PRs use threads format``() =
         task {
             let azdoSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('TestProject'))")
             let azdoThreadBadges = azdoSection.Locator(".thread-badge")
@@ -1938,10 +1936,10 @@ type DashboardTests() =
             Assert.That(azdoText, Does.Contain("threads"), "AzDo PR should use 'threads' format")
 
             let ghSection = this.Page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
-            let ghCommentBadges = ghSection.Locator(".thread-badge")
-            do! ghCommentBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! ghText = ghCommentBadges.First.TextContentAsync()
-            Assert.That(ghText, Does.Contain("comments"), "GitHub PR should use 'comments' format")
+            let ghThreadBadges = ghSection.Locator(".thread-badge")
+            do! ghThreadBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! ghText = ghThreadBadges.First.TextContentAsync()
+            Assert.That(ghText, Does.Contain("threads"), "GitHub PR should use 'threads' format")
         }
 
     [<Test>]

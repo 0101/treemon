@@ -114,7 +114,7 @@ type PersistSessionsTests() =
 
             let entries =
                 sessionsElement.EnumerateObject()
-                |> Seq.map (fun p -> p.Name)
+                |> Seq.map _.Name
                 |> Seq.toList
 
             Assert.That(entries, Is.EqualTo([ @"Q:\code\new" ]),
@@ -273,7 +273,7 @@ type JsonFormatTests() =
 
             let rootProperties =
                 root.EnumerateObject()
-                |> Seq.map (fun p -> p.Name)
+                |> Seq.map _.Name
                 |> Seq.toList
 
             Assert.That(rootProperties, Is.EqualTo([ "sessions" ]),
