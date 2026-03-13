@@ -27,6 +27,12 @@
 - Scheduler picks most-overdue task globally across all repos
 - Branch events scoped by `{repoId}/{branch}` to prevent cross-repo collisions
 
+### Worktree Identification
+
+- All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
+- Server resolves repo and branch from path internally; archive persistence still stores branch names per repo in `.treemon.json`
+- Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
+
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
@@ -76,10 +82,10 @@ Claude Code spawns subagent sessions (via the Task tool) that write to nested JS
 1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
 2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
 3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
-4. If parent status is `Done` or `Idle` -- check subagent files: if any subagent is `Working`, return `Working` (parent file hasn't been written to while the subagent runs)
-5. Otherwise return the parent status
+4. If parent status is `Done` -- return `Done` (parent Done is authoritative; all subagents have completed before parent reaches end_turn)
+5. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle`
 
-Parent `WaitingForUser` is never overridden by subagent activity. Only `Done`/`Idle` can be upgraded to `Working` by an active subagent.
+Parent `Done` and `WaitingForUser` are never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
 
 **Scoping rules:**
 - `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
@@ -213,6 +219,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
 - Claude subagent detection is path-based only (directory structure), no content parsing needed
 - Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
+- `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
