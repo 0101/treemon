@@ -280,7 +280,9 @@ let private runStep
             return Ok proc
     }
 
-let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (ct: CancellationToken) : Async<unit> =
+let buildFetchArgs (upstreamRemote: string) = $"fetch {upstreamRemote}"
+
+let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (ct: CancellationToken) : Async<unit> =
     async {
         try
             Log.log "SyncEngine" $"Starting sync pipeline for {branch} at {worktreePath}"
@@ -298,7 +300,7 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 return ()
             | Ok _ ->
 
-            let! pullResult = runStep post branch SyncStep.Pull worktreePath "git" "fetch origin" ct
+            let! pullResult = runStep post branch SyncStep.Pull worktreePath "git" (buildFetchArgs upstreamRemote) ct
 
             match pullResult with
             | Error status ->
@@ -306,22 +308,24 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 return ()
             | Ok _ ->
 
+            let mergeTarget = GitWorktree.mainRef upstreamRemote
+            let mergeCmd = $"git merge {mergeTarget}"
             post (UpdateProcessState (branch, SyncState.Running SyncStep.Merge))
-            post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" StepStatus.Running))
+            post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd StepStatus.Running))
 
-            let! mergeResult = runProcess worktreePath "git" "merge origin/main" ct
+            let! mergeResult = runProcess worktreePath "git" $"merge {mergeTarget}" ct
 
             match mergeResult with
             | Error msg ->
                 let status = StepStatus.Failed msg
-                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" status))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd status))
                 post (CompleteSync (branch, status))
                 return ()
             | Ok mergeProc when mergeProc.ExitCode = 0 ->
-                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" StepStatus.Succeeded))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd StepStatus.Succeeded))
             | Ok mergeProc ->
                 let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
-                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" "git merge origin/main" (StepStatus.Failed mergeMsg)))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd (StepStatus.Failed mergeMsg)))
 
                 let fileName, arguments = conflictResolutionCommand provider
 
