@@ -14,6 +14,7 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
+      UpstreamRemote: string
       IsReady: bool }
 
 module PerRepoState =
@@ -24,6 +25,7 @@ module PerRepoState =
           BeadsData = Map.empty
           CodingToolData = Map.empty
           PrData = Map.empty
+          UpstreamRemote = "origin"
           IsReady = false }
 
 type DashboardState =
@@ -47,6 +49,7 @@ type StateMsg =
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
     | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
+    | UpdateUpstreamRemote of repoId: RepoId * remote: string
     | RemoveWorktree of repoId: RepoId * path: string
     | GetState of AsyncReplyChannel<DashboardState>
     | LogSchedulerEvent of CardEvent
@@ -125,6 +128,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | UpdatePr(repoId, prMap) ->
         let repo = getRepo repoId state
         updateRepo repoId { repo with PrData = prMap } state
+
+    | UpdateUpstreamRemote(repoId, remote) ->
+        let repo = getRepo repoId state
+        updateRepo repoId { repo with UpstreamRemote = remote } state
 
     | RemoveWorktree(repoId, path) ->
         let repo = getRepo repoId state
@@ -266,18 +273,21 @@ let private executeTask
         | RefreshWorktreeList repoId ->
             let root = rootPaths |> Map.find repoId
             let! worktrees = GitWorktree.listWorktrees root
+            let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             agent.Post(UpdateWorktreeList(repoId, worktrees))
+            agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
 
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
+            let mainRef = $"{repo.UpstreamRemote}/main"
 
             let branch =
                 repo.WorktreeList
                 |> List.tryFind (fun wt -> wt.Path = path)
                 |> Option.bind _.Branch
 
-            let! gitData = GitWorktree.collectWorktreeGitData path branch
+            let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
 
         | RefreshBeads(repoId, path) ->
@@ -299,12 +309,14 @@ let private executeTask
                 |> Seq.choose _.UpstreamBranch
                 |> set
 
-            let! prMap = PrStatus.fetchPrStatusesByRepoRoot root knownBranches
+            let! prMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
             agent.Post(UpdatePr(repoId, prMap))
 
         | RefreshFetch repoId ->
             let root = rootPaths |> Map.find repoId
-            do! GitWorktree.fetchFromOrigin root
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
+            do! GitWorktree.fetchUpstream root repo.UpstreamRemote
     }
 
 let private timeoutMs = 60_000

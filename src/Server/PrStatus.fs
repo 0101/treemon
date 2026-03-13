@@ -70,8 +70,8 @@ let private runAz (arguments: string) =
         Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
         async { return None }
 
-let getRemoteUrl (repoRoot: string) =
-    ProcessRunner.run "PR" "git" $"""-C "{repoRoot}" remote get-url origin"""
+let getRemoteUrl (repoRoot: string) (remoteName: string) =
+    ProcessRunner.run "PR" "git" $"""-C "{repoRoot}" remote get-url {remoteName}"""
 
 type internal ParsedPr =
     { BranchName: string
@@ -427,9 +427,9 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
             return Map entries
     }
 
-let fetchPrStatusesByRepoRoot (repoRoot: string) (knownBranches: Set<string>) =
+let fetchPrStatusesByRepoRoot (repoRoot: string) (upstreamRemote: string) (knownBranches: Set<string>) =
     async {
-        let! remoteUrl = getRemoteUrl repoRoot
+        let! remoteUrl = getRemoteUrl repoRoot upstreamRemote
 
         let provider =
             remoteUrl |> Option.bind detectProvider

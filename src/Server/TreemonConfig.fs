@@ -63,3 +63,21 @@ let modifyArchivedBranches (repoRoot: string) (modify: string list -> string lis
         readBranchesCore path
         |> modify
         |> writeBranchesCore path)
+
+let readUpstreamRemote (repoRoot: string) : string option =
+    let path = configPath repoRoot
+    if not (File.Exists(path)) then
+        None
+    else
+        try
+            let json = File.ReadAllText(path)
+            use doc = JsonDocument.Parse(json)
+
+            match doc.RootElement.TryGetProperty("upstreamRemote") with
+            | true, elem when elem.ValueKind = JsonValueKind.String ->
+                let value = elem.GetString()
+                if System.String.IsNullOrWhiteSpace(value) then None else Some value
+            | _ -> None
+        with ex ->
+            Log.log "TreemonConfig" $"Failed to read upstreamRemote from {path}: {ex.Message}"
+            None

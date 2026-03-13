@@ -103,13 +103,13 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
-let private tryFastForwardMain (repoRoot: string) =
+let private tryFastForwardMain (repoRoot: string) (mainRef: string) =
     async {
         let! currentBranch = runGit repoRoot "rev-parse --abbrev-ref HEAD"
 
         match currentBranch |> Option.map _.Trim() with
         | Some "main" ->
-            let! result = runGitResult repoRoot "merge --ff-only origin/main"
+            let! result = runGitResult repoRoot $"merge --ff-only {mainRef}"
 
             match result with
             | Ok _ -> Log.log "Git" $"Fast-forwarded main in {repoRoot}"
@@ -117,15 +117,15 @@ let private tryFastForwardMain (repoRoot: string) =
         | _ -> ()
     }
 
-let fetchFromOrigin (repoRoot: string) =
+let fetchUpstream (repoRoot: string) (upstreamRemote: string) =
     async {
-        let! _ = runGit repoRoot "fetch origin main"
-        do! tryFastForwardMain repoRoot
+        let! _ = runGit repoRoot $"fetch {upstreamRemote} main"
+        do! tryFastForwardMain repoRoot $"{upstreamRemote}/main"
     }
 
-let getMainBehindCount (worktreePath: string) =
+let getMainBehindCount (worktreePath: string) (mainRef: string) =
     async {
-        let! output = runGit worktreePath "rev-list --count HEAD..origin/main"
+        let! output = runGit worktreePath $"rev-list --count HEAD..{mainRef}"
 
         return
             output
@@ -157,9 +157,9 @@ let isDirty (worktreePath: string) =
             |> Option.defaultValue false
     }
 
-let getCommitCount (worktreePath: string) =
+let getCommitCount (worktreePath: string) (mainRef: string) =
     async {
-        let! output = runGit worktreePath "rev-list --count --no-merges origin/main..HEAD"
+        let! output = runGit worktreePath $"rev-list --count --no-merges {mainRef}..HEAD"
 
         return
             output
@@ -186,20 +186,20 @@ let parseDiffStats (output: string option) =
             ))
     |> Option.defaultValue (0, 0)
 
-let getDiffStats (worktreePath: string) =
+let getDiffStats (worktreePath: string) (mainRef: string) =
     async {
-        let! output = runGit worktreePath "diff --shortstat origin/main...HEAD"
+        let! output = runGit worktreePath $"diff --shortstat {mainRef}...HEAD"
         return parseDiffStats output
     }
 
-let collectWorktreeGitData (worktreePath: string) (branch: string option) =
+let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainRef: string) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
-        let! commitCountChild = Async.StartChild(getCommitCount worktreePath)
-        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath)
-        let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath)
+        let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
+        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath mainRef)
+        let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath mainRef)
 
         let! commit = commitChild
         let! upstream = upstreamChild
@@ -233,6 +233,22 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) =
               MainBehindCount = mainBehind
               IsDirty = dirty
               WorkMetrics = workMetrics }
+    }
+
+let resolveUpstreamRemote (repoRoot: string) =
+    async {
+        match TreemonConfig.readUpstreamRemote repoRoot with
+        | Some remote -> return remote
+        | None ->
+            let! output = runGit repoRoot "remote"
+
+            return
+                output
+                |> Option.map (fun s ->
+                    s.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
+                    |> Array.exists (fun r -> r.Trim() = "upstream"))
+                |> Option.defaultValue false
+                |> fun hasUpstream -> if hasUpstream then "upstream" else "origin"
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =
