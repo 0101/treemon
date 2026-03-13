@@ -216,8 +216,14 @@ let getStatusFromEnumeratedFiles (files: (FileInfo * SessionFileKind) list) =
         |> List.choose (fun (fi, kind) ->
             try
                 let lastWrite = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-                let lines = FileUtils.readLastLines "Claude" fi.FullName 20
-                Some { Kind = kind; LastWriteUtc = lastWrite; LastLinesReversed = lines }
+
+                let matchingLine =
+                    FileUtils.scanBackward "Claude" fi.FullName (fun line ->
+                        tryParseEntryKind line |> Option.map (fun _ -> line))
+                    |> Option.map List.singleton
+                    |> Option.defaultValue []
+
+                Some { Kind = kind; LastWriteUtc = lastWrite; LastLinesReversed = matchingLine }
             with ex ->
                 Log.log "Claude" $"Failed to read status for {fi.FullName}: {ex.Message}"
                 None)
