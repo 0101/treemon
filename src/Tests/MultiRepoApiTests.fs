@@ -118,8 +118,7 @@ type MultiRepoApiTests() =
             let! dashboard = fetchDashboard ()
 
             let allBranches =
-                dashboard.Repos
-                |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+                dashboard.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
             Assert.That(allBranches.Length, Is.EqualTo(allBranches |> List.distinct |> List.length),
                 "Branch names should be distinct across all repos in fixture data")
