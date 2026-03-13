@@ -404,28 +404,28 @@ type MultiRepoSmokeTests() =
         }
 
     [<Test>]
-    member this.``GitHub section uses comments format when PR data is present``() =
+    member this.``GitHub section uses threads format when PR data is present``() =
         task {
             let ghSection = this.Page.Locator($".repo-section:has(.repo-name:text-is('{thisRepoName}'))")
             do! ghSection.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
 
-            let ghCommentBadges = ghSection.Locator(".thread-badge")
-            let! count = ghCommentBadges.CountAsync()
+            let ghThreadBadges = ghSection.Locator(".thread-badge")
+            let! count = ghThreadBadges.CountAsync()
             TestContext.Out.WriteLine($"{thisRepoName} thread badges: {count}")
 
             if count = 0 then
                 do! this.Page.WaitForTimeoutAsync(30000.0f)
-                let! countRetry = ghCommentBadges.CountAsync()
+                let! countRetry = ghThreadBadges.CountAsync()
                 TestContext.Out.WriteLine($"{thisRepoName} thread badges (after 30s wait): {countRetry}")
 
                 if countRetry = 0 then
                     Assert.Ignore(
-                        "No GitHub PR comment badges visible - no worktree branch currently matches an open GitHub PR. " +
+                        "No GitHub PR thread badges visible - no worktree branch currently matches an open GitHub PR. " +
                         "This test passes when a worktree branch has an open PR on GitHub.")
             else
-                let! ghText = ghCommentBadges.First.TextContentAsync()
-                TestContext.Out.WriteLine($"GitHub comment badge text: {ghText}")
-                Assert.That(ghText, Does.Contain("comments"), "GitHub PR should show 'comments' format")
+                let! ghText = ghThreadBadges.First.TextContentAsync()
+                TestContext.Out.WriteLine($"GitHub thread badge text: {ghText}")
+                Assert.That(ghText, Does.Contain("threads"), "GitHub PR should show 'threads' format")
         }
 
     [<Test>]
