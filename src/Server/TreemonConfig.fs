@@ -3,30 +3,38 @@ module Server.TreemonConfig
 open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
+open System.Text.RegularExpressions
 
 let private configLock = obj ()
 
 let private configPath repoRoot = Path.Combine(repoRoot, ".treemon.json")
 
-let private readBranchesCore (path: string) : string list =
+let private validRemoteNamePattern = Regex(@"^[a-zA-Z0-9._-]+$")
+
+let private withJsonProperty (path: string) (propertyName: string) (onFound: JsonElement -> 'a) (defaultValue: 'a) : 'a =
     if not (File.Exists(path)) then
-        []
+        defaultValue
     else
         try
             let json = File.ReadAllText(path)
             use doc = JsonDocument.Parse(json)
 
-            match doc.RootElement.TryGetProperty("archivedBranches") with
-            | true, elem when elem.ValueKind = JsonValueKind.Array ->
-                elem.EnumerateArray()
-                |> Seq.choose (fun v ->
-                    if v.ValueKind = JsonValueKind.String then Some(v.GetString())
-                    else None)
-                |> Seq.toList
-            | _ -> []
+            match doc.RootElement.TryGetProperty(propertyName) with
+            | true, elem -> onFound elem
+            | _ -> defaultValue
         with ex ->
-            Log.log "TreemonConfig" $"Failed to read archivedBranches from {path}: {ex.Message}"
-            []
+            Log.log "TreemonConfig" $"Failed to read {propertyName} from {path}: {ex.Message}"
+            defaultValue
+
+let private readBranchesCore (path: string) : string list =
+    withJsonProperty path "archivedBranches" (fun elem ->
+        if elem.ValueKind = JsonValueKind.Array then
+            elem.EnumerateArray()
+            |> Seq.choose (fun v ->
+                if v.ValueKind = JsonValueKind.String then Some(v.GetString())
+                else None)
+            |> Seq.toList
+        else []) []
 
 let private writeBranchesCore (path: string) (branches: string list) : unit =
     let root =
@@ -65,19 +73,13 @@ let modifyArchivedBranches (repoRoot: string) (modify: string list -> string lis
         |> writeBranchesCore path)
 
 let readUpstreamRemote (repoRoot: string) : string option =
-    let path = configPath repoRoot
-    if not (File.Exists(path)) then
-        None
-    else
-        try
-            let json = File.ReadAllText(path)
-            use doc = JsonDocument.Parse(json)
-
-            match doc.RootElement.TryGetProperty("upstreamRemote") with
-            | true, elem when elem.ValueKind = JsonValueKind.String ->
+    lock configLock (fun () ->
+        withJsonProperty (configPath repoRoot) "upstreamRemote" (fun elem ->
+            if elem.ValueKind = JsonValueKind.String then
                 let value = elem.GetString()
-                if System.String.IsNullOrWhiteSpace(value) then None else Some value
-            | _ -> None
-        with ex ->
-            Log.log "TreemonConfig" $"Failed to read upstreamRemote from {path}: {ex.Message}"
-            None
+                if System.String.IsNullOrWhiteSpace(value) then None
+                elif not (validRemoteNamePattern.IsMatch(value)) then
+                    Log.log "TreemonConfig" $"Rejected invalid upstreamRemote value: '{value}'"
+                    None
+                else Some value
+            else None) None)

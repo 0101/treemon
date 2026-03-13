@@ -280,7 +280,7 @@ let private executeTask
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            let mainRef = $"{repo.UpstreamRemote}/main"
+            let mainRef = GitWorktree.mainRef repo.UpstreamRemote
 
             let branch =
                 repo.WorktreeList

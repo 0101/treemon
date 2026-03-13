@@ -280,6 +280,8 @@ let private runStep
             return Ok proc
     }
 
+let buildFetchArgs (upstreamRemote: string) = $"fetch {upstreamRemote}"
+
 let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (ct: CancellationToken) : Async<unit> =
     async {
         try
@@ -298,7 +300,7 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 return ()
             | Ok _ ->
 
-            let! pullResult = runStep post branch SyncStep.Pull worktreePath "git" $"fetch {upstreamRemote}" ct
+            let! pullResult = runStep post branch SyncStep.Pull worktreePath "git" (buildFetchArgs upstreamRemote) ct
 
             match pullResult with
             | Error status ->
@@ -306,7 +308,7 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 return ()
             | Ok _ ->
 
-            let mergeTarget = $"{upstreamRemote}/main"
+            let mergeTarget = GitWorktree.mainRef upstreamRemote
             let mergeCmd = $"git merge {mergeTarget}"
             post (UpdateProcessState (branch, SyncState.Running SyncStep.Merge))
             post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd StepStatus.Running))

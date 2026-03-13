@@ -117,10 +117,12 @@ let private tryFastForwardMain (repoRoot: string) (mainRef: string) =
         | _ -> ()
     }
 
+let mainRef (upstreamRemote: string) = $"{upstreamRemote}/main"
+
 let fetchUpstream (repoRoot: string) (upstreamRemote: string) =
     async {
         let! _ = runGit repoRoot $"fetch {upstreamRemote} main"
-        do! tryFastForwardMain repoRoot $"{upstreamRemote}/main"
+        do! tryFastForwardMain repoRoot (mainRef upstreamRemote)
     }
 
 let getMainBehindCount (worktreePath: string) (mainRef: string) =
@@ -242,13 +244,13 @@ let resolveUpstreamRemote (repoRoot: string) =
         | None ->
             let! output = runGit repoRoot "remote"
 
-            return
+            let hasUpstream =
                 output
-                |> Option.map (fun s ->
+                |> Option.exists (fun s ->
                     s.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
                     |> Array.exists (fun r -> r.Trim() = "upstream"))
-                |> Option.defaultValue false
-                |> fun hasUpstream -> if hasUpstream then "upstream" else "origin"
+
+            return if hasUpstream then "upstream" else "origin"
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =

@@ -70,8 +70,11 @@ let private runAz (arguments: string) =
         Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
         async { return None }
 
+let buildRemoteUrlArgs (repoRoot: string) (remoteName: string) =
+    $"""-C "{repoRoot}" remote get-url {remoteName}"""
+
 let getRemoteUrl (repoRoot: string) (remoteName: string) =
-    ProcessRunner.run "PR" "git" $"""-C "{repoRoot}" remote get-url {remoteName}"""
+    ProcessRunner.run "PR" "git" (buildRemoteUrlArgs repoRoot remoteName)
 
 type internal ParsedPr =
     { BranchName: string
