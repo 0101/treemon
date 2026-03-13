@@ -60,8 +60,12 @@ if (Test-Path $dataTarget) {
     Write-Host "  No data folder found in source worktree, skipping."
 }
 
-Write-Host "Initializing beads..."
-bd init --skip-hooks --skip-merge-driver --no-daemon --quiet
+if (Get-Command bd -ErrorAction SilentlyContinue) {
+    Write-Host "Initializing beads..."
+    bd init --skip-hooks --skip-merge-driver --no-daemon --quiet
+} else {
+    Write-Host "Skipping beads init (bd not found)."
+}
 
 Write-Host "Installing npm dependencies..."
 npm install
