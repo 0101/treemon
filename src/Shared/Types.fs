@@ -47,7 +47,6 @@ type BuildStatus =
 
 type CommentSummary =
     | WithResolution of unresolved: int * total: int
-    | CountOnly of total: int
 
 type BuildFailure =
     { StepName: string

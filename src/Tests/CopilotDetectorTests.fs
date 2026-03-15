@@ -148,6 +148,10 @@ let private makeTurnEnd (timestamp: string) =
 let private makeToolEvent (timestamp: string) =
     $"""{{"type":"tool.execution_complete","data":{{"name":"powershell"}},"timestamp":"{timestamp}"}}"""
 
+let private makeLargeToolEvent (sizeBytes: int) (timestamp: string) =
+    let padding = String('x', sizeBytes)
+    $"""{{"type":"tool.execution_complete","data":{{"name":"read_agent","output":"{padding}"}},"timestamp":"{timestamp}"}}"""
+
 let private withTempEventsFile content action =
     TestUtils.withTempFile "copilot-test" content action
 
@@ -208,3 +212,39 @@ type ScanForUserMessageTests() =
         withTempEventsFile content (fun path ->
             let result = scanForUserMessage path
             Assert.That(result, Is.EqualTo(None)))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LargeToolOutputTests() =
+
+    [<Test>]
+    member _.``Status is Working when large tool outputs exceed 64KB buffer``() =
+        let content =
+            [ makeAssistantEvent "Now let me read all 6 findings" "2026-03-01T10:00:00Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:01Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:02Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:03Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:04Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            let status = getStatusFromEventsFile path DateTimeOffset.UtcNow
+            Assert.That(status, Is.EqualTo(Working)))
+
+    [<Test>]
+    member _.``Status is Done when turn_end follows large tool outputs``() =
+        let content =
+            [ makeAssistantEvent "processing results" "2026-03-01T10:00:00Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:01Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:02Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:03Z"
+              makeLargeToolEvent 20000 "2026-03-01T10:00:04Z"
+              makeAssistantEvent "all done" "2026-03-01T10:00:05Z"
+              makeTurnEnd "2026-03-01T10:00:06Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            let status = getStatusFromEventsFile path DateTimeOffset.UtcNow
+            Assert.That(status, Is.EqualTo(Done)))

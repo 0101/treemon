@@ -199,7 +199,7 @@
                 "Title": "Add contributing guide and CI workflow",
                 "Url": "https://github.com/0101/treemon/pull/1",
                 "IsDraft": false,
-                "Comments": { "CountOnly": 4 },
+                "Comments": { "WithResolution": [2, 4] },
                 "Builds": [
                   {
                     "Name": "CI",
@@ -231,7 +231,7 @@
                 "Title": "Add editorconfig for consistent formatting",
                 "Url": "https://github.com/0101/treemon/pull/2",
                 "IsDraft": false,
-                "Comments": { "CountOnly": 0 },
+                "Comments": { "WithResolution": [0, 0] },
                 "Builds": [
                   {
                     "Name": "CI",

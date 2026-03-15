@@ -15,20 +15,30 @@ Spec files that describe a single narrow change (e.g., "rename X to Y", "change 
 
 ## Requirements
 
-Use the `/spec-management` skill to evaluate the spec directory. Flag:
+Flag specs in the diff that violate any of these:
 
-### 1. Single-purpose specs that should be removed or consolidated
+### 1. One-off specs that should be deleted
 
-A spec is single-purpose if it:
-- Describes a single refactoring step (rename, type change, parameter change)
-- Describes a minor feature or UI element that is a natural subsection of an existing spec (e.g., a header bar, a tooltip, a button) rather than a standalone architectural concern
+A spec is one-off if it:
+- Describes a single refactoring, cleanup, migration, or bug fix
+- Is a branch-specific implementation plan with no long-lived value
 - Has no lasting architectural significance beyond "we did this"
 - Would never be consulted again after the change is implemented
+
+**Name red flags:** filenames containing `-fixes`, `-cleanup`, `-improvements`, `-refactoring`, `-migration`, `-update` almost always indicate one-off work, not lasting architecture. Flag these.
+
+**Action:** DELETE. Absorb any reusable design decisions into the parent spec first. The change narrative belongs in PR descriptions or commit messages, not in `docs/spec/`.
+
+### 2. Specs that should be subsections, not standalone files
+
+A spec doesn't need its own file if it:
+- Describes a feature that's part of an existing architectural subsystem
 - Could be a paragraph or section in a broader spec instead of its own file
+- Describes a minor feature or UI element (e.g., a header bar, a tooltip, a button)
 
-**Action:** Incorporate the relevant design decisions into the related broader spec as a section, then delete the standalone file.
+**Action:** Find the existing spec where this content belongs (search all specs including subdirectories), add it as a subsection there, then delete the standalone file.
 
-### 2. Specs not updated to reflect the current branch's changes
+### 3. Specs not updated to reflect the current branch's changes
 
 If the branch modifies behavior covered by an existing spec, the spec must be updated to match. Check:
 - Do any changed files fall under a feature that has a spec?
@@ -39,7 +49,9 @@ If the branch modifies behavior covered by an existing spec, the spec must be up
 
 ## Check
 
-1. List all specs in `docs/spec/` (including subdirectories)
-2. For each spec, assess whether it's a long-lived reference or a single-purpose task description
-3. Cross-reference changed files in the branch against specs to find stale documentation
-4. Report findings with specific recommendations (consolidate into X, delete, update section Y)
+1. Look at specs added or modified in the diff
+2. Check filenames for red-flag patterns (`-fixes`, `-cleanup`, `-improvements`, etc.)
+3. For each spec in the diff, assess: is this a long-lived architectural reference or a one-off task description?
+4. For one-off specs, find the existing parent spec where the content belongs (search `docs/spec/` including subdirectories)
+5. Cross-reference changed source files against existing specs to find stale documentation
+6. Report findings with specific actions (delete, move to subsection of X, update section Y)

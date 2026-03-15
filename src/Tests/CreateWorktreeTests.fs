@@ -29,7 +29,8 @@ let private defaultModel : Model =
       CreateModal = Modal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
-      EditorName = "VS Code" }
+      EditorName = "VS Code"
+      ActionCooldowns = Set.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the

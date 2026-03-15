@@ -742,21 +742,17 @@ type ArchiveE2ETests() =
                 null, PageWaitForFunctionOptions(Timeout = 5000.0f))
 
             let focusedElements = System.Collections.Generic.List<string>()
-            let rec pressAndCollect remaining =
-                task {
-                    if remaining > 0 then
-                        let focused = page.Locator(".focused")
-                        let! count = focused.CountAsync()
-                        if count > 0 then
-                            let! classes = focused.First.GetAttributeAsync("class")
-                            focusedElements.Add(classes)
-                        do! page.Keyboard.PressAsync("ArrowDown")
-                        let! _ = page.WaitForFunctionAsync(
-                            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))).then(() => true)",
-                            null, PageWaitForFunctionOptions(Timeout = 5000.0f))
-                        return! pressAndCollect (remaining - 1)
-                }
-            do! pressAndCollect 10
+            for _ in 1..10 do
+                let focused = page.Locator(".focused")
+                let! count = focused.CountAsync()
+                if count > 0 then
+                    let! classes = focused.First.GetAttributeAsync("class")
+                    focusedElements.Add(classes)
+                do! page.Keyboard.PressAsync("ArrowDown")
+                let! _ = page.WaitForFunctionAsync(
+                    "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))).then(() => true)",
+                    null, PageWaitForFunctionOptions(Timeout = 5000.0f))
+                ()
 
             let hasArchiveCardFocused =
                 focusedElements

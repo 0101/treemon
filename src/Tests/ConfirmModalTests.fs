@@ -52,8 +52,8 @@ let private defaultModel : Model =
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
-      EditorName = "VS Code" }
-
+      EditorName = "VS Code"
+      ActionCooldowns = Set.empty }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the
 /// TypeInitializationException (the model is computed before the Cmd).
@@ -94,8 +94,7 @@ type DeleteWithSessionSequencingTests() =
         let model = tryUpdateModel (ConfirmMsg (ConfirmModal.DeleteWorktree testPath)) modelWithConfirmDelete
 
         let branches =
-            model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+            model.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
         Assert.That(branches, Does.Not.Contain("feature-branch"),
             "Worktree should be removed optimistically from model on direct Delete")
@@ -107,8 +106,7 @@ type DeleteWithSessionSequencingTests() =
         let model = tryUpdateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
 
         let branches =
-            model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+            model.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
         Assert.That(branches, Does.Contain("feature-branch"),
             "Worktree should NOT be removed yet — must wait for session kill to succeed")
@@ -120,8 +118,7 @@ type DeleteWithSessionSequencingTests() =
         let model = tryUpdateModel (SessionKilledForDelete testPath) defaultModel
 
         let branches =
-            model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+            model.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
         Assert.That(branches, Does.Not.Contain("feature-branch"),
             "Worktree should be removed after session kill confirmed")
@@ -132,8 +129,7 @@ type DeleteWithSessionSequencingTests() =
         let model = tryUpdateModel (ConfirmMsg ConfirmModal.DismissConfirm) modelWithConfirmDelete
 
         let branches =
-            model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+            model.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
         Assert.That(branches, Does.Contain("feature-branch"),
             "Worktree should remain when user cancels")
@@ -153,8 +149,7 @@ type DeleteWithSessionSequencingTests() =
             "Escape should dismiss the confirm modal")
 
         let branches =
-            model.Repos
-            |> List.collect (fun r -> r.Worktrees |> List.map _.Branch)
+            model.Repos |> List.collect _.Worktrees |> List.map _.Branch
 
         Assert.That(branches, Does.Contain("feature-branch"),
             "Worktree should remain after Escape")

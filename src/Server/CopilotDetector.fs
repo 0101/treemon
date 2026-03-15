@@ -126,19 +126,27 @@ let getSessionMtime (worktreePath: string) =
     findMostRecentEventsFile sessionDirs
     |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
 
+let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
+    try
+        let fi = FileInfo(eventsPath)
+        if not fi.Exists then Idle
+        else
+            let age = now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+            if age > TimeSpan.FromHours(2.0) then
+                Idle
+            else
+                FileUtils.scanBackward "Copilot" eventsPath tryParseEventKind
+                |> Option.map statusFromEvent
+                |> Option.defaultValue Idle
+    with ex ->
+        Log.log "Copilot" $"Failed to read status from {eventsPath}: {ex.Message}"
+        Idle
+
 let getStatus (worktreePath: string) =
     let sessionDirs = getSessionDirsForPath worktreePath
 
     match findMostRecentEventsFile sessionDirs with
-    | Some fi ->
-        let age = DateTimeOffset.UtcNow - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-        if age > TimeSpan.FromHours(2.0) then
-            Idle
-        else
-            FileUtils.readLastLines "Copilot" fi.FullName 20
-            |> List.tryPick tryParseEventKind
-            |> Option.map statusFromEvent
-            |> Option.defaultValue Idle
+    | Some fi -> getStatusFromEventsFile fi.FullName DateTimeOffset.UtcNow
     | None -> Idle
 
 let private tryParseAssistantContent (line: string) =
@@ -223,23 +231,6 @@ let getLastUserMessage (worktreePath: string) =
     findMostRecentEventsFile sessionDirs
     |> Option.bind (fun fi -> scanForUserMessage fi.FullName)
     |> Option.map (fun (text, ts) -> FileUtils.truncateMessage 120 text, ts)
-
-let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
-    try
-        let fi = FileInfo(eventsPath)
-        if not fi.Exists then Idle
-        else
-            let age = now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if age > TimeSpan.FromHours(2.0) then
-                Idle
-            else
-                FileUtils.readLastLines "Copilot" eventsPath 20
-                |> List.tryPick tryParseEventKind
-                |> Option.map statusFromEvent
-                |> Option.defaultValue Idle
-    with ex ->
-        Log.log "Copilot" $"Failed to read status from {eventsPath}: {ex.Message}"
-        Idle
 
 let internal getLastMessageFromEventsFile (eventsPath: string) =
     try
