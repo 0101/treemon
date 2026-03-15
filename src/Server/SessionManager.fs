@@ -168,7 +168,7 @@ let private validateSessions (sessions: Map<string, nativeint>) =
 let private spawnAndTrack (validated: Map<string, nativeint>) path (spawnFn: unit -> Async<Result<nativeint, string>>) (reply: AsyncReplyChannel<Result<unit, string>>) =
     async {
         match validated |> Map.tryFind path with
-        | Some existingHwnd -> killByHwnd existingHwnd
+        | Some existingHwnd -> do! killByHwnd existingHwnd |> Async.Ignore
         | None -> ()
 
         let! result = spawnFn ()

@@ -1,4 +1,4 @@
-﻿module App
+module App
 
 open Shared
 open Shared.EventUtils
@@ -28,7 +28,8 @@ type Model =
       DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
-      LastError: string option }
+      LastError: string option
+      ActionCooldowns: Set<WorktreePath> }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -59,6 +60,7 @@ type Msg =
     | LaunchAction of path: WorktreePath * prompt: string
     | LaunchActionResult of Result<unit, string>
     | ActionFailed of exn
+    | ClearActionCooldown of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
     | DismissError
 
@@ -97,7 +99,8 @@ let init () =
       DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None
-      LastError = None },
+      LastError = None
+      ActionCooldowns = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -340,13 +343,26 @@ let update msg model =
         { model with LastError = Some $"Session failed: {msg}" }, fetchWorktrees ()
 
     | LaunchAction (path, prompt) ->
-        model, Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult ActionFailed
+        if model.ActionCooldowns.Contains path then
+            model, Cmd.none
+        else
+            let clearAfter =
+                Cmd.ofEffect (fun dispatch ->
+                    Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
+            { model with ActionCooldowns = model.ActionCooldowns.Add path },
+            Cmd.batch [
+                Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult ActionFailed
+                clearAfter
+            ]
 
     | LaunchActionResult (Ok _) ->
         model, fetchWorktrees ()
 
     | LaunchActionResult (Error msg) ->
         { model with LastError = Some $"Launch failed: {msg}" }, fetchWorktrees ()
+
+    | ClearActionCooldown path ->
+        { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
 
     | SetFocus target ->
         { model with FocusedElement = target }, Cmd.none
@@ -540,8 +556,8 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
         ]
     else
         let syncing = isBranchSyncing branchEvents
-        let claudeBlocked = isCodingToolBusy wt
-        let disabled = syncing || claudeBlocked
+        let codingToolBusy = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
+        let disabled = syncing || codingToolBusy
         if syncing then
             Html.button [
                 prop.className "sync-cancel-btn"
@@ -555,7 +571,7 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.disabled disabled
                 yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
-                prop.title (if claudeBlocked then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
+                prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
                 prop.text "Sync"
             ]
 
@@ -895,12 +911,18 @@ let conflictIcon =
         ]
     ]
 
-let prActionButton dispatch (wt: WorktreeStatus) (prompt: string) (title: string) (icon: ReactElement) =
-    let disabled = isCodingToolBusy wt
-    let disabledTitle = $"{providerDisplayName wt.CodingToolProvider} is active"
-    actionButton (fun () -> dispatch (LaunchAction (wt.Path, prompt))) disabledTitle disabled title icon
+let prActionButton dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (prompt: string) (title: string) (icon: ReactElement) =
+    let onCooldown = cooldowns.Contains wt.Path
+    Html.button [
+        prop.className (if onCooldown then "action-btn disabled" else "action-btn")
+        prop.disabled onCooldown
+        yield! noFocusProps
+        prop.title (if onCooldown then "Action already triggered" else title)
+        prop.onClick (fun e -> e.stopPropagation(); if not onCooldown then dispatch (LaunchAction (wt.Path, prompt)))
+        prop.children [ icon ]
+    ]
 
-let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
+let prBadgeContent dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
             Interop.createElement "a" [
@@ -928,41 +950,41 @@ let prBadgeContent dispatch (wt: WorktreeStatus) (repoName: string) (pr: PrInfo)
                     prop.text ($"{unresolved}/{total} threads")
                 ]
                 if unresolved > 0 then
-                    prActionButton dispatch wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
+                    prActionButton dispatch cooldowns wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
             | _ -> ()
             yield! pr.Builds |> List.collect (fun build -> [
                     buildBadge repoName build
                     if build.Status = Failed then
                         match build.Url with
-                        | Some url -> prActionButton dispatch wt $"/fix-build {url}" "Fix build" wrenchIcon
+                        | Some url -> prActionButton dispatch cooldowns wt $"/fix-build {url}" "Fix build" wrenchIcon
                         | None -> ()
                 ])
     ]
 
-let prSection dispatch (wt: WorktreeStatus) (repoName: string) =
+let prSection dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr with
     | NoPr -> Html.none
-    | HasPr pr -> prBadgeContent dispatch wt repoName pr
+    | HasPr pr -> prBadgeContent dispatch cooldowns wt repoName pr
 
-let prRow dispatch (wt: WorktreeStatus) (repoName: string) =
+let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr, wt.Branch with
     | NoPr, ("main" | "master") -> Html.none
     | NoPr, _ ->
         Html.div [
             prop.className "pr-row"
             prop.children [
-                prActionButton dispatch wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR" createPrIcon
+                prActionButton dispatch cooldowns wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR" createPrIcon
             ]
         ]
     | HasPr pr, _ ->
         Html.div [
             prop.className "pr-row"
-            prop.children [ prBadgeContent dispatch wt repoName pr ]
+            prop.children [ prBadgeContent dispatch cooldowns wt repoName pr ]
         ]
 
 let workMetricsView = ArchiveViews.workMetricsView
 
-let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
@@ -989,13 +1011,13 @@ let compactWorktreeCard dispatch editorName (repoName: string) (scopedKey: strin
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator wt.MainBehindCount
-                    prSection dispatch wt repoName
+                    prSection dispatch cooldowns wt repoName
                 ]
             ]
         ]
     ]
 
-let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
@@ -1033,7 +1055,7 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
 
                     mainBehindWithSync dispatch wt branchEvents isPending scopedKey
 
-                    prRow dispatch wt repoName
+                    prRow dispatch cooldowns wt repoName
                 ]
             ]
 
@@ -1057,13 +1079,13 @@ let worktreeCard dispatch editorName (repoName: string) (branchEvents: CardEvent
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName events isPending scopedKey isFocused wt
+    if isCompact then compactWorktreeCard dispatch editorName repoName cooldowns scopedKey isFocused wt
+    else worktreeCard dispatch editorName repoName cooldowns events isPending scopedKey isFocused wt
 
 let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
 
@@ -1261,7 +1283,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
         ]
     ]
 
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (repo: RepoModel) =
+let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -1273,7 +1295,7 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending cooldowns))
                     ]
                     archiveSection dispatch repo.ArchivedWorktrees
         ]
@@ -1418,7 +1440,7 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending))
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
                     ]
 
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
