@@ -14,6 +14,7 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
+      Provider: RepoProvider option
       UpstreamRemote: string
       IsReady: bool }
 
@@ -25,6 +26,7 @@ module PerRepoState =
           BeadsData = Map.empty
           CodingToolData = Map.empty
           PrData = Map.empty
+          Provider = None
           UpstreamRemote = "origin"
           IsReady = false }
 
@@ -49,6 +51,7 @@ type StateMsg =
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
     | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
+    | UpdateProvider of repoId: RepoId * RepoProvider option
     | UpdateUpstreamRemote of repoId: RepoId * remote: string
     | RemoveWorktree of repoId: RepoId * path: string
     | GetState of AsyncReplyChannel<DashboardState>
@@ -128,6 +131,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | UpdatePr(repoId, prMap) ->
         let repo = getRepo repoId state
         updateRepo repoId { repo with PrData = prMap } state
+
+    | UpdateProvider(repoId, provider) ->
+        let repo = getRepo repoId state
+        updateRepo repoId { repo with Provider = provider } state
 
     | UpdateUpstreamRemote(repoId, remote) ->
         let repo = getRepo repoId state
@@ -276,6 +283,12 @@ let private executeTask
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             agent.Post(UpdateWorktreeList(repoId, worktrees))
             agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
+            let! state = agent.PostAndAsyncReply(GetState)
+            let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
+            if not alreadyDetected then
+                let! remoteUrl = PrStatus.getRemoteUrl root upstreamRemote
+                let provider = remoteUrl |> Option.bind PrStatus.detectProvider |> Option.map PrStatus.toRepoProvider |> Option.defaultValue UnknownProvider
+                agent.Post(UpdateProvider(repoId, Some provider))
 
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)

@@ -57,7 +57,7 @@ type ActionLaunchSpawnTests() =
     [<Test>]
     member _.``launchAction with no existing session spawns new window and tracks HWND``() =
         let a = agent.Value
-        let prompt = "/pr https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+        let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42")
         let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
 
         let result = runAsync (launchAction a testPath command)
@@ -89,7 +89,7 @@ type ActionLaunchSpawnTests() =
         let windowCountBefore = windowsBefore.Count
         TestContext.Out.WriteLine($"WT windows before launchAction: {windowCountBefore}")
 
-        let prompt = "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123"
+        let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123")
         let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
         let actionResult = runAsync (launchAction a testPath command)
         assertOk actionResult "launchAction should return Ok when session exists (new tab)"
@@ -110,7 +110,7 @@ type ActionLaunchSpawnTests() =
     [<Test>]
     member _.``launchAction spawns session that stays open (interactive mode)``() =
         let a = agent.Value
-        let prompt = "Commit all changes, push to origin, and create a pull request for this branch"
+        let prompt = "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
         let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
 
         let result = runAsync (launchAction a testPath command)
@@ -129,7 +129,7 @@ type ActionLaunchSpawnTests() =
     [<Test>]
     member _.``launchAction with special characters in prompt succeeds``() =
         let a = agent.Value
-        let prompt = "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc"
+        let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc")
         let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
 
         let result = runAsync (launchAction a testPath command)

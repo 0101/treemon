@@ -136,6 +136,14 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
 
     { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg }
 
+let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
+    match action, provider |> Option.defaultValue CodingToolProvider.Claude with
+    | FixPr url, CodingToolProvider.Copilot -> $"use pr skill with {url}"
+    | FixPr url, CodingToolProvider.Claude -> $"/pr {url}"
+    | FixBuild url, CodingToolProvider.Copilot -> $"use fix-build skill with {url}"
+    | FixBuild url, CodingToolProvider.Claude -> $"/fix-build {url}"
+    | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
+
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")
     match provider |> Option.defaultValue CodingToolProvider.Claude with

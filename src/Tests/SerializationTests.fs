@@ -44,7 +44,32 @@ type WrapperTypeSerializationTests() =
         Assert.That(result.Prompt, Is.EqualTo(original.Prompt))
 
     [<Test>]
-    member _.``CreateWorktreeRequest with BranchName survives JSON round-trip``() =
+    member _.``ActionRequest with FixPr survives JSON round-trip``() =
+        let original: ActionRequest =
+            { Path = WorktreePath.create @"Q:\code\test"
+              Action = FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42" }
+
+        let result = roundTrip original
+        Assert.That(result.Path, Is.EqualTo(original.Path))
+        Assert.That(result.Action, Is.EqualTo(original.Action))
+
+    [<Test>]
+    member _.``ActionRequest with FixBuild survives JSON round-trip``() =
+        let original: ActionRequest =
+            { Path = WorktreePath.create @"Q:\code\test"
+              Action = FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123" }
+
+        let result = roundTrip original
+        Assert.That(result.Action, Is.EqualTo(original.Action))
+
+    [<Test>]
+    member _.``ActionRequest with CreatePr survives JSON round-trip``() =
+        let original: ActionRequest =
+            { Path = WorktreePath.create @"Q:\code\test"
+              Action = CreatePr }
+
+        let result = roundTrip original
+        Assert.That(result.Action, Is.EqualTo(original.Action))
         let original =
             { RepoId = "my-repo"
               BranchName = BranchName.create "feature/new"
