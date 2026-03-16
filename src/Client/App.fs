@@ -1261,6 +1261,7 @@ let providerIcon (provider: RepoProvider option) =
                 ]
             ]
         ]
+    | Some UnknownProvider -> Html.none
 
 let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoModel) =
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"

@@ -287,8 +287,8 @@ let private executeTask
             let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then
                 let! remoteUrl = PrStatus.getRemoteUrl root upstreamRemote
-                let provider = remoteUrl |> Option.bind PrStatus.detectProvider |> Option.map PrStatus.toRepoProvider
-                agent.Post(UpdateProvider(repoId, provider))
+                let provider = remoteUrl |> Option.bind PrStatus.detectProvider |> Option.map PrStatus.toRepoProvider |> Option.defaultValue UnknownProvider
+                agent.Post(UpdateProvider(repoId, Some provider))
 
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)

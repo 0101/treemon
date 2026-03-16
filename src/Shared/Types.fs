@@ -120,6 +120,7 @@ type CardEvent =
 type RepoProvider =
     | GitHubProvider
     | AzDoProvider
+    | UnknownProvider
 
 type RepoWorktrees =
     { RepoId: RepoId
