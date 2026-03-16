@@ -341,7 +341,8 @@ let worktreeApi
                       | Error msg -> return Error msg
                       | Ok ct ->
                           let post = syncAgent.Post
-                          Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider ct, ct)
+                          let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
+                          Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote ct, ct)
                           return Ok ()
               }
           cancelSync = fun wtPath ->

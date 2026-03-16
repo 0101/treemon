@@ -4,7 +4,9 @@ param(
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
-    [string[]]$WorktreeRoots
+    [string[]]$WorktreeRoots,
+
+    [string]$Upstream = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +31,7 @@ if (-not $Command) {
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
     Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
     Write-Host "  add <path> [<path>...]      Add watched root(s) to config"
+    Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
     Write-Host "  remove <path>              Remove a watched root from config"
     exit 0
 }
@@ -263,6 +266,18 @@ function Start-DemoMode {
     Start-DualProcess -ServerArgs "--demo" -ModeName "Demo" -ServerLabel "demo data"
 }
 
+function Set-UpstreamRemote([string]$RepoRoot, [string]$RemoteName) {
+    $configPath = Join-Path $RepoRoot ".treemon.json"
+    if (Test-Path $configPath) {
+        $json = Get-Content $configPath -Raw | ConvertFrom-Json
+    } else {
+        $json = [PSCustomObject]@{}
+    }
+    $json | Add-Member -NotePropertyName "upstreamRemote" -NotePropertyValue $RemoteName -Force
+    $json | ConvertTo-Json -Depth 10 | Set-Content $configPath
+    Write-Host "  Upstream remote set to '$RemoteName' for $RepoRoot" -ForegroundColor Green
+}
+
 function Add-Roots([string[]]$NewRoots) {
     $config = Get-SavedConfig
     $existing = if ($config) { @($config.WorktreeRoots) } else { @() }
@@ -276,18 +291,24 @@ function Add-Roots([string[]]$NewRoots) {
             $existing += $normalized
             $added += $normalized
         }
+
+        if ($Upstream) {
+            Set-UpstreamRemote $normalized $Upstream
+        }
     }
 
-    if ($added.Count -eq 0) {
+    if ($added.Count -eq 0 -and -not $Upstream) {
         Write-Host "No new roots to add" -ForegroundColor Yellow
         return
     }
 
-    Save-Config $existing
-    $added | ForEach-Object { Write-Host "Added: $_" -ForegroundColor Green }
+    if ($added.Count -gt 0) {
+        Save-Config $existing
+        $added | ForEach-Object { Write-Host "Added: $_" -ForegroundColor Green }
+    }
 
     $runningPid = Get-RunningPid
-    if ($runningPid) {
+    if ($runningPid -and $added.Count -gt 0) {
         Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
         Stop-ProductionServer
         Start-Sleep -Seconds 1

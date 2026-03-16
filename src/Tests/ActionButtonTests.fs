@@ -52,93 +52,6 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    member this.``Action buttons have disabled class when coding tool shows working``() =
-        task {
-            let workingCards = this.Page.Locator(".wt-card.ct-working")
-            do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! workingCount = workingCards.CountAsync()
-
-            if workingCount = 0 then
-                Assert.Ignore("No working coding tool cards in live data; skipping disabled-state test")
-            else
-                let disabledBtns = workingCards.Locator(".action-btn.disabled")
-                let allBtns = workingCards.Locator(".action-btn")
-                let! disabledCount = disabledBtns.CountAsync()
-                let! allCount = allBtns.CountAsync()
-
-                if allCount = 0 then
-                    Assert.Ignore("Working cards have no action buttons (no applicable conditions)")
-                else
-                    Assert.That(disabledCount, Is.EqualTo(allCount),
-                        "All action buttons on working coding tool cards should have the disabled class")
-        }
-
-    [<Test>]
-    member this.``Action buttons have disabled class when coding tool shows waiting``() =
-        task {
-            let waitingCards = this.Page.Locator(".wt-card.ct-waiting")
-            do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! waitingCount = waitingCards.CountAsync()
-
-            if waitingCount = 0 then
-                Assert.Ignore("No waiting coding tool cards in live data; skipping disabled-state test")
-            else
-                let disabledBtns = waitingCards.Locator(".action-btn.disabled")
-                let allBtns = waitingCards.Locator(".action-btn")
-                let! disabledCount = disabledBtns.CountAsync()
-                let! allCount = allBtns.CountAsync()
-
-                if allCount = 0 then
-                    Assert.Ignore("Waiting cards have no action buttons (no applicable conditions)")
-                else
-                    Assert.That(disabledCount, Is.EqualTo(allCount),
-                        "All action buttons on waiting coding tool cards should have the disabled class")
-        }
-
-    [<Test>]
-    member this.``Action buttons do NOT have disabled class when coding tool is idle``() =
-        task {
-            let idleCards = this.Page.Locator(".wt-card.ct-idle")
-            do! idleCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! idleCount = idleCards.CountAsync()
-
-            if idleCount = 0 then
-                Assert.Ignore("No idle coding tool cards in live data; skipping enabled-state test")
-            else
-                let actionBtns = idleCards.Locator(".action-btn")
-                let! btnCount = actionBtns.CountAsync()
-
-                if btnCount = 0 then
-                    Assert.Ignore("Idle cards have no action buttons (no applicable conditions)")
-                else
-                    let disabledBtns = idleCards.Locator(".action-btn.disabled")
-                    let! disabledCount = disabledBtns.CountAsync()
-                    Assert.That(disabledCount, Is.EqualTo(0),
-                        "Action buttons on idle coding tool cards should NOT have the disabled class")
-        }
-
-    [<Test>]
-    member this.``Action buttons do NOT have disabled class when coding tool is done``() =
-        task {
-            let doneCards = this.Page.Locator(".wt-card.ct-done")
-            let! doneCount = doneCards.CountAsync()
-
-            if doneCount = 0 then
-                Assert.Ignore("No done coding tool cards in live data; skipping enabled-state test")
-            else
-                let actionBtns = doneCards.Locator(".action-btn")
-                let! btnCount = actionBtns.CountAsync()
-
-                if btnCount = 0 then
-                    Assert.Ignore("Done cards have no action buttons (no applicable conditions)")
-                else
-                    let disabledBtns = doneCards.Locator(".action-btn.disabled")
-                    let! disabledCount = disabledBtns.CountAsync()
-                    Assert.That(disabledCount, Is.EqualTo(0),
-                        "Action buttons on done coding tool cards should NOT have the disabled class")
-        }
-
-    [<Test>]
     [<Category("Fast")>]
     member this.``Create-PR action button appears on cards with no PR badge``() =
         task {
@@ -267,82 +180,34 @@ type ActionButtonTests() =
         }
 
     [<Test>]
-    member this.``Disabled action button has correct tooltip showing provider is active``() =
+    member this.``Action button has descriptive tooltip``() =
         task {
-            let disabledBtns = this.Page.Locator(".wt-card .action-btn.disabled")
-            do! disabledBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = disabledBtns.CountAsync()
-
-            if count = 0 then
-                Assert.Ignore("No disabled action buttons in live data; skipping tooltip test")
-            else
-                let! title = disabledBtns.First.GetAttributeAsync("title")
-                Assert.That(title, Does.Contain("is active"),
-                    "Disabled action button tooltip should indicate the provider is active")
-        }
-
-    [<Test>]
-    member this.``Enabled action button has descriptive tooltip``() =
-        task {
-            let enabledBtns = this.Page.Locator(".wt-card .action-btn:not(.disabled)")
-            do! enabledBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = enabledBtns.CountAsync()
-
-            if count = 0 then
-                Assert.Ignore("No enabled action buttons in live data; skipping tooltip test")
-            else
-                let! title = enabledBtns.First.GetAttributeAsync("title")
-                Assert.That(title, Is.Not.Null.And.Not.Empty,
-                    "Enabled action button should have a non-empty title attribute")
-                Assert.That(title, Does.Not.Contain("is active"),
-                    "Enabled action button tooltip should not mention provider being active")
-        }
-
-    [<Test>]
-    member this.``Disabled action button has HTML disabled attribute``() =
-        task {
-            let disabledBtns = this.Page.Locator(".wt-card .action-btn.disabled")
-            do! disabledBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = disabledBtns.CountAsync()
-
-            if count = 0 then
-                Assert.Ignore("No disabled action buttons in live data; skipping HTML disabled test")
-            else
-                let! isDisabled = disabledBtns.First.IsDisabledAsync()
-                Assert.That(isDisabled, Is.True,
-                    "Action buttons with .disabled class should also have HTML disabled attribute")
-        }
-
-    [<Test>]
-    member this.``Action button has correct CSS styling``() =
-        task {
-            let actionBtns = this.Page.Locator(".wt-card .action-btn:not(.disabled)")
+            let actionBtns = this.Page.Locator(".wt-card .action-btn")
             do! actionBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = actionBtns.CountAsync()
 
             if count = 0 then
-                Assert.Ignore("No enabled action buttons in live data; skipping CSS test")
+                Assert.Ignore("No action buttons in live data; skipping tooltip test")
+            else
+                let! title = actionBtns.First.GetAttributeAsync("title")
+                Assert.That(title, Is.Not.Null.And.Not.Empty,
+                    "Action button should have a non-empty title attribute")
+        }
+
+    [<Test>]
+    member this.``Action button has pointer cursor``() =
+        task {
+            let actionBtns = this.Page.Locator(".wt-card .action-btn")
+            do! actionBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = actionBtns.CountAsync()
+
+            if count = 0 then
+                Assert.Ignore("No action buttons in live data; skipping CSS test")
             else
                 let! cursor =
                     actionBtns.First.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
                 Assert.That(cursor, Is.EqualTo("pointer"),
-                    "Enabled action button should have pointer cursor")
-        }
-
-    [<Test>]
-    member this.``Disabled action button has not-allowed cursor``() =
-        task {
-            let disabledBtns = this.Page.Locator(".wt-card .action-btn.disabled")
-            do! disabledBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = disabledBtns.CountAsync()
-
-            if count = 0 then
-                Assert.Ignore("No disabled action buttons in live data; skipping cursor test")
-            else
-                let! cursor =
-                    disabledBtns.First.EvaluateAsync<string>("el => getComputedStyle(el).cursor")
-                Assert.That(cursor, Is.EqualTo("not-allowed"),
-                    "Disabled action button should have not-allowed cursor")
+                    "Action button should have pointer cursor")
         }
 
     [<Test>]

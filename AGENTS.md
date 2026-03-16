@@ -65,6 +65,15 @@ This project uses [focused-review](https://github.com/0101/focused-review) for a
 
 `treemon.ps1` manages the application lifecycle: `dev`, `deploy`, `start`, `stop`, `restart`, `status`, `log`, `add`, `remove`.
 
+## Tech Stack
+
+- **Client**: F# with Fable (compiles to JS), Feliz for React bindings, Vite for bundling
+- **Server**: F# with ASP.NET Core
+- **Shared**: F# types shared between client and server
+- **Tests**: F# with NUnit + Playwright (E2E against live data)
+
+There is no TypeScript or JavaScript application code — all UI logic is in F# under `src/Client/`.
+
 ## Architecture & Specs
 
 For project architecture, domain types, and implementation details read `docs/spec/worktree-monitor.md`. Domain types are in `src/Shared/Types.fs`.

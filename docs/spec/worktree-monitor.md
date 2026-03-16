@@ -158,8 +158,17 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 ### PR Provider Routing
 
 - `RemoteInfo` DU: `AzureDevOps of AzDoRemote | GitHub of GithubRemote`
-- `detectProvider` inspects `git remote get-url origin`, routes to appropriate fetcher
+- `detectProvider` inspects `git remote get-url {upstreamRemote}`, routes to appropriate fetcher
 - Unknown remotes produce empty PR data — other sources unaffected
+
+### Upstream Remote Resolution
+
+For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects and uses the correct remote:
+
+- **Resolution order**: `.treemon.json` `"upstreamRemote"` field → auto-detect `upstream` remote → fall back to `origin`
+- **Affects**: PR fetching (remote URL), main branch comparisons (`{remote}/main`), fetch cycle, sync merge target
+- **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh
+- **Config example**: `{ "upstreamRemote": "upstream" }` in `.treemon.json` at repo root
 
 ### CommentSummary
 
@@ -217,6 +226,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
+- Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 
 ## Related Specs
 
