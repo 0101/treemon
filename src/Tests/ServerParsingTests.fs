@@ -91,6 +91,16 @@ type EncodeWorktreePathTests() =
         Assert.That(result, Is.EqualTo("Q--code-AITestAgent"))
 
     [<Test>]
+    member _.``Dot is replaced with hyphen``() =
+        let result = encodeWorktreePath @"C:\Users\user\.claude"
+        Assert.That(result, Is.EqualTo("C--Users-user--claude"))
+
+    [<Test>]
+    member _.``Space is replaced with hyphen``() =
+        let result = encodeWorktreePath @"C:\Users\user\OneDrive - Microsoft"
+        Assert.That(result, Is.EqualTo("C--Users-user-OneDrive---Microsoft"))
+
+    [<Test>]
     member _.``Path without special characters is unchanged``() =
         let result = encodeWorktreePath "simple"
         Assert.That(result, Is.EqualTo("simple"))
