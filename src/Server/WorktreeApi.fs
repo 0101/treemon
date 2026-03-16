@@ -480,6 +480,7 @@ let worktreeApi
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
+                      let prompt = CodingToolStatus.actionPrompt provider req.Action
+                      let command = CodingToolStatus.buildInteractiveCommand provider prompt
                       return! SessionManager.launchAction sessionAgent req.Path command
                   }) }

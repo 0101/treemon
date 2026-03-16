@@ -13,11 +13,11 @@
 
 Three contextual action buttons appear on cards when conditions are met:
 
-| Condition | Button Location | Prompt Sent |
-|-----------|----------------|-------------|
-| Unresolved PR comments (AzDo: `unresolved > 0`, GitHub: `total > 0` on open PRs only) | Next to thread/comment badge | `/pr <pr-url>` |
-| Failed build | Next to failed build badge | `/fix-build <build-url>` |
-| No PR exists (suppressed on main/master branches) | PR row area (where badge would be) | `Commit all changes, push to origin, and create a pull request for this branch` |
+| Condition | Button Location | Action |
+|-----------|----------------|--------|
+| Unresolved PR comments (AzDo: `unresolved > 0`, GitHub: `total > 0` on open PRs only) | Next to thread/comment badge | `FixPr <pr-url>` |
+| Failed build | Next to failed build badge | `FixBuild <build-url>` |
+| No PR exists (suppressed on main/master branches) | PR row area (where badge would be) | `CreatePr` |
 
 ### Disabled State
 

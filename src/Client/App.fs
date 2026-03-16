@@ -57,7 +57,7 @@ type Msg =
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
-    | LaunchAction of path: WorktreePath * prompt: string
+    | LaunchAction of path: WorktreePath * action: ActionKind
     | LaunchActionResult of Result<unit, string>
     | ClearActionCooldown of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
@@ -335,7 +335,7 @@ let update msg model =
     | SessionResult _ ->
         model, fetchWorktrees ()
 
-    | LaunchAction (path, prompt) ->
+    | LaunchAction (path, action) ->
         if model.ActionCooldowns.Contains path then
             model, Cmd.none
         else
@@ -344,7 +344,7 @@ let update msg model =
                     Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
             { model with ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Prompt = prompt } LaunchActionResult
+                Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Action = action } LaunchActionResult
                 clearAfter
             ]
 
@@ -891,14 +891,14 @@ let conflictIcon =
         ]
     ]
 
-let prActionButton dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (prompt: string) (title: string) (icon: ReactElement) =
+let prActionButton dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (action: ActionKind) (title: string) (icon: ReactElement) =
     let onCooldown = cooldowns.Contains wt.Path
     Html.button [
         prop.className (if onCooldown then "action-btn disabled" else "action-btn")
         prop.disabled onCooldown
         yield! noFocusProps
         prop.title (if onCooldown then "Action already triggered" else title)
-        prop.onClick (fun e -> e.stopPropagation(); if not onCooldown then dispatch (LaunchAction (wt.Path, prompt)))
+        prop.onClick (fun e -> e.stopPropagation(); if not onCooldown then dispatch (LaunchAction (wt.Path, action)))
         prop.children [ icon ]
     ]
 
@@ -930,13 +930,13 @@ let prBadgeContent dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) 
                     prop.text ($"{unresolved}/{total} threads")
                 ]
                 if unresolved > 0 then
-                    prActionButton dispatch cooldowns wt $"/pr {pr.Url}" "Fix PR comments" commentIcon
+                    prActionButton dispatch cooldowns wt (FixPr pr.Url) "Fix PR comments" commentIcon
             | _ -> ()
             yield! pr.Builds |> List.collect (fun build -> [
                     buildBadge repoName build
                     if build.Status = Failed then
                         match build.Url with
-                        | Some url -> prActionButton dispatch cooldowns wt $"/fix-build {url}" "Fix build" wrenchIcon
+                        | Some url -> prActionButton dispatch cooldowns wt (FixBuild url) "Fix build" wrenchIcon
                         | None -> ()
                 ])
     ]
@@ -953,7 +953,7 @@ let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName
         Html.div [
             prop.className "pr-row"
             prop.children [
-                prActionButton dispatch cooldowns wt "Commit all changes, push to origin, and create a pull request for this branch" "Create PR" createPrIcon
+                prActionButton dispatch cooldowns wt CreatePr "Create PR" createPrIcon
             ]
         ]
     | HasPr pr, _ ->
