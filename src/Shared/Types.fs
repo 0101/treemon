@@ -118,8 +118,8 @@ type CardEvent =
       Duration: TimeSpan option }
 
 type RepoProvider =
-    | GitHubProvider
-    | AzDoProvider
+    | GitHubProvider of url: string
+    | AzDoProvider of url: string
     | UnknownProvider
 
 type RepoWorktrees =

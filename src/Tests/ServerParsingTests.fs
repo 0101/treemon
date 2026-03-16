@@ -110,25 +110,25 @@ type DetectProviderTests() =
     member _.``detectProvider with GitHub HTTPS URL returns GitHub remote``() =
         let result = detectProvider "https://github.com/octocat/hello-world"
         Assert.That(result.IsSome, Is.True)
-        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.GitHubProvider))
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.GitHubProvider "https://github.com/octocat/hello-world"))
 
     [<Test>]
     member _.``detectProvider with GitHub SSH URL returns GitHub remote``() =
         let result = detectProvider "git@github.com:octocat/hello-world.git"
         Assert.That(result.IsSome, Is.True)
-        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.GitHubProvider))
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.GitHubProvider "https://github.com/octocat/hello-world"))
 
     [<Test>]
     member _.``detectProvider with AzDo HTTPS URL returns AzDo remote``() =
         let result = detectProvider "https://dev.azure.com/myorg/myproject/_git/myrepo"
         Assert.That(result.IsSome, Is.True)
-        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.AzDoProvider))
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.AzDoProvider "https://dev.azure.com/myorg/myproject/_git/myrepo"))
 
     [<Test>]
     member _.``detectProvider with AzDo SSH URL returns AzDo remote``() =
         let result = detectProvider "git@ssh.dev.azure.com:v3/myorg/myproject/myrepo"
         Assert.That(result.IsSome, Is.True)
-        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.AzDoProvider))
+        Assert.That(toRepoProvider result.Value, Is.EqualTo(Shared.AzDoProvider "https://dev.azure.com/myorg/myproject/_git/myrepo"))
 
     [<Test>]
     member _.``detectProvider with unknown URL returns None``() =

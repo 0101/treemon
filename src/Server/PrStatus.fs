@@ -50,8 +50,8 @@ let detectProvider (url: string) =
         |> Option.map GitHub)
 
 let toRepoProvider = function
-    | AzureDevOps _ -> AzDoProvider
-    | GitHub _ -> GitHubProvider
+    | AzureDevOps r -> AzDoProvider $"https://dev.azure.com/{r.Org}/{r.Project}/_git/{r.Repo}"
+    | GitHub r -> GitHubProvider $"https://github.com/{r.Owner}/{r.Repo}"
 
 let private azPythonExe =
     lazy

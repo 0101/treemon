@@ -180,7 +180,7 @@
           }
         ],
         "IsReady": true,
-        "Provider": "AzDoProvider"
+        "Provider": { "AzDoProvider": "https://dev.azure.com/myorg/TestProject/_git/TestProject" }
       },
       {
         "RepoId": {"RepoId": "treemon"},
@@ -263,7 +263,7 @@
           }
         ],
         "IsReady": true,
-        "Provider": "GitHubProvider"
+        "Provider": { "GitHubProvider": "https://github.com/user/treemon" }
       }
     ],
     "SchedulerEvents": [

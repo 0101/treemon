@@ -1237,31 +1237,34 @@ let allWorktreesEmpty (repos: RepoModel list) =
     repos |> List.forall _.Worktrees.IsEmpty
 
 let providerIcon (provider: RepoProvider option) =
+    let icon viewBox (svgPath: string) =
+        Svg.svg [
+            svg.className "provider-icon"
+            svg.viewBox viewBox
+            svg.children [ Svg.path [ svg.d svgPath; svg.fill "currentColor" ] ]
+        ]
+
+    let githubPath = "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+    let azdoPath = "M17 4v9.74l-4 3.28-6.2-2.26V17l-3.51-4.59 10.23.8V4.44zm-3.41.49L7.85 1v2.29L2.58 4.84 1 6.87v4.61l2.26 1V6.57z"
+
     match provider with
-    | None -> Html.none
-    | Some GitHubProvider ->
-        Svg.svg [
-            svg.className "provider-icon"
-            svg.viewBox (0, 0, 24, 24)
-            svg.children [
-                Svg.path [
-                    svg.d "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
-                    svg.fill "currentColor"
-                ]
-            ]
+    | None | Some UnknownProvider -> Html.none
+    | Some(GitHubProvider url) ->
+        Html.a [
+            prop.className "provider-link"
+            prop.href url
+            prop.target "_blank"
+            prop.onClick (fun e -> e.stopPropagation())
+            prop.children [ icon (0, 0, 24, 24) githubPath ]
         ]
-    | Some AzDoProvider ->
-        Svg.svg [
-            svg.className "provider-icon"
-            svg.viewBox (0, 0, 18, 18)
-            svg.children [
-                Svg.path [
-                    svg.d "M17 4v9.74l-4 3.28-6.2-2.26V17l-3.51-4.59 10.23.8V4.44zm-3.41.49L7.85 1v2.29L2.58 4.84 1 6.87v4.61l2.26 1V6.57z"
-                    svg.fill "currentColor"
-                ]
-            ]
+    | Some(AzDoProvider url) ->
+        Html.a [
+            prop.className "provider-link"
+            prop.href url
+            prop.target "_blank"
+            prop.onClick (fun e -> e.stopPropagation())
+            prop.children [ icon (0, 0, 18, 18) azdoPath ]
         ]
-    | Some UnknownProvider -> Html.none
 
 let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoModel) =
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
