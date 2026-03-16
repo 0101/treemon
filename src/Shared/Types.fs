@@ -77,6 +77,15 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
+type ActionKind =
+    | FixPr of url: string
+    | FixBuild of url: string
+    | CreatePr
+
+type ActionRequest =
+    { Path: WorktreePath
+      Action: ActionKind }
+
 type LaunchRequest =
     { Path: WorktreePath
       Prompt: string }
@@ -117,11 +126,17 @@ type CardEvent =
       Status: StepStatus option
       Duration: TimeSpan option }
 
+type RepoProvider =
+    | GitHubProvider of url: string
+    | AzDoProvider of url: string
+    | UnknownProvider
+
 type RepoWorktrees =
     { RepoId: RepoId
       RootFolderName: string
       Worktrees: WorktreeStatus list
-      IsReady: bool }
+      IsReady: bool
+      Provider: RepoProvider option }
 
 type SystemMetrics =
     { CpuPercent: float
@@ -157,4 +172,4 @@ type IWorktreeApi =
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
-      launchAction: LaunchRequest -> Async<Result<unit, string>> }
+      launchAction: ActionRequest -> Async<Result<unit, string>> }
