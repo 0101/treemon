@@ -126,11 +126,17 @@ type CardEvent =
       Status: StepStatus option
       Duration: TimeSpan option }
 
+type RepoProvider =
+    | GitHubProvider of url: string
+    | AzDoProvider of url: string
+    | UnknownProvider
+
 type RepoWorktrees =
     { RepoId: RepoId
       RootFolderName: string
       Worktrees: WorktreeStatus list
-      IsReady: bool }
+      IsReady: bool
+      Provider: RepoProvider option }
 
 type SystemMetrics =
     { CpuPercent: float

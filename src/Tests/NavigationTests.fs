@@ -28,7 +28,8 @@ module NavHelpers =
           Worktrees = branches |> List.map makeWorktree
           ArchivedWorktrees = []
           IsReady = true
-          IsCollapsed = false }
+          IsCollapsed = false
+          Provider = None }
 
     let scrollHint (_, _, hint) = hint
 

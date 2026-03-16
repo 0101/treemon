@@ -235,7 +235,8 @@ type NavigationArchiveTests() =
           Worktrees = worktrees
           ArchivedWorktrees = archivedWorktrees
           IsReady = true
-          IsCollapsed = false }
+          IsCollapsed = false
+          Provider = None }
 
     let makeWorktreeStatus branch isArchived : WorktreeStatus =
         { Path = WorktreePath.create $"/repo/{branch}"
