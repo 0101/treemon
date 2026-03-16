@@ -154,7 +154,8 @@ let getWorktrees
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)
                   Worktrees = statuses
-                  IsReady = repo.IsReady })
+                  IsReady = repo.IsReady
+                  Provider = repo.Provider })
 
         return
             { Repos = repos

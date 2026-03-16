@@ -3793,6 +3793,23 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Provider icon SVG exists in repo-header for recognized remotes``() =
+        task {
+            let headers = this.Page.Locator(".repo-section .repo-header")
+            do! headers.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let icons = this.Page.Locator(".repo-header .provider-icon")
+            let! iconCount = icons.CountAsync()
+            Assert.That(iconCount, Is.GreaterThanOrEqualTo(1),
+                "At least one repo-header should contain a .provider-icon SVG for repos with recognized remotes")
+
+            let firstIcon = icons.First
+            let! tagName = firstIcon.EvaluateAsync<string>("el => el.tagName.toLowerCase()")
+            Assert.That(tagName, Is.EqualTo("svg"), "Provider icon should be an SVG element")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Enter key in modal input does not collapse repo``() =
         task {
             let repoSection = this.Page.Locator(".repo-section").First
@@ -3814,6 +3831,27 @@ type DashboardTests() =
             let! gridVisibleAfter = cardGrid.IsVisibleAsync()
             Assert.That(gridVisibleAfter, Is.True,
                 "Card grid should still be visible after pressing Enter in modal input (Enter must not propagate to ToggleCollapse)")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Provider icon SVG has valid viewBox for GitHub or AzDo``() =
+        task {
+            let icons = this.Page.Locator(".repo-header .provider-icon")
+            do! icons.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = icons.CountAsync()
+
+            let mutable checkedAny = false
+            for i in 0 .. count - 1 do
+                let icon = icons.Nth(i)
+                let! viewBox = icon.GetAttributeAsync("viewBox")
+                Assert.That(viewBox, Is.Not.Null.And.Not.Empty,
+                    $"Provider icon {i} should have a viewBox attribute")
+                Assert.That(viewBox, Is.EqualTo("0 0 24 24").Or.EqualTo("0 0 18 18"),
+                    $"Provider icon {i} viewBox should be GitHub (0 0 24 24) or AzDo (0 0 18 18)")
+                checkedAny <- true
+
+            Assert.That(checkedAny, Is.True, "Should have checked at least one provider icon viewBox")
         }
 
     [<Test>]
@@ -3965,4 +4003,5 @@ type DashboardTests() =
             Assert.That(afterClass, Does.Contain("repo-header"),
                 "Focus should remain on repo header (arrow keys while modal open should not have changed it)")
         }
+
 
