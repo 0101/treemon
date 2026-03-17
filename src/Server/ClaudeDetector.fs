@@ -20,7 +20,7 @@ let private claudeProjectsDir =
     )
 
 let encodeWorktreePath (worktreePath: string) =
-    worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-")
+    worktreePath.Replace(":", "-").Replace("\\", "-").Replace("/", "-").Replace(".", "-").Replace(" ", "-")
 
 let internal findAllJsonlFiles (projectDir: string) =
     try
