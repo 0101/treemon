@@ -81,6 +81,7 @@ type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
     | CreatePr
+    | FixTests
 
 type ActionRequest =
     { Path: WorktreePath
@@ -109,6 +110,7 @@ type WorktreeStatus =
       IsDirty: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
+      HasTestFailureLog: bool
       IsArchived: bool }
 
 [<RequireQualifiedAccess>]

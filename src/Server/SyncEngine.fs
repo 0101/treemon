@@ -242,6 +242,28 @@ let private readTreemonConfig (worktreePath: string) : string option =
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
+let private testFailureLogPath (worktreePath: string) =
+    Path.Combine(worktreePath, ".agents", "tests-failure.log")
+
+let private saveTestFailureLog (worktreePath: string) (command: string) (proc: ProcessResult) =
+    try
+        let logPath = testFailureLogPath worktreePath
+        Directory.CreateDirectory(Path.GetDirectoryName(logPath)) |> ignore
+        let content = $"Command: {command}\nExit code: {proc.ExitCode}\n\n--- stdout ---\n{proc.Stdout}\n\n--- stderr ---\n{proc.Stderr}"
+        File.WriteAllText(logPath, content)
+        Log.log "SyncEngine" $"Saved test failure log to {logPath}"
+    with ex ->
+        Log.log "SyncEngine" $"Failed to save test failure log: {ex.Message}"
+
+let private deleteTestFailureLog (worktreePath: string) =
+    try
+        let logPath = testFailureLogPath worktreePath
+        if File.Exists(logPath) then
+            File.Delete(logPath)
+            Log.log "SyncEngine" $"Cleaned up test failure log: {logPath}"
+    with ex ->
+        Log.log "SyncEngine" $"Failed to delete test failure log: {ex.Message}"
+
 let private conflictResolutionCommand (provider: Shared.CodingToolProvider option) =
     match provider |> Option.defaultValue Shared.CodingToolProvider.Claude with
     | Shared.CodingToolProvider.Claude ->
@@ -347,14 +369,28 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                     Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
                     "test"
 
-            let! testResult =
-                runStep post branch SyncStep.Test worktreePath "dotnet" testArgs ct
+            let testCmd = $"dotnet {testArgs}"
+            post (UpdateProcessState (branch, SyncState.Running SyncStep.Test))
+            post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Running))
+
+            let! testResult = runProcess worktreePath "dotnet" testArgs ct
 
             match testResult with
-            | Error status ->
+            | Error msg ->
+                let status = StepStatus.Failed msg
+                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd status))
                 post (CompleteSync (branch, status))
                 return ()
-            | Ok _ -> ()
+            | Ok testProc when testProc.ExitCode <> 0 ->
+                let msg = $"exit {testProc.ExitCode}: {truncateStderr testProc.Stderr 200}"
+                let status = StepStatus.Failed msg
+                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd status))
+                saveTestFailureLog worktreePath testCmd testProc
+                post (CompleteSync (branch, status))
+                return ()
+            | Ok testProc ->
+                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Succeeded))
+                deleteTestFailureLog worktreePath
 
             let! diffResult = runProcess worktreePath "git" "diff --cached --quiet" ct
 

@@ -280,6 +280,7 @@ type SortWorktreesTests() =
           IsDirty = false
           WorkMetrics = None
           HasActiveSession = false
+          HasTestFailureLog = false
           IsArchived = false }
 
     let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)

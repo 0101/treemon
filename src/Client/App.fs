@@ -603,7 +603,9 @@ let relativeEventTime (dt: System.DateTimeOffset) =
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
 
-let eventLogEntry (evt: CardEvent) =
+let eventLogEntry (onFixTests: (unit -> unit) option) (evt: CardEvent) =
+    let isTestFailure =
+        evt.Source = "Test" && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
     Html.div [
         prop.className "event-entry"
         prop.children [
@@ -613,20 +615,32 @@ let eventLogEntry (evt: CardEvent) =
             match evt.Status with
             | Some _ ->
                 Html.span [
-                    prop.className (stepStatusClassName evt.Status)
+                    prop.className (
+                        if isTestFailure && onFixTests.IsSome
+                        then stepStatusClassName evt.Status + " clickable"
+                        else stepStatusClassName evt.Status)
                     prop.text (stepStatusText evt.Status)
+                    if isTestFailure then
+                        match onFixTests with
+                        | Some handler ->
+                            prop.title "Click to fix with coding tool"
+                            prop.onClick (fun e -> e.stopPropagation(); handler())
+                        | None -> ()
                 ]
             | None -> Html.none
         ]
     ]
 
-let eventLog (events: CardEvent list) =
+let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (events: CardEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
+        let onFixTests =
+            if cooldowns.Contains wtPath then None
+            else Some (fun () -> dispatch (LaunchAction (wtPath, FixTests)))
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map eventLogEntry)
+            prop.children (evts |> List.map (eventLogEntry onFixTests))
         ]
 
 let knownCategories =
@@ -1054,7 +1068,7 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                         ]
                     | None -> ()
 
-                    eventLog branchEvents
+                    eventLog dispatch cooldowns wt.Path branchEvents
                 ]
             ]
         ]

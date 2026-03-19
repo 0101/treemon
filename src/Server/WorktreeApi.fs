@@ -47,6 +47,9 @@ let private assembleFromState
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
+      HasTestFailureLog =
+          let logPath = System.IO.Path.Combine(wt.Path, ".agents", "tests-failure.log")
+          System.IO.File.Exists(logPath)
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
