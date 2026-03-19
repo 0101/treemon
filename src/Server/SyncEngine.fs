@@ -247,7 +247,7 @@ let private conflictResolutionCommand (provider: Shared.CodingToolProvider optio
     | Shared.CodingToolProvider.Claude ->
         "claude", """-p "/conflict" --dangerously-skip-permissions"""
     | Shared.CodingToolProvider.Copilot ->
-        "copilot", """-p "Resolve all merge conflicts in this branch. Run 'git status' to find conflicted files, then resolve each conflict. After resolving, stage the files with 'git add'." --allow-all --no-ask-user -s --autopilot"""
+        "copilot", """-p "use conflict skill to resolve conflicts" --allow-all --no-ask-user -s --autopilot"""
 
 let private runStep
     (post: SyncMsg -> unit)
