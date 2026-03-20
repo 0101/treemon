@@ -17,6 +17,7 @@ Hardcoded path separators and newline characters break on other operating system
 - Exception: `\n` is acceptable when splitting input known to use `\n` (e.g. parsing git output)
 - Exception: `\n` is acceptable when writing files consumed by cross-platform tools (e.g. AI coding assistants, CI parsers) where consistent line endings are preferred over platform-specific ones
 - Exception: String interpolation with `/` for URL construction is fine — only flag file system paths
+- Exception: `src/Shared/` is compiled by Fable to JavaScript — avoid `System.IO` and other server-only .NET APIs there. Use plain string literals for paths.
 
 ## Wrong
 ```fsharp

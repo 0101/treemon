@@ -1,10 +1,9 @@
 namespace Shared
 
 open System
-open System.IO
 
 module TestFailureLog =
-    let relPath = Path.Combine(".agents", "tests-failure.log")
+    let [<Literal>] relPath = ".agents/tests-failure.log"
 
 type RepoId = RepoId of string
 
