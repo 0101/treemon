@@ -242,7 +242,7 @@ let private readTreemonConfig (worktreePath: string) : string option =
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
-let private testFailureLogPath (worktreePath: string) =
+let testFailureLogPath (worktreePath: string) =
     Path.Combine(worktreePath, ".agents", "tests-failure.log")
 
 let private saveTestFailureLog (worktreePath: string) (command: string) (proc: ProcessResult) =

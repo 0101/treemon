@@ -18,6 +18,7 @@ let loadFixtures (path: string) =
 let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
+    (hasTestFailureLog: string -> bool)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
@@ -47,9 +48,7 @@ let private assembleFromState
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
-      HasTestFailureLog =
-          let logPath = System.IO.Path.Combine(wt.Path, ".agents", "tests-failure.log")
-          System.IO.File.Exists(logPath)
+      HasTestFailureLog = hasTestFailureLog wt.Path
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
@@ -150,9 +149,12 @@ let getWorktrees
                     |> Map.tryFind repoId
                     |> TreemonConfig.readArchivedBranchSet
 
+                let hasTestFailureLog path =
+                    SyncEngine.testFailureLogPath path |> System.IO.File.Exists
+
                 let statuses =
                     repo.WorktreeList
-                    |> List.map (assembleFromState activeSessionPaths archivedBranches repo)
+                    |> List.map (assembleFromState activeSessionPaths archivedBranches hasTestFailureLog repo)
 
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)

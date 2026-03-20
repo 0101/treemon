@@ -631,12 +631,12 @@ let eventLogEntry (onFixTests: (unit -> unit) option) (evt: CardEvent) =
         ]
     ]
 
-let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (events: CardEvent list) =
+let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (hasTestFailureLog: bool) (events: CardEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
         let onFixTests =
-            if cooldowns.Contains wtPath then None
+            if not hasTestFailureLog || cooldowns.Contains wtPath then None
             else Some (fun () -> dispatch (LaunchAction (wtPath, FixTests)))
         Html.div [
             prop.className "event-log"
@@ -1068,7 +1068,7 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                         ]
                     | None -> ()
 
-                    eventLog dispatch cooldowns wt.Path branchEvents
+                    eventLog dispatch cooldowns wt.Path wt.HasTestFailureLog branchEvents
                 ]
             ]
         ]
