@@ -142,6 +142,8 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | FixPr url, CodingToolProvider.Claude -> $"/pr {url}"
     | FixBuild url, CodingToolProvider.Copilot -> $"use fix-build skill with {url}"
     | FixBuild url, CodingToolProvider.Claude -> $"/fix-build {url}"
+    | FixTests, _ ->
+        $"Please fix the failing tests. See the test failure report in {TestFailureLog.relPath} for details."
     | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
 
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =

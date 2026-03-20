@@ -252,6 +252,7 @@ type NavigationArchiveTests() =
           IsDirty = false
           WorkMetrics = None
           HasActiveSession = false
+          HasTestFailureLog = false
           IsArchived = isArchived }
 
     [<Test>]
@@ -350,7 +351,7 @@ type ArchiveE2ETests() =
             "Beads":{{"Open":0,"InProgress":0,"Closed":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
-            "WorkMetrics":null,"HasActiveSession":false,"IsArchived":{archived}
+            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived}
         }}"""
 
     let makeDashboardJson (worktrees: string list) =
