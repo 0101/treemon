@@ -1,6 +1,10 @@
 namespace Shared
 
 open System
+open System.IO
+
+module TestFailureLog =
+    let relPath = Path.Combine(".agents", "tests-failure.log")
 
 type RepoId = RepoId of string
 
@@ -120,6 +124,9 @@ type StepStatus =
     | Succeeded
     | Failed of message: string
     | Cancelled
+
+module EventSource =
+    let [<Literal>] Test = "Test"
 
 type CardEvent =
     { Source: string

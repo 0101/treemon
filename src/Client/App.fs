@@ -605,7 +605,7 @@ let relativeEventTime (dt: System.DateTimeOffset) =
 
 let eventLogEntry (onFixTests: (unit -> unit) option) (evt: CardEvent) =
     let isTestFailure =
-        evt.Source = "Test" && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+        evt.Source = EventSource.Test && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
     Html.div [
         prop.className "event-entry"
         prop.children [

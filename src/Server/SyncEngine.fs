@@ -242,8 +242,10 @@ let private readTreemonConfig (worktreePath: string) : string option =
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
+let testFailureLogRelPath = TestFailureLog.relPath
+
 let testFailureLogPath (worktreePath: string) =
-    Path.Combine(worktreePath, ".agents", "tests-failure.log")
+    Path.Combine(worktreePath, testFailureLogRelPath)
 
 let private saveTestFailureLog (worktreePath: string) (command: string) (proc: ProcessResult) =
     try
@@ -373,6 +375,7 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
             post (UpdateProcessState (branch, SyncState.Running SyncStep.Test))
             post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Running))
 
+            deleteTestFailureLog worktreePath
             let! testResult = runProcess worktreePath "dotnet" testArgs ct
 
             match testResult with
@@ -390,7 +393,6 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                 return ()
             | Ok testProc ->
                 post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Succeeded))
-                deleteTestFailureLog worktreePath
 
             let! diffResult = runProcess worktreePath "git" "diff --cached --quiet" ct
 
