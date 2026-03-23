@@ -5,6 +5,7 @@ open System.Diagnostics
 open System.IO
 open System.Threading
 open Shared
+open FsToolkit.ErrorHandling
 
 [<RequireQualifiedAccess>]
 type SyncStep =
@@ -273,143 +274,132 @@ let private conflictResolutionCommand (provider: Shared.CodingToolProvider optio
     | Shared.CodingToolProvider.Copilot ->
         "copilot", """-p "use conflict skill to resolve conflicts" --allow-all --no-ask-user -s --autopilot"""
 
-let private runStep
-    (post: SyncMsg -> unit)
-    (branch: string)
-    (step: SyncStep)
-    (worktreePath: string)
-    (fileName: string)
-    (arguments: string)
-    (ct: CancellationToken)
-    : Async<Result<ProcessResult, StepStatus>> =
-    async {
-        let cmdString = $"{fileName} {arguments}"
-        post (UpdateProcessState (branch, SyncState.Running step))
-        post (PushEvent (branch, mkEvent $"{step}" cmdString StepStatus.Running))
-
-        let! result = runProcess worktreePath fileName arguments ct
-
-        match result with
-        | Error msg ->
-            let status = StepStatus.Failed msg
-            post (PushEvent (branch, mkEvent $"{step}" cmdString status))
-            return Error status
-        | Ok proc when proc.ExitCode <> 0 ->
-            let msg = $"exit {proc.ExitCode}: {truncateStderr proc.Stderr 200}"
-            let status = StepStatus.Failed msg
-            post (PushEvent (branch, mkEvent $"{step}" cmdString status))
-            return Error status
-        | Ok proc ->
-            post (PushEvent (branch, mkEvent $"{step}" cmdString StepStatus.Succeeded))
-            return Ok proc
-    }
-
 let buildFetchArgs (upstreamRemote: string) = $"fetch {upstreamRemote}"
 
+type StepContext =
+    { Post: SyncMsg -> unit
+      Branch: string
+      WorktreePath: string
+      Ct: CancellationToken }
+
+module private PipelineSteps =
+
+    let formatExitError (proc: ProcessResult) =
+        $"exit {proc.ExitCode}: {truncateStderr proc.Stderr 200}"
+
+    let runStep (ctx: StepContext) (step: SyncStep) (cmd: string) (args: string) (check: ProcessResult -> Result<'a, string>) : Async<Result<'a, StepStatus>> =
+        async {
+            let cmdString = $"{cmd} {args}"
+            ctx.Post (UpdateProcessState (ctx.Branch, SyncState.Running step))
+            ctx.Post (PushEvent (ctx.Branch, mkEvent $"{step}" cmdString StepStatus.Running))
+
+            let! result = runProcess ctx.WorktreePath cmd args ctx.Ct
+
+            match result with
+            | Error msg ->
+                let status = StepStatus.Failed msg
+                ctx.Post (PushEvent (ctx.Branch, mkEvent $"{step}" cmdString status))
+                return Error status
+            | Ok proc ->
+                match check proc with
+                | Ok value ->
+                    ctx.Post (PushEvent (ctx.Branch, mkEvent $"{step}" cmdString StepStatus.Succeeded))
+                    return Ok value
+                | Error msg ->
+                    let status = StepStatus.Failed msg
+                    ctx.Post (PushEvent (ctx.Branch, mkEvent $"{step}" cmdString status))
+                    return Error status
+        }
+
+    let checkExitCode (proc: ProcessResult) =
+        if proc.ExitCode = 0 then Ok ()
+        else Error (formatExitError proc)
+
+    let checkClean (ctx: StepContext) =
+        runStep ctx SyncStep.CheckClean "git" "status --porcelain --untracked-files=no" (fun proc ->
+            if proc.ExitCode <> 0 then Error (formatExitError proc)
+            elif proc.Stdout <> "" then Error "Working tree is dirty"
+            else Ok ())
+
+    let fetch (ctx: StepContext) (upstreamRemote: string) =
+        runStep ctx SyncStep.Pull "git" (buildFetchArgs upstreamRemote) checkExitCode
+
+    let merge (ctx: StepContext) (upstreamRemote: string) : Async<Result<bool, StepStatus>> =
+        let mergeTarget = GitWorktree.mainRef upstreamRemote
+        let cmdString = $"git merge {mergeTarget}"
+        async {
+            ctx.Post (UpdateProcessState (ctx.Branch, SyncState.Running SyncStep.Merge))
+            ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Merge}" cmdString StepStatus.Running))
+
+            let! result = runProcess ctx.WorktreePath "git" $"merge {mergeTarget}" ctx.Ct
+
+            match result with
+            | Error msg ->
+                let status = StepStatus.Failed msg
+                ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Merge}" cmdString status))
+                return Error status
+            | Ok proc when proc.ExitCode = 0 ->
+                ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Merge}" cmdString StepStatus.Succeeded))
+                return Ok false
+            | Ok proc ->
+                ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Merge}" cmdString (StepStatus.Failed (formatExitError proc))))
+                return Ok true
+        }
+
+    let resolveConflicts (ctx: StepContext) (provider: Shared.CodingToolProvider option) =
+        let fileName, arguments = conflictResolutionCommand provider
+        runStep ctx SyncStep.ResolveConflicts fileName arguments checkExitCode
+
+    let resolveTestArgs (repoRoot: string) =
+        match readTreemonConfig repoRoot with
+        | Some solutionPath ->
+            Log.log "SyncEngine" $"Using testSolution from .treemon.json: {solutionPath}"
+            $"""test "{solutionPath}" """
+        | None ->
+            Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
+            "test"
+
+    let runTests (ctx: StepContext) (repoRoot: string) =
+        let testArgs = resolveTestArgs repoRoot
+        deleteTestFailureLog ctx.WorktreePath
+        runStep ctx SyncStep.Test "dotnet" testArgs (fun proc ->
+            if proc.ExitCode = 0 then Ok ()
+            else
+                saveTestFailureLog ctx.WorktreePath $"dotnet {testArgs}" proc
+                Error (formatExitError proc))
+
+    let commitIfNeeded (ctx: StepContext) : Async<Result<unit, StepStatus>> =
+        async {
+            let! diffResult = runProcess ctx.WorktreePath "git" "diff --cached --quiet" ctx.Ct |> Async.map Result.toOption
+            match diffResult with
+            | Some proc when proc.ExitCode = 1 ->
+                return! runStep ctx SyncStep.Commit "git" "commit --no-edit" checkExitCode
+            | _ -> return Ok ()
+        }
+
+
 let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (ct: CancellationToken) : Async<unit> =
+    let ctx = { Post = post; Branch = branch; WorktreePath = worktreePath; Ct = ct }
+
+    let pipeline () =
+        asyncResult {
+            do! PipelineSteps.checkClean ctx
+            do! PipelineSteps.fetch ctx upstreamRemote
+            let! hasConflicts = PipelineSteps.merge ctx upstreamRemote
+            if hasConflicts then
+                do! PipelineSteps.resolveConflicts ctx provider
+            do! PipelineSteps.runTests ctx repoRoot
+            do! PipelineSteps.commitIfNeeded ctx
+        }
+
     async {
         try
             Log.log "SyncEngine" $"Starting sync pipeline for {branch} at {worktreePath}"
-
-            let! checkResult = runStep post branch SyncStep.CheckClean worktreePath "git" "status --porcelain --untracked-files=no" ct
-
-            match checkResult with
-            | Error status ->
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok proc when proc.Stdout <> "" ->
-                let status = StepStatus.Failed "Working tree is dirty"
-                post (PushEvent (branch, mkEvent $"{SyncStep.CheckClean}" "git status --porcelain --untracked-files=no" status))
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok _ ->
-
-            let! pullResult = runStep post branch SyncStep.Pull worktreePath "git" (buildFetchArgs upstreamRemote) ct
-
-            match pullResult with
-            | Error status ->
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok _ ->
-
-            let mergeTarget = GitWorktree.mainRef upstreamRemote
-            let mergeCmd = $"git merge {mergeTarget}"
-            post (UpdateProcessState (branch, SyncState.Running SyncStep.Merge))
-            post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd StepStatus.Running))
-
-            let! mergeResult = runProcess worktreePath "git" $"merge {mergeTarget}" ct
-
-            match mergeResult with
-            | Error msg ->
-                let status = StepStatus.Failed msg
-                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd status))
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok mergeProc when mergeProc.ExitCode = 0 ->
-                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd StepStatus.Succeeded))
-            | Ok mergeProc ->
-                let mergeMsg = $"exit {mergeProc.ExitCode}: {truncateStderr mergeProc.Stderr 200}"
-                post (PushEvent (branch, mkEvent $"{SyncStep.Merge}" mergeCmd (StepStatus.Failed mergeMsg)))
-
-                let fileName, arguments = conflictResolutionCommand provider
-
-                let! conflictResult =
-                    runStep post branch SyncStep.ResolveConflicts worktreePath fileName arguments ct
-
-                match conflictResult with
-                | Error status ->
-                    post (CompleteSync (branch, status))
-                    return ()
-                | Ok _ -> ()
-
-            let testArgs =
-                match readTreemonConfig repoRoot with
-                | Some solutionPath ->
-                    Log.log "SyncEngine" $"Using testSolution from .treemon.json: {solutionPath}"
-                    $"""test "{solutionPath}" """
-                | None ->
-                    Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
-                    "test"
-
-            let testCmd = $"dotnet {testArgs}"
-            post (UpdateProcessState (branch, SyncState.Running SyncStep.Test))
-            post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Running))
-
-            deleteTestFailureLog worktreePath
-            let! testResult = runProcess worktreePath "dotnet" testArgs ct
-
-            match testResult with
-            | Error msg ->
-                let status = StepStatus.Failed msg
-                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd status))
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok testProc when testProc.ExitCode <> 0 ->
-                let msg = $"exit {testProc.ExitCode}: {truncateStderr testProc.Stderr 200}"
-                let status = StepStatus.Failed msg
-                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd status))
-                saveTestFailureLog worktreePath testCmd testProc
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok testProc ->
-                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Succeeded))
-
-            let! diffResult = runProcess worktreePath "git" "diff --cached --quiet" ct
-
-            match diffResult with
-            | Ok proc when proc.ExitCode = 1 ->
-                let! commitResult =
-                    runStep post branch SyncStep.Commit worktreePath "git" "commit --no-edit" ct
-
-                match commitResult with
-                | Error status ->
-                    post (CompleteSync (branch, status))
-                    return ()
-                | Ok _ -> ()
-            | _ -> ()
-
-            post (CompleteSync (branch, StepStatus.Succeeded))
-            Log.log "SyncEngine" $"Sync pipeline completed successfully for {branch}"
+            let! result = pipeline ()
+            match result with
+            | Ok () -> post (CompleteSync (branch, StepStatus.Succeeded))
+            | Error status -> post (CompleteSync (branch, status))
+            Log.log "SyncEngine" $"Sync pipeline completed for {branch}"
         with
         | :? OperationCanceledException ->
             Log.log "SyncEngine" $"Sync pipeline cancelled for {branch}"
