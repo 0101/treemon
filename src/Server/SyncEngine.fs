@@ -205,39 +205,11 @@ let runProcess
             return Error $"Failed to start process: {ex.Message}"
     }
 
-let private isValidSolutionPath (worktreePath: string) (solutionPath: string) =
-    let isSolutionExtension =
-        solutionPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
-        || solutionPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
-
-    let fullPath = Path.Combine(worktreePath, solutionPath) |> Path.GetFullPath
-    let normalizedRoot = Path.GetFullPath(worktreePath)
-
-    isSolutionExtension && fullPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(fullPath)
-
-let private readTreemonConfig (worktreePath: string) : string option =
-    let configPath = Path.Combine(worktreePath, ".treemon.json")
-
-    match File.Exists(configPath) with
-    | false -> None
-    | true ->
-        try
-            let json = File.ReadAllText(configPath)
-            use doc = System.Text.Json.JsonDocument.Parse(json)
-
-            match doc.RootElement.TryGetProperty("testSolution") with
-            | true, elem ->
-                let solutionPath = elem.GetString()
-
-                match isValidSolutionPath worktreePath solutionPath with
-                | true -> Some solutionPath
-                | false ->
-                    Log.log "SyncEngine" $"testSolution '{solutionPath}' rejected: must be a .sln/.slnx file within {worktreePath}"
-                    None
-            | false, _ -> None
-        with ex ->
-            Log.log "SyncEngine" $"Failed to read .treemon.json: {ex.Message}"
-            None
+let private parseCommand (command: string) : string * string =
+    let trimmed = command.Trim()
+    match trimmed.IndexOf(' ') with
+    | -1 -> trimmed, ""
+    | i -> trimmed[..i-1], trimmed[i+1..]
 
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
@@ -362,37 +334,34 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                     return ()
                 | Ok _ -> ()
 
-            let testArgs =
-                match readTreemonConfig repoRoot with
-                | Some solutionPath ->
-                    Log.log "SyncEngine" $"Using testSolution from .treemon.json: {solutionPath}"
-                    $"""test "{solutionPath}" """
-                | None ->
-                    Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
-                    "test"
+            match TreemonConfig.readTestCommand repoRoot with
+            | None ->
+                Log.log "SyncEngine" $"No testCommand configured in {repoRoot}, skipping tests"
+                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" "not configured" StepStatus.NotConfigured))
 
-            let testCmd = $"dotnet {testArgs}"
-            post (UpdateProcessState (branch, SyncState.Running SyncStep.Test))
-            post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Running))
+            | Some testCommand ->
+                let fileName, args = parseCommand testCommand
+                post (UpdateProcessState (branch, SyncState.Running SyncStep.Test))
+                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCommand StepStatus.Running))
 
-            deleteTestFailureLog worktreePath
-            let! testResult = runProcess worktreePath "dotnet" testArgs ct
+                deleteTestFailureLog worktreePath
+                let! testResult = runProcess worktreePath fileName args ct
 
-            match testResult with
-            | Error msg ->
-                let status = StepStatus.Failed msg
-                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd status))
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok testProc when testProc.ExitCode <> 0 ->
-                let msg = $"exit {testProc.ExitCode}: {truncateStderr testProc.Stderr 200}"
-                let status = StepStatus.Failed msg
-                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd status))
-                saveTestFailureLog worktreePath testCmd testProc
-                post (CompleteSync (branch, status))
-                return ()
-            | Ok testProc ->
-                post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCmd StepStatus.Succeeded))
+                match testResult with
+                | Error msg ->
+                    let status = StepStatus.Failed msg
+                    post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCommand status))
+                    post (CompleteSync (branch, status))
+                    return ()
+                | Ok testProc when testProc.ExitCode <> 0 ->
+                    let msg = $"exit {testProc.ExitCode}: {truncateStderr testProc.Stderr 200}"
+                    let status = StepStatus.Failed msg
+                    post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCommand status))
+                    saveTestFailureLog worktreePath testCommand testProc
+                    post (CompleteSync (branch, status))
+                    return ()
+                | Ok _ ->
+                    post (PushEvent (branch, mkEvent $"{SyncStep.Test}" testCommand StepStatus.Succeeded))
 
             let! diffResult = runProcess worktreePath "git" "diff --cached --quiet" ct
 

@@ -78,7 +78,7 @@ module AbsolutePath =
 
 ### No RelativePath needed
 
-Relative paths appear only in `.treemon.json` `testSolution` (resolved immediately via combine) and `logs/server.log` (hardcoded at startup). Neither needs a type.
+Relative paths appear only in `.treemon.json` `testCommand` (a shell command string, not a path — no resolution needed) and `logs/server.log` (hardcoded at startup). Neither needs a type.
 
 ## Key Files
 

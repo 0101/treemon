@@ -85,6 +85,7 @@ type ActionKind =
     | FixBuild of url: string
     | CreatePr
     | FixTests
+    | ConfigureTests
 
 type ActionRequest =
     { Path: WorktreePath
@@ -123,6 +124,7 @@ type StepStatus =
     | Succeeded
     | Failed of message: string
     | Cancelled
+    | NotConfigured
 
 module EventSource =
     let [<Literal>] Test = "Test"

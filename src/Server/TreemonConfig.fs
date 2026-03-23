@@ -83,3 +83,12 @@ let readUpstreamRemote (repoRoot: string) : string option =
                     None
                 else Some value
             else None) None)
+
+let readTestCommand (repoRoot: string) : string option =
+    lock configLock (fun () ->
+        withJsonProperty (configPath repoRoot) "testCommand" (fun elem ->
+            if elem.ValueKind = JsonValueKind.String then
+                let value = elem.GetString()
+                if System.String.IsNullOrWhiteSpace(value) then None
+                else Some value
+            else None) None)

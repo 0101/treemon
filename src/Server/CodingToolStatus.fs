@@ -144,6 +144,10 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | FixBuild url, CodingToolProvider.Claude -> $"/fix-build {url}"
     | FixTests, _ ->
         $"Please fix the failing tests. See the test failure report in {TestFailureLog.relPath} for details."
+    | ConfigureTests, _ ->
+        "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "
+        + "Then create or update .treemon.json in the repo root with a \"testCommand\" field set to the full test command string. "
+        + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
     | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
 
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
