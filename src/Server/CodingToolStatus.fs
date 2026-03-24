@@ -136,7 +136,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
 
     { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg }
 
-let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
+let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) (repoRoot: string option) =
     match action, provider |> Option.defaultValue CodingToolProvider.Claude with
     | FixPr url, CodingToolProvider.Copilot -> $"use pr skill with {url}"
     | FixPr url, CodingToolProvider.Claude -> $"/pr {url}"
@@ -145,8 +145,10 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | FixTests, _ ->
         $"Please fix the failing tests. See the test failure report in {TestFailureLog.relPath} for details."
     | ConfigureTests, _ ->
+        let targetPath = repoRoot |> Option.defaultValue "the repo root"
         "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "
-        + "Then create or update .treemon.json in the repo root with a \"testCommand\" field set to the full test command string. "
+        + $"Then create or update .treemon.json at '{targetPath}' with a \"testCommand\" field set to the full test command string. "
+        + $"IMPORTANT: The config file MUST be at '{targetPath}\\.treemon.json', not in the current directory. "
         + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
     | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
 

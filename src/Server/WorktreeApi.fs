@@ -474,7 +474,10 @@ let worktreeApi
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      let prompt = CodingToolStatus.actionPrompt provider req.Action
+                      let repoRoot =
+                          tryResolveWorktreeContext rootPaths state path
+                          |> Option.map _.RepoRoot
+                      let prompt = CodingToolStatus.actionPrompt provider req.Action repoRoot
                       let command = CodingToolStatus.buildInteractiveCommand provider prompt
                       return! SessionManager.launchAction sessionAgent req.Path command
                   }) }

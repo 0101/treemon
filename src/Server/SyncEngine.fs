@@ -208,9 +208,18 @@ let runProcess
 
 let private parseCommand (command: string) : string * string =
     let trimmed = command.Trim()
-    match trimmed.IndexOf(' ') with
-    | -1 -> trimmed, ""
-    | i -> trimmed[..i-1], trimmed[i+1..]
+    match trimmed with
+    | s when s.StartsWith('"') ->
+        match s.IndexOf('"', 1) with
+        | -1 -> trimmed, ""
+        | i ->
+            let exe = s[1..i-1]
+            let rest = s[i+1..].TrimStart()
+            exe, rest
+    | _ ->
+        match trimmed.IndexOf(' ') with
+        | -1 -> trimmed, ""
+        | i -> trimmed[..i-1], trimmed[i+1..]
 
 let private truncateStderr (stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
@@ -327,6 +336,7 @@ module private PipelineSteps =
             match TreemonConfig.readTestCommand repoRoot with
             | None ->
                 Log.log "SyncEngine" $"No testCommand configured in {repoRoot}, skipping tests"
+                deleteTestFailureLog ctx.WorktreePath
                 ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Test}" "not configured" StepStatus.NotConfigured))
                 return Ok ()
             | Some testCommand ->
