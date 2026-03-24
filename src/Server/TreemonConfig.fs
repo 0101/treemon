@@ -81,24 +81,6 @@ let private readStringConfig (repoRoot: string) (propertyName: string) : string 
                 else Some value
             else None) None)
 
-let private allowedTestRunners =
-    Set.ofList [ "dotnet"; "npm"; "npx"; "yarn"; "pnpm"; "pytest"; "python"; "cargo"; "go"; "make"; "gradle"; "gradlew"; "mvn"; "mvnw" ]
-
-let private extractExecutable (command: string) =
-    let trimmed = command.Trim()
-    if trimmed.StartsWith('"') then
-        match trimmed.IndexOf('"', 1) with
-        | -1 -> trimmed
-        | i -> trimmed[1..i-1]
-    else
-        match trimmed.IndexOf(' ') with
-        | -1 -> trimmed
-        | i -> trimmed[..i-1]
-
-let private isAllowedTestCommand (command: string) =
-    let exe = extractExecutable command |> Path.GetFileNameWithoutExtension
-    allowedTestRunners.Contains(exe.ToLowerInvariant())
-
 let readUpstreamRemote (repoRoot: string) : string option =
     readStringConfig repoRoot "upstreamRemote"
     |> Option.bind (fun value ->
@@ -109,8 +91,3 @@ let readUpstreamRemote (repoRoot: string) : string option =
 
 let readTestCommand (repoRoot: string) : string option =
     readStringConfig repoRoot "testCommand"
-    |> Option.bind (fun cmd ->
-        if isAllowedTestCommand cmd then Some cmd
-        else
-            Log.log "TreemonConfig" $"Rejected testCommand '{cmd}': executable not in allowlist"
-            None)

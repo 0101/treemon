@@ -3,6 +3,7 @@ module Server.SyncEngine
 open System
 open System.Diagnostics
 open System.IO
+open System.Runtime.InteropServices
 open System.Threading
 open Shared
 open FsToolkit.ErrorHandling
@@ -206,22 +207,11 @@ let runProcess
             return Error $"Failed to start process: {ex.Message}"
     }
 
-let private parseCommand (command: string) : string * string =
-    let trimmed = command.Trim()
-    match trimmed with
-    | s when s.StartsWith('"') ->
-        match s.IndexOf('"', 1) with
-        | -1 -> trimmed, ""
-        | i ->
-            let exe = s[1..i-1]
-            let rest = s[i+1..].TrimStart()
-            exe, rest
-    | _ ->
-        match trimmed.IndexOf(' ') with
-        | -1 -> trimmed, ""
-        | i -> trimmed[..i-1], trimmed[i+1..]
+let private shellCommand (command: string) : string * string =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "cmd", $"/c {command}"
+    else "sh", $"-c \"{command}\""
 
-let private truncateStderr (stderr: string) (maxLen: int) : string =
+let private truncateStderr(stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
 let testFailureLogRelPath = TestFailureLog.relPath
@@ -340,7 +330,7 @@ module private PipelineSteps =
                 ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Test}" "not configured" StepStatus.NotConfigured))
                 return Ok ()
             | Some testCommand ->
-                let fileName, args = parseCommand testCommand
+                let fileName, args = shellCommand testCommand
                 deleteTestFailureLog ctx.WorktreePath
                 return! runStep ctx SyncStep.Test fileName args (fun proc ->
                     if proc.ExitCode = 0 then Ok ()
