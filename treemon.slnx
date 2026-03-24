@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Cli/Cli.fsproj" />
     <Project Path="src/Client/Client.fsproj" />
     <Project Path="src/Server/Server.fsproj" />
     <Project Path="src/Shared/Shared.fsproj" />
