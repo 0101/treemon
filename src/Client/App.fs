@@ -584,6 +584,7 @@ let stepStatusClassName (status: StepStatus option) =
     | Some StepStatus.Succeeded -> "event-status success"
     | Some (StepStatus.Failed _) -> "event-status failed"
     | Some StepStatus.Cancelled -> "event-status cancelled"
+    | Some StepStatus.NotConfigured -> "event-status not-configured"
     | Some StepStatus.Pending -> "event-status"
     | None -> "event-status"
 
@@ -593,6 +594,7 @@ let stepStatusText (status: StepStatus option) =
     | Some StepStatus.Succeeded -> "success"
     | Some (StepStatus.Failed msg) -> match msg with "" -> "failed" | _ -> $"failed: {msg}"
     | Some StepStatus.Cancelled -> "cancelled"
+    | Some StepStatus.NotConfigured -> "not configured"
     | _ -> ""
 
 let relativeEventTime (dt: System.DateTimeOffset) =
@@ -603,9 +605,12 @@ let relativeEventTime (dt: System.DateTimeOffset) =
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
 
-let eventLogEntry (onFixTests: (unit -> unit) option) (evt: CardEvent) =
+let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -> unit) option) (evt: CardEvent) =
     let isTestFailure =
         evt.Source = EventSource.Test && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+    let isTestNotConfigured =
+        evt.Source = EventSource.Test && evt.Status = Some StepStatus.NotConfigured
+    let isClickable = (isTestFailure && onFixTests.IsSome) || (isTestNotConfigured && onConfigureTests.IsSome)
     Html.div [
         prop.className "event-entry"
         prop.children [
@@ -616,7 +621,7 @@ let eventLogEntry (onFixTests: (unit -> unit) option) (evt: CardEvent) =
             | Some _ ->
                 Html.span [
                     prop.className (
-                        if isTestFailure && onFixTests.IsSome
+                        if isClickable
                         then stepStatusClassName evt.Status + " clickable"
                         else stepStatusClassName evt.Status)
                     prop.text (stepStatusText evt.Status)
@@ -624,6 +629,12 @@ let eventLogEntry (onFixTests: (unit -> unit) option) (evt: CardEvent) =
                         match onFixTests with
                         | Some handler ->
                             prop.title "Click to fix with coding tool"
+                            prop.onClick (fun e -> e.stopPropagation(); handler())
+                        | None -> ()
+                    elif isTestNotConfigured then
+                        match onConfigureTests with
+                        | Some handler ->
+                            prop.title "Click to configure test command"
                             prop.onClick (fun e -> e.stopPropagation(); handler())
                         | None -> ()
                 ]
@@ -638,9 +649,12 @@ let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (has
         let onFixTests =
             if not hasTestFailureLog || cooldowns.Contains wtPath then None
             else Some (fun () -> dispatch (LaunchAction (wtPath, FixTests)))
+        let onConfigureTests =
+            if cooldowns.Contains wtPath then None
+            else Some (fun () -> dispatch (LaunchAction (wtPath, ConfigureTests)))
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (eventLogEntry onFixTests))
+            prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
         ]
 
 let knownCategories =

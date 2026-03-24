@@ -108,7 +108,7 @@ type ReadUpstreamRemoteTests() =
     member _.``readUpstreamRemote coexists with other fields``() =
         File.WriteAllText(
             Path.Combine(tempDir, ".treemon.json"),
-            """{ "archivedBranches": ["old"], "upstreamRemote": "upstream", "testSolution": "test.sln" }""")
+            """{ "archivedBranches": ["old"], "upstreamRemote": "upstream", "testCommand": "dotnet test test.sln" }""")
 
         let result = readUpstreamRemote tempDir
         Assert.That(result, Is.EqualTo(Some "upstream"))
