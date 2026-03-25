@@ -1,6 +1,8 @@
 module Cli.Program
 
 open System
+open System.IO
+open System.Text.RegularExpressions
 open FSharp.SystemCommandLine
 open FSharp.SystemCommandLine.Input
 open Fable.Remoting.DotnetClient
@@ -25,16 +27,36 @@ let serverError port =
     eprintfn $"Error: Treemon server is not running on port %d{port}. Start with: .\\treemon.ps1 start <path>"
     1
 
-let runApi port (fn: IWorktreeApi -> Async<Result<unit, string>>) successMsg =
-    try
-        let api = createApi port
+let isConnectionError (ex: exn) =
+    match ex with
+    | :? Net.Http.HttpRequestException -> true
+    | :? Net.Sockets.SocketException -> true
+    | _ -> false
 
+let tryCallServer port (fn: IWorktreeApi -> int) =
+    try
+        fn (createApi port)
+    with
+    | :? AggregateException as ae when ae.InnerExceptions |> Seq.exists isConnectionError -> serverError port
+    | :? Net.Http.HttpRequestException -> serverError port
+
+let withPort portMaybe fn =
+    let port = resolvePort portMaybe
+
+    if port < 1 || port > 65535 then
+        eprintfn $"Error: Invalid port %d{port}. Must be between 1 and 65535."
+        1
+    else
+        fn port
+
+let runApi port (fn: IWorktreeApi -> Async<Result<unit, string>>) successMsg =
+    tryCallServer port (fun api ->
         match fn api |> Async.RunSynchronously with
         | Ok() -> printfn $"✓ %s{successMsg}"; 0
-        | Error e -> eprintfn $"Error: %s{e}"; 1
-    with
-    | :? AggregateException -> serverError port
-    | :? Net.Http.HttpRequestException -> serverError port
+        | Error e -> eprintfn $"Error: %s{e}"; 1)
+
+let sanitizeForTerminal (s: string) =
+    Regex.Replace(s, @"\x1B\[[0-9;]*[a-zA-Z]", "")
 
 let formatCodingTool = function
     | Working -> "🔧 Working"
@@ -55,7 +77,7 @@ let formatPr = function
             | [] -> ""
             | fs -> fs |> String.concat ", " |> sprintf " [%s]"
 
-        $"PR #{pr.Id}%s{flagStr}: %s{pr.Title}"
+        $"PR #{pr.Id}%s{flagStr}: %s{sanitizeForTerminal pr.Title}"
 
 let launchCmd =
     let handler
@@ -68,28 +90,27 @@ let launchCmd =
             createPr: bool,
             port: int option
         ) =
-        let port = resolvePort port
+        withPort port (fun port ->
+            let actions =
+                [ prompt |> Option.map Choice1Of2
+                  fixPr |> Option.map (FixPr >> Choice2Of2)
+                  fixBuild |> Option.map (FixBuild >> Choice2Of2)
+                  (if fixTests then Some(Choice2Of2 FixTests) else None)
+                  (if createPr then Some(Choice2Of2 CreatePr) else None) ]
+                |> List.choose id
 
-        let actions =
-            [ prompt |> Option.map Choice1Of2
-              fixPr |> Option.map (FixPr >> Choice2Of2)
-              fixBuild |> Option.map (FixBuild >> Choice2Of2)
-              (if fixTests then Some(Choice2Of2 FixTests) else None)
-              (if createPr then Some(Choice2Of2 CreatePr) else None) ]
-            |> List.choose id
+            match actions with
+            | [ single ] ->
+                let wtPath = path |> Path.GetFullPath |> WorktreePath.create
 
-        match actions with
-        | [ single ] ->
-            let wtPath = WorktreePath.create path
-
-            match single with
-            | Choice1Of2 text ->
-                runApi port (fun api -> api.launchSession { Path = wtPath; Prompt = text }) "Session launched"
-            | Choice2Of2 action ->
-                runApi port (fun api -> api.launchAction { Path = wtPath; Action = action }) "Action launched"
-        | _ ->
-            eprintfn "Error: Provide exactly one of: <prompt>, --fix-pr, --fix-build, --fix-tests, or --create-pr"
-            1
+                match single with
+                | Choice1Of2 text ->
+                    runApi port (fun api -> api.launchSession { Path = wtPath; Prompt = text }) "Session launched"
+                | Choice2Of2 action ->
+                    runApi port (fun api -> api.launchAction { Path = wtPath; Action = action }) "Action launched"
+            | _ ->
+                eprintfn "Error: Provide exactly one of: <prompt>, --fix-pr, --fix-build, --fix-tests, or --create-pr"
+                1)
 
     command "launch" {
         description "Launch a coding agent in a worktree terminal tab"
@@ -109,16 +130,15 @@ let launchCmd =
 
 let newCmd =
     let handler (repo: string, branch: string, baseBranch: string, port: int option) =
-        let port = resolvePort port
-
-        runApi
-            port
-            (fun api ->
-                api.createWorktree
-                    { RepoId = repo
-                      BranchName = BranchName.create branch
-                      BaseBranch = BranchName.create baseBranch })
-            $"Worktree created for branch '%s{branch}'"
+        withPort port (fun port ->
+            runApi
+                port
+                (fun api ->
+                    api.createWorktree
+                        { RepoId = repo
+                          BranchName = BranchName.create branch
+                          BaseBranch = BranchName.create baseBranch })
+                $"Worktree created for branch '%s{branch}'")
 
     command "new" {
         description "Create a new worktree"
@@ -135,30 +155,25 @@ let newCmd =
 
 let worktreesCmd =
     let handler (port: int option) =
-        let port = resolvePort port
+        withPort port (fun port ->
+            tryCallServer port (fun api ->
+                let dashboard = api.getWorktrees() |> Async.RunSynchronously
 
-        try
-            let api = createApi port
-            let dashboard = api.getWorktrees() |> Async.RunSynchronously
+                match dashboard.Repos with
+                | [] -> printfn "No worktrees found."
+                | repos ->
+                    repos
+                    |> List.iter (fun repo ->
+                        printfn $"\n📁 %s{repo.RootFolderName}"
 
-            match dashboard.Repos with
-            | [] -> printfn "No worktrees found."
-            | repos ->
-                repos
-                |> List.iter (fun repo ->
-                    printfn $"\n📁 %s{repo.RootFolderName}"
+                        repo.Worktrees
+                        |> List.iter (fun wt ->
+                            let path = WorktreePath.value wt.Path
+                            let tool = formatCodingTool wt.CodingTool
+                            let pr = formatPr wt.Pr
+                            printfn $"  %-50s{path}  %-15s{wt.Branch}  %-15s{tool}  %s{pr}"))
 
-                    repo.Worktrees
-                    |> List.iter (fun wt ->
-                        let path = WorktreePath.value wt.Path
-                        let tool = formatCodingTool wt.CodingTool
-                        let pr = formatPr wt.Pr
-                        printfn $"  %-50s{path}  %-15s{wt.Branch}  %-15s{tool}  %s{pr}"))
-
-            0
-        with
-        | :? AggregateException -> serverError port
-        | :? Net.Http.HttpRequestException -> serverError port
+                0))
 
     command "worktrees" {
         description "List all tracked worktrees"

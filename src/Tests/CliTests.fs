@@ -1,5 +1,6 @@
 module Tests.CliTests
 
+open System
 open NUnit.Framework
 open Shared
 open Cli.Program
@@ -8,6 +9,15 @@ open Cli.Program
 [<Category("Unit")>]
 [<Category("Fast")>]
 type ResolvePortTests() =
+    let savedPort = Environment.GetEnvironmentVariable "TREEMON_PORT"
+
+    [<SetUp>]
+    member _.Setup() =
+        Environment.SetEnvironmentVariable("TREEMON_PORT", null)
+
+    [<TearDown>]
+    member _.Teardown() =
+        Environment.SetEnvironmentVariable("TREEMON_PORT", savedPort)
 
     [<Test>]
     member _.``None with no env var returns 5000``() =
@@ -23,6 +33,18 @@ type ResolvePortTests() =
     member _.``Some 0 returns 0``() =
         let result = resolvePort (Some 0)
         Assert.That(result, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``None with TREEMON_PORT env var returns parsed port``() =
+        Environment.SetEnvironmentVariable("TREEMON_PORT", "9090")
+        let result = resolvePort None
+        Assert.That(result, Is.EqualTo(9090))
+
+    [<Test>]
+    member _.``None with non-numeric TREEMON_PORT returns 5000``() =
+        Environment.SetEnvironmentVariable("TREEMON_PORT", "not-a-number")
+        let result = resolvePort None
+        Assert.That(result, Is.EqualTo(5000))
 
 [<TestFixture>]
 [<Category("Unit")>]

@@ -66,6 +66,22 @@ Open http://localhost:5174 (Vite proxies API calls to the server).
 .\treemon.ps1 deploy                         # build frontend → wwwroot/, restart prod
 ```
 
+## CLI
+
+`tm.ps1` provides command-line access to the Treemon server.
+
+```powershell
+.\tm.ps1 launch --path C:\code\my-project "fix the login bug"    # launch agent with prompt
+.\tm.ps1 launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
+.\tm.ps1 launch --path C:\code\my-project --fix-build <url>      # fix failed build
+.\tm.ps1 launch --path C:\code\my-project --fix-tests             # fix failing tests
+.\tm.ps1 launch --path C:\code\my-project --create-pr             # create a pull request
+.\tm.ps1 new --repo C:\code\my-project --branch feature/foo      # create worktree
+.\tm.ps1 worktrees                                                 # list all worktrees
+```
+
+All commands accept `--port` (default: 5000, env: `TREEMON_PORT`).
+
 ## Stack
 
 F# on both sides — [Saturn](https://saturnframework.org) server, [Fable](https://fable.io) + [Elmish](https://elmish.github.io) client, [Fable.Remoting](https://github.com/Zaid-Ajaj/Fable.Remoting) for type-safe RPC, [Vite](https://vitejs.dev) for dev tooling. Supports multiple root directories with auto-detected PR providers (Azure DevOps, GitHub).
