@@ -19,8 +19,8 @@ const tmpDir = resolve(ROOT, ".agents", "recording-tmp");
 const SERVER_PORT = 5051;
 const VITE_PORT = 5176;
 const DEMO_URL = `http://localhost:${VITE_PORT}`;
-const VIEWPORT = { width: 800, height: 1200 };
-const LOOP_SECONDS = 10;
+const VIEWPORT = { width: 800, height: 900 };
+const LOOP_SECONDS = 24;
 const FPS = 15;
 
 const wingetLinks = resolve(process.env.LOCALAPPDATA, "Microsoft", "WinGet", "Links");
@@ -87,6 +87,10 @@ try {
     { timeout: 15000 }
   );
   await page.waitForTimeout(1500);
+
+  // Hide scheduler footer in recording — timestamps freeze in demo mode
+  await page.addStyleTag({ content: ".scheduler-footer { display: none !important; }" });
+
   console.log("Capturing screenshots...");
 
   const totalFrames = LOOP_SECONDS * FPS;
@@ -106,7 +110,7 @@ try {
 
   // Assemble GIF via ffmpeg (2-pass palette for quality)
   const gifRaw = resolve(tmpDir, "raw.gif");
-  const gifPath = resolve(ROOT, "demo-screenshots.gif");
+  const gifPath = resolve(ROOT, "docs", "demo.gif");
   const palettePath = resolve(tmpDir, "palette.png");
   const input = resolve(tmpDir, "frame_%04d.png");
   const filters = `fps=${FPS},scale=${VIEWPORT.width}:-1:flags=lanczos`;

@@ -7,15 +7,63 @@ type DemoFrame =
     { Data: FixtureData
       DurationSeconds: int }
 
+// --- Constants ---
+
 let private azDoRepoId = RepoId.create "C:\\code\\CloudPlatform"
 let private githubRepoId = RepoId.create "C:\\code\\DataPipeline"
-
 let private azDoPath prefix = WorktreePath.create $"C:\\code\\CloudPlatform\\{prefix}"
 let private githubPath prefix = WorktreePath.create $"C:\\code\\DataPipeline\\{prefix}"
-
 let private baseTimestamp = DateTimeOffset(2025, 6, 15, 10, 0, 0, TimeSpan.FromHours(2))
 
-let private prAzDoOpen: PrInfo =
+// --- Helpers ---
+
+let private evt source message secsAgo status duration =
+    { Source = source
+      Message = message
+      Timestamp = baseTimestamp.AddSeconds(float -secsAgo)
+      Status = status
+      Duration = duration }
+
+let private updateWorktree repoId branch transform repos =
+    repos
+    |> List.map (fun repo ->
+        if repo.RepoId = repoId then
+            { repo with
+                Worktrees =
+                    repo.Worktrees
+                    |> List.map (fun wt -> if wt.Branch = branch then transform wt else wt) }
+        else
+            repo)
+
+// Fixture-level transforms for chaining frames
+let private withRepos f (fix: FixtureData) =
+    { fix with
+        Worktrees = { fix.Worktrees with Repos = f fix.Worktrees.Repos } }
+
+let private withRetry f = withRepos (updateWorktree azDoRepoId "feature/retry-logic" f)
+let private withConfig f = withRepos (updateWorktree azDoRepoId "refactor/config-loading" f)
+let private withAuth f = withRepos (updateWorktree azDoRepoId "feature/auth-middleware" f)
+let private withStream f = withRepos (updateWorktree githubRepoId "feature/streaming-agg" f)
+
+let private withCpu cpu mem (fix: FixtureData) =
+    { fix with
+        Worktrees =
+            { fix.Worktrees with
+                SystemMetrics = Some { CpuPercent = cpu; MemoryUsedMb = mem; MemoryTotalMb = 32768 } } }
+
+let private withCardEvt branch cardEvt (fix: FixtureData) =
+    { fix with SyncStatus = fix.SyncStatus |> Map.add branch [ cardEvt ] }
+
+let private withLatest key cardEvt (fix: FixtureData) =
+    { fix with
+        Worktrees = { fix.Worktrees with LatestByCategory = fix.Worktrees.LatestByCategory |> Map.add key cardEvt } }
+
+let private azDoEvt = "C:\\code\\CloudPlatform"
+let private githubEvt = "C:\\code\\DataPipeline"
+
+// --- PRs (retry-logic cycles, others static) ---
+
+let private prRetryBuilding: PrInfo =
     { Id = 4201
       Title = "Add retry logic to blob storage client"
       Url = "https://dev.azure.com/contoso/CloudPlatform/_git/CloudPlatform/pullrequest/4201"
@@ -29,7 +77,32 @@ let private prAzDoOpen: PrInfo =
       IsMerged = false
       HasConflicts = false }
 
-let private prAzDoDraft: PrInfo =
+let private prRetryFailed =
+    { prRetryBuilding with
+        Builds =
+            [ { Name = "CI Build"
+                Status = Failed
+                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88801"
+                Failure = Some { StepName = "Run Tests"; Log = "3 test(s) failed in RetryTests.cs" } } ] }
+
+let private prRetryRebuilding =
+    { prRetryBuilding with
+        Builds =
+            [ { Name = "CI Build"
+                Status = Building
+                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"
+                Failure = None } ] }
+
+let private prRetrySucceeded =
+    { prRetryBuilding with
+        Comments = WithResolution(1, 5)
+        Builds =
+            [ { Name = "CI Build"
+                Status = Succeeded
+                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"
+                Failure = None } ] }
+
+let private prConfigDraft: PrInfo =
     { Id = 4199
       Title = "WIP: Refactor config loading"
       Url = "https://dev.azure.com/contoso/CloudPlatform/_git/CloudPlatform/pullrequest/4199"
@@ -43,7 +116,21 @@ let private prAzDoDraft: PrInfo =
       IsMerged = false
       HasConflicts = false }
 
-let private prGithubOpen: PrInfo =
+let private prAuth: PrInfo =
+    { Id = 4203
+      Title = "Add JWT auth middleware for API endpoints"
+      Url = "https://dev.azure.com/contoso/CloudPlatform/_git/CloudPlatform/pullrequest/4203"
+      IsDraft = false
+      Comments = WithResolution(1, 3)
+      Builds =
+        [ { Name = "CI Build"
+            Status = Succeeded
+            Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88810"
+            Failure = None } ]
+      IsMerged = false
+      HasConflicts = false }
+
+let private prStreaming: PrInfo =
     { Id = 312
       Title = "Streaming aggregation for real-time metrics"
       Url = "https://github.com/acme/data-pipeline/pull/312"
@@ -59,9 +146,9 @@ let private prGithubOpen: PrInfo =
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/99002"
             Failure = None } ]
       IsMerged = false
-      HasConflicts = true }
+      HasConflicts = false }
 
-let private prGithubMerged: PrInfo =
+let private prCsvMerged: PrInfo =
     { Id = 308
       Title = "Fix CSV parser edge case with quoted newlines"
       Url = "https://github.com/acme/data-pipeline/pull/308"
@@ -75,19 +162,7 @@ let private prGithubMerged: PrInfo =
       IsMerged = true
       HasConflicts = false }
 
-let private prAzDoAuth: PrInfo =
-    { Id = 4203
-      Title = "Add JWT auth middleware for API endpoints"
-      Url = "https://dev.azure.com/contoso/CloudPlatform/_git/CloudPlatform/pullrequest/4203"
-      IsDraft = false
-      Comments = WithResolution(1, 3)
-      Builds =
-        [ { Name = "CI Build"
-            Status = Succeeded
-            Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88810"
-            Failure = None } ]
-      IsMerged = false
-      HasConflicts = false }
+// --- Worktrees (base definitions) ---
 
 let private wtAzDoMain: WorktreeStatus =
     { Path = azDoPath "main"
@@ -105,7 +180,7 @@ let private wtAzDoMain: WorktreeStatus =
       HasActiveSession = false
       IsArchived = false }
 
-let private wtAzDoRetry: WorktreeStatus =
+let private wtRetryLogic: WorktreeStatus =
     { Path = azDoPath "feature-retry"
       Branch = "feature/retry-logic"
       LastCommitMessage = "Add exponential backoff to blob storage retries"
@@ -113,47 +188,47 @@ let private wtAzDoRetry: WorktreeStatus =
       Beads = { Open = 3; InProgress = 1; Closed = 5 }
       CodingTool = Working
       CodingToolProvider = Some Claude
-      LastUserMessage = Some ("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
-      Pr = HasPr prAzDoOpen
+      LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
+      Pr = HasPr prRetryBuilding
       MainBehindCount = 2
       IsDirty = true
       WorkMetrics = Some { CommitCount = 8; LinesAdded = 342; LinesRemoved = 67 }
       HasActiveSession = true
       IsArchived = false }
 
-let private wtAzDoConfig: WorktreeStatus =
+let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
       Branch = "refactor/config-loading"
       LastCommitMessage = "Extract config validation into separate module"
-      LastCommitTime = baseTimestamp.AddMinutes(-45.0)
-      Beads = { Open = 1; InProgress = 0; Closed = 3 }
-      CodingTool = Idle
+      LastCommitTime = baseTimestamp.AddMinutes(-12.0)
+      Beads = { Open = 1; InProgress = 1; Closed = 3 }
+      CodingTool = Working
       CodingToolProvider = Some Claude
-      LastUserMessage = None
-      Pr = HasPr prAzDoDraft
+      LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
+      Pr = HasPr prConfigDraft
       MainBehindCount = 5
       IsDirty = false
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
-      HasActiveSession = false
+      HasActiveSession = true
       IsArchived = false }
 
-let private wtAzDoAuth: WorktreeStatus =
+let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
       Branch = "feature/auth-middleware"
       LastCommitMessage = "Add JWT validation and claims extraction"
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
-      Beads = { Open = 2; InProgress = 1; Closed = 3 }
-      CodingTool = Working
+      Beads = { Open = 1; InProgress = 0; Closed = 5 }
+      CodingTool = Done
       CodingToolProvider = Some Copilot
-      LastUserMessage = Some ("add token validation for api routes", baseTimestamp.AddMinutes(-12.0))
-      Pr = HasPr prAzDoAuth
+      LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
+      Pr = HasPr prAuth
       MainBehindCount = 1
-      IsDirty = true
+      IsDirty = false
       WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
-      HasActiveSession = true
+      HasActiveSession = false
       IsArchived = false }
 
-let private wtAzDoArchived: WorktreeStatus =
+let private wtArchived: WorktreeStatus =
     { Path = azDoPath "old-migration"
       Branch = "feature/db-migration"
       LastCommitMessage = "Complete database migration script v2"
@@ -185,7 +260,7 @@ let private wtGithubMain: WorktreeStatus =
       HasActiveSession = false
       IsArchived = false }
 
-let private wtGithubStreaming: WorktreeStatus =
+let private wtStreaming: WorktreeStatus =
     { Path = githubPath "streaming"
       Branch = "feature/streaming-agg"
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
@@ -193,15 +268,15 @@ let private wtGithubStreaming: WorktreeStatus =
       Beads = { Open = 2; InProgress = 2; Closed = 4 }
       CodingTool = Working
       CodingToolProvider = Some Copilot
-      LastUserMessage = Some ("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
-      Pr = HasPr prGithubOpen
+      LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
+      Pr = HasPr prStreaming
       MainBehindCount = 1
-      IsDirty = true
+      IsDirty = false
       WorkMetrics = Some { CommitCount = 12; LinesAdded = 567; LinesRemoved = 123 }
       HasActiveSession = true
       IsArchived = false }
 
-let private wtGithubCsvFix: WorktreeStatus =
+let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
       Branch = "fix/csv-parser"
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
@@ -210,300 +285,197 @@ let private wtGithubCsvFix: WorktreeStatus =
       CodingTool = Done
       CodingToolProvider = Some Copilot
       LastUserMessage = None
-      Pr = HasPr prGithubMerged
+      Pr = HasPr prCsvMerged
       MainBehindCount = 0
       IsDirty = false
       WorkMetrics = Some { CommitCount = 4; LinesAdded = 45; LinesRemoved = 12 }
       HasActiveSession = false
       IsArchived = false }
 
-let private baseSchedulerEvents: CardEvent list =
-    [ { Source = "git-fetch"
-        Message = "CloudPlatform (fetched 3 new commits)"
-        Timestamp = baseTimestamp.AddSeconds(-10.0)
-        Status = Some StepStatus.Succeeded
-        Duration = Some (TimeSpan.FromSeconds(1.8)) }
-      { Source = "git-fetch"
-        Message = "DataPipeline (up to date)"
-        Timestamp = baseTimestamp.AddSeconds(-8.0)
-        Status = Some StepStatus.Succeeded
-        Duration = Some (TimeSpan.FromSeconds(0.9)) }
-      { Source = "pr-check"
-        Message = "feature/retry-logic (4 threads, 2 unresolved)"
-        Timestamp = baseTimestamp.AddSeconds(-5.0)
-        Status = Some StepStatus.Succeeded
-        Duration = Some (TimeSpan.FromSeconds(2.1)) } ]
+// --- Scheduler footer (all 6 categories populated) ---
 
 let private baseLatestByCategory: Map<string, CardEvent> =
-    [ "git-fetch",
-      { Source = "git-fetch"
-        Message = "All repos fetched"
-        Timestamp = baseTimestamp.AddSeconds(-8.0)
-        Status = Some StepStatus.Succeeded
-        Duration = Some (TimeSpan.FromSeconds(2.7)) }
-      "pr-check",
-      { Source = "pr-check"
-        Message = "3 PRs checked"
-        Timestamp = baseTimestamp.AddSeconds(-5.0)
-        Status = Some StepStatus.Succeeded
-        Duration = Some (TimeSpan.FromSeconds(2.1)) }
-      "beads",
-      { Source = "beads"
-        Message = "Beads refreshed"
-        Timestamp = baseTimestamp.AddSeconds(-3.0)
-        Status = Some StepStatus.Succeeded
-        Duration = Some (TimeSpan.FromSeconds(0.4)) } ]
+    [ "WorktreeList", evt "WorktreeList" $"{azDoEvt}" 18 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.3))
+      "GitRefresh", evt "GitRefresh" $"{azDoEvt}/feature-retry (3 files)" 10 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.8))
+      "BeadsRefresh", evt "BeadsRefresh" $"{azDoEvt}/feature-retry" 6 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.4))
+      "CodingToolRefresh", evt "CodingToolRefresh" "4 agents checked" 4 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.2))
+      "PrFetch", evt "PrFetch" $"{azDoEvt}" 8 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.8))
+      "GitFetch", evt "GitFetch" $"{azDoEvt} (2 new commits)" 12 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 2.1)) ]
     |> Map.ofList
+
+let private baseSchedulerEvents: CardEvent list =
+    [ evt "GitFetch" "CloudPlatform (fetched 2 commits)" 12 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 2.1))
+      evt "GitFetch" "DataPipeline (up to date)" 11 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.9))
+      evt "PrFetch" "CloudPlatform (4 PRs checked)" 8 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.8)) ]
+
+// --- Card events: only 1 "Running" at a time, rest are recent "Succeeded" ---
+
+let private retryEvt msg secsAgo = evt "claude" msg secsAgo
 
 let private baseSyncStatus: Map<string, CardEvent list> =
-    [ "C:\\code\\CloudPlatform/feature/retry-logic",
-      [ { Source = "sync"
-          Message = "feature/retry-logic: rebased on main"
-          Timestamp = baseTimestamp.AddMinutes(-10.0)
-          Status = Some StepStatus.Succeeded
-          Duration = Some (TimeSpan.FromSeconds(3.2)) } ] ]
+    [ $"{azDoEvt}/feature/retry-logic",
+      [ retryEvt "Reading BlobStorageClient retry logic" 3 None None ]
+      $"{azDoEvt}/refactor/config-loading",
+      [ evt "claude" "Extracting config validation rules" 8 None None ]
+      $"{azDoEvt}/feature/auth-middleware",
+      [ evt "copilot" "All tests passing" 5 None None ]
+      $"{githubEvt}/feature/streaming-agg",
+      [ evt "copilot" "Implementing tumbling window support" 5 None None ] ]
     |> Map.ofList
 
-let private baseMetrics: SystemMetrics =
-    { CpuPercent = 23.4
-      MemoryUsedMb = 12800
-      MemoryTotalMb = 32768 }
+// --- Base dashboard ---
 
 let private baseDashboard: DashboardResponse =
     { Repos =
         [ { RepoId = azDoRepoId
             RootFolderName = "CloudPlatform"
-            Worktrees = [ wtAzDoMain; wtAzDoRetry; wtAzDoConfig; wtAzDoAuth; wtAzDoArchived ]
-            IsReady = true }
+            Worktrees = [ wtAzDoMain; wtRetryLogic; wtConfigLoading; wtAuthMiddleware; wtArchived ]
+            IsReady = true
+            Provider = Some(AzDoProvider "https://dev.azure.com/contoso/CloudPlatform") }
           { RepoId = githubRepoId
             RootFolderName = "DataPipeline"
-            Worktrees = [ wtGithubMain; wtGithubStreaming; wtGithubCsvFix ]
-            IsReady = true } ]
+            Worktrees = [ wtGithubMain; wtStreaming; wtCsvFix ]
+            IsReady = true
+            Provider = Some(GitHubProvider "https://github.com/contoso/DataPipeline") } ]
       SchedulerEvents = baseSchedulerEvents
       LatestByCategory = baseLatestByCategory
       AppVersion = "demo|0"
       DeployBranch = None
-      SystemMetrics = Some baseMetrics
+      SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code" }
 
 let private baseFixture: FixtureData =
     { Worktrees = baseDashboard
       SyncStatus = baseSyncStatus }
 
-let private prAzDoOpenFailed =
-    { prAzDoOpen with
-        Builds =
-            [ { Name = "CI Build"
-                Status = Failed
-                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88801"
-                Failure = Some { StepName = "Run Tests"; Log = "3 test(s) failed in RetryTests.cs" } } ] }
+// ============================================================
+// FRAME SEQUENCE — 12 frames, 24s total
+//
+// Starting state: 3 Working (retry, config, streaming) + 1 Done (auth)
+// Each frame changes ONE card. Distributed over time.
+//
+// Story arcs:
+//   retry-logic: Building → Failed → fix → Rebuilding → Succeeded
+//   config:      working steadily, commits accumulate
+//   auth:        Done → user prompt → Working → Copilot events → Done (loops)
+//   streaming:   steady background work
+// ============================================================
 
-let private prGithubOpenCanceled =
-    { prGithubOpen with
-        Builds =
-            [ { Name = "test"
-                Status = Canceled
-                Url = Some "https://github.com/acme/data-pipeline/actions/runs/99001"
-                Failure = None }
-              { Name = "lint"
-                Status = PartiallySucceeded
-                Url = Some "https://github.com/acme/data-pipeline/actions/runs/99002"
-                Failure = None } ] }
+// F1 (0-2s): Baseline — see base state above
 
-let private prAzDoOpenSucceeded =
-    { prAzDoOpen with
-        Builds =
-            [ { Name = "CI Build"
-                Status = Succeeded
-                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88802"
-                Failure = None } ] }
-
-let private prGithubOpenAllGreen =
-    { prGithubOpen with
-        Builds =
-            [ { Name = "test"
-                Status = Succeeded
-                Url = Some "https://github.com/acme/data-pipeline/actions/runs/99003"
-                Failure = None }
-              { Name = "lint"
-                Status = Succeeded
-                Url = Some "https://github.com/acme/data-pipeline/actions/runs/99004"
-                Failure = None } ] }
-
-let private prAzDoOpenBuilding =
-    { prAzDoOpen with
-        Builds =
-            [ { Name = "CI Build"
-                Status = Building
-                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"
-                Failure = None } ] }
-
-let private prAzDoAuthBuilding =
-    { prAzDoAuth with
-        Builds =
-            [ { Name = "CI Build"
-                Status = Building
-                Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88811"
-                Failure = None } ] }
-
-let private updateWorktree (repoId: RepoId) (branch: string) (transform: WorktreeStatus -> WorktreeStatus) (repos: RepoWorktrees list) =
-    repos
-    |> List.map (fun repo ->
-        if repo.RepoId = repoId then
-            { repo with
-                Worktrees =
-                    repo.Worktrees
-                    |> List.map (fun wt ->
-                        if wt.Branch = branch then transform wt else wt) }
-        else repo)
-
-let private frame2SchedulerEvents =
-    baseSchedulerEvents @
-    [ { Source = "sync"
-        Message = "feature/retry-logic: sync started"
-        Timestamp = baseTimestamp.AddSeconds(3.0)
-        Status = Some StepStatus.Running
-        Duration = None } ]
-
-let private frame2LatestByCategory =
-    baseLatestByCategory
-    |> Map.add "beads"
-        { Source = "beads"
-          Message = "CloudPlatform: bd command failed"
-          Timestamp = baseTimestamp.AddSeconds(3.0)
-          Status = Some (StepStatus.Failed "bd: database locked")
-          Duration = Some (TimeSpan.FromSeconds(5.0)) }
-    |> Map.add "CodingToolRefresh"
-        { Source = "CodingToolRefresh"
-          Message = "5 agents checked"
-          Timestamp = baseTimestamp.AddSeconds(2.5)
-          Status = Some StepStatus.Succeeded
-          Duration = Some (TimeSpan.FromSeconds(1.2)) }
-
-let private frame2SyncStatus =
-    baseSyncStatus
-    |> Map.add "C:\\code\\CloudPlatform/feature/retry-logic"
-        [ { Source = "sync"
-            Message = "feature/retry-logic: pulling latest"
-            Timestamp = baseTimestamp.AddSeconds(3.0)
-            Status = Some StepStatus.Running
-            Duration = None } ]
-
-let private frame2Repos =
-    baseDashboard.Repos
-    |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
+// F2 (2-4s): Config commits (lines grow)
+let private f2 =
+    baseFixture
+    |> withConfig (fun wt ->
         { wt with
-            Pr = HasPr prAzDoOpenFailed })
-    |> updateWorktree azDoRepoId "feature/auth-middleware" (fun wt ->
-        { wt with
-            Pr = HasPr prAzDoAuthBuilding })
-    |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
-        { wt with
-            CodingTool = Done
-            Pr = HasPr prGithubOpenCanceled })
+            LastCommitMessage = "Add config schema validation"
+            WorkMetrics = Some { CommitCount = 4; LinesAdded = 186; LinesRemoved = 95 } })
+    |> withCpu 38.0 14400
 
-let private frame2: FixtureData =
-    { Worktrees =
-        { baseDashboard with
-            Repos = frame2Repos
-            SchedulerEvents = frame2SchedulerEvents
-            LatestByCategory = frame2LatestByCategory
-            SystemMetrics = Some { baseMetrics with CpuPercent = 67.8; MemoryUsedMb = 18200 } }
-      SyncStatus = frame2SyncStatus }
+// F3 (4-6s): Auth — Copilot starts working (dot changes, event updates)
+let private f3 =
+    f2
+    |> withAuth (fun wt -> { wt with CodingTool = Working })
+    |> withCardEvt $"{azDoEvt}/feature/auth-middleware"
+        (evt "copilot" "Reading authorization middleware" 1 None None)
+    |> withCpu 45.0 14800
 
-let private frame3SyncStatus =
-    baseSyncStatus
-    |> Map.add "C:\\code\\CloudPlatform/feature/retry-logic"
-        [ { Source = "sync"
-            Message = "feature/retry-logic: sync complete"
-            Timestamp = baseTimestamp.AddSeconds(6.0)
-            Status = Some StepStatus.Succeeded
-            Duration = Some (TimeSpan.FromSeconds(3.0)) } ]
+// F4 (6-8s): Retry build fails (red badge appears)
+let private f4 =
+    f3
+    |> withRetry (fun wt -> { wt with Pr = HasPr prRetryFailed })
+    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+        (retryEvt "CI build failed — analyzing test results" 1 None None)
+    |> withCpu 58.0 15200
 
-let private frame3LatestByCategory =
-    baseLatestByCategory
-    |> Map.add "beads"
-        { Source = "beads"
-          Message = "Beads refreshed"
-          Timestamp = baseTimestamp.AddSeconds(6.0)
-          Status = Some StepStatus.Succeeded
-          Duration = Some (TimeSpan.FromSeconds(0.3)) }
-    |> Map.add "PrFetch"
-        { Source = "PrFetch"
-          Message = "4 PRs fetched"
-          Timestamp = baseTimestamp.AddSeconds(5.5)
-          Status = Some StepStatus.Succeeded
-          Duration = Some (TimeSpan.FromSeconds(1.8)) }
+// F5 (8-10s): Auth copilot progresses
+let private f5 =
+    f4
+    |> withCardEvt $"{azDoEvt}/feature/auth-middleware"
+        (evt "copilot" "Generating role-based access checks" 1 None None)
+    |> withCpu 72.0 16100
 
-let private frame3Repos =
-    baseDashboard.Repos
-    |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
+// F6 (10-12s): Retry agent pushes fix, CI rebuilds
+let private f6 =
+    f5
+    |> withRetry (fun wt ->
         { wt with
-            CodingTool = Working
-            MainBehindCount = 0
-            Pr = HasPr prAzDoOpenSucceeded })
-    |> updateWorktree azDoRepoId "refactor/config-loading" (fun wt ->
-        { wt with
-            CodingTool = Working
-            HasActiveSession = true })
-    |> updateWorktree azDoRepoId "feature/auth-middleware" (fun wt ->
-        { wt with
-            CodingTool = Done
-            IsDirty = false })
-    |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
-        { wt with
-            CodingTool = Done
-            IsDirty = false
-            Pr = HasPr prGithubOpenAllGreen })
+            LastCommitMessage = "Fix flaky retry test timing"
+            Pr = HasPr prRetryRebuilding })
+    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+        (retryEvt "Pushed fix, waiting for CI" 1 None None)
+    |> withCpu 84.0 17400
 
-let private frame3: FixtureData =
-    { Worktrees =
-        { baseDashboard with
-            Repos = frame3Repos
-            SchedulerEvents = baseSchedulerEvents
-            LatestByCategory = frame3LatestByCategory
-            SystemMetrics = Some { baseMetrics with CpuPercent = 31.2; MemoryUsedMb = 14100 } }
-      SyncStatus = frame3SyncStatus }
+// F7 (12-14s): Streaming commits (lines grow)
+let private f7 =
+    f6
+    |> withStream (fun wt ->
+        { wt with
+            LastCommitMessage = "Add watermark tracking for event windows"
+            WorkMetrics = Some { CommitCount = 13; LinesAdded = 612; LinesRemoved = 131 } })
+    |> withCpu 68.0 16800
 
-let private frame4Repos =
-    baseDashboard.Repos
-    |> updateWorktree azDoRepoId "feature/retry-logic" (fun wt ->
-        { wt with
-            CodingTool = Working
-            IsDirty = true
-            LastCommitMessage = "Add jitter to retry delay calculation"
-            Pr = HasPr prAzDoOpenBuilding })
-    |> updateWorktree azDoRepoId "refactor/config-loading" (fun wt ->
-        { wt with
-            CodingTool = Working
-            HasActiveSession = true
-            IsDirty = true })
-    |> updateWorktree azDoRepoId "feature/auth-middleware" (fun wt ->
-        { wt with
-            CodingTool = Working
-            LastCommitMessage = "Add role-based authorization checks"
-            LastUserMessage = Some ("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-1.0))
-            WorkMetrics = Some { CommitCount = 6; LinesAdded = 275; LinesRemoved = 41 } })
-    |> updateWorktree githubRepoId "feature/streaming-agg" (fun wt ->
-        { wt with
-            CodingTool = Idle
-            CodingToolProvider = Some Copilot })
+// F8 (14-16s): Auth — Copilot finishes, back to Done (matches base)
+let private f8 =
+    f7
+    |> withAuth (fun wt -> { wt with CodingTool = Done })
+    |> withCardEvt $"{azDoEvt}/feature/auth-middleware"
+        (evt "copilot" "All tests passing" 5 None None)
+    |> withCpu 52.0 15800
 
-let private frame4: FixtureData =
-    { Worktrees =
-        { baseDashboard with
-            Repos = frame4Repos
-            SystemMetrics = Some { baseMetrics with CpuPercent = 18.9; MemoryUsedMb = 13400 } }
-      SyncStatus = baseSyncStatus }
+// F9 (16-18s): Retry build passes
+let private f9 =
+    f8
+    |> withRetry (fun wt -> { wt with Pr = HasPr prRetrySucceeded })
+    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+        (retryEvt "All tests passing — task complete" 1 None None)
+    |> withCpu 41.0 15200
+
+// F10 (18-20s): Config commits again
+let private f10 =
+    f9
+    |> withConfig (fun wt ->
+        { wt with
+            LastCommitMessage = "Simplify config provider chain"
+            WorkMetrics = Some { CommitCount = 5; LinesAdded = 221; LinesRemoved = 108 } })
+    |> withCpu 35.0 14600
+
+// F11 (20-22s): Retry picks up new task
+let private f11 =
+    f10
+    |> withRetry (fun wt ->
+        { wt with LastUserMessage = Some("add request deduplication", baseTimestamp.AddMinutes(-1.0)) })
+    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+        (retryEvt "Starting next task: request deduplication" 1 None None)
+    |> withCpu 39.0 14400
+
+// F12 (22-24s): Retry beads update, settling toward start
+let private f12 =
+    f11
+    |> withRetry (fun wt ->
+        { wt with Beads = { Open = 2; InProgress = 1; Closed = 6 } })
+    |> withCpu 42.0 14200
+
+// --- Frame list ---
 
 let private frames: DemoFrame list =
-    [ { Data = baseFixture; DurationSeconds = 3 }
-      { Data = frame2; DurationSeconds = 3 }
-      { Data = frame3; DurationSeconds = 2 }
-      { Data = frame4; DurationSeconds = 2 } ]
+    [ { Data = baseFixture; DurationSeconds = 2 }
+      { Data = f2; DurationSeconds = 2 }
+      { Data = f3; DurationSeconds = 2 }
+      { Data = f4; DurationSeconds = 2 }
+      { Data = f5; DurationSeconds = 2 }
+      { Data = f6; DurationSeconds = 2 }
+      { Data = f7; DurationSeconds = 2 }
+      { Data = f8; DurationSeconds = 2 }
+      { Data = f9; DurationSeconds = 2 }
+      { Data = f10; DurationSeconds = 2 }
+      { Data = f11; DurationSeconds = 2 }
+      { Data = f12; DurationSeconds = 2 } ]
 
 let private totalDurationSeconds =
     frames |> List.sumBy _.DurationSeconds
+
+// --- Timestamp adjustment ---
 
 let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) =
     let shift = now - baseTimestamp
@@ -513,9 +485,9 @@ let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) 
             wt.LastUserMessage
             |> Option.map (fun (msg, ts) -> msg, ts + shift) }
 
-let private adjustEventTimestamp (now: DateTimeOffset) (evt: CardEvent) =
+let private adjustEventTimestamp (now: DateTimeOffset) (e: CardEvent) =
     let shift = now - baseTimestamp
-    { evt with Timestamp = evt.Timestamp + shift }
+    { e with Timestamp = e.Timestamp + shift }
 
 let adjustTimestamps (now: DateTimeOffset) (fixture: FixtureData) : FixtureData =
     let adjustEvent = adjustEventTimestamp now
@@ -525,12 +497,11 @@ let adjustTimestamps (now: DateTimeOffset) (fixture: FixtureData) : FixtureData 
             Repos =
                 fixture.Worktrees.Repos
                 |> List.map (fun repo ->
-                    { repo with
-                        Worktrees = repo.Worktrees |> List.map adjustWt })
+                    { repo with Worktrees = repo.Worktrees |> List.map adjustWt })
             SchedulerEvents =
                 fixture.Worktrees.SchedulerEvents |> List.map adjustEvent
             LatestByCategory =
-                fixture.Worktrees.LatestByCategory |> Map.map (fun _ evt -> adjustEvent evt) }
+                fixture.Worktrees.LatestByCategory |> Map.map (fun _ e -> adjustEvent e) }
       SyncStatus =
         fixture.SyncStatus
         |> Map.map (fun _ events -> events |> List.map adjustEvent) }
