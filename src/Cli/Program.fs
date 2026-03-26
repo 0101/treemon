@@ -56,7 +56,7 @@ let runApi port (fn: IWorktreeApi -> Async<Result<unit, string>>) successMsg =
         | Error e -> eprintfn $"Error: %s{e}"; 1)
 
 let sanitizeForTerminal (s: string) =
-    Regex.Replace(s, @"\x1B\[[0-9;]*[a-zA-Z]", "")
+    Regex.Replace(s, @"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "")
 
 let formatCodingTool = function
     | Working -> "🔧 Working"
@@ -135,7 +135,7 @@ let newCmd =
                 port
                 (fun api ->
                     api.createWorktree
-                        { RepoId = repo
+                        { RepoId = Path.GetFullPath repo
                           BranchName = BranchName.create branch
                           BaseBranch = BranchName.create baseBranch })
                 $"Worktree created for branch '%s{branch}'")

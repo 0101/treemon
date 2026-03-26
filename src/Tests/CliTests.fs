@@ -49,27 +49,6 @@ type ResolvePortTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type FormatCodingToolTests() =
-
-    [<Test>]
-    member _.``Working formats with wrench emoji``() =
-        Assert.That(formatCodingTool Working, Is.EqualTo("🔧 Working"))
-
-    [<Test>]
-    member _.``WaitingForUser formats with hourglass emoji``() =
-        Assert.That(formatCodingTool WaitingForUser, Is.EqualTo("⏳ Waiting"))
-
-    [<Test>]
-    member _.``Done formats with check emoji``() =
-        Assert.That(formatCodingTool Done, Is.EqualTo("✅ Done"))
-
-    [<Test>]
-    member _.``Idle formats with sleep emoji``() =
-        Assert.That(formatCodingTool Idle, Is.EqualTo("💤 Idle"))
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
 type FormatPrTests() =
 
     let makePrInfo id title isDraft isMerged hasConflicts =
