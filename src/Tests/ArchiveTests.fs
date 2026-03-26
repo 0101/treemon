@@ -106,7 +106,7 @@ type TreemonConfigWriteTests() =
         let configPath = Path.Combine(tempDir, ".treemon.json")
         File.WriteAllText(
             configPath,
-            """{ "codingTool": "claude", "testSolution": "src/Tests/Tests.fsproj" }""")
+            """{ "codingTool": "claude", "testCommand": "dotnet test src/Tests/Tests.fsproj" }""")
 
         setArchivedBranches tempDir [ "archived-1" ]
 
@@ -118,13 +118,13 @@ type TreemonConfigWriteTests() =
             | true, elem -> elem.GetString()
             | _ -> ""
 
-        let testSolution =
-            match doc.RootElement.TryGetProperty("testSolution") with
+        let testCommand =
+            match doc.RootElement.TryGetProperty("testCommand") with
             | true, elem -> elem.GetString()
             | _ -> ""
 
         Assert.That(codingTool, Is.EqualTo("claude"), "codingTool should be preserved")
-        Assert.That(testSolution, Is.EqualTo("src/Tests/Tests.fsproj"), "testSolution should be preserved")
+        Assert.That(testCommand, Is.EqualTo("dotnet test src/Tests/Tests.fsproj"), "testCommand should be preserved")
 
         let archived = readArchivedBranches tempDir
         Assert.That(archived, Is.EqualTo([ "archived-1" ]))
@@ -252,6 +252,7 @@ type NavigationArchiveTests() =
           IsDirty = false
           WorkMetrics = None
           HasActiveSession = false
+          HasTestFailureLog = false
           IsArchived = isArchived }
 
     [<Test>]
@@ -350,7 +351,7 @@ type ArchiveE2ETests() =
             "Beads":{{"Open":0,"InProgress":0,"Closed":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
-            "WorkMetrics":null,"HasActiveSession":false,"IsArchived":{archived}
+            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived}
         }}"""
 
     let makeDashboardJson (worktrees: string list) =

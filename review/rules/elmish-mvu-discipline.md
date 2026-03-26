@@ -18,6 +18,7 @@ The MVU (Model-View-Update) pattern guarantees unidirectional data flow and make
 - No direct DOM manipulation (e.g., `document.getElementById`, `element.style`, `element.classList`) in view functions — use React props/attributes instead
 - No `async { ... } |> Async.StartImmediate` or `promise { ... }` fire-and-forget in view functions — use `Cmd.OfAsync` or `Cmd.OfPromise` in update
 - Event handlers in view must only dispatch messages: `prop.onClick (fun _ -> dispatch SomeMsg)` — not `prop.onClick (fun _ -> doSomeSideEffect(); dispatch SomeMsg)`
+- Exception: `e.stopPropagation()` and `e.preventDefault()` are acceptable in event handlers — these are view-layer DOM plumbing, not business-logic side effects, and must execute synchronously during the browser event (they cannot be deferred to the update cycle)
 - Subscriptions (`Sub`, `useEffect`, timers) must dispatch messages to feed results back into the MVU loop
 - The `update` function is the single source of truth for state transitions — no model fields should be set outside of it
 - `Cmd.ofEffect` is acceptable for fire-and-forget effects (e.g., `window.location.reload()`) but should not be used to update model state

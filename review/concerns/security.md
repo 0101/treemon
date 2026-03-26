@@ -44,6 +44,7 @@ Every finding **must** include:
 - "Error message could leak information" — check what the error actually contains
 - Flagging missing CSRF protection on GET endpoints or API-only endpoints with token auth
 - Reporting theoretical vulnerabilities that require the attacker to already have the level of access the vulnerability would grant
+- Flagging local-only inputs as attack vectors. Config files on the local filesystem, user-authored scripts, and data that only the machine operator can create are NOT external attack vectors — if the machine is already compromised, it's too late. Focus on data that crosses trust boundaries from the outside: web requests, PR comments, branch names, commit messages, API responses, and other externally-controlled inputs
 
 ## Output Format
 

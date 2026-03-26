@@ -178,6 +178,7 @@ let private wtAzDoMain: WorktreeStatus =
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false
+      HasTestFailureLog = false
       IsArchived = false }
 
 let private wtRetryLogic: WorktreeStatus =
@@ -194,6 +195,7 @@ let private wtRetryLogic: WorktreeStatus =
       IsDirty = true
       WorkMetrics = Some { CommitCount = 8; LinesAdded = 342; LinesRemoved = 67 }
       HasActiveSession = true
+      HasTestFailureLog = false
       IsArchived = false }
 
 let private wtConfigLoading: WorktreeStatus =
@@ -210,6 +212,7 @@ let private wtConfigLoading: WorktreeStatus =
       IsDirty = false
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
       HasActiveSession = true
+      HasTestFailureLog = false
       IsArchived = false }
 
 let private wtAuthMiddleware: WorktreeStatus =
@@ -226,6 +229,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       IsDirty = false
       WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
       HasActiveSession = false
+      HasTestFailureLog = false
       IsArchived = false }
 
 let private wtArchived: WorktreeStatus =
@@ -242,6 +246,7 @@ let private wtArchived: WorktreeStatus =
       IsDirty = false
       WorkMetrics = Some { CommitCount = 15; LinesAdded = 890; LinesRemoved = 234 }
       HasActiveSession = false
+      HasTestFailureLog = false
       IsArchived = true }
 
 let private wtGithubMain: WorktreeStatus =
@@ -258,6 +263,7 @@ let private wtGithubMain: WorktreeStatus =
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false
+      HasTestFailureLog = false
       IsArchived = false }
 
 let private wtStreaming: WorktreeStatus =
@@ -274,6 +280,7 @@ let private wtStreaming: WorktreeStatus =
       IsDirty = false
       WorkMetrics = Some { CommitCount = 12; LinesAdded = 567; LinesRemoved = 123 }
       HasActiveSession = true
+      HasTestFailureLog = false
       IsArchived = false }
 
 let private wtCsvFix: WorktreeStatus =
@@ -290,6 +297,7 @@ let private wtCsvFix: WorktreeStatus =
       IsDirty = false
       WorkMetrics = Some { CommitCount = 4; LinesAdded = 45; LinesRemoved = 12 }
       HasActiveSession = false
+      HasTestFailureLog = false
       IsArchived = false }
 
 // --- Scheduler footer (all 6 categories populated) ---

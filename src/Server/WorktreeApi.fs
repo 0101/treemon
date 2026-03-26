@@ -5,6 +5,7 @@ open System.IO
 open Shared
 open Shared.EventUtils
 open Newtonsoft.Json
+open FsToolkit.ErrorHandling
 
 let loadFixtures (path: string) =
     let json = File.ReadAllText(path)
@@ -36,6 +37,7 @@ let readOnlyApi
 let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
+    (hasTestFailureLog: bool)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
@@ -65,6 +67,7 @@ let private assembleFromState
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
+      HasTestFailureLog = hasTestFailureLog
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
@@ -167,7 +170,9 @@ let getWorktrees
 
                 let statuses =
                     repo.WorktreeList
-                    |> List.map (assembleFromState activeSessionPaths archivedBranches repo)
+                    |> List.map (fun wt ->
+                        let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
+                        assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
 
                 { RepoId = repoId
                   RootFolderName = Path.GetFileName(RepoId.value repoId)
@@ -325,26 +330,22 @@ let worktreeApi
           openEditor = openEditor validatePath
           startSync = fun wtPath ->
               let path = WorktreePath.value wtPath
-              async {
+              asyncResult {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  match tryResolveWorktreeContext rootPaths state path with
-                  | None -> return Error $"No worktree found at path '{path}'"
-                  | Some { Branch = None } ->
-                      return Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
-                  | Some ({ Branch = Some branch } as ctx) ->
-                      let syncKey = scopedBranchKey ctx.RepoId branch
-                      let provider = resolveProvider state ctx.Worktree.Path
+                  let! ctx, branch =
+                      match tryResolveWorktreeContext rootPaths state path with
+                      | None -> Error $"No worktree found at path '{path}'"
+                      | Some { Branch = None } -> Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
+                      | Some ({ Branch = Some branch } as ctx) -> Ok (ctx, branch)
+                  let syncKey = scopedBranchKey ctx.RepoId branch
+                  let provider = resolveProvider state ctx.Worktree.Path
 
-                      let! beginResult = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
+                  let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
 
-                      match beginResult with
-                      | Error msg -> return Error msg
-                      | Ok ct ->
-                          let post = syncAgent.Post
-                          let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
-                          Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote ct, ct)
-                          return Ok ()
+                  let post = syncAgent.Post
+                  let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
+                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath
@@ -452,34 +453,26 @@ let worktreeApi
                       |> Option.defaultValue []
               }
           createWorktree = fun req ->
-              async {
+              asyncResult {
                   let repoId = RepoId.create req.RepoId
 
-                  match rootPaths |> Map.tryFind repoId with
-                  | None ->
-                      return Error $"Unknown repo: {req.RepoId}"
-                  | Some root ->
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                  let! root =
+                      rootPaths
+                      |> Map.tryFind repoId
+                      |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
-                      let sourceWorktree =
-                          state.Repos
-                          |> Map.tryFind repoId
-                          |> Option.bind (fun repo ->
-                              repo.WorktreeList
-                              |> List.tryFind (fun wt -> wt.Branch = Some (BranchName.value req.BaseBranch)))
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                      match sourceWorktree with
-                      | None ->
-                          return Error $"No worktree found for branch '{BranchName.value req.BaseBranch}'"
-                      | Some wt ->
-                          let! result = GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
+                  let! wt =
+                      state.Repos
+                      |> Map.tryFind repoId
+                      |> Option.bind (fun repo ->
+                          repo.WorktreeList
+                          |> List.tryFind (fun wt -> wt.Branch = Some (BranchName.value req.BaseBranch)))
+                      |> Result.requireSome $"No worktree found for branch '{BranchName.value req.BaseBranch}'"
 
-                          match result with
-                          | Ok () ->
-                              agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
-                          | Error _ -> ()
-
-                          return result
+                  do! GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
+                  agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
@@ -490,7 +483,12 @@ let worktreeApi
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      let prompt = CodingToolStatus.actionPrompt provider req.Action
+                      let prompt =
+                          match req.Action with
+                          | ConfigureTests ->
+                              let root = tryResolveWorktreeContext rootPaths state path |> Option.map _.RepoRoot |> Option.defaultValue path
+                              CodingToolStatus.configureTestsPrompt root
+                          | action -> CodingToolStatus.actionPrompt provider action
                       let command = CodingToolStatus.buildInteractiveCommand provider prompt
                       return! SessionManager.launchAction sessionAgent req.Path command
                   }) }

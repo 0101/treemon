@@ -2,6 +2,9 @@ namespace Shared
 
 open System
 
+module TestFailureLog =
+    let [<Literal>] relPath = ".agents/tests-failure.log"
+
 type RepoId = RepoId of string
 
 module RepoId =
@@ -81,6 +84,8 @@ type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
     | CreatePr
+    | FixTests
+    | ConfigureTests
 
 type ActionRequest =
     { Path: WorktreePath
@@ -109,6 +114,7 @@ type WorktreeStatus =
       IsDirty: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
+      HasTestFailureLog: bool
       IsArchived: bool }
 
 [<RequireQualifiedAccess>]
@@ -118,6 +124,10 @@ type StepStatus =
     | Succeeded
     | Failed of message: string
     | Cancelled
+    | NotConfigured
+
+module EventSource =
+    let [<Literal>] Test = "Test"
 
 type CardEvent =
     { Source: string

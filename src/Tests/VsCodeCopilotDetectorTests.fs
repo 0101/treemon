@@ -358,3 +358,61 @@ type DetachedHeadKeyTests() =
               buildKey @"Q:\code\project\wt2" None ]
         let newDistinct = newKeys |> List.distinct
         Assert.That(newDistinct.Length, Is.EqualTo(2), "New pattern should produce distinct keys")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LastMessageEventTests() =
+
+    let fileMtime = DateTimeOffset(2024, 3, 10, 12, 0, 0, TimeSpan.Zero)
+
+    let reqWith modelState responseText completedAt =
+        { ModelState = modelState
+          CompletedAt = completedAt
+          ResponseText = responseText
+          ResponseKinds = []
+          UserText = None }
+
+    [<Test>]
+    member _.``Complete request with response text returns message``() =
+        let req = reqWith Complete (Some "Here is the answer") (Some fileMtime)
+        let result = toLastMessageEvent req fileMtime
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.Message, Does.Contain("Here is the answer"))
+        Assert.That(result.Value.Source, Is.EqualTo("copilot-vscode"))
+        Assert.That(result.Value.Status, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``InProgress request with response text returns that text``() =
+        let req = reqWith InProgress (Some "Partial streaming text") None
+        let result = toLastMessageEvent req fileMtime
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.Message, Does.Contain("Partial streaming text"))
+        Assert.That(result.Value.Status, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Unknown model state with response text returns that text``() =
+        let req = reqWith Unknown (Some "Some text") None
+        let result = toLastMessageEvent req fileMtime
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.Message, Does.Contain("Some text"))
+
+    [<Test>]
+    member _.``No response text returns None regardless of model state``() =
+        Assert.That(toLastMessageEvent (reqWith InProgress None None) fileMtime, Is.EqualTo(None))
+        Assert.That(toLastMessageEvent (reqWith Complete None None) fileMtime, Is.EqualTo(None))
+        Assert.That(toLastMessageEvent (reqWith Unknown None None) fileMtime, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Uses completedAt timestamp when available``() =
+        let completed = DateTimeOffset(2024, 3, 10, 13, 0, 0, TimeSpan.Zero)
+        let req = reqWith Complete (Some "Done") (Some completed)
+        let result = toLastMessageEvent req fileMtime
+        Assert.That(result.Value.Timestamp, Is.EqualTo(completed))
+
+    [<Test>]
+    member _.``Falls back to fileMtime when completedAt is None``() =
+        let req = reqWith InProgress (Some "Streaming") None
+        let result = toLastMessageEvent req fileMtime
+        Assert.That(result.Value.Timestamp, Is.EqualTo(fileMtime))

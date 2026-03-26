@@ -37,20 +37,27 @@ Point Treemon at one or more directories, and it runs a lightweight background p
 
 Prerequisites: [.NET SDK 9](https://dotnet.microsoft.com/download), [Node.js](https://nodejs.org), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts).
 
-```
-npm install
-```
-
-### Production
-
 ```powershell
+git clone https://github.com/0101/treemon.git
+cd treemon
+npm install
+.\treemon.ps1 deploy                                                # build frontend
 .\treemon.ps1 start "C:\code\my-project" "C:\code\other-project"   # start on port 5000
-.\treemon.ps1 stop                                                  # stop
-.\treemon.ps1 status                                                # show PID, port, uptime
-.\treemon.ps1 log                                                   # tail server log
 ```
 
 Open http://localhost:5000 — install as a PWA from the browser for a native app experience.
+
+### Managing the server
+
+```powershell
+.\treemon.ps1 stop                                                  # stop
+.\treemon.ps1 restart                                               # stop + start
+.\treemon.ps1 status                                                # show PID, port, uptime
+.\treemon.ps1 log                                                   # tail server log
+.\treemon.ps1 add "C:\code\another-project"                         # add a monitored root
+.\treemon.ps1 remove "C:\code\another-project"                      # remove a monitored root
+.\treemon.ps1 deploy                                                # rebuild frontend + restart
+```
 
 ### Development
 
@@ -59,12 +66,6 @@ Open http://localhost:5000 — install as a PWA from the browser for a native ap
 ```
 
 Open http://localhost:5174 (Vite proxies API calls to the server).
-
-### Deploy
-
-```powershell
-.\treemon.ps1 deploy                         # build frontend → wwwroot/, restart prod
-```
 
 ## Stack
 
