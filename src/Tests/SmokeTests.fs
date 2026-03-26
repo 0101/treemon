@@ -85,12 +85,14 @@ type SmokeTests() =
     let rec waitForReady (client: HttpClient) (deadline: DateTime) : Async<string> =
         async {
             if DateTime.UtcNow > deadline then
-                return failwith "Timed out waiting for IsReady=true (60s)"
+                return failwith "Timed out waiting for IsReady=true with SchedulerEvents (60s)"
             else
                 try
                     let! statusCode, body = pollApi client
 
-                    if statusCode < 500 && body.Contains("\"IsReady\":true") then
+                    if statusCode < 500
+                       && body.Contains("\"IsReady\":true")
+                       && body.Contains("\"SchedulerEvents\":[{") then
                         return body
                     else
                         do! Async.Sleep 2000
