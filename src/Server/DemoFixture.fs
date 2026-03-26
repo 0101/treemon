@@ -54,10 +54,6 @@ let private withCpu cpu mem (fix: FixtureData) =
 let private withCardEvt branch cardEvt (fix: FixtureData) =
     { fix with SyncStatus = fix.SyncStatus |> Map.add branch [ cardEvt ] }
 
-let private withLatest key cardEvt (fix: FixtureData) =
-    { fix with
-        Worktrees = { fix.Worktrees with LatestByCategory = fix.Worktrees.LatestByCategory |> Map.add key cardEvt } }
-
 let private azDoEvt = "C:\\code\\CloudPlatform"
 let private githubEvt = "C:\\code\\DataPipeline"
 
@@ -102,19 +98,6 @@ let private prRetrySucceeded =
                 Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88803"
                 Failure = None } ] }
 
-let private prConfigDraft: PrInfo =
-    { Id = 4199
-      Title = "WIP: Refactor config loading"
-      Url = "https://dev.azure.com/contoso/CloudPlatform/_git/CloudPlatform/pullrequest/4199"
-      IsDraft = true
-      Comments = WithResolution(0, 1)
-      Builds =
-        [ { Name = "CI Build"
-            Status = Succeeded
-            Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88790"
-            Failure = None } ]
-      IsMerged = false
-      HasConflicts = false }
 
 let private prAuth: PrInfo =
     { Id = 4203
@@ -207,7 +190,7 @@ let private wtConfigLoading: WorktreeStatus =
       CodingTool = Working
       CodingToolProvider = Some Claude
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
-      Pr = HasPr prConfigDraft
+      Pr = NoPr
       MainBehindCount = 5
       IsDirty = false
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }

@@ -4,7 +4,7 @@
 // Starts the demo server + vite, waits for dashboard to load,
 // captures screenshots at 15fps for one full 10s demo cycle,
 // assembles into GIF via ffmpeg 2-pass palette, optimizes with gifsicle.
-// Output: demo-screenshots.gif
+// Output: docs/demo.gif
 
 import { chromium } from "playwright";
 import { spawn, execSync } from "child_process";
@@ -134,7 +134,7 @@ try {
   const reduction = ((1 - finalSize / rawSize) * 100).toFixed(0);
   rmSync(tmpDir, { recursive: true, force: true });
 
-  console.log(`\n✅ demo-screenshots.gif — ${(finalSize / 1024 / 1024).toFixed(1)} MB (${reduction}% optimized by gifsicle)`);
+  console.log(`\n✅ docs/demo.gif — ${(finalSize / 1024 / 1024).toFixed(1)} MB (${reduction}% optimized by gifsicle)`);
 } finally {
   cleanup();
 }

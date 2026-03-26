@@ -42,7 +42,7 @@ let private tryGet (client: HttpClient) (url: string) =
 let rec private pollUntilReady (client: HttpClient) (url: string) (deadline: DateTime) =
     async {
         if DateTime.UtcNow > deadline then
-            failwithf "Timed out waiting for %s" url
+            failwith $"Timed out waiting for {url}"
         else
             let! ok = tryGet client url
             if not ok then
@@ -346,6 +346,5 @@ type DemoModeTests() =
             // Look for cards with the archived class or branch name "feature/db-migration"
             let archiveSection = this.Page.Locator(".archive-section")
             let! sectionCount = archiveSection.CountAsync()
-            // Archive section may or may not be visible depending on frame; assert structure is present
-            Assert.That(sectionCount, Is.GreaterThanOrEqualTo(0))
+            Assert.That(sectionCount, Is.GreaterThanOrEqualTo(1))
         }

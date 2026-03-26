@@ -1,7 +1,7 @@
 ---
 autofix: false
 model: haiku
-applies-to: "*.fs"
+applies-to: "**/*.fs"
 ---
 # No Null
 
