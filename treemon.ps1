@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "add", "remove")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
@@ -28,6 +28,7 @@ if (-not $Command) {
     Write-Host "  status                     Show production server status"
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev <path> [<path>...]     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
+    Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
     Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
     Write-Host "  add <path> [<path>...]      Add watched root(s) to config"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
@@ -201,28 +202,28 @@ function Show-Log {
     Get-Content $LogFile -Tail 50 -Wait
 }
 
-function Start-DevMode([string[]]$Roots) {
+function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$ServerLabel, [string[]]$MonitorPaths) {
     $devApiPort = 5001
     $devVitePort = 5174
 
-    Write-Host "Starting dev mode..." -ForegroundColor Cyan
-    Write-Host "  Server:  http://localhost:$devApiPort (dotnet watch)" -ForegroundColor Gray
+    Write-Host "Starting $ModeName mode..." -ForegroundColor Cyan
+    Write-Host "  Server:  http://localhost:$devApiPort ($ServerLabel)" -ForegroundColor Gray
     Write-Host "  Vite:    http://localhost:$devVitePort" -ForegroundColor Gray
     Write-Host "  Press Ctrl+C to stop both processes" -ForegroundColor Gray
-    $Roots | ForEach-Object { Write-Host "  Monitoring: $_" -ForegroundColor Gray }
+    if ($MonitorPaths) {
+        $MonitorPaths | ForEach-Object { Write-Host "  Monitoring: $_" -ForegroundColor Gray }
+    }
     Write-Host ""
 
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
-
-    $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
 
     $serverProcess = $null
     $viteProcess = $null
 
     try {
         $serverProcess = Start-Process -FilePath "dotnet" `
-            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $rootArgs --port $devApiPort" `
+            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort" `
             -WorkingDirectory $ScriptDir `
             -PassThru `
             -NoNewWindow
@@ -233,14 +234,14 @@ function Start-DevMode([string[]]$Roots) {
             -PassThru `
             -NoNewWindow
 
-        Write-Host "Dev server started (PID: $($serverProcess.Id)), Vite started (PID: $($viteProcess.Id))" -ForegroundColor Green
+        Write-Host "$ModeName server started (PID: $($serverProcess.Id)), Vite started (PID: $($viteProcess.Id))" -ForegroundColor Green
 
         while (-not $serverProcess.HasExited -and -not $viteProcess.HasExited) {
             Start-Sleep -Milliseconds 500
         }
     } finally {
         Write-Host ""
-        Write-Host "Shutting down dev processes..." -ForegroundColor Yellow
+        Write-Host "Shutting down $ModeName processes..." -ForegroundColor Yellow
 
         if ($serverProcess -and -not $serverProcess.HasExited) {
             Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
@@ -252,8 +253,17 @@ function Start-DevMode([string[]]$Roots) {
         Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
         Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
 
-        Write-Host "Dev mode stopped" -ForegroundColor Green
+        Write-Host "$ModeName mode stopped" -ForegroundColor Green
     }
+}
+
+function Start-DevMode([string[]]$Roots) {
+    $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
+    Start-DualProcess -ServerArgs $rootArgs -ModeName "Dev" -ServerLabel "dotnet watch" -MonitorPaths $Roots
+}
+
+function Start-DemoMode {
+    Start-DualProcess -ServerArgs "--demo" -ModeName "Demo" -ServerLabel "demo data"
 }
 
 function Set-UpstreamRemote([string]$RepoRoot, [string]$RemoteName) {
@@ -419,6 +429,9 @@ switch ($Command) {
             }
         }
         Start-DevMode $roots
+    }
+    "demo" {
+        Start-DemoMode
     }
     "deploy" {
         Deploy-Frontend

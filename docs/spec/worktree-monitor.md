@@ -133,6 +133,10 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - Merged PRs always have `HasConflicts = false`; unknown/computing states treated as no conflicts (resolves on next poll)
 - Client renders an inline conflict icon (⚔) on the PR badge when `HasConflicts = true`
 
+### Demo Mode
+
+`treemon.ps1 demo` launches the server with `--demo` flag, cycling through pre-built `FixtureData` frames (~10s loop) that cover all dashboard features. No client changes — same poll-based rendering. See `src/Server/DemoFixture.fs`.
+
 ### Resilience
 
 - Poll failure: show last successful data

@@ -1,6 +1,6 @@
-<p align="center">
+<!-- <p align="center">
   <img src="src/Client/public/icon-512.png" width="128" />
-</p>
+</p> -->
 
 <h1 align="center">Treemon</h1>
 
@@ -12,7 +12,7 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Treemon dashboard" width="600" />
+  <img src="docs/demo.gif" alt="Treemon dashboard" width="600" />
 </p>
 
 ## Why Treemon?
