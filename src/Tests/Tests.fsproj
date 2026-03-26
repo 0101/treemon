@@ -37,6 +37,7 @@
     <Compile Include="SerializationTests.fs" />
     <Compile Include="VsCodeCopilotDetectorTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
+    <Compile Include="DemoModeTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 

@@ -1,7 +1,7 @@
 ---
 autofix: false
 model: sonnet
-applies-to: "src/Client/*.fs"
+applies-to: "src/Client/**/*.fs"
 ---
 # Elmish MVU Discipline
 

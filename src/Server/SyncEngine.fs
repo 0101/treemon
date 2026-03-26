@@ -3,6 +3,7 @@ module Server.SyncEngine
 open System
 open System.Diagnostics
 open System.IO
+open System.Runtime.InteropServices
 open System.Threading
 open Shared
 open FsToolkit.ErrorHandling
@@ -206,41 +207,11 @@ let runProcess
             return Error $"Failed to start process: {ex.Message}"
     }
 
-let private isValidSolutionPath (worktreePath: string) (solutionPath: string) =
-    let isSolutionExtension =
-        solutionPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
-        || solutionPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
+let private shellCommand (command: string) : string * string =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "cmd", $"/c {command}"
+    else "sh", $"-c \"{command}\""
 
-    let fullPath = Path.Combine(worktreePath, solutionPath) |> Path.GetFullPath
-    let normalizedRoot = Path.GetFullPath(worktreePath)
-
-    isSolutionExtension && fullPath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(fullPath)
-
-let private readTreemonConfig (worktreePath: string) : string option =
-    let configPath = Path.Combine(worktreePath, ".treemon.json")
-
-    match File.Exists(configPath) with
-    | false -> None
-    | true ->
-        try
-            let json = File.ReadAllText(configPath)
-            use doc = System.Text.Json.JsonDocument.Parse(json)
-
-            match doc.RootElement.TryGetProperty("testSolution") with
-            | true, elem ->
-                let solutionPath = elem.GetString()
-
-                match isValidSolutionPath worktreePath solutionPath with
-                | true -> Some solutionPath
-                | false ->
-                    Log.log "SyncEngine" $"testSolution '{solutionPath}' rejected: must be a .sln/.slnx file within {worktreePath}"
-                    None
-            | false, _ -> None
-        with ex ->
-            Log.log "SyncEngine" $"Failed to read .treemon.json: {ex.Message}"
-            None
-
-let private truncateStderr (stderr: string) (maxLen: int) : string =
+let private truncateStderr(stderr: string) (maxLen: int) : string =
     if stderr = "" then "" else stderr[..min (maxLen - 1) (stderr.Length - 1)]
 
 let testFailureLogRelPath = TestFailureLog.relPath
@@ -350,23 +321,23 @@ module private PipelineSteps =
         let fileName, arguments = conflictResolutionCommand provider
         runStep ctx SyncStep.ResolveConflicts fileName arguments checkExitCode
 
-    let resolveTestArgs (repoRoot: string) =
-        match readTreemonConfig repoRoot with
-        | Some solutionPath ->
-            Log.log "SyncEngine" $"Using testSolution from .treemon.json: {solutionPath}"
-            $"""test "{solutionPath}" """
-        | None ->
-            Log.log "SyncEngine" $"No .treemon.json found in {repoRoot}, running default 'dotnet test'"
-            "test"
-
-    let runTests (ctx: StepContext) (repoRoot: string) =
-        let testArgs = resolveTestArgs repoRoot
-        deleteTestFailureLog ctx.WorktreePath
-        runStep ctx SyncStep.Test "dotnet" testArgs (fun proc ->
-            if proc.ExitCode = 0 then Ok ()
-            else
-                saveTestFailureLog ctx.WorktreePath $"dotnet {testArgs}" proc
-                Error (formatExitError proc))
+    let runTests (ctx: StepContext) (repoRoot: string) : Async<Result<unit, StepStatus>> =
+        async {
+            match TreemonConfig.readTestCommand repoRoot with
+            | None ->
+                Log.log "SyncEngine" $"No testCommand configured in {repoRoot}, skipping tests"
+                deleteTestFailureLog ctx.WorktreePath
+                ctx.Post (PushEvent (ctx.Branch, mkEvent $"{SyncStep.Test}" "not configured" StepStatus.NotConfigured))
+                return Ok ()
+            | Some testCommand ->
+                let fileName, args = shellCommand testCommand
+                deleteTestFailureLog ctx.WorktreePath
+                return! runStep ctx SyncStep.Test fileName args (fun proc ->
+                    if proc.ExitCode = 0 then Ok ()
+                    else
+                        saveTestFailureLog ctx.WorktreePath testCommand proc
+                        Error (formatExitError proc))
+        }
 
     let commitIfNeeded (ctx: StepContext) : Async<Result<unit, StepStatus>> =
         async {

@@ -6,13 +6,10 @@ open System.IO
 open System.Text.Json
 open Shared
 
-let private vsCodeWorkspaceStorageDir =
-    Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "Code",
-        "User",
-        "workspaceStorage"
-    )
+let private vsCodeWorkspaceStorageDirs =
+    let appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+    [ Path.Combine(appData, "Code", "User", "workspaceStorage")
+      Path.Combine(appData, "Code - Insiders", "User", "workspaceStorage") ]
 
 type private WorkspaceIndex =
     { PathToChatSessions: Dictionary<string, string>
@@ -50,8 +47,10 @@ let private buildWorkspaceIndex () =
     let index = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
 
     try
-        if Directory.Exists(vsCodeWorkspaceStorageDir) then
-            Directory.GetDirectories(vsCodeWorkspaceStorageDir)
+        vsCodeWorkspaceStorageDirs
+        |> List.filter Directory.Exists
+        |> List.iter (fun storageDir ->
+            Directory.GetDirectories(storageDir)
             |> Array.iter (fun hashDir ->
                 let workspaceJson = Path.Combine(hashDir, "workspace.json")
                 let chatSessionsDir = Path.Combine(hashDir, "chatSessions")
@@ -60,7 +59,7 @@ let private buildWorkspaceIndex () =
                     tryReadFolderUri workspaceJson
                     |> Option.bind tryDecodeLocalPath
                     |> Option.iter (fun localPath ->
-                        index[normalizePath localPath] <- chatSessionsDir))
+                        index[normalizePath localPath] <- chatSessionsDir)))
     with ex ->
         Log.log "VsCodeCopilot" $"Failed to scan workspaceStorage: {ex.Message}"
 
@@ -304,23 +303,15 @@ let private statusFromReqState = function
     | { ModelState = InProgress } | { ModelState = Unknown } -> Working
     | _ -> Done
 
-let private toLastMessageEvent (req: ReqState) (fileMtime: DateTimeOffset) =
-    match req.ModelState with
-    | InProgress | Unknown ->
-        Some { Source = "copilot-vscode"
-               Message = "Working..."
-               Timestamp = fileMtime
-               Status = Some StepStatus.Running
-               Duration = None }
-    | Complete ->
-        req.ResponseText
-        |> Option.map (fun text ->
-            let ts = req.CompletedAt |> Option.defaultValue fileMtime
-            { Source = "copilot-vscode"
-              Message = FileUtils.truncateMessage 80 text
-              Timestamp = ts
-              Status = None
-              Duration = None })
+let internal toLastMessageEvent (req: ReqState) (fileMtime: DateTimeOffset) =
+    req.ResponseText
+    |> Option.map (fun text ->
+        let ts = req.CompletedAt |> Option.defaultValue fileMtime
+        { Source = "copilot-vscode"
+          Message = FileUtils.truncateMessage 80 text
+          Timestamp = ts
+          Status = None
+          Duration = None })
 
 let getSessionMtime (worktreePath: string) : DateTimeOffset option =
     getChatSessionsDir worktreePath

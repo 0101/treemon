@@ -72,14 +72,22 @@ let modifyArchivedBranches (repoRoot: string) (modify: string list -> string lis
         |> modify
         |> writeBranchesCore path)
 
-let readUpstreamRemote (repoRoot: string) : string option =
+let private readStringConfig (repoRoot: string) (propertyName: string) : string option =
     lock configLock (fun () ->
-        withJsonProperty (configPath repoRoot) "upstreamRemote" (fun elem ->
+        withJsonProperty (configPath repoRoot) propertyName (fun elem ->
             if elem.ValueKind = JsonValueKind.String then
                 let value = elem.GetString()
                 if System.String.IsNullOrWhiteSpace(value) then None
-                elif not (validRemoteNamePattern.IsMatch(value)) then
-                    Log.log "TreemonConfig" $"Rejected invalid upstreamRemote value: '{value}'"
-                    None
                 else Some value
             else None) None)
+
+let readUpstreamRemote (repoRoot: string) : string option =
+    readStringConfig repoRoot "upstreamRemote"
+    |> Option.bind (fun value ->
+        if validRemoteNamePattern.IsMatch(value) then Some value
+        else
+            Log.log "TreemonConfig" $"Rejected invalid upstreamRemote value: '{value}'"
+            None)
+
+let readTestCommand (repoRoot: string) : string option =
+    readStringConfig repoRoot "testCommand"

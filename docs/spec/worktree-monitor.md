@@ -51,6 +51,8 @@
 - Available when `MainBehindCount > 0` and worktree is clean
 - Pipeline: CheckClean -> Pull -> Merge -> ResolveConflicts -> Test
 - Conflict resolution uses the detected/configured coding tool CLI (Claude or Copilot)
+- Test step runs the shell command from `.treemon.json` `"testCommand"` (e.g. `"dotnet test src/Tests/Tests.fsproj"`, `"npm test"`, `"pytest"`)
+- If `testCommand` is not configured, the sync engine skips tests and shows a "not configured" status with a clickable action to configure it
 - Cancellable mid-pipeline; progress shown in card event log
 
 ### Coding Tool Detection
@@ -130,6 +132,10 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - GitHub: parsed from `mergeable` field in per-PR detail response (`false` → conflicts, `true`/`null` → no conflicts)
 - Merged PRs always have `HasConflicts = false`; unknown/computing states treated as no conflicts (resolves on next poll)
 - Client renders an inline conflict icon (⚔) on the PR badge when `HasConflicts = true`
+
+### Demo Mode
+
+`treemon.ps1 demo` launches the server with `--demo` flag, cycling through pre-built `FixtureData` frames (~10s loop) that cover all dashboard features. No client changes — same poll-based rendering. See `src/Server/DemoFixture.fs`.
 
 ### Resilience
 

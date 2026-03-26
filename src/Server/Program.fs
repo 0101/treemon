@@ -37,36 +37,49 @@ let readAppVersion () =
 type ServerConfig =
     { WorktreeRoots: string list
       Port: int
-      TestFixtures: string option }
+      TestFixtures: string option
+      Demo: bool }
 
 let parseArgs (args: string array) =
-    let rec parse roots port testFixtures remaining =
+    let rec parse roots port testFixtures demo remaining =
         match remaining with
         | "--port" :: portStr :: rest ->
             match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots p testFixtures rest
+            | true, p -> parse roots p testFixtures demo rest
             | false, _ ->
                 eprintfn "Invalid port number: %s" portStr
                 exit 1
         | "--test-fixtures" :: path :: rest ->
-            parse roots port (Some path) rest
+            parse roots port (Some path) demo rest
+        | "--demo" :: rest ->
+            parse roots port testFixtures true rest
         | path :: rest when not (path.StartsWith("--")) ->
-            parse (roots @ [ path ]) port testFixtures rest
-        | [] -> roots, port, testFixtures
+            parse (roots @ [ path ]) port testFixtures demo rest
+        | [] -> roots, port, testFixtures, demo
         | unexpected :: _ ->
             eprintfn "Unexpected argument: %s" unexpected
             exit 1
 
-    match args |> Array.toList |> parse [] 5000 None with
-    | roots, port, testFixtures when roots <> [] ->
+    match args |> Array.toList |> parse [] 5000 None false with
+    | _, _, Some _, true ->
+        eprintfn "--demo and --test-fixtures are mutually exclusive"
+        exit 1
+    | _, port, _, true ->
+        { WorktreeRoots = []
+          Port = port
+          TestFixtures = None
+          Demo = true }
+    | roots, port, testFixtures, _ when roots <> [] ->
         { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
           Port = port
-          TestFixtures = testFixtures }
+          TestFixtures = testFixtures
+          Demo = false }
     | _ ->
         eprintfn "Usage: Server <worktree-root-path> [<additional-roots>...] [--port <port>] [--test-fixtures <path>]"
+        eprintfn "       Server --demo [--port <port>]"
         exit 1
 
-let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: WorktreeApi.FixtureData) =
+let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
     |> List.iter (fun repo ->
         let worktreeInfos =
@@ -78,6 +91,32 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
 
         agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
         Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
+
+let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
+    let cachedFrame = ref (None: (int * FixtureData) option)
+
+    let getFrame () =
+        let elapsed = System.DateTimeOffset.Now - startTime
+        let positionSeconds = int elapsed.TotalSeconds
+        match cachedFrame.Value with
+        | Some (cached, frame) when cached = positionSeconds -> frame
+        | _ ->
+            let frame = DemoFixture.selectFrame startTime System.DateTimeOffset.Now
+            cachedFrame.Value <- Some (positionSeconds, frame)
+            frame
+
+    WorktreeApi.readOnlyApi
+        "demo mode"
+        (fun () -> async { return (getFrame ()).Worktrees })
+        (fun () -> async { return (getFrame ()).SyncStatus })
+
+let private buildRemotingHandler (api: IWorktreeApi) =
+    Remoting.createApi ()
+    |> Remoting.fromValue api
+    |> Remoting.withErrorHandler (fun ex routeInfo ->
+        Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
+        Propagate ex.Message)
+    |> Remoting.buildHttpHandler
 
 [<EntryPoint>]
 let main args =
@@ -101,26 +140,27 @@ let main args =
     config.WorktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
     let cts = new CancellationTokenSource()
-    let agent = RefreshScheduler.createAgent ()
-    let syncAgent = SyncEngine.createSyncAgent ()
-    let sessionAgent = SessionManager.createAgent ()
-
-    match config.TestFixtures with
-    | Some path ->
-        let fixtures = WorktreeApi.loadFixtures path
-        populateAgentFromFixtures agent fixtures
-        Log.log "Startup" "Fixture mode: scheduler background loop skipped"
-    | None ->
-        RefreshScheduler.start agent config.WorktreeRoots cts.Token
-        Log.log "Startup" "Scheduler background loop started"
 
     let remotingApi =
-        Remoting.createApi ()
-        |> Remoting.fromValue (WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch)
-        |> Remoting.withErrorHandler (fun ex routeInfo ->
-            Log.log "API" $"Error in {routeInfo.methodName}: {ex}"
-            Propagate ex.Message)
-        |> Remoting.buildHttpHandler
+        if config.Demo then
+            Log.log "Startup" "Demo mode: serving cycling fixture frames"
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler
+        else
+            let agent = RefreshScheduler.createAgent ()
+            let syncAgent = SyncEngine.createSyncAgent ()
+            let sessionAgent = SessionManager.createAgent ()
+
+            match config.TestFixtures with
+            | Some path ->
+                let fixtures = WorktreeApi.loadFixtures path
+                populateAgentFromFixtures agent fixtures
+                Log.log "Startup" "Fixture mode: scheduler background loop skipped"
+            | None ->
+                RefreshScheduler.start agent config.WorktreeRoots cts.Token
+                Log.log "Startup" "Scheduler background loop started"
+
+            WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch
+            |> buildRemotingHandler
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"
