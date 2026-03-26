@@ -68,19 +68,19 @@ Open http://localhost:5174 (Vite proxies API calls to the server).
 
 ## CLI
 
-`tm.ps1` provides command-line access to the Treemon server.
+The `tm` command is automatically added to your PATH when you run `.\treemon.ps1 deploy`. Restart your shell to pick it up.
 
 ```powershell
-.\tm.ps1 launch --path C:\code\my-project "fix the login bug"    # launch agent with prompt
-.\tm.ps1 launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
-.\tm.ps1 launch --path C:\code\my-project --fix-build <url>      # fix failed build
-.\tm.ps1 launch --path C:\code\my-project --fix-tests             # fix failing tests
-.\tm.ps1 launch --path C:\code\my-project --create-pr             # create a pull request
-.\tm.ps1 new --repo C:\code\my-project --branch feature/foo      # create worktree
-.\tm.ps1 worktrees                                                 # list all worktrees
+tm launch --path C:\code\my-project "fix the login bug"    # launch agent with prompt
+tm launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
+tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
+tm launch --path C:\code\my-project --fix-tests             # fix failing tests
+tm launch --path C:\code\my-project --create-pr             # create a pull request
+tm new --repo C:\code\my-project --branch feature/foo      # create worktree
+tm worktrees                                                 # list all worktrees
 ```
 
-All commands accept `--port` (default: 5000, env: `TREEMON_PORT`).
+All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also run `.\tm.ps1` directly from the repo root without installing.
 
 ## Stack
 
