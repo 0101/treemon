@@ -303,23 +303,15 @@ let private statusFromReqState = function
     | { ModelState = InProgress } | { ModelState = Unknown } -> Working
     | _ -> Done
 
-let private toLastMessageEvent (req: ReqState) (fileMtime: DateTimeOffset) =
-    match req.ModelState with
-    | InProgress | Unknown ->
-        Some { Source = "copilot-vscode"
-               Message = "Working..."
-               Timestamp = fileMtime
-               Status = Some StepStatus.Running
-               Duration = None }
-    | Complete ->
-        req.ResponseText
-        |> Option.map (fun text ->
-            let ts = req.CompletedAt |> Option.defaultValue fileMtime
-            { Source = "copilot-vscode"
-              Message = FileUtils.truncateMessage 80 text
-              Timestamp = ts
-              Status = None
-              Duration = None })
+let internal toLastMessageEvent (req: ReqState) (fileMtime: DateTimeOffset) =
+    req.ResponseText
+    |> Option.map (fun text ->
+        let ts = req.CompletedAt |> Option.defaultValue fileMtime
+        { Source = "copilot-vscode"
+          Message = FileUtils.truncateMessage 80 text
+          Timestamp = ts
+          Status = None
+          Duration = None })
 
 let getSessionMtime (worktreePath: string) : DateTimeOffset option =
     getChatSessionsDir worktreePath
