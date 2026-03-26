@@ -1,7 +1,7 @@
 ---
 autofix: false
 model: sonnet
-applies-to: "*.fs"
+applies-to: "**/*.fs"
 ---
 # Expression-Oriented
 
