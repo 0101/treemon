@@ -32,6 +32,7 @@
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="ActionLaunchSpawnTests.fs" />
     <Compile Include="CommandBuilderTests.fs" />
+    <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="VsCodeCopilotDetectorTests.fs" />
@@ -55,6 +56,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Server\Server.fsproj" />
     <ProjectReference Include="..\Client\Client.fsproj" />
+    <ProjectReference Include="..\Cli\Cli.fsproj" />
   </ItemGroup>
 
 </Project>

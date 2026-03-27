@@ -17,7 +17,7 @@ type WrapperTypeSerializationTests() =
 
     [<Test>]
     member _.``WorktreePath survives JSON round-trip``() =
-        let original = WorktreePath.create @"Q:\code\my-project"
+        let original = WorktreePath @"Q:\code\my-project"
         let result = roundTrip original
         Assert.That(result, Is.EqualTo(original))
 
@@ -29,14 +29,14 @@ type WrapperTypeSerializationTests() =
 
     [<Test>]
     member _.``RepoId survives JSON round-trip``() =
-        let original = RepoId.create "my-repo"
+        let original = RepoId "my-repo"
         let result = roundTrip original
         Assert.That(result, Is.EqualTo(original))
 
     [<Test>]
     member _.``LaunchRequest with WorktreePath survives JSON round-trip``() =
         let original =
-            { Path = WorktreePath.create @"Q:\code\test"
+            { Path = WorktreePath @"Q:\code\test"
               Prompt = "run tests" }
 
         let result = roundTrip original
@@ -46,7 +46,7 @@ type WrapperTypeSerializationTests() =
     [<Test>]
     member _.``ActionRequest with FixPr survives JSON round-trip``() =
         let original: ActionRequest =
-            { Path = WorktreePath.create @"Q:\code\test"
+            { Path = WorktreePath @"Q:\code\test"
               Action = FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42" }
 
         let result = roundTrip original
@@ -56,7 +56,7 @@ type WrapperTypeSerializationTests() =
     [<Test>]
     member _.``ActionRequest with FixBuild survives JSON round-trip``() =
         let original: ActionRequest =
-            { Path = WorktreePath.create @"Q:\code\test"
+            { Path = WorktreePath @"Q:\code\test"
               Action = FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123" }
 
         let result = roundTrip original
@@ -65,7 +65,7 @@ type WrapperTypeSerializationTests() =
     [<Test>]
     member _.``ActionRequest with CreatePr survives JSON round-trip``() =
         let original: ActionRequest =
-            { Path = WorktreePath.create @"Q:\code\test"
+            { Path = WorktreePath @"Q:\code\test"
               Action = CreatePr }
 
         let result = roundTrip original

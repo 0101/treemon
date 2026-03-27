@@ -28,9 +28,7 @@ let private tryDecodeLocalPath (folderUri: string) =
         Log.log "VsCodeCopilot" $"Failed to decode folder URI '{folderUri}': {ex.Message}"
         None
 
-let private normalizePath (path: string) =
-    Path.GetFullPath(path)
-        .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+let private normalizePath = Server.PathUtils.normalizePath
 
 let private tryReadFolderUri (workspaceJson: string) =
     try

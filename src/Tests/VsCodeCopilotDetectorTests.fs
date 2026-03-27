@@ -314,7 +314,7 @@ type EdgeCaseTests() =
 [<Category("Fast")>]
 type DetachedHeadKeyTests() =
 
-    let repoId = RepoId.create "myrepo"
+    let repoId = RepoId "myrepo"
 
     let buildKey (path: string) (branch: string option) =
         let b = branch |> Option.defaultValue (detachedBranchLabel path)

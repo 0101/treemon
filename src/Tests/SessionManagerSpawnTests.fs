@@ -55,7 +55,7 @@ type SessionManagerSpawnTests() =
     [<Test>]
     member _.``spawnTerminal returns Ok and HWND is resolved``() =
         let a = agent.Value
-        let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+        let testPath = WorktreePath @"Q:\code\AITestAgent"
         let testPathStr = WorktreePath.value testPath
 
         let result = runAsync (spawnTerminal a testPath)
@@ -72,7 +72,7 @@ type SessionManagerSpawnTests() =
     [<Test>]
     member _.``killSession closes the window``() =
         let a = agent.Value
-        let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+        let testPath = WorktreePath @"Q:\code\AITestAgent"
         let testPathStr = WorktreePath.value testPath
 
         let result = runAsync (spawnTerminal a testPath)
@@ -96,7 +96,7 @@ type SessionManagerSpawnTests() =
     [<Test>]
     member _.``re-spawn works after killSession``() =
         let a = agent.Value
-        let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+        let testPath = WorktreePath @"Q:\code\AITestAgent"
         let testPathStr = WorktreePath.value testPath
 
         let result1 = runAsync (spawnTerminal a testPath)

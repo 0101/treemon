@@ -225,7 +225,7 @@ let internal loadSessions () =
                 |> Seq.fold (fun acc prop ->
                     let hwnd = nativeint (prop.Value.GetInt64())
                     if Win32.isWindowValid hwnd then
-                        acc |> Map.add prop.Name hwnd
+                        acc |> Map.add (Server.PathUtils.normalizePath prop.Name) hwnd
                     else
                         acc
                 ) Map.empty
