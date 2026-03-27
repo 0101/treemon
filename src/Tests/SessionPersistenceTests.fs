@@ -5,6 +5,7 @@ open System.IO
 open System.Text.Json
 open NUnit.Framework
 open Server.SessionManager
+open Shared.PathUtils
 
 let private emptySessionMap : Map<string, nativeint> = Map.empty
 
@@ -202,8 +203,9 @@ type RoundTripTests() =
             let loaded = loadSessions ()
 
             Assert.That(loaded.Count, Is.EqualTo(1), "One valid HWND should survive round-trip")
-            Assert.That(loaded.ContainsKey(@"Q:\code\test-worktree"), Is.True)
-            Assert.That(loaded[@"Q:\code\test-worktree"], Is.EqualTo(realHwnd)))
+            let normalizedKey = normalizePath @"Q:\code\test-worktree"
+            Assert.That(loaded.ContainsKey(normalizedKey), Is.True)
+            Assert.That(loaded[normalizedKey], Is.EqualTo(realHwnd)))
 
     [<Test>]
     member _.``round-trip preserves multiple valid entries``() =
@@ -225,8 +227,10 @@ type RoundTripTests() =
             let loaded = loadSessions ()
 
             Assert.That(loaded.Count, Is.EqualTo(2))
-            Assert.That(loaded[@"Q:\code\repo-a"], Is.EqualTo(hwnd1))
-            Assert.That(loaded[@"Q:\code\repo-b"], Is.EqualTo(hwnd2)))
+            let keyA = normalizePath @"Q:\code\repo-a"
+            let keyB = normalizePath @"Q:\code\repo-b"
+            Assert.That(loaded[keyA], Is.EqualTo(hwnd1))
+            Assert.That(loaded[keyB], Is.EqualTo(hwnd2)))
 
     [<Test>]
     member _.``round-trip filters invalid entries but keeps valid ones``() =
@@ -248,8 +252,10 @@ type RoundTripTests() =
             let loaded = loadSessions ()
 
             Assert.That(loaded.Count, Is.EqualTo(1), "Only the valid HWND should survive")
-            Assert.That(loaded.ContainsKey(@"Q:\code\valid"), Is.True)
-            Assert.That(loaded.ContainsKey(@"Q:\code\invalid"), Is.False))
+            let normalizedValid = normalizePath @"Q:\code\valid"
+            let normalizedInvalid = normalizePath @"Q:\code\invalid"
+            Assert.That(loaded.ContainsKey(normalizedValid), Is.True)
+            Assert.That(loaded.ContainsKey(normalizedInvalid), Is.False))
 
 
 [<TestFixture>]
