@@ -77,3 +77,4 @@ New `reportActivity` endpoint posts `ReportClientActivity` to the scheduler agen
 - No multi-tab support — PWA, single tab assumed
 - Mutable state confined to subscription throttle closure only
 - `ActivityLevel` uses `[<RequireQualifiedAccess>]` — its `Idle` case would shadow `CodingToolStatus.Idle`
+- Server-side client activity decay: `ClientActivityAt` timestamp stored alongside level. If 5 min stale and was Active → Idle; if 20 min stale → DeepIdle regardless. Mirrors coding tool's 5-min pattern. Client only reports transitions (not periodic), so generous timeouts prevent false decay while connected.
