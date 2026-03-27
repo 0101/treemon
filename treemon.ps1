@@ -16,7 +16,11 @@ $ConfigFile = Join-Path $ScriptDir ".treemon.config"
 $LogDir = Join-Path $ScriptDir "logs"
 $LogFile = Join-Path $LogDir "treemon-prod.log"
 $WwwRoot = Join-Path $ScriptDir "wwwroot"
-$DefaultPort = if ($env:TREEMON_PORT) { [int]$env:TREEMON_PORT } else { 5000 }
+$DefaultPort = 5000
+if ($env:TREEMON_PORT) {
+    $parsed = 0
+    if ([int]::TryParse($env:TREEMON_PORT, [ref]$parsed)) { $DefaultPort = $parsed }
+}
 
 if (-not $Command) {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
