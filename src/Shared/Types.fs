@@ -41,6 +41,12 @@ type CodingToolProvider =
     | Claude
     | Copilot
 
+[<RequireQualifiedAccess>]
+type ActivityLevel =
+    | Active
+    | Idle
+    | DeepIdle
+
 type BuildStatus =
     | Building
     | Succeeded
@@ -182,4 +188,5 @@ type IWorktreeApi =
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
-      launchAction: ActionRequest -> Async<Result<unit, string>> }
+      launchAction: ActionRequest -> Async<Result<unit, string>>
+      reportActivity: ActivityLevel -> Async<unit> }
