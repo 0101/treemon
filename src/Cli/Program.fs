@@ -7,21 +7,24 @@ open FSharp.SystemCommandLine
 open FSharp.SystemCommandLine.Input
 open Fable.Remoting.DotnetClient
 open Shared
+open Shared.PathUtils
 
 let createApi (port: int) =
     Remoting.createApi $"http://localhost:{port}"
     |> Remoting.buildProxy<IWorktreeApi>
 
-let resolvePort (portMaybe: int option) =
-    portMaybe
-    |> Option.orElseWith (fun () ->
-        Environment.GetEnvironmentVariable "TREEMON_PORT"
-        |> Option.ofObj
-        |> Option.bind (fun s ->
-            match Int32.TryParse s with
-            | true, p -> Some p
-            | _ -> None))
-    |> Option.defaultValue 5000
+let defaultPort = 5000
+
+let resolvePort (portMaybe: int option) (envPort: string option) =
+    match portMaybe with
+    | Some port -> port
+    | None ->
+        match envPort with
+        | Some portStr ->
+            match Int32.TryParse portStr with
+            | true, port -> port
+            | _ -> defaultPort
+        | None -> defaultPort
 
 let serverError port =
     eprintfn $"Error: Treemon server is not running on port %d{port}. Start with: .\\treemon.ps1 start <path>"
@@ -39,9 +42,12 @@ let tryCallServer port (fn: IWorktreeApi -> int) =
     with
     | :? AggregateException as ae when ae.InnerExceptions |> Seq.exists isConnectionError -> serverError port
     | :? Net.Http.HttpRequestException -> serverError port
+    | ex ->
+        eprintfn "Server error: %s" ex.Message
+        1
 
 let withPort portMaybe fn =
-    let port = resolvePort portMaybe
+    let port = resolvePort portMaybe (Environment.GetEnvironmentVariable "TREEMON_PORT" |> Option.ofObj)
 
     if port < 1 || port > 65535 then
         eprintfn $"Error: Invalid port %d{port}. Must be between 1 and 65535."
@@ -56,7 +62,7 @@ let runApi port (fn: IWorktreeApi -> Async<Result<unit, string>>) successMsg =
         | Error e -> eprintfn $"Error: %s{e}"; 1)
 
 let sanitizeForTerminal (s: string) =
-    Regex.Replace(s, @"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "")
+    Regex.Replace(s, @"[\x00-\x1F\x7F]", "")
 
 let formatCodingTool = function
     | Working -> "🔧 Working"
@@ -101,7 +107,7 @@ let launchCmd =
 
             match actions with
             | [ single ] ->
-                let wtPath = path |> Path.GetFullPath |> WorktreePath.create
+                let wtPath = path |> normalizePath |> WorktreePath.create
 
                 match single with
                 | Choice1Of2 text ->
@@ -135,7 +141,7 @@ let newCmd =
                 port
                 (fun api ->
                     api.createWorktree
-                        { RepoId = Path.GetFullPath repo
+                        { RepoId = normalizePath repo
                           BranchName = BranchName.create branch
                           BaseBranch = BranchName.create baseBranch })
                 $"Worktree created for branch '%s{branch}'")
@@ -160,7 +166,7 @@ let worktreesCmd =
                 let dashboard = api.getWorktrees() |> Async.RunSynchronously
 
                 match dashboard.Repos with
-                | [] -> printfn "No worktrees found."
+                | [] -> printfn "No worktrees found."; 0
                 | repos ->
                     repos
                     |> List.iter (fun repo ->
@@ -173,7 +179,7 @@ let worktreesCmd =
                             let pr = formatPr wt.Pr
                             printfn $"  %-50s{path}  %-15s{wt.Branch}  %-15s{tool}  %s{pr}"))
 
-                0))
+                    0))
 
     command "worktrees" {
         description "List all tracked worktrees"

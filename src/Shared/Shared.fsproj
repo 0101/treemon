@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="Types.fs" />
+    <Compile Include="PathUtils.fs" />
     <Compile Include="EventUtils.fs" />
   </ItemGroup>
 

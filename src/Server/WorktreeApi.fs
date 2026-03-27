@@ -4,6 +4,7 @@ open System
 open System.IO
 open Shared
 open Shared.EventUtils
+open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 
@@ -88,7 +89,7 @@ let private tryResolveWorktreeContext
     |> Map.toList
     |> List.tryPick (fun (repoId, repo) ->
         repo.WorktreeList
-        |> List.tryFind (fun wt -> wt.Path = path)
+        |> List.tryFind (fun wt -> pathEquals wt.Path path)
         |> Option.bind (fun wt ->
             rootPaths
             |> Map.tryFind repoId
@@ -103,6 +104,9 @@ let private allKnownPaths (state: RefreshScheduler.DashboardState) =
     |> Map.values
     |> Seq.collect _.KnownPaths
     |> Set.ofSeq
+
+let private containsPathCI (path: string) (paths: Set<string>) =
+    paths |> Set.exists (fun p -> pathEquals p path)
 
 let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
@@ -300,7 +304,7 @@ let worktreeApi
         async {
             let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
             let knownPaths = allKnownPaths state
-            return Set.contains path knownPaths
+            return containsPathCI path knownPaths
         }
 
     let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
@@ -454,7 +458,7 @@ let worktreeApi
               }
           createWorktree = fun req ->
               asyncResult {
-                  let repoId = RepoId.create req.RepoId
+                  let repoId = RepoId.create (normalizePath req.RepoId)
 
                   let! root =
                       rootPaths

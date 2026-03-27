@@ -16,7 +16,7 @@ $ConfigFile = Join-Path $ScriptDir ".treemon.config"
 $LogDir = Join-Path $ScriptDir "logs"
 $LogFile = Join-Path $LogDir "treemon-prod.log"
 $WwwRoot = Join-Path $ScriptDir "wwwroot"
-$DefaultPort = 5000
+$DefaultPort = if ($env:TREEMON_PORT) { [int]$env:TREEMON_PORT } else { 5000 }
 
 if (-not $Command) {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
@@ -411,7 +411,6 @@ function Install-Skill {
     if ($installed.Count -eq 0) {
         Write-Host "Warning: no supported AI tool directories found" -ForegroundColor Yellow
         Write-Host "  Claude Code: ~/.claude/skills/ not found" -ForegroundColor Gray
-        Write-Host "  VS Code:     prompts directory not found" -ForegroundColor Gray
     } else {
         $installed | ForEach-Object { Write-Host "  Installed for $_" -ForegroundColor Green }
     }
@@ -422,8 +421,8 @@ function Deploy-Frontend {
     Build-Frontend
     Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
 
-    Install-TmCommand
-    Install-Skill
+    try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
+    try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
 
     $runningPid = Get-RunningPid
     if ($runningPid) {
