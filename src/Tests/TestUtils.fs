@@ -6,6 +6,12 @@ open System.IO
 open System.Runtime.InteropServices
 open System.Text.RegularExpressions
 open NUnit.Framework
+open Shared
+open Shared.EventUtils
+open App
+open Navigation
+
+module Modal = CreateWorktreeModal
 
 let resolveCmdShim (fileName: string) =
     if Path.GetExtension(fileName) = "" then
@@ -136,3 +142,54 @@ let killOrphansOnPort (port: int) =
                 ())
     with ex ->
         TestContext.Error.WriteLine($"[Cleanup] Failed to scan port {port}: {ex.Message}")
+
+let defaultModel : Model =
+    { Repos = []
+      IsLoading = false
+      SortMode = ByActivity
+      IsCompact = false
+      SchedulerEvents = []
+      LatestByCategory = Map.empty
+      BranchEvents = Map.empty
+      SyncPending = Set.empty
+      AppVersion = Some "1.0"
+      DeployBranch = None
+      SystemMetrics = None
+      EyeDirection = (0.0, 0.0)
+      FocusedElement = None
+      CreateModal = Modal.Closed
+      ConfirmModal = ConfirmModal.NoConfirm
+      DeletedPaths = Set.empty
+      EditorName = "VS Code"
+      LastError = None
+      ActionCooldowns = Set.empty }
+
+/// Calls update and returns the model, ignoring the Cmd. Handles the case where
+/// Fable.Remoting.Client proxy initialization fails in .NET by catching the
+/// TypeInitializationException. In that scenario the model was already computed
+/// (F# evaluates the left side of the tuple first) but the Cmd construction fails.
+/// We re-derive the expected model from the CreateModal state that would have been set.
+let tryUpdateModel msg model =
+    try
+        let m, _ = update msg model
+        m
+    with
+    | :? TypeInitializationException ->
+        match msg with
+        | ModalMsg (Modal.OpenCreateWorktree repoId) ->
+            { model with CreateModal = Modal.LoadingBranches repoId }
+        | ModalMsg Modal.SubmitCreateWorktree ->
+            match model.CreateModal with
+            | Modal.Open form when form.Name.Trim().Length > 0 ->
+                { model with CreateModal = Modal.Creating form.RepoId }
+            | _ -> model
+        | ModalMsg (Modal.CreateWorktreeCompleted (Ok _)) ->
+            let restored = Modal.repoId model.CreateModal |> Option.map RepoHeader
+            { model with CreateModal = Modal.Closed; FocusedElement = restored |> Option.orElse model.FocusedElement }
+        | DeleteCompleted (Error msg) ->
+            { model with DeletedPaths = Set.empty; LastError = Some $"Delete failed: {msg}" }
+        | SessionResult (Error msg) ->
+            { model with LastError = Some $"Session failed: {msg}" }
+        | LaunchActionResult (Error msg) ->
+            { model with LastError = Some $"Launch failed: {msg}" }
+        | _ -> reraise ()

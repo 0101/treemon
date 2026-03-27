@@ -6,55 +6,11 @@ open Shared
 open Shared.EventUtils
 open App
 open Navigation
+open Tests.TestUtils
 
 module Modal = CreateWorktreeModal
 
 let private testRepoId = RepoId "TestRepo"
-
-let private defaultModel : Model =
-    { Repos = []
-      IsLoading = false
-      HasError = false
-      SortMode = ByActivity
-      IsCompact = false
-      SchedulerEvents = []
-      LatestByCategory = Map.empty
-      BranchEvents = Map.empty
-      SyncPending = Set.empty
-      AppVersion = Some "1.0"
-      DeployBranch = None
-      SystemMetrics = None
-      EyeDirection = (0.0, 0.0)
-      FocusedElement = None
-      CreateModal = Modal.Closed
-      ConfirmModal = ConfirmModal.NoConfirm
-      DeletedPaths = Set.empty
-      EditorName = "VS Code"
-      ActionCooldowns = Set.empty }
-
-/// Calls update and returns the model, ignoring the Cmd. Handles the case where
-/// Fable.Remoting.Client proxy initialization fails in .NET by catching the
-/// TypeInitializationException. In that scenario the model was already computed
-/// (F# evaluates the left side of the tuple first) but the Cmd construction fails.
-/// We re-derive the expected model from the CreateModal state that would have been set.
-let private tryUpdateModel msg model =
-    try
-        let m, _ = update msg model
-        m
-    with
-    | :? TypeInitializationException ->
-        match msg with
-        | ModalMsg (Modal.OpenCreateWorktree repoId) ->
-            { model with CreateModal = Modal.LoadingBranches repoId }
-        | ModalMsg Modal.SubmitCreateWorktree ->
-            match model.CreateModal with
-            | Modal.Open form when form.Name.Trim().Length > 0 ->
-                { model with CreateModal = Modal.Creating form.RepoId }
-            | _ -> model
-        | ModalMsg (Modal.CreateWorktreeCompleted (Ok _)) ->
-            let restored = Modal.repoId model.CreateModal |> Option.map RepoHeader
-            { model with CreateModal = Modal.Closed; FocusedElement = restored |> Option.orElse model.FocusedElement }
-        | _ -> reraise ()
 
 
 [<TestFixture>]
@@ -77,7 +33,6 @@ type OpenCreateWorktreeTests() =
         let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
 
         Assert.That(model.IsLoading, Is.EqualTo(defaultModel.IsLoading))
-        Assert.That(model.HasError, Is.EqualTo(defaultModel.HasError))
         Assert.That(model.Repos, Is.EqualTo(defaultModel.Repos))
 
 
