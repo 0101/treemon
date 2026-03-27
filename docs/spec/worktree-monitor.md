@@ -155,11 +155,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 
 ### Refresh Intervals
 
-| Category | Scope | Interval |
-|----------|-------|----------|
-| WorktreeList | per-repo | 60s |
-| Git, Beads, CodingTool | per-worktree | 15s |
-| PR, Fetch | per-repo | 120s |
+Intervals adapt to user activity level (Active / Idle / Deep Idle). See `docs/spec/user-idle-detection.md` for the full interval table and activity state definitions. The Idle column matches the original fixed values shown here historically.
 
 ### PR Provider Routing
 
@@ -236,6 +232,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 ## Related Specs
 
+- `docs/spec/user-idle-detection.md` — adaptive refresh cadence based on user activity level
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
