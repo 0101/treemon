@@ -9,7 +9,7 @@ open Server.GitWorktree
 open Server.SyncEngine
 open Shared
 
-let private normPath = Shared.PathUtils.normalizePath
+let private normPath = Server.PathUtils.normalizePath
 
 let private makeWorktree path branch : WorktreeInfo =
     { Path = normPath path; Head = "abc123"; Branch = Some branch }
@@ -53,8 +53,8 @@ type DeleteWorktreeResolutionTests() =
     member _.``deleteWorktree with WorktreePath targets correct repo when branches are duplicated``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
@@ -68,7 +68,7 @@ type DeleteWorktreeResolutionTests() =
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
             let targetPath = normPath $"{Path.GetFullPath tempDirA}/feature-x"
-            let! _result = api.deleteWorktree (WorktreePath.create targetPath)
+            let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
 
             do! Async.Sleep 50
             let! state = getAgentState agent
@@ -105,8 +105,8 @@ type DeleteWorktreeResolutionTests() =
     member _.``deleteWorktree with WorktreePath for repoB does not affect repoA``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
@@ -120,7 +120,7 @@ type DeleteWorktreeResolutionTests() =
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
             let targetPath = normPath $"{Path.GetFullPath tempDirB}/main"
-            let! _result = api.deleteWorktree (WorktreePath.create targetPath)
+            let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
 
             do! Async.Sleep 50
             let! state = getAgentState agent
@@ -152,7 +152,7 @@ type DeleteWorktreeResolutionTests() =
     member _.``deleteWorktree with unknown path returns error``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main" ]
@@ -161,7 +161,7 @@ type DeleteWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
 
-            let! result = api.deleteWorktree (WorktreePath.create "/nonexistent/path/main")
+            let! result = api.deleteWorktree (PathUtils.toWorktreePath "/nonexistent/path/main")
 
             match result with
             | Error msg ->
@@ -195,8 +195,8 @@ type ArchiveWorktreeResolutionTests() =
     member _.``archiveWorktree with WorktreePath archives correct repo branch when duplicated``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
@@ -209,7 +209,7 @@ type ArchiveWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            let! result = api.archiveWorktree (WorktreePath.create $"{Path.GetFullPath tempDirA}/feature-x")
+            let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
             match result with
             | Ok () -> ()
@@ -226,8 +226,8 @@ type ArchiveWorktreeResolutionTests() =
     member _.``archiveWorktree for repoB does not affect repoA``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
@@ -240,7 +240,7 @@ type ArchiveWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            let! result = api.archiveWorktree (WorktreePath.create $"{Path.GetFullPath tempDirB}/main")
+            let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirB}/main")
 
             match result with
             | Ok () -> ()
@@ -257,8 +257,8 @@ type ArchiveWorktreeResolutionTests() =
     member _.``unarchiveWorktree with WorktreePath targets correct repo``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             TreemonConfig.setArchivedBranches tempDirA [ "feature-x" ]
             TreemonConfig.setArchivedBranches tempDirB [ "feature-x" ]
@@ -274,7 +274,7 @@ type ArchiveWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            let! result = api.unarchiveWorktree (WorktreePath.create $"{Path.GetFullPath tempDirA}/feature-x")
+            let! result = api.unarchiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
             match result with
             | Ok () -> ()
@@ -291,7 +291,7 @@ type ArchiveWorktreeResolutionTests() =
     member _.``archiveWorktree with detached HEAD returns error``() =
         task {
             let agent = RefreshScheduler.createAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktreesA =
                 [ makeDetachedWorktree $"{Path.GetFullPath tempDirA}/detached" ]
@@ -300,7 +300,7 @@ type ArchiveWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
 
-            let! result = api.archiveWorktree (WorktreePath.create $"{Path.GetFullPath tempDirA}/detached")
+            let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/detached")
 
             match result with
             | Error msg ->
@@ -335,8 +335,8 @@ type SyncResolutionTests() =
         task {
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = createSyncAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
@@ -349,7 +349,7 @@ type SyncResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent syncAgent (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            let! result = api.startSync (WorktreePath.create $"{Path.GetFullPath tempDirA}/feature-x")
+            let! result = api.startSync (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
             do! Async.Sleep 100
             let! syncStatus = syncAgent.PostAndAsyncReply(GetAllEvents)
@@ -379,7 +379,7 @@ type SyncResolutionTests() =
         task {
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = createSyncAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktrees =
                 [ makeDetachedWorktree $"{Path.GetFullPath tempDirA}/detached" ]
@@ -388,7 +388,7 @@ type SyncResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent syncAgent (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
 
-            let! result = api.startSync (WorktreePath.create $"{Path.GetFullPath tempDirA}/detached")
+            let! result = api.startSync (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/detached")
 
             match result with
             | Error msg ->
@@ -402,7 +402,7 @@ type SyncResolutionTests() =
         task {
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = createSyncAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktrees =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main" ]
@@ -411,7 +411,7 @@ type SyncResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent syncAgent (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
 
-            let! result = api.startSync (WorktreePath.create "/nonexistent/path/main")
+            let! result = api.startSync (PathUtils.toWorktreePath "/nonexistent/path/main")
 
             match result with
             | Error msg ->
@@ -425,8 +425,8 @@ type SyncResolutionTests() =
         task {
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = createSyncAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
-            let repoBId = RepoId.create (Path.GetFullPath tempDirB)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
@@ -439,7 +439,7 @@ type SyncResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent syncAgent (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            do! api.cancelSync (WorktreePath.create $"{Path.GetFullPath tempDirA}/feature-x")
+            do! api.cancelSync (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
             Assert.Pass("cancelSync completed without error, path resolved correctly to repoA")
         }
@@ -449,7 +449,7 @@ type SyncResolutionTests() =
         task {
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = createSyncAgent ()
-            let repoAId = RepoId.create (Path.GetFullPath tempDirA)
+            let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktrees =
                 [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main" ]
@@ -458,7 +458,7 @@ type SyncResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent syncAgent (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
 
-            do! api.cancelSync (WorktreePath.create "/nonexistent/path/main")
+            do! api.cancelSync (PathUtils.toWorktreePath "/nonexistent/path/main")
 
             Assert.Pass("cancelSync with unknown path completed without throwing")
         }

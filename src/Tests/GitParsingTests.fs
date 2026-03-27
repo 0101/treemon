@@ -4,7 +4,7 @@ open System
 open System.IO
 open NUnit.Framework
 open Server.GitWorktree
-open Shared.PathUtils
+open Server.PathUtils
 
 [<SetUpFixture>]
 type LogDirSetup() =

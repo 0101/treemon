@@ -9,10 +9,10 @@ type DemoFrame =
 
 // --- Constants ---
 
-let private azDoRepoId = RepoId.create "C:\\code\\CloudPlatform"
-let private githubRepoId = RepoId.create "C:\\code\\DataPipeline"
-let private azDoPath prefix = WorktreePath.create $"C:\\code\\CloudPlatform\\{prefix}"
-let private githubPath prefix = WorktreePath.create $"C:\\code\\DataPipeline\\{prefix}"
+let private azDoRepoId = PathUtils.toRepoId "C:\\code\\CloudPlatform"
+let private githubRepoId = PathUtils.toRepoId "C:\\code\\DataPipeline"
+let private azDoPath prefix = PathUtils.toWorktreePath $"C:\\code\\CloudPlatform\\{prefix}"
+let private githubPath prefix = PathUtils.toWorktreePath $"C:\\code\\DataPipeline\\{prefix}"
 let private baseTimestamp = DateTimeOffset(2025, 6, 15, 10, 0, 0, TimeSpan.FromHours(2))
 
 // --- Helpers ---

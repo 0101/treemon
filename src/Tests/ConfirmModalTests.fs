@@ -7,10 +7,10 @@ open Shared.EventUtils
 open App
 open Navigation
 
-let private testPath = WorktreePath.create "/repo/feature-branch"
+let private testPath = WorktreePath "/repo/feature-branch"
 
 let private makeWorktree branch hasSession : WorktreeStatus =
-    { Path = WorktreePath.create $"/repo/{branch}"
+    { Path = WorktreePath $"/repo/{branch}"
       Branch = branch
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
@@ -27,7 +27,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       IsArchived = false }
 
 let private makeRepo repoId worktrees : RepoModel =
-    { RepoId = RepoId.create repoId
+    { RepoId = RepoId repoId
       Name = repoId
       Worktrees = worktrees
       ArchivedWorktrees = []

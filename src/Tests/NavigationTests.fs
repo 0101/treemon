@@ -7,7 +7,7 @@ open Navigation
 
 module NavHelpers =
     let makeWorktree branch : WorktreeStatus =
-        { Path = WorktreePath.create $"/repo/{branch}"
+        { Path = WorktreePath $"/repo/{branch}"
           Branch = branch
           LastCommitMessage = "msg"
           LastCommitTime = DateTimeOffset.UtcNow
@@ -24,7 +24,7 @@ module NavHelpers =
           IsArchived = false }
 
     let makeRepo repoId branches : RepoModel =
-        { RepoId = RepoId.create repoId
+        { RepoId = RepoId repoId
           Name = repoId
           Worktrees = branches |> List.map makeWorktree
           ArchivedWorktrees = []
@@ -34,7 +34,7 @@ module NavHelpers =
 
     let scrollHint (_, _, hint) = hint
 
-    let cardTarget repoId branch = Card $"{RepoId.value (RepoId.create repoId)}/{branch}"
+    let cardTarget repoId branch = Card $"{repoId}/{branch}"
 
 [<TestFixture>]
 [<Category("Unit")>]

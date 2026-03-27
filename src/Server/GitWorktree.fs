@@ -52,7 +52,7 @@ let parseWorktreeList (porcelainOutput: string) =
                 findValue "branch refs/heads/"
 
             Some
-                { Path = Shared.PathUtils.normalizePath path
+                { Path = Server.PathUtils.normalizePath path
                   Head = head
                   Branch = branch }
         | _ -> None)

@@ -55,7 +55,7 @@ let private assembleFromState
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
-    { Path = WorktreePath.create wt.Path
+    { Path = PathUtils.toWorktreePath wt.Path
       Branch = wt.Branch |> Option.defaultValue GitWorktree.DetachedBranchName
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
@@ -443,7 +443,7 @@ let worktreeApi
           unarchiveWorktree = updateArchivedBranches agent rootPaths Set.remove
           getBranches = fun repoIdStr ->
               async {
-                  let repoId = RepoId.create repoIdStr
+                  let repoId = PathUtils.toRepoId repoIdStr
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
                   return
@@ -457,7 +457,7 @@ let worktreeApi
               }
           createWorktree = fun req ->
               asyncResult {
-                  let repoId = RepoId.create req.RepoId
+                  let repoId = PathUtils.toRepoId req.RepoId
 
                   let! root =
                       rootPaths

@@ -8,13 +8,11 @@ module TestFailureLog =
 type RepoId = RepoId of string
 
 module RepoId =
-    let create (path: string) = path |> PathUtils.normalizePath |> RepoId
     let value (RepoId id) = id
 
 type WorktreePath = WorktreePath of string
 
 module WorktreePath =
-    let create (path: string) = path |> PathUtils.normalizePath |> WorktreePath
     let value (WorktreePath p) = p
 
 type BranchName = BranchName of string

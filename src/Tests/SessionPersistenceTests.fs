@@ -5,7 +5,7 @@ open System.IO
 open System.Text.Json
 open NUnit.Framework
 open Server.SessionManager
-open Shared.PathUtils
+open Server.PathUtils
 
 let private emptySessionMap : Map<string, nativeint> = Map.empty
 

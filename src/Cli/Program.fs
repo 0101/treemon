@@ -104,7 +104,7 @@ let launchCmd =
 
             match actions with
             | [ single ] ->
-                let wtPath = path |> WorktreePath.create
+                let wtPath = path |> Path.GetFullPath |> WorktreePath
 
                 match single with
                 | Choice1Of2 text ->

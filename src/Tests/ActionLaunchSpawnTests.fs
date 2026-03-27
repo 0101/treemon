@@ -17,7 +17,7 @@ type ActionLaunchSpawnTests() =
 
     let mutable spawnedPids: int list = []
     let mutable agent: SessionAgent option = None
-    let testPath = WorktreePath.create @"Q:\code\AITestAgent"
+    let testPath = WorktreePath @"Q:\code\AITestAgent"
     let testPathStr = WorktreePath.value testPath
 
     let trackWindowPid (hwnd: nativeint) =
