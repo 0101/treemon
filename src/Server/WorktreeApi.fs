@@ -493,4 +493,4 @@ let worktreeApi
                       let command = CodingToolStatus.buildInteractiveCommand provider prompt
                       return! SessionManager.launchAction sessionAgent req.Path command
                   })
-          reportActivity = fun _ -> async { return () } }
+          reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity level) } }

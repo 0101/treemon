@@ -29,7 +29,9 @@ type Model =
       DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
-      ActionCooldowns: Set<WorktreePath> }
+      ActionCooldowns: Set<WorktreePath>
+      LastActivityTime: float
+      ActivityLevel: ActivityLevel }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -61,6 +63,7 @@ type Msg =
     | LaunchActionResult of Result<unit, string>
     | ClearActionCooldown of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
+    | UserActivity
 
 let worktreeApi =
     Remoting.createApi ()
@@ -98,7 +101,9 @@ let init () =
       DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None
-      ActionCooldowns = Set.empty },
+      ActionCooldowns = Set.empty
+      LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
+      ActivityLevel = ActivityLevel.Active },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
 let rng = System.Random()
@@ -155,6 +160,16 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
+
+let idleThresholdMs = 60_000.0
+let deepIdleThresholdMs = 900_000.0
+
+let computeActivityLevel (lastActivityTime: float) (now: float) =
+    let elapsed = now - lastActivityTime
+
+    if elapsed < idleThresholdMs then ActivityLevel.Active
+    elif elapsed < deepIdleThresholdMs then ActivityLevel.Idle
+    else ActivityLevel.DeepIdle
 
 let update msg model =
     match msg with
@@ -241,7 +256,35 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick)
 
     | Tick ->
-        model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+        let now = Fable.Core.JS.Constructors.Date.now ()
+        let newLevel = computeActivityLevel model.LastActivityTime now
+
+        let transitionCmd =
+            if newLevel <> model.ActivityLevel then
+                Cmd.OfAsync.attempt worktreeApi.reportActivity newLevel (fun _ -> Tick)
+            else
+                Cmd.none
+
+        { model with ActivityLevel = newLevel },
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); transitionCmd ]
+
+    | UserActivity ->
+        let now = Fable.Core.JS.Constructors.Date.now ()
+        let wasActive = model.ActivityLevel = ActivityLevel.Active
+
+        let wakeUpCmd =
+            if not wasActive then
+                Cmd.batch [
+                    Cmd.ofMsg Tick
+                    Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> Tick)
+                ]
+            else
+                Cmd.none
+
+        { model with
+            LastActivityTime = now
+            ActivityLevel = ActivityLevel.Active },
+        wakeUpCmd
 
     | StartSync (path, key) ->
         let syntheticEvent =
@@ -423,9 +466,20 @@ let update msg model =
                 | None -> model, Cmd.none
 
 let pollingSubscription (model: Model) : Sub<Msg> =
+    let pollingIntervalMs =
+        match model.ActivityLevel with
+        | ActivityLevel.Active | ActivityLevel.Idle -> 1000
+        | ActivityLevel.DeepIdle -> 15000
+
+    let activityLevelKey =
+        match model.ActivityLevel with
+        | ActivityLevel.Active -> "active"
+        | ActivityLevel.Idle -> "idle"
+        | ActivityLevel.DeepIdle -> "deep-idle"
+
     let worktreePolling (dispatch: Dispatch<Msg>) =
         let intervalId =
-            Fable.Core.JS.setInterval (fun () -> dispatch Tick) 1000
+            Fable.Core.JS.setInterval (fun () -> dispatch Tick) pollingIntervalMs
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
@@ -435,11 +489,32 @@ let pollingSubscription (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
+    let activityDetection (dispatch: Dispatch<Msg>) =
+        let mutable lastDispatchTime = Fable.Core.JS.Constructors.Date.now ()
+        let throttleMs = 5000.0
+
+        let handler =
+            fun (_: Browser.Types.Event) ->
+                let now = Fable.Core.JS.Constructors.Date.now ()
+                if now - lastDispatchTime >= throttleMs then
+                    lastDispatchTime <- now
+                    dispatch UserActivity
+
+        let events = [| "mousemove"; "keydown"; "click"; "scroll" |]
+        events |> Array.iter (fun evt -> Dom.document.addEventListener (evt, handler))
+
+        { new System.IDisposable with
+            member _.Dispose() =
+                events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
+
+    let subs =
+        [ [ "polling"; activityLevelKey ], worktreePolling
+          [ "activity" ], activityDetection ]
+
     if hasSyncRunning model.BranchEvents then
-        [ [ "polling" ], worktreePolling
-          [ "sync-polling" ], syncPolling ]
+        ([ "sync-polling" ], syncPolling) :: subs
     else
-        [ [ "polling" ], worktreePolling ]
+        subs
 
 let relativeTime = ArchiveViews.relativeTime
 

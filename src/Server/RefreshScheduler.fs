@@ -35,7 +35,8 @@ type DashboardState =
       SchedulerEvents: CardEvent list
       PinnedErrors: Map<string * string, CardEvent>
       LatestByCategory: Map<string, CardEvent>
-      ExpeditedRepos: Set<RepoId> }
+      ExpeditedRepos: Set<RepoId>
+      ClientActivity: ActivityLevel }
 
 module DashboardState =
     let empty =
@@ -43,7 +44,8 @@ module DashboardState =
           SchedulerEvents = []
           PinnedErrors = Map.empty
           LatestByCategory = Map.empty
-          ExpeditedRepos = Set.empty }
+          ExpeditedRepos = Set.empty
+          ClientActivity = ActivityLevel.Idle }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
@@ -58,6 +60,7 @@ type StateMsg =
     | LogSchedulerEvent of CardEvent
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
+    | ReportClientActivity of ActivityLevel
 
 let private maxEvents = 50
 
@@ -160,6 +163,9 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | ClearExpedite repoId ->
         { state with ExpeditedRepos = state.ExpeditedRepos |> Set.remove repoId }
 
+    | ReportClientActivity activity ->
+        { state with ClientActivity = activity }
+
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
         let rec loop (state: DashboardState) =
@@ -187,13 +193,51 @@ let private taskLabel = function
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
-let private intervalOf = function
-    | RefreshWorktreeList _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshBeads _ -> TimeSpan.FromSeconds(60.0)
-    | RefreshCodingTool _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
-    | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
+let private intervalOf (activity: ActivityLevel) = function
+    | RefreshWorktreeList _ ->
+        match activity with
+        | ActivityLevel.Active -> TimeSpan.FromSeconds(10.0)
+        | ActivityLevel.Idle -> TimeSpan.FromSeconds(15.0)
+        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(60.0)
+    | RefreshGit _ ->
+        match activity with
+        | ActivityLevel.Active -> TimeSpan.FromSeconds(5.0)
+        | ActivityLevel.Idle -> TimeSpan.FromSeconds(15.0)
+        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(60.0)
+    | RefreshBeads _ ->
+        match activity with
+        | ActivityLevel.Active -> TimeSpan.FromSeconds(30.0)
+        | ActivityLevel.Idle -> TimeSpan.FromSeconds(60.0)
+        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(240.0)
+    | RefreshCodingTool _ ->
+        match activity with
+        | ActivityLevel.Active -> TimeSpan.FromSeconds(5.0)
+        | ActivityLevel.Idle -> TimeSpan.FromSeconds(15.0)
+        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(60.0)
+    | RefreshPr _ ->
+        match activity with
+        | ActivityLevel.Active -> TimeSpan.FromSeconds(10.0)
+        | ActivityLevel.Idle -> TimeSpan.FromSeconds(120.0)
+        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(600.0)
+    | RefreshFetch _ ->
+        match activity with
+        | ActivityLevel.Active -> TimeSpan.FromSeconds(10.0)
+        | ActivityLevel.Idle -> TimeSpan.FromSeconds(120.0)
+        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(600.0)
+
+let private codingToolActivityThreshold = TimeSpan.FromMinutes(5.0)
+
+let effectiveActivity (now: DateTimeOffset) (state: DashboardState) =
+    let hasCodingToolActivity =
+        state.Repos
+        |> Map.exists (fun _ repo ->
+            repo.CodingToolData
+            |> Map.exists (fun _ ct ->
+                ct.LastUserMessage
+                |> Option.exists (fun (_, ts) -> now - ts < codingToolActivityThreshold)))
+
+    if hasCodingToolActivity then ActivityLevel.Active
+    else state.ClientActivity
 
 let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths
@@ -264,10 +308,10 @@ let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoI
 let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
     repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
 
-let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
+let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
-    |> Option.map (fun t -> t + intervalOf task)
+    |> Option.map (fun t -> t + intervalOf activity task)
     |> Option.defaultValue DateTimeOffset.MinValue
 
 let private executeTask
@@ -431,16 +475,16 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
             |> Map.ofList
     }
 
-let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+let pickMostOverdue (activity: ActivityLevel) (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
-    |> List.filter (fun task -> deadlineOf lastRuns task <= now)
-    |> List.sortBy (deadlineOf lastRuns)
+    |> List.filter (fun task -> deadlineOf activity lastRuns task <= now)
+    |> List.sortBy (deadlineOf activity lastRuns)
     |> List.tryHead
 
-let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+let computeSleepMs (activity: ActivityLevel) (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.map (fun task ->
-        let deadline = deadlineOf lastRuns task
+        let deadline = deadlineOf activity lastRuns task
         (deadline - now).TotalMilliseconds |> int)
     |> List.fold min Int32.MaxValue
     |> max 100
@@ -473,6 +517,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
             let tasks = buildTaskList archivedPaths repos
             let now = DateTimeOffset.UtcNow
+            let activity = effectiveActivity now state
 
             let effectiveLastRuns =
                 tasks
@@ -482,7 +527,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                         runs |> Map.remove task
                     | _ -> runs) lastRuns
 
-            match pickMostOverdue now effectiveLastRuns tasks with
+            match pickMostOverdue activity now effectiveLastRuns tasks with
             | Some task ->
                 let! result = executeWithTimeout agent rootPaths task
                 logTaskResult agent task result
@@ -495,7 +540,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 let updatedRuns = lastRuns |> Map.add task now
                 return! loop updatedRuns
             | None ->
-                let sleepMs = computeSleepMs now effectiveLastRuns tasks
+                let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
                 return! loop lastRuns
         }

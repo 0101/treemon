@@ -24,14 +24,14 @@ type PickMostOverdueTests() =
     [<Test>]
     member _.``Cold start with empty lastRuns returns first task``() =
         let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
-        let result = pickMostOverdue DateTimeOffset.UtcNow Map.empty tasks
+        let result = pickMostOverdue ActivityLevel.Idle DateTimeOffset.UtcNow Map.empty tasks
 
         Assert.That(result.IsSome, Is.True)
 
     [<Test>]
     member _.``Cold start with empty lastRuns picks earliest deadline (all MinValue)``() =
         let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId; RefreshGit(testRepoId, "/repo/a") ]
-        let result = pickMostOverdue DateTimeOffset.UtcNow Map.empty tasks
+        let result = pickMostOverdue ActivityLevel.Idle DateTimeOffset.UtcNow Map.empty tasks
 
         Assert.That(result, Is.EqualTo(Some(RefreshWorktreeList testRepoId)))
 
@@ -45,7 +45,7 @@ type PickMostOverdueTests() =
             |> List.map (fun t -> t, now)
             |> Map.ofList
 
-        let result = pickMostOverdue now lastRuns tasks
+        let result = pickMostOverdue ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.EqualTo(None))
 
@@ -62,7 +62,7 @@ type PickMostOverdueTests() =
               RefreshGit(testRepoId, "/repo/a"), now ]
             |> Map.ofList
 
-        let result = pickMostOverdue now lastRuns tasks
+        let result = pickMostOverdue ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
@@ -80,13 +80,13 @@ type PickMostOverdueTests() =
               RefreshGit(testRepoId, "/repo/a"), now ]
             |> Map.ofList
 
-        let result = pickMostOverdue now lastRuns tasks
+        let result = pickMostOverdue ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
     [<Test>]
     member _.``Empty task list returns None``() =
-        let result = pickMostOverdue DateTimeOffset.UtcNow Map.empty []
+        let result = pickMostOverdue ActivityLevel.Idle DateTimeOffset.UtcNow Map.empty []
         Assert.That(result, Is.EqualTo(None))
 
     [<Test>]
@@ -99,7 +99,7 @@ type PickMostOverdueTests() =
 
         let tasks = [ RefreshWorktreeList testRepoId; RefreshPr testRepoId ]
 
-        let result = pickMostOverdue now lastRuns tasks
+        let result = pickMostOverdue ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.EqualTo(Some(RefreshPr testRepoId)))
 
@@ -119,7 +119,7 @@ type ComputeSleepMsTests() =
               RefreshPr testRepoId, now ]
             |> Map.ofList
 
-        let result = computeSleepMs now lastRuns tasks
+        let result = computeSleepMs ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.GreaterThan(1000))
 
@@ -133,7 +133,7 @@ type ComputeSleepMsTests() =
             [ RefreshPr testRepoId, longAgo ]
             |> Map.ofList
 
-        let result = computeSleepMs now lastRuns tasks
+        let result = computeSleepMs ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.EqualTo(100))
 
@@ -147,13 +147,13 @@ type ComputeSleepMsTests() =
             [ RefreshGit(testRepoId, "/repo/a"), ranTenSecondsAgo ]
             |> Map.ofList
 
-        let result = computeSleepMs now lastRuns tasks
+        let result = computeSleepMs ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.InRange(4000, 6000))
 
     [<Test>]
     member _.``Empty task list returns max int``() =
-        let result = computeSleepMs DateTimeOffset.UtcNow Map.empty []
+        let result = computeSleepMs ActivityLevel.Idle DateTimeOffset.UtcNow Map.empty []
         Assert.That(result, Is.EqualTo(Int32.MaxValue))
 
     [<Test>]
@@ -166,7 +166,7 @@ type ComputeSleepMsTests() =
               RefreshPr testRepoId, now ]
             |> Map.ofList
 
-        let result = computeSleepMs now lastRuns tasks
+        let result = computeSleepMs ActivityLevel.Idle now lastRuns tasks
 
         Assert.That(result, Is.InRange(4000, 6000))
 
