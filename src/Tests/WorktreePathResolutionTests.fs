@@ -9,11 +9,13 @@ open Server.GitWorktree
 open Server.SyncEngine
 open Shared
 
+let private normPath = Shared.PathUtils.normalizePath
+
 let private makeWorktree path branch : WorktreeInfo =
-    { Path = path; Head = "abc123"; Branch = Some branch }
+    { Path = normPath path; Head = "abc123"; Branch = Some branch }
 
 let private makeDetachedWorktree path : WorktreeInfo =
-    { Path = path; Head = "abc123"; Branch = None }
+    { Path = normPath path; Head = "abc123"; Branch = None }
 
 let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * WorktreeInfo list) list) =
     async {
@@ -65,7 +67,7 @@ type DeleteWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            let targetPath = $"{Path.GetFullPath tempDirA}/feature-x"
+            let targetPath = normPath $"{Path.GetFullPath tempDirA}/feature-x"
             let! _result = api.deleteWorktree (WorktreePath.create targetPath)
 
             do! Async.Sleep 50
@@ -90,12 +92,12 @@ type DeleteWorktreeResolutionTests() =
 
             Assert.That(
                 repoBWorktrees,
-                Does.Contain($"{Path.GetFullPath tempDirB}/feature-x"),
+                Does.Contain(normPath $"{Path.GetFullPath tempDirB}/feature-x"),
                 "RepoB's feature-x should NOT be affected")
 
             Assert.That(
                 repoBWorktrees,
-                Does.Contain($"{Path.GetFullPath tempDirB}/main"),
+                Does.Contain(normPath $"{Path.GetFullPath tempDirB}/main"),
                 "RepoB's main should NOT be affected")
         }
 
@@ -117,7 +119,7 @@ type DeleteWorktreeResolutionTests() =
 
             let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
 
-            let targetPath = $"{Path.GetFullPath tempDirB}/main"
+            let targetPath = normPath $"{Path.GetFullPath tempDirB}/main"
             let! _result = api.deleteWorktree (WorktreePath.create targetPath)
 
             do! Async.Sleep 50
@@ -142,7 +144,7 @@ type DeleteWorktreeResolutionTests() =
 
             Assert.That(
                 repoAWorktrees,
-                Does.Contain($"{Path.GetFullPath tempDirA}/main"),
+                Does.Contain(normPath $"{Path.GetFullPath tempDirA}/main"),
                 "RepoA's main should NOT be affected")
         }
 
@@ -355,13 +357,13 @@ type SyncResolutionTests() =
             let repoAKeys =
                 syncStatus
                 |> Map.keys
-                |> Seq.filter (fun k -> k.Contains(Path.GetFullPath tempDirA))
+                |> Seq.filter (fun k -> k.Contains(normPath (Path.GetFullPath tempDirA)))
                 |> Seq.toList
 
             let repoBKeys =
                 syncStatus
                 |> Map.keys
-                |> Seq.filter (fun k -> k.Contains(Path.GetFullPath tempDirB))
+                |> Seq.filter (fun k -> k.Contains(normPath (Path.GetFullPath tempDirB)))
                 |> Seq.toList
 
             match result with

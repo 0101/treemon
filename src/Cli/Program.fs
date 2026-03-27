@@ -7,7 +7,6 @@ open FSharp.SystemCommandLine
 open FSharp.SystemCommandLine.Input
 open Fable.Remoting.DotnetClient
 open Shared
-open Shared.PathUtils
 
 let createApi (port: int) =
     Remoting.createApi $"http://localhost:{port}"
@@ -107,7 +106,7 @@ let launchCmd =
 
             match actions with
             | [ single ] ->
-                let wtPath = path |> normalizePath |> WorktreePath.create
+                let wtPath = path |> WorktreePath.create
 
                 match single with
                 | Choice1Of2 text ->
@@ -141,7 +140,7 @@ let newCmd =
                 port
                 (fun api ->
                     api.createWorktree
-                        { RepoId = normalizePath repo
+                        { RepoId = repo
                           BranchName = BranchName.create branch
                           BaseBranch = BranchName.create baseBranch })
                 $"Worktree created for branch '%s{branch}'")

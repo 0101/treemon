@@ -458,7 +458,7 @@ let worktreeApi
               }
           createWorktree = fun req ->
               asyncResult {
-                  let repoId = RepoId.create (normalizePath req.RepoId)
+                  let repoId = RepoId.create req.RepoId
 
                   let! root =
                       rootPaths

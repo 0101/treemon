@@ -34,7 +34,7 @@ module NavHelpers =
 
     let scrollHint (_, _, hint) = hint
 
-    let cardTarget repoId branch = Card $"{repoId}/{branch}"
+    let cardTarget repoId branch = Card $"{RepoId.value (RepoId.create repoId)}/{branch}"
 
 [<TestFixture>]
 [<Category("Unit")>]
