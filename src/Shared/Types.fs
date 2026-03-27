@@ -40,6 +40,7 @@ type CodingToolStatus =
 type CodingToolProvider =
     | Claude
     | Copilot
+    static member Default = Copilot
 
 type BuildStatus =
     | Building

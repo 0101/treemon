@@ -239,7 +239,7 @@ let private deleteTestFailureLog (worktreePath: string) =
         Log.log "SyncEngine" $"Failed to delete test failure log: {ex.Message}"
 
 let private conflictResolutionCommand (provider: Shared.CodingToolProvider option) =
-    match provider |> Option.defaultValue Shared.CodingToolProvider.Claude with
+    match provider |> Option.defaultValue Shared.CodingToolProvider.Default with
     | Shared.CodingToolProvider.Claude ->
         "claude", """-p "/conflict" --dangerously-skip-permissions"""
     | Shared.CodingToolProvider.Copilot ->
