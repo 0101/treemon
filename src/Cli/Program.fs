@@ -169,14 +169,15 @@ let worktreesCmd =
                 | repos ->
                     repos
                     |> List.iter (fun repo ->
-                        printfn $"\n📁 %s{repo.RootFolderName}"
+                        printfn $"\n📁 %s{sanitizeForTerminal repo.RootFolderName}"
 
                         repo.Worktrees
                         |> List.iter (fun wt ->
-                            let path = WorktreePath.value wt.Path
+                            let path = WorktreePath.value wt.Path |> sanitizeForTerminal
+                            let branch = sanitizeForTerminal wt.Branch
                             let tool = formatCodingTool wt.CodingTool
                             let pr = formatPr wt.Pr
-                            printfn $"  %-50s{path}  %-15s{wt.Branch}  %-15s{tool}  %s{pr}"))
+                            printfn $"  %-50s{path}  %-15s{branch}  %-15s{tool}  %s{pr}"))
 
                     0))
 
