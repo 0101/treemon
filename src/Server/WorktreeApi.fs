@@ -175,8 +175,10 @@ let getWorktrees
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
                         assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
 
+                let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
+
                 { RepoId = repoId
-                  RootFolderName = Path.GetFileName(RepoId.value repoId)
+                  RootFolderName = Path.GetFileName(originalPath)
                   Worktrees = statuses
                   IsReady = repo.IsReady
                   Provider = repo.Provider })
