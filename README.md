@@ -67,12 +67,6 @@ Open http://localhost:5000 — install as a PWA from the browser for a native ap
 
 Open http://localhost:5174 (Vite proxies API calls to the server).
 
-### Deploy
-
-```powershell
-.\treemon.ps1 deploy                         # build frontend → wwwroot/, restart prod
-```
-
 ## CLI
 
 The `tm` command is automatically added to your PATH when you run `.\treemon.ps1 deploy`. Restart your shell to pick it up.
