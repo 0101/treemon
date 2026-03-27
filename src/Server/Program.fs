@@ -47,7 +47,7 @@ let parseArgs (args: string array) =
             match System.Int32.TryParse(portStr) with
             | true, p -> parse roots p testFixtures demo rest
             | false, _ ->
-                eprintfn "Invalid port number: %s" portStr
+                eprintfn $"Invalid port number: {portStr}"
                 exit 1
         | "--test-fixtures" :: path :: rest ->
             parse roots port (Some path) demo rest
@@ -57,7 +57,7 @@ let parseArgs (args: string array) =
             parse (roots @ [ path ]) port testFixtures demo rest
         | [] -> roots, port, testFixtures, demo
         | unexpected :: _ ->
-            eprintfn "Unexpected argument: %s" unexpected
+            eprintfn $"Unexpected argument: {unexpected}"
             exit 1
 
     match args |> Array.toList |> parse [] 5000 None false with

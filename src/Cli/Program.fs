@@ -15,15 +15,13 @@ let createApi (port: int) =
 let defaultPort = 5000
 
 let resolvePort (portMaybe: int option) (envPort: string option) =
-    match portMaybe with
-    | Some port -> port
-    | None ->
-        match envPort with
-        | Some portStr ->
-            match Int32.TryParse portStr with
-            | true, port -> port
-            | _ -> defaultPort
-        | None -> defaultPort
+    match portMaybe, envPort with
+    | Some port, _ -> port
+    | None, Some portStr ->
+        match Int32.TryParse portStr with
+        | true, port -> port
+        | _ -> defaultPort
+    | None, None -> defaultPort
 
 let serverError port =
     eprintfn $"Error: Treemon server is not running on port %d{port}. Start with: .\\treemon.ps1 start <path>"
@@ -42,7 +40,7 @@ let tryCallServer port (fn: IWorktreeApi -> int) =
     | :? AggregateException as ae when ae.InnerExceptions |> Seq.exists isConnectionError -> serverError port
     | :? Net.Http.HttpRequestException -> serverError port
     | ex ->
-        eprintfn "Server error: %s" ex.Message
+        eprintfn $"Server error: {ex.Message}"
         1
 
 let withPort portMaybe fn =

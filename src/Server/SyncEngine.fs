@@ -223,7 +223,8 @@ let private saveTestFailureLog (worktreePath: string) (command: string) (proc: P
     try
         let logPath = testFailureLogPath worktreePath
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)) |> ignore
-        let content = $"Command: {command}\nExit code: {proc.ExitCode}\n\n--- stdout ---\n{proc.Stdout}\n\n--- stderr ---\n{proc.Stderr}"
+        let nl = Environment.NewLine
+        let content = $"Command: {command}{nl}Exit code: {proc.ExitCode}{nl}{nl}--- stdout ---{nl}{proc.Stdout}{nl}{nl}--- stderr ---{nl}{proc.Stderr}"
         File.WriteAllText(logPath, content)
         Log.log "SyncEngine" $"Saved test failure log to {logPath}"
     with ex ->

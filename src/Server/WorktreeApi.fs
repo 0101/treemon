@@ -105,9 +105,6 @@ let private allKnownPaths (state: RefreshScheduler.DashboardState) =
     |> Seq.collect _.KnownPaths
     |> Set.ofSeq
 
-let private containsPathCI (path: string) (paths: Set<string>) =
-    paths |> Set.exists (fun p -> pathEquals p path)
-
 let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value repoId}/{branch}"
 
 let internal detachedBranchLabel (path: string) = $"(detached@{path})"
@@ -304,7 +301,7 @@ let worktreeApi
         async {
             let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
             let knownPaths = allKnownPaths state
-            return containsPathCI path knownPaths
+            return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
 
     let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
