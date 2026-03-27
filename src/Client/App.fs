@@ -104,7 +104,7 @@ let init () =
       ActionCooldowns = Set.empty
       LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
       ActivityLevel = ActivityLevel.Active },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> Tick) ]
 
 let rng = System.Random()
 

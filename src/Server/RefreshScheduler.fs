@@ -36,7 +36,8 @@ type DashboardState =
       PinnedErrors: Map<string * string, CardEvent>
       LatestByCategory: Map<string, CardEvent>
       ExpeditedRepos: Set<RepoId>
-      ClientActivity: ActivityLevel }
+      ClientActivity: ActivityLevel
+      ClientActivityAt: DateTimeOffset }
 
 module DashboardState =
     let empty =
@@ -45,7 +46,8 @@ module DashboardState =
           PinnedErrors = Map.empty
           LatestByCategory = Map.empty
           ExpeditedRepos = Set.empty
-          ClientActivity = ActivityLevel.Idle }
+          ClientActivity = ActivityLevel.Idle
+          ClientActivityAt = DateTimeOffset.MinValue }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
@@ -60,7 +62,7 @@ type StateMsg =
     | LogSchedulerEvent of CardEvent
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
-    | ReportClientActivity of ActivityLevel
+    | ReportClientActivity of ActivityLevel * DateTimeOffset
 
 let private maxEvents = 50
 
@@ -163,8 +165,8 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | ClearExpedite repoId ->
         { state with ExpeditedRepos = state.ExpeditedRepos |> Set.remove repoId }
 
-    | ReportClientActivity activity ->
-        { state with ClientActivity = activity }
+    | ReportClientActivity(activity, timestamp) ->
+        { state with ClientActivity = activity; ClientActivityAt = timestamp }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
@@ -193,39 +195,30 @@ let private taskLabel = function
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
-let private intervalOf (activity: ActivityLevel) = function
-    | RefreshWorktreeList _ ->
-        match activity with
-        | ActivityLevel.Active -> TimeSpan.FromSeconds(10.0)
-        | ActivityLevel.Idle -> TimeSpan.FromSeconds(15.0)
-        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(60.0)
-    | RefreshGit _ ->
-        match activity with
-        | ActivityLevel.Active -> TimeSpan.FromSeconds(5.0)
-        | ActivityLevel.Idle -> TimeSpan.FromSeconds(15.0)
-        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(60.0)
-    | RefreshBeads _ ->
-        match activity with
-        | ActivityLevel.Active -> TimeSpan.FromSeconds(30.0)
-        | ActivityLevel.Idle -> TimeSpan.FromSeconds(60.0)
-        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(240.0)
-    | RefreshCodingTool _ ->
-        match activity with
-        | ActivityLevel.Active -> TimeSpan.FromSeconds(5.0)
-        | ActivityLevel.Idle -> TimeSpan.FromSeconds(15.0)
-        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(60.0)
-    | RefreshPr _ ->
-        match activity with
-        | ActivityLevel.Active -> TimeSpan.FromSeconds(10.0)
-        | ActivityLevel.Idle -> TimeSpan.FromSeconds(120.0)
-        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(600.0)
-    | RefreshFetch _ ->
-        match activity with
-        | ActivityLevel.Active -> TimeSpan.FromSeconds(10.0)
-        | ActivityLevel.Idle -> TimeSpan.FromSeconds(120.0)
-        | ActivityLevel.DeepIdle -> TimeSpan.FromSeconds(600.0)
+let private intervalOf (activity: ActivityLevel) (task: RefreshTask) =
+    match activity, task with
+    | ActivityLevel.Active,   RefreshWorktreeList _ -> TimeSpan.FromSeconds(10.0)
+    | ActivityLevel.Idle,     RefreshWorktreeList _ -> TimeSpan.FromSeconds(15.0)
+    | ActivityLevel.DeepIdle, RefreshWorktreeList _ -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.Active,   RefreshGit _          -> TimeSpan.FromSeconds(5.0)
+    | ActivityLevel.Idle,     RefreshGit _          -> TimeSpan.FromSeconds(15.0)
+    | ActivityLevel.DeepIdle, RefreshGit _          -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.Active,   RefreshBeads _        -> TimeSpan.FromSeconds(30.0)
+    | ActivityLevel.Idle,     RefreshBeads _        -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.DeepIdle, RefreshBeads _        -> TimeSpan.FromSeconds(240.0)
+    | ActivityLevel.Active,   RefreshCodingTool _   -> TimeSpan.FromSeconds(5.0)
+    | ActivityLevel.Idle,     RefreshCodingTool _   -> TimeSpan.FromSeconds(15.0)
+    | ActivityLevel.DeepIdle, RefreshCodingTool _   -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.Active,   RefreshPr _           -> TimeSpan.FromSeconds(10.0)
+    | ActivityLevel.Idle,     RefreshPr _           -> TimeSpan.FromSeconds(120.0)
+    | ActivityLevel.DeepIdle, RefreshPr _           -> TimeSpan.FromSeconds(600.0)
+    | ActivityLevel.Active,   RefreshFetch _        -> TimeSpan.FromSeconds(10.0)
+    | ActivityLevel.Idle,     RefreshFetch _        -> TimeSpan.FromSeconds(120.0)
+    | ActivityLevel.DeepIdle, RefreshFetch _        -> TimeSpan.FromSeconds(600.0)
 
 let private codingToolActivityThreshold = TimeSpan.FromMinutes(5.0)
+let private clientActivityTimeout = TimeSpan.FromMinutes(5.0)
+let private clientDeepIdleTimeout = TimeSpan.FromMinutes(20.0)
 
 let effectiveActivity (now: DateTimeOffset) (state: DashboardState) =
     let hasCodingToolActivity =
@@ -237,7 +230,12 @@ let effectiveActivity (now: DateTimeOffset) (state: DashboardState) =
                 |> Option.exists (fun (_, ts) -> now - ts < codingToolActivityThreshold)))
 
     if hasCodingToolActivity then ActivityLevel.Active
-    else state.ClientActivity
+    else
+        let elapsed = now - state.ClientActivityAt
+
+        if elapsed >= clientDeepIdleTimeout then ActivityLevel.DeepIdle
+        elif elapsed >= clientActivityTimeout && state.ClientActivity = ActivityLevel.Active then ActivityLevel.Idle
+        else state.ClientActivity
 
 let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths
