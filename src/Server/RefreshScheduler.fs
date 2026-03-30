@@ -195,7 +195,7 @@ let private taskLabel = function
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
-let private intervalOf (activity: ActivityLevel) (task: RefreshTask) =
+let internal intervalOf (activity: ActivityLevel) (task: RefreshTask) =
     match activity, task with
     | ActivityLevel.Active,   RefreshWorktreeList _ -> TimeSpan.FromSeconds(10.0)
     | ActivityLevel.Idle,     RefreshWorktreeList _ -> TimeSpan.FromSeconds(15.0)

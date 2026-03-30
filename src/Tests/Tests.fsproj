@@ -12,6 +12,7 @@
     <Compile Include="DashboardTests.fs" />
     <Compile Include="GitParsingTests.fs" />
     <Compile Include="SchedulerTests.fs" />
+    <Compile Include="IdleDetectionTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
     <Compile Include="ClaudeDetectorTests.fs" />
     <Compile Include="ClaudeSessionReplayTests.fs" />
