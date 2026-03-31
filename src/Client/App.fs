@@ -161,7 +161,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
 
-let idleThresholdMs = 60_000.0
+let idleThresholdMs = 180_000.0
 let deepIdleThresholdMs = 900_000.0
 
 let computeActivityLevel (lastActivityTime: float) (now: float) =
@@ -1192,7 +1192,7 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
-let viewEyeOpen (pupilColor: string) (dx: float, dy: float) =
+let viewEyeOpen (pupilColor: string) (activity: ActivityLevel) (dx: float, dy: float) =
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
@@ -1233,6 +1233,30 @@ let viewEyeOpen (pupilColor: string) (dx: float, dy: float) =
                 svg.r 2
                 svg.fill "rgba(255, 255, 255, 0.8)"
             ]
+            match activity with
+            | ActivityLevel.Idle ->
+                Svg.path [
+                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 4 20 5 Q10 4 2 10 Z"
+                    svg.fill "#b0b0b0"
+                ]
+                Svg.path [
+                    svg.d "M2 10 Q10 4 20 5 Q30 4 38 10"
+                    svg.fill "none"
+                    svg.stroke "#56b6c2"
+                    svg.strokeWidth 2.0
+                ]
+            | ActivityLevel.DeepIdle ->
+                Svg.path [
+                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 9 20 12 Q10 9 2 10 Z"
+                    svg.fill "#b0b0b0"
+                ]
+                Svg.path [
+                    svg.d "M2 10 Q10 9 20 12 Q30 9 38 10"
+                    svg.fill "none"
+                    svg.stroke "#56b6c2"
+                    svg.strokeWidth 2.0
+                ]
+            | _ -> ()
         ]
     ]
 
@@ -1473,7 +1497,7 @@ let viewAppHeader model dispatch =
                     if model.HasError then viewEyeRolledBack
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
-                        viewEyeOpen pupilColor model.EyeDirection
+                        viewEyeOpen pupilColor model.ActivityLevel model.EyeDirection
                     else viewEyeClosed
                 ]
             ]
