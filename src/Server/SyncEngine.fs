@@ -13,6 +13,7 @@ type SyncStep =
     | CheckClean
     | Pull
     | Merge
+    | Rebase
     | ResolveConflicts
     | Test
     | Commit
@@ -349,6 +350,10 @@ module private PipelineSteps =
             | _ -> return Ok ()
         }
 
+    let rebase (ctx: StepContext) (upstreamRemote: string) =
+        let mergeTarget = GitWorktree.mainRef upstreamRemote
+        runStep ctx SyncStep.Rebase "git" $"rebase {mergeTarget}" checkExitCode
+
 
 let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (ct: CancellationToken) : Async<unit> =
     let ctx = { Post = post; Branch = branch; WorktreePath = worktreePath; Ct = ct }
@@ -357,11 +362,16 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
         asyncResult {
             do! PipelineSteps.checkClean ctx
             do! PipelineSteps.fetch ctx upstreamRemote
-            let! hasConflicts = PipelineSteps.merge ctx upstreamRemote
-            if hasConflicts then
-                do! PipelineSteps.resolveConflicts ctx provider
-            do! PipelineSteps.runTests ctx repoRoot
-            do! PipelineSteps.commitIfNeeded ctx
+            let mainRef = GitWorktree.mainRef upstreamRemote
+            let! commitCount = GitWorktree.getCommitCount ctx.WorktreePath mainRef |> Async.map Ok
+            if commitCount = 0 then
+                do! PipelineSteps.rebase ctx upstreamRemote
+            else
+                let! hasConflicts = PipelineSteps.merge ctx upstreamRemote
+                if hasConflicts then
+                    do! PipelineSteps.resolveConflicts ctx provider
+                do! PipelineSteps.runTests ctx repoRoot
+                do! PipelineSteps.commitIfNeeded ctx
         }
 
     async {
