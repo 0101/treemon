@@ -283,12 +283,12 @@ type ComputeActivityLevelTests() =
         Assert.That(App.computeActivityLevel (nowMs - 30_000.0) nowMs, Is.EqualTo(ActivityLevel.Active))
 
     [<Test>]
-    member _.``Activity 59.999s ago returns Active``() =
-        Assert.That(App.computeActivityLevel (nowMs - 59_999.0) nowMs, Is.EqualTo(ActivityLevel.Active))
+    member _.``Activity 2m59.999s ago returns Active``() =
+        Assert.That(App.computeActivityLevel (nowMs - 179_999.0) nowMs, Is.EqualTo(ActivityLevel.Active))
 
     [<Test>]
-    member _.``Activity exactly 60s ago returns Idle``() =
-        Assert.That(App.computeActivityLevel (nowMs - 60_000.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
+    member _.``Activity exactly 3 min ago returns Idle``() =
+        Assert.That(App.computeActivityLevel (nowMs - 180_000.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
 
     [<Test>]
     member _.``Activity 5 min ago returns Idle``() =

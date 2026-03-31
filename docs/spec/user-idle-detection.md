@@ -15,11 +15,11 @@ Three states derived from two signals (dashboard interaction + coding tool messa
 
 | State | Condition |
 |-------|-----------|
-| Active | Dashboard interaction within last 60s, OR any coding tool user message within last 5 min |
-| Idle | No dashboard interaction for 60s AND no recent coding tool messages |
+| Active | Dashboard interaction within last 3 min, OR any coding tool user message within last 5 min |
+| Idle | No dashboard interaction for 3 min AND no recent coding tool messages |
 | Deep Idle | No dashboard interaction for 15 min AND no recent coding tool messages |
 
-Dashboard interaction = `mousemove`, `keydown`, `click`, `scroll` on the document. Tracked coarse-grained (throttled to 1 dispatch per 5s). App runs as a PWA — no tab-switching concerns; when minimized, mouse events stop and the 60s timer kicks in naturally.
+Dashboard interaction = `mousemove`, `keydown`, `click`, `scroll` on the document. Tracked coarse-grained (throttled to 1 dispatch per 5s). App runs as a PWA — no tab-switching concerns; when minimized, mouse events stop and the 3-min timer kicks in naturally.
 
 ### Refresh Intervals
 
@@ -51,7 +51,7 @@ New `ActivityLevel` DU: `Active | Idle | DeepIdle`. New `reportActivity: Activit
 
 Elmish subscription registers DOM event listeners (mousemove, keydown, click, scroll). Throttled to dispatch `UserActivity` at most once per 5s — the throttle uses a mutable timestamp inside the subscription closure (Elmish's designated impure boundary, same pattern as `setInterval`). The Model stays fully immutable with `LastActivityTime: float` and `ActivityLevel: ActivityLevel`.
 
-`computeActivityLevel` is a pure function: compares `Date.now() - lastActivity` against 60s/15min thresholds.
+`computeActivityLevel` is a pure function: compares `Date.now() - lastActivity` against 3min/15min thresholds.
 
 `pollingSubscription` includes activity level in its key so Elmish tears down and recreates the interval on transitions. Active/Idle = 1s, DeepIdle = 15s.
 
