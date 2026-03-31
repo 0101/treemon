@@ -43,6 +43,10 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - No unnecessary comments — code should be self-documenting
 - No backwards-compatibility shims — make breaking changes, update everything at once
 
+## Before Writing New Code
+
+Before implementing a helper, utility, or any non-trivial logic, **search the codebase** for existing functions that do the same thing. Grep for the underlying command, operation, or concept — not just the function name you have in mind. Reuse what exists; don't duplicate.
+
 ## Testing
 - Focus on business logic and transformations
 - Do not test trivial property accessors or simple constructors
