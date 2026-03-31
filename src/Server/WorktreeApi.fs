@@ -4,6 +4,7 @@ open System
 open System.IO
 open Shared
 open Shared.EventUtils
+open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 
@@ -55,7 +56,7 @@ let private assembleFromState
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
-    { Path = WorktreePath.create wt.Path
+    { Path = PathUtils.toWorktreePath wt.Path
       Branch = wt.Branch |> Option.defaultValue GitWorktree.DetachedBranchName
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
@@ -89,7 +90,7 @@ let private tryResolveWorktreeContext
     |> Map.toList
     |> List.tryPick (fun (repoId, repo) ->
         repo.WorktreeList
-        |> List.tryFind (fun wt -> wt.Path = path)
+        |> List.tryFind (fun wt -> pathEquals wt.Path path)
         |> Option.bind (fun wt ->
             rootPaths
             |> Map.tryFind repoId
@@ -175,8 +176,10 @@ let getWorktrees
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
                         assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
 
+                let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
+
                 { RepoId = repoId
-                  RootFolderName = Path.GetFileName(RepoId.value repoId)
+                  RootFolderName = Path.GetFileName(originalPath)
                   Worktrees = statuses
                   IsReady = repo.IsReady
                   Provider = repo.Provider })
@@ -301,7 +304,7 @@ let worktreeApi
         async {
             let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
             let knownPaths = allKnownPaths state
-            return Set.contains path knownPaths
+            return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
 
     let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
@@ -441,7 +444,7 @@ let worktreeApi
           unarchiveWorktree = updateArchivedBranches agent rootPaths Set.remove
           getBranches = fun repoIdStr ->
               async {
-                  let repoId = RepoId.create repoIdStr
+                  let repoId = PathUtils.toRepoId repoIdStr
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
                   return
@@ -455,7 +458,7 @@ let worktreeApi
               }
           createWorktree = fun req ->
               asyncResult {
-                  let repoId = RepoId.create req.RepoId
+                  let repoId = PathUtils.toRepoId req.RepoId
 
                   let! root =
                       rootPaths

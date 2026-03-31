@@ -489,7 +489,7 @@ let computeSleepMs (activity: ActivityLevel) (now: DateTimeOffset) (lastRuns: Ma
 
 let buildRootPaths (worktreeRoots: string list) =
     worktreeRoots
-    |> List.map (fun root -> RepoId.create (Path.GetFullPath(root)), root)
+    |> List.map (fun root -> PathUtils.toRepoId root, root)
     |> Map.ofList
 
 let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =

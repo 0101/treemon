@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="PathUtils.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />

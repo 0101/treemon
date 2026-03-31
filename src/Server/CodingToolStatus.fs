@@ -143,7 +143,7 @@ let configureTestsPrompt (repoRoot: string) =
     + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
 
 let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
-    match action, provider |> Option.defaultValue CodingToolProvider.Claude with
+    match action, provider |> Option.defaultValue CodingToolProvider.Default with
     | FixPr url, CodingToolProvider.Copilot -> $"use pr skill with {url}"
     | FixPr url, CodingToolProvider.Claude -> $"/pr {url}"
     | FixBuild url, CodingToolProvider.Copilot -> $"use fix-build skill with {url}"
@@ -155,6 +155,6 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")
-    match provider |> Option.defaultValue CodingToolProvider.Claude with
+    match provider |> Option.defaultValue CodingToolProvider.Default with
     | CodingToolProvider.Claude -> $"claude --dangerously-skip-permissions '{escapedPrompt}'"
     | CodingToolProvider.Copilot -> $"copilot --yolo -i '{escapedPrompt}'"

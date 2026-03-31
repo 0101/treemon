@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove", "install-skill")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
@@ -17,6 +17,10 @@ $LogDir = Join-Path $ScriptDir "logs"
 $LogFile = Join-Path $LogDir "treemon-prod.log"
 $WwwRoot = Join-Path $ScriptDir "wwwroot"
 $DefaultPort = 5000
+if ($env:TREEMON_PORT) {
+    $parsed = 0
+    if ([int]::TryParse($env:TREEMON_PORT, [ref]$parsed)) { $DefaultPort = $parsed }
+}
 
 if (-not $Command) {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
@@ -33,6 +37,7 @@ if (-not $Command) {
     Write-Host "  add <path> [<path>...]      Add watched root(s) to config"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
     Write-Host "  remove <path>              Remove a watched root from config"
+    Write-Host "  install-skill              Install the tm CLI skill for AI coding agents"
     exit 0
 }
 
@@ -361,10 +366,67 @@ function Remove-Roots([string[]]$RootsToRemove) {
     }
 }
 
+function Install-TmCommand {
+    $shimDir = Join-Path $env:LOCALAPPDATA "tm-cli"
+    $shimFile = Join-Path $shimDir "tm.cmd"
+    $tmScript = Join-Path $PSScriptRoot "tm.ps1"
+
+    if (-not (Test-Path $shimDir)) { New-Item -ItemType Directory -Path $shimDir | Out-Null }
+
+    @"
+@echo off
+pwsh -NoProfile -File "$tmScript" %*
+exit /b %ERRORLEVEL%
+"@ | Set-Content $shimFile
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $entries = $userPath -split ";" | Where-Object { $_ -ne "" }
+
+    if ($entries -contains $shimDir) { return }
+
+    $newPath = ($entries + $shimDir) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+
+    if ($env:Path -notlike "*$shimDir*") {
+        $env:Path = "$env:Path;$shimDir"
+    }
+
+    Write-Host "'tm' command installed (restart shells to pick it up)" -ForegroundColor Green
+}
+
+function Install-Skill {
+    $skillSource = Join-Path $ScriptDir "src" "Cli" "skill" "SKILL.md"
+
+    if (-not (Test-Path $skillSource)) {
+        Write-Host "Error: skill file not found at $skillSource" -ForegroundColor Red
+        return
+    }
+
+    $installed = @()
+
+    # Claude Code: ~/.claude/skills/treemon-cli/SKILL.md
+    $claudeDir = Join-Path $HOME ".claude" "skills" "treemon-cli"
+    if (Test-Path (Join-Path $HOME ".claude")) {
+        if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir | Out-Null }
+        Copy-Item $skillSource (Join-Path $claudeDir "SKILL.md") -Force
+        $installed += "Claude Code"
+    }
+
+    if ($installed.Count -eq 0) {
+        Write-Host "Warning: no supported AI tool directories found" -ForegroundColor Yellow
+        Write-Host "  Claude Code: ~/.claude/skills/ not found" -ForegroundColor Gray
+    } else {
+        $installed | ForEach-Object { Write-Host "  Installed for $_" -ForegroundColor Green }
+    }
+}
+
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
     Build-Frontend
     Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
+
+    try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
+    try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
 
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -463,5 +525,8 @@ switch ($Command) {
             }
         }
         Remove-Roots $WorktreeRoots
+    }
+    "install-skill" {
+        Install-Skill
     }
 }

@@ -239,7 +239,7 @@ type NavigationArchiveTests() =
           Provider = None }
 
     let makeWorktreeStatus branch isArchived : WorktreeStatus =
-        { Path = WorktreePath.create $"/repo/{branch}"
+        { Path = WorktreePath $"/repo/{branch}"
           Branch = branch
           LastCommitMessage = "test"
           LastCommitTime = DateTimeOffset.UtcNow

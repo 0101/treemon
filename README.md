@@ -67,6 +67,22 @@ Open http://localhost:5000 — install as a PWA from the browser for a native ap
 
 Open http://localhost:5174 (Vite proxies API calls to the server).
 
+## CLI
+
+The `tm` command is automatically added to your PATH when you run `.\treemon.ps1 deploy`. Restart your shell to pick it up.
+
+```powershell
+tm launch --path C:\code\my-project "fix the login bug"    # launch agent with prompt
+tm launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
+tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
+tm launch --path C:\code\my-project --fix-tests             # fix failing tests
+tm launch --path C:\code\my-project --create-pr             # create a pull request
+tm new --repo C:\code\my-project --branch feature/foo      # create worktree
+tm worktrees                                                 # list all worktrees
+```
+
+All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also run `.\tm.ps1` directly from the repo root without installing.
+
 ## Stack
 
 F# on both sides — [Saturn](https://saturnframework.org) server, [Fable](https://fable.io) + [Elmish](https://elmish.github.io) client, [Fable.Remoting](https://github.com/Zaid-Ajaj/Fable.Remoting) for type-safe RPC, [Vite](https://vitejs.dev) for dev tooling. Supports multiple root directories with auto-detected PR providers (Azure DevOps, GitHub).

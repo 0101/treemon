@@ -9,7 +9,7 @@ open Navigation
 
 module Modal = CreateWorktreeModal
 
-let private testRepoId = RepoId.create "TestRepo"
+let private testRepoId = RepoId "TestRepo"
 
 let private defaultModel : Model =
     { Repos = []

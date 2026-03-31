@@ -23,9 +23,9 @@ Prevents a class of bug where paths with different separators or casing fail to 
 - **Serialization risk**: Fable.Remoting with private-constructor DUs and custom equality needs testing
 - **Subtle Map/Set behavior**: case-insensitive comparison is implicit and non-obvious to readers
 
-### Chosen alternative
+### Chosen alternative (implemented)
 
-Normalize paths with `Path.GetFullPath` at the 3-4 system entry points (CLI args, git worktree parsing, CopilotDetector YAML, config reading). ~10 lines of change, catches the same bugs, no type complexity.
+Normalize paths in domain type constructors (`RepoId.create`, `WorktreePath.create`) so normalization is enforced once at construction. Remaining entry points that use raw strings (git worktree parsing, CopilotDetector) keep explicit `normalizePath` calls. This catches the same path-identity bugs with ~30 lines of change and no type complexity.
 
 ## Technical Approach
 
@@ -79,6 +79,14 @@ module AbsolutePath =
 ### No RelativePath needed
 
 Relative paths appear only in `.treemon.json` `testCommand` (a shell command string, not a path — no resolution needed) and `logs/server.log` (hardcoded at startup). Neither needs a type.
+
+## Decisions
+
+- **Lowercase on Windows only**: `normalizePath` lowercases paths on Windows where the filesystem is case-insensitive. On Linux/macOS it preserves case. This matches `pathEquals` behavior.
+- **Constructor normalization removes most call-site normalization**: Once `RepoId.create` and `WorktreePath.create` normalize, call-site `normalizePath` calls on domain types become redundant and should be removed to avoid double-normalization.
+- **GitWorktree.parseWorktreeList keeps normalizePath**: `WorktreeInfo.Path` is a raw `string`, not a domain type. Removing normalization there causes path mismatches (forward vs backslash, case differences) because `pathEquals` only handles case, not separator normalization.
+- **VsCodeCopilotDetector keeps normalizePath**: Uses normalization for `Dictionary<string,string>` keys, not domain types. Still required for key lookup consistency.
+- **PathUtils.fs must compile before Types.fs**: Since `RepoId.create`/`WorktreePath.create` call `PathUtils.normalizePath`, `PathUtils.fs` must appear first in the F# compilation order in `Shared.fsproj`.
 
 ## Key Files
 

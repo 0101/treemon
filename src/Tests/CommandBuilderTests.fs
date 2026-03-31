@@ -20,9 +20,9 @@ type BuildInteractiveCommandTests() =
         Assert.That(result, Is.EqualTo("copilot --yolo -i 'use pr skill with https://github.com/org/repo/pull/7'"))
 
     [<Test>]
-    member _.``None provider falls back to Claude``() =
+    member _.``None provider falls back to Copilot``() =
         let result = buildInteractiveCommand None "create a pull request"
-        Assert.That(result, Is.EqualTo("claude --dangerously-skip-permissions 'create a pull request'"))
+        Assert.That(result, Is.EqualTo("copilot --yolo -i 'create a pull request'"))
 
     [<Test>]
     member _.``single quotes in prompt are escaped``() =
@@ -37,7 +37,7 @@ type BuildInteractiveCommandTests() =
     [<Test>]
     member _.``prompt with special characters is preserved``() =
         let result = buildInteractiveCommand None "/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs"
-        Assert.That(result, Is.EqualTo("claude --dangerously-skip-permissions '/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs'"))
+        Assert.That(result, Is.EqualTo("copilot --yolo -i '/fix-build https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs'"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -72,6 +72,6 @@ type ActionPromptTests() =
         Assert.That(copilot, Is.EqualTo(claude))
 
     [<Test>]
-    member _.``None provider falls back to Claude for FixPr``() =
+    member _.``None provider falls back to Copilot for FixPr``() =
         let result = actionPrompt None (FixPr "https://example.com/pr/1")
-        Assert.That(result, Is.EqualTo("/pr https://example.com/pr/1"))
+        Assert.That(result, Is.EqualTo("use pr skill with https://example.com/pr/1"))
