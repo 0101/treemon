@@ -64,6 +64,7 @@ type Msg =
     | ClearActionCooldown of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
     | UserActivity of now: float
+    | NoOp
 
 let worktreeApi =
     Remoting.createApi ()
@@ -104,7 +105,7 @@ let init () =
       ActionCooldowns = Set.empty
       LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
       ActivityLevel = ActivityLevel.Active },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ())) ]
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
 
 let rng = System.Random()
 
@@ -258,8 +259,14 @@ let update msg model =
     | Tick now ->
         let newLevel = computeActivityLevel model.LastActivityTime now
 
+        let reportCmd =
+            if newLevel <> model.ActivityLevel then
+                Cmd.OfAsync.attempt worktreeApi.reportActivity newLevel (fun _ -> NoOp)
+            else
+                Cmd.none
+
         { model with ActivityLevel = newLevel },
-        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity newLevel (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ())) ]
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
     | UserActivity now ->
         let wasActive = model.ActivityLevel = ActivityLevel.Active
@@ -267,8 +274,8 @@ let update msg model =
         let wakeUpCmd =
             if not wasActive then
                 Cmd.batch [
-                    Cmd.ofMsg (Tick(Fable.Core.JS.Constructors.Date.now ()))
-                    Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+                    Cmd.ofMsg (Tick now)
+                    Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp)
                 ]
             else
                 Cmd.none
@@ -457,7 +464,9 @@ let update msg model =
                 | Some action -> model, Cmd.ofMsg action
                 | None -> model, Cmd.none
 
-let pollingSubscription (model: Model) : Sub<Msg> =
+    | NoOp -> model, Cmd.none
+
+let appSubscriptions (model: Model) : Sub<Msg> =
     let pollingIntervalMs =
         match model.ActivityLevel with
         | ActivityLevel.Active | ActivityLevel.Idle -> 1000
@@ -1256,7 +1265,7 @@ let viewEyeOpen (pupilColor: string) (activity: ActivityLevel) (dx: float, dy: f
                     svg.stroke "#56b6c2"
                     svg.strokeWidth 2.0
                 ]
-            | _ -> ()
+            | ActivityLevel.Active -> ()
         ]
     ]
 
@@ -1569,6 +1578,6 @@ let view model dispatch =
 open Elmish.React
 
 Program.mkProgram init update view
-|> Program.withSubscription pollingSubscription
+|> Program.withSubscription appSubscriptions
 |> Program.withReactSynchronous "app"
 |> Program.run

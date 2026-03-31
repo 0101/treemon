@@ -151,7 +151,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - `MailboxProcessor` state agent with `Map<string, PerRepoState>` — each repo has its own data partitions
 - Tail-recursive async loop picks most-overdue task, executes it, posts result to mailbox
 - API responses are instant reads from in-memory state
-- Client polls every 1s; 2s fast poll during active sync
+- Client polls every 1–15s depending on activity level (see `docs/spec/user-idle-detection.md`); 2s fast poll during active sync
 
 ### Refresh Intervals
 
@@ -214,7 +214,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Web app over TUI: richer layout, easy to keep open in a browser tab
 - F# + Fable/Elmish: single language both sides, shared types
 - MailboxProcessor over TTL cache: caps concurrent processes, instant API reads
-- Polling over WebSocket: simpler, sufficient at 1s
+- Polling over WebSocket: simpler, sufficient at 1–15s variable cadence (activity-based)
 - Most-overdue task selection: no cursor state, naturally prevents starvation
 - `gh`/`az` CLI over raw REST: handles auth, consistent pattern
 - Single API call returns all repos: client doesn't need to know repo count
