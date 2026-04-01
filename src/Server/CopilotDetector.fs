@@ -126,18 +126,27 @@ let getSessionMtime (worktreePath: string) =
     findMostRecentEventsFile sessionDirs
     |> Option.map (fun fi -> DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero))
 
+let private graceWindow = TimeSpan.FromSeconds(15.0)
+let private stalenessTimeout = TimeSpan.FromMinutes(30.0)
+
 let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) =
     try
         let fi = FileInfo(eventsPath)
         if not fi.Exists then Idle
         else
-            let age = now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if age > TimeSpan.FromHours(2.0) then
+            let fileAge = now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+            if fileAge > TimeSpan.FromHours(2.0) then
                 Idle
             else
-                FileUtils.scanBackward "Copilot" eventsPath tryParseEventKind
-                |> Option.map statusFromEvent
-                |> Option.defaultValue Idle
+                let rawStatus =
+                    FileUtils.scanBackward "Copilot" eventsPath tryParseEventKind
+                    |> Option.map statusFromEvent
+                    |> Option.defaultValue Idle
+
+                match rawStatus with
+                | Done when fileAge < graceWindow -> Working
+                | Working when fileAge > stalenessTimeout -> Idle
+                | status -> status
     with ex ->
         Log.log "Copilot" $"Failed to read status from {eventsPath}: {ex.Message}"
         Idle

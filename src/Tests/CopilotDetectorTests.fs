@@ -37,9 +37,15 @@ type StatusParsingTests() =
         Assert.That(status, Is.EqualTo(Working))
 
     [<Test>]
-    member _.``Last event assistant.turn_end yields Done``() =
-        let status = getStatusFromEventsFile (eventsPath "done-session") recentTime
+    member _.``Last event assistant.turn_end yields Done after grace period``() =
+        let pastGrace = DateTimeOffset.UtcNow.AddSeconds(20.0)
+        let status = getStatusFromEventsFile (eventsPath "done-session") pastGrace
         Assert.That(status, Is.EqualTo(Done))
+
+    [<Test>]
+    member _.``Last event assistant.turn_end within grace period yields Working``() =
+        let status = getStatusFromEventsFile (eventsPath "done-session") recentTime
+        Assert.That(status, Is.EqualTo(Working))
 
     [<Test>]
     member _.``Assistant.message with tool requests yields Working``() =
@@ -75,6 +81,12 @@ type StalenessTests() =
     member _.``Events file within 2 hours yields non-Idle status``() =
         let status = getStatusFromEventsFile (eventsPath "active-session") recentTime
         Assert.That(status, Is.Not.EqualTo(Idle))
+
+    [<Test>]
+    member _.``Working status goes stale after 30 minutes``() =
+        let staleTime = DateTimeOffset.UtcNow.AddMinutes(35.0)
+        let status = getStatusFromEventsFile (eventsPath "active-session") staleTime
+        Assert.That(status, Is.EqualTo(Idle))
 
 
 [<TestFixture>]
@@ -234,7 +246,7 @@ type LargeToolOutputTests() =
             Assert.That(status, Is.EqualTo(Working)))
 
     [<Test>]
-    member _.``Status is Done when turn_end follows large tool outputs``() =
+    member _.``Status is Done when turn_end follows large tool outputs after grace period``() =
         let content =
             [ makeAssistantEvent "processing results" "2026-03-01T10:00:00Z"
               makeLargeToolEvent 20000 "2026-03-01T10:00:01Z"
@@ -246,5 +258,6 @@ type LargeToolOutputTests() =
             |> String.concat Environment.NewLine
 
         withTempEventsFile content (fun path ->
-            let status = getStatusFromEventsFile path DateTimeOffset.UtcNow
+            let pastGrace = DateTimeOffset.UtcNow.AddSeconds(20.0)
+            let status = getStatusFromEventsFile path pastGrace
             Assert.That(status, Is.EqualTo(Done)))
