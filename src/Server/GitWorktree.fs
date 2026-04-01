@@ -46,8 +46,10 @@ let parseWorktreeList (porcelainOutput: string) =
             |> Array.tryFind (fun l -> l.StartsWith(prefix))
             |> Option.map (fun l -> l[prefix.Length..])
 
-        match findValue "worktree ", findValue "HEAD " with
-        | Some path, Some head ->
+        let isPrunable = lines |> Array.exists (fun l -> l.StartsWith("prunable"))
+
+        match findValue "worktree ", findValue "HEAD ", isPrunable with
+        | Some path, Some head, false ->
             let branch =
                 findValue "branch refs/heads/"
 
@@ -257,8 +259,25 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string opt
     async {
         let! removeResult = runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
 
-        match removeResult, branch with
-        | Error msg, _ -> return Error $"git worktree remove failed: {msg}"
+        let! effectiveResult =
+            match removeResult with
+            | Ok _ -> async { return Ok () }
+            | Error removeMsg ->
+                async {
+                    let! _ = runGitResult repoRoot "worktree prune"
+
+                    if Directory.Exists(worktreePath) then
+                        try Directory.Delete(worktreePath, recursive = false)
+                        with _ -> ()
+
+                    if Directory.Exists(worktreePath) then
+                        return Error $"git worktree remove failed: {removeMsg}"
+                    else
+                        return Ok ()
+                }
+
+        match effectiveResult, branch with
+        | Error msg, _ -> return Error msg
         | Ok _, None -> return Ok ()
         | Ok _, Some b ->
             let! branchResult = runGitResult repoRoot $"branch -D -- \"{b}\""
