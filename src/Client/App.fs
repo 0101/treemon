@@ -1012,7 +1012,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<W
                     if wt.HasActiveSession then newTabButton dispatch wt
                     editorButton dispatch editorName wt
                     archiveButton dispatch scopedKey wt
-                    deleteButton dispatch scopedKey wt
+                    if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
                 ]
             ]
             Html.div [
@@ -1049,7 +1049,7 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                             if wt.HasActiveSession then newTabButton dispatch wt
                             editorButton dispatch editorName wt
                             archiveButton dispatch scopedKey wt
-                            deleteButton dispatch scopedKey wt
+                            if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
                         ]
                     ]
 

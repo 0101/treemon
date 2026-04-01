@@ -253,6 +253,7 @@ type NavigationArchiveTests() =
           WorkMetrics = None
           HasActiveSession = false
           HasTestFailureLog = false
+          IsMainWorktree = false
           IsArchived = isArchived }
 
     [<Test>]

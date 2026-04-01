@@ -23,6 +23,16 @@ let private git (workingDir: string) (args: string) =
     proc.WaitForExit()
     proc.ExitCode
 
+let private gitAssert (workingDir: string) (args: string) =
+    let exitCode = git workingDir args
+    Assert.That(exitCode, Is.EqualTo(0), $"git {args} failed with exit code {exitCode}")
+
+let private initRepo (repoDir: string) =
+    Directory.CreateDirectory(repoDir) |> ignore
+    gitAssert repoDir "init"
+    gitAssert repoDir "config user.name test"
+    gitAssert repoDir "config user.email test@test.com"
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -45,12 +55,11 @@ type RemoveWorktreeTests() =
         let repoDir = Path.Combine(tempDir, "repo")
         let worktreeDir = Path.Combine(tempDir, "wt-broken")
 
-        Directory.CreateDirectory(repoDir) |> ignore
-        git repoDir "init" |> ignore
+        initRepo repoDir
         File.WriteAllText(Path.Combine(repoDir, "README.md"), "test")
-        git repoDir "add ." |> ignore
-        git repoDir "commit -m init" |> ignore
-        git repoDir $"worktree add -b test-branch \"{worktreeDir}\"" |> ignore
+        gitAssert repoDir "add ."
+        gitAssert repoDir "commit -m init"
+        gitAssert repoDir $"worktree add -b test-branch \"{worktreeDir}\""
 
         // Break the worktree by removing its .git file (makes it prunable)
         let gitFile = Path.Combine(worktreeDir, ".git")
@@ -66,12 +75,23 @@ type RemoveWorktreeTests() =
         let repoDir = Path.Combine(tempDir, "repo")
         let worktreeDir = Path.Combine(tempDir, "wt-normal")
 
-        Directory.CreateDirectory(repoDir) |> ignore
-        git repoDir "init" |> ignore
-        git repoDir "commit --allow-empty -m init" |> ignore
-        git repoDir $"worktree add -b normal-branch \"{worktreeDir}\"" |> ignore
+        initRepo repoDir
+        gitAssert repoDir "commit --allow-empty -m init"
+        gitAssert repoDir $"worktree add -b normal-branch \"{worktreeDir}\""
 
         let result = removeWorktree repoDir worktreeDir (Some "normal-branch") |> Async.RunSynchronously
 
         Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
         Assert.That(Directory.Exists(worktreeDir), Is.False)
+
+    [<Test>]
+    member _.``removeWorktree rejects main worktree``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+
+        initRepo repoDir
+        gitAssert repoDir "commit --allow-empty -m init"
+
+        let result = removeWorktree repoDir repoDir (Some "main") |> Async.RunSynchronously
+
+        Assert.That(Result.isError result, Is.True)
+        Assert.That(Directory.Exists(repoDir), Is.True, "Main worktree directory should not be deleted")
