@@ -18,6 +18,8 @@ let private git (workingDir: string) (args: string) =
         )
 
     use proc = Diagnostics.Process.Start(psi)
+    proc.StandardOutput.ReadToEnd() |> ignore
+    proc.StandardError.ReadToEnd() |> ignore
     proc.WaitForExit()
     proc.ExitCode
 
@@ -45,7 +47,9 @@ type RemoveWorktreeTests() =
 
         Directory.CreateDirectory(repoDir) |> ignore
         git repoDir "init" |> ignore
-        git repoDir "commit --allow-empty -m init" |> ignore
+        File.WriteAllText(Path.Combine(repoDir, "README.md"), "test")
+        git repoDir "add ." |> ignore
+        git repoDir "commit -m init" |> ignore
         git repoDir $"worktree add -b test-branch \"{worktreeDir}\"" |> ignore
 
         // Break the worktree by removing its .git file (makes it prunable)
