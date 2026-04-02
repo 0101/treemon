@@ -187,3 +187,41 @@ let validate name age email =
 - **Mixed Ok/Error pattern matching**: When branches destructure the `Ok` value with additional pattern guards (e.g., `| Ok proc when proc.ExitCode = 0 -> ...`), the manual `match` may be clearer than chaining `Result.bind` with separate condition checks.
 - **Interop boundaries**: When calling .NET APIs that don't return `Result`, converting at the boundary with a simple `match` or `try/with` is expected.
 - **No FsToolkit import**: Only flag this in files that already `open FsToolkit.ErrorHandling` or where adding the import is trivial (the server project has the package reference).
+
+## Prefer CE builtins over library combinators
+
+Inside `asyncResult`/`result` CEs, prefer plain language features over library helpers when they do the same thing more clearly:
+
+### `let!` binds `Async<'T>` directly — no lifting needed
+
+#### Wrong
+```fsharp
+asyncResult {
+    let! value = someAsync () |> Async.map Ok
+}
+```
+
+#### Correct
+```fsharp
+asyncResult {
+    let! value = someAsync ()
+}
+```
+
+### `if/then return! Error` for early exits — no `Result.requireTrue` needed
+
+#### Wrong
+```fsharp
+asyncResult {
+    do! (not (Directory.Exists(path)))
+        |> Result.requireTrue "Path exists"
+}
+```
+
+#### Correct
+```fsharp
+asyncResult {
+    if Directory.Exists(path) then
+        return! Error "Path exists"
+}
+```

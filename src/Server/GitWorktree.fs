@@ -44,10 +44,10 @@ let parseWorktreeList (porcelainOutput: string) =
 
         let findValue (prefix: string) =
             lines
-            |> Array.tryFind (fun l -> l.StartsWith(prefix))
+            |> Array.tryFind _.StartsWith(prefix)
             |> Option.map (fun l -> l[prefix.Length..])
 
-        let isPrunable = lines |> Array.exists (fun l -> l.StartsWith("prunable"))
+        let isPrunable = lines |> Array.exists _.StartsWith("prunable")
 
         match findValue "worktree ", findValue "HEAD ", isPrunable with
         | Some path, Some head, false ->
@@ -256,48 +256,54 @@ let resolveUpstreamRemote (repoRoot: string) =
             return if hasUpstream then "upstream" else "origin"
     }
 
-let private tryPruneAndClean (repoRoot: string) (worktreePath: string) (removeMsg: string) =
+let private isWorktreePrunable (repoRoot: string) (worktreePath: string) =
     async {
+        let! listOutput = runGit repoRoot "worktree list --porcelain"
+        let normalizedPath = Server.PathUtils.normalizePath worktreePath
+
+        return
+            listOutput
+            |> Option.exists (fun output ->
+                output.Split(
+                    [| Environment.NewLine + Environment.NewLine; "\n\n" |],
+                    StringSplitOptions.RemoveEmptyEntries)
+                |> Array.exists (fun block ->
+                    let lines = block.Split([| Environment.NewLine; "\n" |], StringSplitOptions.RemoveEmptyEntries)
+                    let hasPath =
+                        lines |> Array.exists (fun line ->
+                            line.StartsWith("worktree ")
+                            && Server.PathUtils.normalizePath (line.Substring(9)) = normalizedPath)
+                    let hasPrunable = lines |> Array.exists _.StartsWith("prunable")
+                    hasPath && hasPrunable))
+    }
+
+let private cleanupDirectory (path: string) =
+    try
+        if Directory.Exists(path) then
+            Directory.Delete(path, recursive = true)
+        if Directory.Exists(path) then Error "directory still exists after cleanup"
+        else Ok ()
+    with ex ->
+        Error $"cleanup failed: {ex.Message}"
+
+let private tryPruneAndClean (repoRoot: string) (worktreePath: string) (removeMsg: string) =
+    asyncResult {
         if Directory.Exists(Path.Combine(worktreePath, ".git")) then
-            return Error "Cannot delete the main worktree"
-        else
-            let! listOutput = runGit repoRoot "worktree list --porcelain"
-            let normalizedPath = Server.PathUtils.normalizePath worktreePath
+            return! Error "Cannot delete the main worktree"
 
-            let isPrunable =
-                listOutput
-                |> Option.exists (fun output ->
-                    output.Split(
-                        [| Environment.NewLine + Environment.NewLine; "\n\n" |],
-                        StringSplitOptions.RemoveEmptyEntries)
-                    |> Array.exists (fun block ->
-                        let lines = block.Split([| Environment.NewLine; "\n" |], StringSplitOptions.RemoveEmptyEntries)
-                        let hasPath =
-                            lines |> Array.exists (fun line ->
-                                line.StartsWith("worktree ")
-                                && Server.PathUtils.normalizePath (line.Substring(9)) = normalizedPath)
-                        let hasPrunable = lines |> Array.exists (fun line -> line.StartsWith("prunable"))
-                        hasPath && hasPrunable))
+        let! prunable = isWorktreePrunable repoRoot worktreePath
 
-            if not isPrunable then
-                return Error $"git worktree remove failed: {removeMsg}"
-            else
-                let! pruneResult = runGitResult repoRoot "worktree prune"
+        if not prunable then
+            return! Error $"git worktree remove failed: {removeMsg}"
 
-                match pruneResult with
-                | Error pruneMsg ->
-                    return Error $"git worktree remove failed: {removeMsg} (prune also failed: {pruneMsg})"
-                | Ok _ ->
-                    try
-                        if Directory.Exists(worktreePath) then
-                            Directory.Delete(worktreePath, recursive = true)
+        do! runGitResult repoRoot "worktree prune"
+            |> AsyncResult.mapError (fun pruneMsg ->
+                $"git worktree remove failed: {removeMsg} (prune also failed: {pruneMsg})")
+            |> AsyncResult.ignore
 
-                        return
-                            if Directory.Exists(worktreePath) then
-                                Error $"git worktree remove failed: {removeMsg}"
-                            else Ok ()
-                    with ex ->
-                        return Error $"Worktree cleanup failed after prune: {ex.Message}"
+        do! cleanupDirectory worktreePath
+            |> Result.mapError (fun msg ->
+                $"git worktree remove failed: {removeMsg} ({msg})")
     }
 
 let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =
