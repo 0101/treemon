@@ -3,6 +3,7 @@ module Server.GitWorktree
 open System
 open System.IO
 open System.Runtime.InteropServices
+open FsToolkit.ErrorHandling
 
 let [<Literal>] DetachedBranchName = "(detached)"
 
@@ -255,66 +256,62 @@ let resolveUpstreamRemote (repoRoot: string) =
             return if hasUpstream then "upstream" else "origin"
     }
 
-let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =
+let private tryPruneAndClean (repoRoot: string) (worktreePath: string) (removeMsg: string) =
     async {
-        let! removeResult = runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
+        if Directory.Exists(Path.Combine(worktreePath, ".git")) then
+            return Error "Cannot delete the main worktree"
+        else
+            let! listOutput = runGit repoRoot "worktree list --porcelain"
+            let normalizedPath = Server.PathUtils.normalizePath worktreePath
 
-        let! effectiveResult =
-            match removeResult with
-            | Ok _ -> async { return Ok () }
-            | Error removeMsg ->
-                async {
-                    if Directory.Exists(Path.Combine(worktreePath, ".git")) then
-                        return Error "Cannot delete the main worktree"
-                    else
-                        let! listOutput = runGit repoRoot "worktree list --porcelain"
-                        let normalizedPath = Server.PathUtils.normalizePath worktreePath
+            let isPrunable =
+                listOutput
+                |> Option.exists (fun output ->
+                    output.Split(
+                        [| Environment.NewLine + Environment.NewLine; "\n\n" |],
+                        StringSplitOptions.RemoveEmptyEntries)
+                    |> Array.exists (fun block ->
+                        let lines = block.Split([| Environment.NewLine; "\n" |], StringSplitOptions.RemoveEmptyEntries)
+                        let hasPath =
+                            lines |> Array.exists (fun line ->
+                                line.StartsWith("worktree ")
+                                && Server.PathUtils.normalizePath (line.Substring(9)) = normalizedPath)
+                        let hasPrunable = lines |> Array.exists (fun line -> line.StartsWith("prunable"))
+                        hasPath && hasPrunable))
 
-                        let isPrunable =
-                            listOutput
-                            |> Option.exists (fun output ->
-                                output.Split(
-                                    [| Environment.NewLine + Environment.NewLine; "\n\n" |],
-                                    StringSplitOptions.RemoveEmptyEntries)
-                                |> Array.exists (fun block ->
-                                    let lines = block.Split([| Environment.NewLine; "\n" |], StringSplitOptions.RemoveEmptyEntries)
-                                    let hasPath =
-                                        lines |> Array.exists (fun line ->
-                                            line.StartsWith("worktree ")
-                                            && Server.PathUtils.normalizePath (line.Substring(9)) = normalizedPath)
-                                    let hasPrunable = lines |> Array.exists (fun line -> line.StartsWith("prunable"))
-                                    hasPath && hasPrunable))
+            if not isPrunable then
+                return Error $"git worktree remove failed: {removeMsg}"
+            else
+                let! pruneResult = runGitResult repoRoot "worktree prune"
 
-                        if not isPrunable then
-                            return Error $"git worktree remove failed: {removeMsg}"
-                        else
-                            let! pruneResult = runGitResult repoRoot "worktree prune"
+                match pruneResult with
+                | Error pruneMsg ->
+                    return Error $"git worktree remove failed: {removeMsg} (prune also failed: {pruneMsg})"
+                | Ok _ ->
+                    try
+                        if Directory.Exists(worktreePath) then
+                            Directory.Delete(worktreePath, recursive = true)
 
-                            match pruneResult with
-                            | Error pruneMsg ->
-                                return Error $"git worktree remove failed: {removeMsg} (prune also failed: {pruneMsg})"
-                            | Ok _ ->
-                                try
-                                    if Directory.Exists(worktreePath) then
-                                        Directory.Delete(worktreePath, recursive = true)
+                        return
+                            if Directory.Exists(worktreePath) then
+                                Error $"git worktree remove failed: {removeMsg}"
+                            else Ok ()
+                    with ex ->
+                        return Error $"Worktree cleanup failed after prune: {ex.Message}"
+    }
 
-                                    return
-                                        if Directory.Exists(worktreePath) then
-                                            Error $"git worktree remove failed: {removeMsg}"
-                                        else Ok ()
-                                with ex ->
-                                    return Error $"Worktree cleanup failed after prune: {ex.Message}"
-                }
+let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string option) =
+    asyncResult {
+        do! runGitResult repoRoot $"""worktree remove --force "{worktreePath}" """
+            |> AsyncResult.ignore
+            |> AsyncResult.orElseWith (tryPruneAndClean repoRoot worktreePath)
 
-        match effectiveResult, branch with
-        | Error msg, _ -> return Error msg
-        | Ok _, None -> return Ok ()
-        | Ok _, Some b ->
-            let! branchResult = runGitResult repoRoot $"branch -D -- \"{b}\""
-
-            match branchResult with
-            | Ok _ -> return Ok ()
-            | Error msg -> return Error $"Worktree removed but git branch -D failed: {msg}"
+        match branch with
+        | None -> ()
+        | Some b ->
+            do! runGitResult repoRoot $"branch -D -- \"{b}\""
+                |> AsyncResult.mapError (fun msg -> $"Worktree removed but git branch -D failed: {msg}")
+                |> AsyncResult.ignore
     }
 
 let branchSortKey (name: string) =
