@@ -186,7 +186,7 @@ let validate name age email =
 - **Custom recovery on a specific step**: When one step in a chain has complex recovery logic (retries, fallback paths), extract that step into a helper that returns `Async<Result<_,_>>` and `let!` it from the `asyncResult` CE. Do NOT exempt the entire function from using the CE just because one step has recovery logic.
 - **Mixed Ok/Error pattern matching**: When branches destructure the `Ok` value with additional pattern guards (e.g., `| Ok proc when proc.ExitCode = 0 -> ...`), the manual `match` may be clearer than chaining `Result.bind` with separate condition checks.
 - **Interop boundaries**: When calling .NET APIs that don't return `Result`, converting at the boundary with a simple `match` or `try/with` is expected.
-- **No FsToolkit import**: Only flag this in files that already `open FsToolkit.ErrorHandling` or where adding the import is trivial (the server project has the package reference).
+- **No FsToolkit import**: Only flag this in files that already `open FsToolkit.ErrorHandling` or where adding the import is trivial (the Server project has the package reference; add it to Client/Shared if needed).
 
 ## Prefer CE builtins over library combinators
 

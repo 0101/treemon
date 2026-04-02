@@ -37,7 +37,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - **Type inference** — only annotate when needed for clarity
 - **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
 
-**FsToolkit.ErrorHandling** (available in Server project):
+**FsToolkit.ErrorHandling** (currently referenced in Server project, add to Client/Shared if needed):
 - Use `asyncResult { }` instead of nesting `match ... with Ok/Error` inside `async { }` — it short-circuits on Error
 - `let!` binds `Async<Result<_,_>>`, plain `Async<_>`, or `Result<_,_>` — no manual lifting needed
 - `if ... then return! Error "msg"` for early exits (no `Result.requireTrue` needed)
