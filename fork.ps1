@@ -8,15 +8,17 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = $PSScriptRoot
 
+$dirSafeBranch = $Branch -replace '/', '-'
+
 if ($Remote) {
-    $worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-review-$Branch"
+    $worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-review-$dirSafeBranch"
     Write-Host "Fetching from $Remote..."
     git fetch $Remote
     $localBranch = "review/$Branch"
     Write-Host "Creating review worktree at $worktreePath (branch $localBranch tracking $Remote/$Branch)..."
     git worktree add -b $localBranch $worktreePath "$Remote/$Branch"
 } else {
-    $worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-$Branch"
+    $worktreePath = Join-Path (Split-Path $repoRoot -Parent) "tm-$dirSafeBranch"
     Write-Host "Creating worktree at $worktreePath with branch $Branch..."
     git worktree add -b $Branch $worktreePath
 }

@@ -67,6 +67,18 @@
 - Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
 - VS Code Copilot: reads `%APPDATA%/Code/User/workspaceStorage/{hash}/chatSessions/*.jsonl` mutation logs, maps workspace storage hash dirs to worktree paths via `workspace.json` folder URIs, replays JSONL mutation log (kind 0: snapshot, 1: set, 2: push/splice; kind 3 delete intentionally ignored) to reconstruct last request's model state and response
 
+#### Copilot CLI Status Detection
+
+Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.message`, `assistant.turn_start`, `assistant.turn_end`, `assistant.message`. Status is determined by scanning backward from the end of the file to the first recognized event.
+
+**Temporal adjustments** (applied after raw status is determined from events):
+
+- **Grace period (15s):** `Done → Working` when the events file was modified within 15 seconds. Copilot CLI emits `turn_end` between every turn in a multi-turn interaction, and LLM thinking gaps of 27-35 seconds are common between `turn_start` and the next `assistant.message`. Without the grace window, the dashboard flickers to Done during these gaps. The 15s value (vs Claude's 10s) accounts for Copilot's longer inter-turn gaps and background agent startup time.
+- **Staleness (30min):** `Working → Idle` when the events file hasn't been modified for 30 minutes. Catches abandoned sessions where the CLI exited without writing a final `turn_end`.
+- **Age cutoff (2h):** Any file older than 2 hours returns `Idle` regardless of last event.
+
+Both grace period and staleness use file mtime (not event timestamps). This differs from Claude's staleness check which uses parsed event timestamps with file mtime as fallback.
+
 #### Claude Parent/Subagent Detection
 
 Claude Code spawns subagent sessions (via the Task tool) that write to nested JSONL files:

@@ -294,7 +294,8 @@ let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (bran
         fileName, arguments, Some sourceWorktreePath
     | None ->
         let parentDir = Path.GetDirectoryName(repoRoot)
-        let worktreePath = Path.Combine(parentDir, $"tm-{branchName}")
+        let dirName = branchName.Replace('/', '-')
+        let worktreePath = Path.Combine(parentDir, $"tm-{dirName}")
         "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\"", None
 
 let createWorktree (repoRoot: string) (sourceWorktreePath: string) (branchName: string) =
