@@ -16,6 +16,7 @@ Focused functions are easier to test, reuse, and understand. Large functions tha
 - If a function does parsing AND processing AND formatting, split it into separate functions
 - Compose small, focused functions rather than writing large monolithic ones
 - Modules should group related functions around a single concept
+- Sequential steps of a single cohesive operation (e.g. error recovery: attempt cleanup, verify result) do not violate this rule — only flag functions that mix genuinely unrelated domains
 
 ## Wrong
 ```fsharp

@@ -114,6 +114,7 @@ type WorktreeStatus =
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
       HasTestFailureLog: bool
+      IsMainWorktree: bool
       IsArchived: bool }
 
 [<RequireQualifiedAccess>]
