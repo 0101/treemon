@@ -32,9 +32,20 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - **Discriminated unions** for domain modeling — make illegal states unrepresentable
 - **Option types** instead of null
 - **Module organization** — group functions in modules, avoid classes
-- **Computation expressions** — `async`, `seq`, `result` for workflows
+- **Computation expressions** — `async`, `seq`, `result`, `asyncResult` for workflows
+- **F# 9 shorthand lambdas** — `_.Property`, `_.Method(arg)`, chained `_.Trim().ToUpper()`, nested `_.Value.Name` instead of `fun x -> ...`. No wrapping parens needed: `List.exists _.StartsWith("x")`. Only works with `.` member access — not operators or indexers.
 - **Type inference** — only annotate when needed for clarity
 - **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
+
+**FsToolkit.ErrorHandling** (currently referenced in Server project, add to Client/Shared if needed):
+- Use `asyncResult { }` instead of nesting `match ... with Ok/Error` inside `async { }` — it short-circuits on Error
+- `let!` binds `Async<Result<_,_>>`, plain `Async<_>`, or `Result<_,_>` — no manual lifting needed
+- `if ... then return! Error "msg"` for early exits (no `Result.requireTrue` needed)
+- `do!` with `AsyncResult.ignore` to discard Ok values (e.g. `runGitResult` returns stdout you don't need)
+- `AsyncResult.orElseWith` for fallback/recovery on Error
+- `AsyncResult.mapError` to transform error messages
+- `Result.requireSome "msg"` to convert `Option` → `Result`
+- Extract complex recovery logic into helpers returning `Async<Result<_,_>>`, then `let!`/`do!` them from the CE
 
 **Code style:**
 - Concise, readable code — optimize for clarity, not premature performance

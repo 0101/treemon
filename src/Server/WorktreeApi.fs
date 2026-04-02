@@ -69,6 +69,7 @@ let private assembleFromState
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
       HasTestFailureLog = hasTestFailureLog
+      IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
@@ -249,6 +250,8 @@ let private deleteWorktree
 
         match tryResolveWorktreeContext rootPaths state path with
         | None -> return Error $"No worktree found at path '{path}'"
+        | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
+            return Error "Cannot delete the main worktree"
         | Some ctx ->
             agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
             return! GitWorktree.removeWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
