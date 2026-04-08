@@ -104,6 +104,56 @@ type ParseWorktreeListTests() =
         Assert.That(result, Is.Empty)
 
     [<Test>]
+    member _.``Prunable worktree is excluded``() =
+        let output =
+            String.concat "\n"
+                [ "worktree /repo/main"
+                  "HEAD abc1234567890abcdef1234567890abcdef123456"
+                  "branch refs/heads/main"
+                  ""
+                  "worktree /repo/stale-branch"
+                  "HEAD def4567890abcdef1234567890abcdef12345678"
+                  "branch refs/heads/stale-branch"
+                  "prunable gitdir file points to non-existent location"
+                  "" ]
+
+        let result = parseWorktreeList output
+
+        Assert.That(result.Length, Is.EqualTo(1))
+        Assert.That(result[0].Path, Is.EqualTo(normalizePath "/repo/main"))
+
+    [<Test>]
+    member _.``All prunable worktrees are excluded``() =
+        let output =
+            String.concat "\n"
+                [ "worktree /repo/stale-a"
+                  "HEAD abc1234567890abcdef1234567890abcdef123456"
+                  "branch refs/heads/stale-a"
+                  "prunable gitdir file points to non-existent location"
+                  ""
+                  "worktree /repo/stale-b"
+                  "HEAD def4567890abcdef1234567890abcdef12345678"
+                  "branch refs/heads/stale-b"
+                  "prunable gitdir file points to non-existent location"
+                  "" ]
+
+        let result = parseWorktreeList output
+        Assert.That(result, Is.Empty)
+
+    [<Test>]
+    member _.``Prunable bare worktree is excluded``() =
+        let output =
+            String.concat "\n"
+                [ "worktree /repo/bare"
+                  "HEAD abc1234567890abcdef1234567890abcdef123456"
+                  "bare"
+                  "prunable gitdir file points to non-existent location"
+                  "" ]
+
+        let result = parseWorktreeList output
+        Assert.That(result, Is.Empty)
+
+    [<Test>]
     member _.``Multiple blocks separated by Environment.NewLine``() =
         let output =
             String.concat (Environment.NewLine)

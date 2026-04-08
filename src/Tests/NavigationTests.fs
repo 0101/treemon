@@ -21,6 +21,7 @@ module NavHelpers =
           WorkMetrics = None
           HasActiveSession = false
           HasTestFailureLog = false
+          IsMainWorktree = false
           IsArchived = false }
 
     let makeRepo repoId branches : RepoModel =

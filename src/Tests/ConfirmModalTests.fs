@@ -24,6 +24,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       WorkMetrics = None
       HasActiveSession = hasSession
       HasTestFailureLog = false
+      IsMainWorktree = false
       IsArchived = false }
 
 let private makeRepo repoId worktrees : RepoModel =

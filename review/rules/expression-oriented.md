@@ -16,6 +16,7 @@ Expressions return values and compose naturally. Statement-heavy code relies on 
 - Use `match` expressions that return values rather than performing side effects in each branch
 - Prefer single-expression function bodies over multi-statement blocks where practical
 - Use computation expressions for sequencing effects rather than imperative statement blocks
+- Within computation expressions, `return` in each branch of an `if/else` or `match` is acceptable — this rule primarily targets mutable state and imperative control flow, not CE keyword placement
 
 ## Wrong
 ```fsharp

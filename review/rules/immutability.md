@@ -15,7 +15,7 @@ Mutable state is the root of most bugs. Immutable data makes data flow explicit,
 - No `let mutable` bindings
 - Never pass collections into functions to be mutated — return new collections instead
 - Prefer immutable data structures (records, DUs, lists) over mutable ones (ResizeArray, Dictionary)
-- If mutable state is absolutely required (e.g. MailboxProcessor internals), it must be explicitly isolated and documented
+- If mutable state is absolutely required (e.g. MailboxProcessor internals, NUnit `[<SetUp>]`/`[<TearDown>]` lifecycle fields), it must be explicitly isolated and documented
 
 ## Wrong
 ```fsharp
