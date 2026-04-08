@@ -2,6 +2,7 @@ module Navigation
 
 open Shared
 open Browser
+open Browser.CssExtensions
 open Fable.Core.JsInterop
 
 type FocusTarget =
@@ -40,7 +41,7 @@ let getColumnCount () =
     Dom.document.querySelector ".card-grid"
     |> Option.ofObj
     |> Option.map (fun el ->
-        let cols: string = Dom.window?getComputedStyle(el)?getPropertyValue("grid-template-columns")
+        let cols = Dom.window.getComputedStyle(el).getPropertyValue("grid-template-columns")
         cols.Trim().Split(' ') |> Array.length)
     |> Option.defaultValue 1
 
@@ -184,25 +185,24 @@ let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     match target with
     | None -> ()
     | Some _ ->
-        Dom.window?requestAnimationFrame(fun (_: float) ->
+        Dom.window.requestAnimationFrame(fun _ ->
             Dom.document.querySelector ".focused"
             |> Option.ofObj
             |> Option.iter (fun el ->
-                let rect = el?getBoundingClientRect()
-                let rectTop: float = rect?top
-                let rectBottom: float = rect?bottom
-                let viewH: float = Dom.window?innerHeight
-                let scrollY: float = Dom.window?scrollY
-                let elTop = rectTop + scrollY
-                let elBottom = rectBottom + scrollY
-                let docHeight: float = Dom.document.documentElement?scrollHeight
+                let rect = el.getBoundingClientRect()
+                let viewH = Dom.window.innerHeight
+                let scrollY = Dom.window.scrollY
+                let elTop = rect.top + scrollY
+                let elBottom = rect.bottom + scrollY
+                let docHeight = Dom.document.documentElement.scrollHeight
                 let scrollTo top = Dom.window?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
                 match hint with
                 | ScrollToTop -> scrollTo 0
                 | ScrollToBottom -> scrollTo docHeight
-                | Normal when rectTop < headerOffset -> scrollTo (elTop - headerOffset)
-                | Normal when rectBottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
+                | Normal when rect.top < headerOffset -> scrollTo (elTop - headerOffset)
+                | Normal when rect.bottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
                 | _ -> ()))
+        |> ignore
 
 let navigateToFirst (repos: RepoModel list) =
     let targets = visibleFocusTargets repos

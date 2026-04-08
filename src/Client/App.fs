@@ -13,7 +13,6 @@ open ActionButtons
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
-      HasError: bool
       SortMode: SortMode
       IsCompact: bool
       SchedulerEvents: CardEvent list
@@ -29,6 +28,7 @@ type Model =
       DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
+      LastError: string option
       ActionCooldowns: Set<WorktreePath> }
 
 type Msg =
@@ -59,8 +59,10 @@ type Msg =
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * action: ActionKind
     | LaunchActionResult of Result<unit, string>
+    | ActionFailed of exn
     | ClearActionCooldown of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
+    | DismissError
 
 let worktreeApi =
     Remoting.createApi ()
@@ -70,7 +72,7 @@ let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.getWorktrees () DataLoaded DataFailed
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.either worktreeApi.getSyncStatus () SyncStatusUpdate DataFailed
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
@@ -82,7 +84,6 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
 let init () =
     { Repos = []
       IsLoading = true
-      HasError = false
       SortMode = ByActivity
       IsCompact = false
       SchedulerEvents = []
@@ -98,6 +99,7 @@ let init () =
       DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None
+      LastError = None
       ActionCooldowns = Set.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
 
@@ -187,7 +189,6 @@ let update msg model =
             { model with
                 Repos = repos
                 IsLoading = false
-                HasError = false
                 SchedulerEvents = response.SchedulerEvents
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
@@ -199,11 +200,14 @@ let update msg model =
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
-    | DataFailed _ ->
+    | DataFailed ex ->
         { model with
             IsLoading = false
-            HasError = true },
+            LastError = Some ex.Message },
         Cmd.none
+
+    | ActionFailed ex ->
+        { model with LastError = Some ex.Message }, Cmd.none
 
     | ToggleSort ->
         let newSort =
@@ -236,12 +240,12 @@ let update msg model =
         Cmd.none
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
+        model, Cmd.OfAsync.either worktreeApi.openTerminal path (fun _ -> Tick) ActionFailed
     | OpenEditor path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick)
+        model, Cmd.OfAsync.either worktreeApi.openEditor path (fun _ -> Tick) ActionFailed
 
     | Tick ->
-        model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+        model, fetchWorktrees ()
 
     | StartSync (path, key) ->
         let syntheticEvent =
@@ -256,7 +260,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync path (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.either worktreeApi.startSync path (fun r -> SyncStarted (key, r)) ActionFailed
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -271,7 +275,7 @@ let update msg model =
         { model with BranchEvents = events }, Cmd.none
 
     | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick)
+        model, Cmd.OfAsync.either worktreeApi.cancelSync path (fun _ -> Tick) ActionFailed
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -317,8 +321,8 @@ let update msg model =
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
 
-    | DeleteCompleted (Error _) ->
-        { model with DeletedPaths = Set.empty }, fetchWorktrees ()
+    | DeleteCompleted (Error msg) ->
+        { model with DeletedPaths = Set.empty; LastError = Some $"Delete failed: {msg}" }, fetchWorktrees ()
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
@@ -328,13 +332,16 @@ let update msg model =
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
 
     | FocusSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.focusSession path SessionResult ActionFailed
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
+        model, Cmd.OfAsync.either worktreeApi.openNewTab path SessionResult ActionFailed
 
-    | SessionResult _ ->
+    | SessionResult (Ok _) ->
         model, fetchWorktrees ()
+
+    | SessionResult (Error msg) ->
+        { model with LastError = Some $"Session failed: {msg}" }, fetchWorktrees ()
 
     | LaunchAction (path, action) ->
         if model.ActionCooldowns.Contains path then
@@ -345,12 +352,15 @@ let update msg model =
                     Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
             { model with ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Action = action } LaunchActionResult
+                Cmd.OfAsync.either worktreeApi.launchAction { Path = path; Action = action } LaunchActionResult ActionFailed
                 clearAfter
             ]
 
-    | LaunchActionResult _ ->
+    | LaunchActionResult (Ok _) ->
         model, fetchWorktrees ()
+
+    | LaunchActionResult (Error msg) ->
+        { model with LastError = Some $"Launch failed: {msg}" }, fetchWorktrees ()
 
     | ClearActionCooldown path ->
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
@@ -369,6 +379,9 @@ let update msg model =
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
+
+    | DismissError ->
+        { model with LastError = None }, Cmd.none
 
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
@@ -435,11 +448,18 @@ let pollingSubscription (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    if hasSyncRunning model.BranchEvents then
-        [ [ "polling" ], worktreePolling
-          [ "sync-polling" ], syncPolling ]
-    else
-        [ [ "polling" ], worktreePolling ]
+    let errorDismiss (dispatch: Dispatch<Msg>) =
+        let timeoutId =
+            Fable.Core.JS.setTimeout (fun () -> dispatch DismissError) 8000
+        { new System.IDisposable with
+            member _.Dispose() = Fable.Core.JS.clearTimeout timeoutId }
+
+    [ [ "polling" ], worktreePolling
+      if hasSyncRunning model.BranchEvents then
+          [ "sync-polling" ], syncPolling
+      match model.LastError with
+      | Some msg -> [ "error-dismiss"; msg ], errorDismiss
+      | None -> () ]
 
 let relativeTime = ArchiveViews.relativeTime
 
@@ -1403,7 +1423,7 @@ let viewAppHeader model dispatch =
             Html.div [
                 prop.className "header-center"
                 prop.children [
-                    if model.HasError then viewEyeRolledBack
+                    if model.LastError.IsSome then viewEyeRolledBack
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
                         viewEyeOpen pupilColor model.EyeDirection
@@ -1439,6 +1459,22 @@ let viewAppHeader model dispatch =
         ]
     ]
 
+let errorToast dispatch (error: string option) =
+    match error with
+    | None -> Html.none
+    | Some msg ->
+        Html.div [
+            prop.className "error-toast"
+            prop.children [
+                Html.span [ prop.text msg ]
+                Html.button [
+                    prop.className "toast-dismiss"
+                    prop.onClick (fun _ -> dispatch DismissError)
+                    prop.text "\u00D7"
+                ]
+            ]
+        ]
+
 let view model dispatch =
     React.fragment [
         viewAppHeader model dispatch
@@ -1473,6 +1509,7 @@ let view model dispatch =
                 ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
             ]
         ]
+        errorToast dispatch model.LastError
     ]
 
 open Elmish.React
