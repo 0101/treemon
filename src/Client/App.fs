@@ -163,6 +163,7 @@ let update msg model =
         | Some v when v <> response.AppVersion ->
             model, Cmd.ofEffect (fun _ -> Dom.window.location.reload ())
         | _ ->
+            let isFirstLoad = List.isEmpty model.Repos
             let existingCollapse =
                 model.Repos
                 |> List.map (fun r -> r.RepoId, r.IsCollapsed)
@@ -181,7 +182,9 @@ let update msg model =
                       Worktrees = sortWorktrees model.SortMode active
                       ArchivedWorktrees = archived
                       IsReady = r.IsReady
-                      IsCollapsed = existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
+                      IsCollapsed =
+                          if isFirstLoad then response.CollapsedRepos |> Set.contains (RepoId.value r.RepoId)
+                          else existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
                       Provider = r.Provider })
                 |> filterDeletedPaths stillPending
             { model with
@@ -232,8 +235,12 @@ let update msg model =
         let focusAdjusted =
             if isCollapsing then adjustFocusAfterCollapse repoId updatedModel.FocusedElement
             else updatedModel.FocusedElement
+        let collapsedRepos =
+            updatedModel.Repos
+            |> List.filter _.IsCollapsed
+            |> List.map (_.RepoId >> RepoId.value)
         { updatedModel with FocusedElement = focusAdjusted },
-        Cmd.none
+        Cmd.OfAsync.attempt worktreeApi.saveCollapsedRepos collapsedRepos (fun _ -> Tick)
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
