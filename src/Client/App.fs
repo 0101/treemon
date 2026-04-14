@@ -183,7 +183,7 @@ let update msg model =
                       ArchivedWorktrees = archived
                       IsReady = r.IsReady
                       IsCollapsed =
-                          if isFirstLoad then response.CollapsedRepos |> Set.contains (RepoId.value r.RepoId)
+                          if isFirstLoad then response.CollapsedRepos |> Set.contains r.RepoId
                           else existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
                       Provider = r.Provider })
                 |> filterDeletedPaths stillPending
@@ -238,7 +238,7 @@ let update msg model =
         let collapsedRepos =
             updatedModel.Repos
             |> List.filter _.IsCollapsed
-            |> List.map (_.RepoId >> RepoId.value)
+            |> List.map _.RepoId
         { updatedModel with FocusedElement = focusAdjusted },
         Cmd.OfAsync.attempt worktreeApi.saveCollapsedRepos collapsedRepos (fun _ -> Tick)
 

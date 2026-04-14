@@ -125,78 +125,55 @@ let private globalConfigPath () =
         ".treemon",
         "config.json")
 
+let private withConfigDocument (defaultValue: 'a) (f: System.Text.Json.JsonElement -> 'a) : 'a =
+    let path = globalConfigPath ()
+    if not (File.Exists path) then defaultValue
+    else
+        try
+            let json = File.ReadAllText path
+            use doc = System.Text.Json.JsonDocument.Parse json
+            f doc.RootElement
+        with ex ->
+            Log.log "Config" $"Failed to read config: {ex.Message}"
+            defaultValue
+
 let private readGlobalConfig () =
-    let configPath = globalConfigPath ()
+    withConfigDocument Map.empty (fun root ->
+        root.EnumerateObject()
+        |> Seq.choose (fun prop ->
+            if prop.Value.ValueKind = System.Text.Json.JsonValueKind.String
+            then Some (prop.Name, prop.Value.GetString())
+            else None)
+        |> Map.ofSeq)
 
-    if not (File.Exists(configPath)) then
-        Map.empty
-    else
-        try
-            let json = File.ReadAllText(configPath)
-            use doc = System.Text.Json.JsonDocument.Parse(json)
-            doc.RootElement.EnumerateObject()
-            |> Seq.map (fun prop -> prop.Name, prop.Value.GetString())
-            |> Map.ofSeq
-        with ex ->
-            Log.log "Config" $"Failed to read global config: {ex.Message}"
-            Map.empty
+let private readCollapsedRepos () : Set<RepoId> =
+    withConfigDocument Set.empty (fun root ->
+        match root.TryGetProperty("collapsedRepos") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (RepoId (el.GetString()))
+                else None)
+            |> Set.ofSeq
+        | _ -> Set.empty)
 
-let private readCollapsedRepos () =
-    let configPath = globalConfigPath ()
-    if not (File.Exists(configPath)) then Set.empty
-    else
-        try
-            let json = File.ReadAllText(configPath)
-            use doc = System.Text.Json.JsonDocument.Parse(json)
-            match doc.RootElement.TryGetProperty("collapsedRepos") with
-            | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-                prop.EnumerateArray()
-                |> Seq.choose (fun el ->
-                    if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
-                    else None)
-                |> Set.ofSeq
-            | _ -> Set.empty
-        with ex ->
-            Log.log "Config" $"Failed to read collapsed repos: {ex.Message}"
-            Set.empty
-
-let private writeCollapsedRepos (repos: string list) =
+let private writeCollapsedRepos (repos: RepoId list) =
     let configPath = globalConfigPath ()
     try
         let dir = Path.GetDirectoryName(configPath)
         if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
 
-        let existing =
+        let root =
             if File.Exists(configPath) then
-                try
-                    let json = File.ReadAllText(configPath)
-                    use doc = System.Text.Json.JsonDocument.Parse(json)
-                    doc.RootElement.EnumerateObject()
-                    |> Seq.map (fun prop -> prop.Name, prop.Value.Clone())
-                    |> Seq.toList
-                with _ -> []
-            else []
+                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
+                with _ -> System.Text.Json.Nodes.JsonObject()
+            else System.Text.Json.Nodes.JsonObject()
 
-        use ms = new System.IO.MemoryStream()
-        let opts = System.Text.Json.JsonWriterOptions(Indented = true)
-        use writer = new System.Text.Json.Utf8JsonWriter(ms, opts)
-        writer.WriteStartObject()
+        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
+        root["collapsedRepos"] <- repoArray
 
-        existing
-        |> List.filter (fun (name, _) -> name <> "collapsedRepos")
-        |> List.iter (fun (name, value) ->
-            writer.WritePropertyName(name)
-            value.WriteTo(writer))
-
-        writer.WritePropertyName("collapsedRepos")
-        writer.WriteStartArray()
-        repos |> List.iter writer.WriteStringValue
-        writer.WriteEndArray()
-
-        writer.WriteEndObject()
-        writer.Flush()
-        let bytes = ms.ToArray()
-        File.WriteAllBytes(configPath, bytes)
+        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
+        File.WriteAllText(configPath, root.ToJsonString(options))
     with ex ->
         Log.log "Config" $"Failed to save collapsed repos: {ex.Message}"
 
