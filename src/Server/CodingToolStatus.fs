@@ -33,7 +33,8 @@ type CodingToolResult =
     { Status: CodingToolStatus
       Provider: CodingToolProvider option
       LastUserMessage: (string * DateTimeOffset) option
-      LastAssistantMessage: CardEvent option }
+      LastAssistantMessage: CardEvent option
+      LastMessageProvider: CodingToolProvider option }
 
 type internal ProviderResult =
     { Provider: CodingToolProvider
@@ -93,28 +94,30 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
     let status, provider = resolveStatus configured results
     let target = configured |> Option.orElse provider
 
-    let lastUserMsg =
+    let lastUserMsg, lastMsgProvider =
         match target with
         | Some Claude ->
-            ClaudeDetector.getLastUserMessageFromFiles claudeFiles
+            let msg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
+            msg, msg |> Option.map (fun _ -> Claude)
         | Some Copilot ->
             let cliMsg = CopilotDetector.getLastUserMessage worktreePath
             let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
 
-            [ cliMsg; vsCodeMsg ]
-            |> List.choose id
-            |> List.sortByDescending snd
-            |> List.tryHead
+            let msg =
+                [ cliMsg; vsCodeMsg ]
+                |> List.choose id
+                |> List.sortByDescending snd
+                |> List.tryHead
+            msg, msg |> Option.map (fun _ -> Copilot)
         | None ->
-            let claudeMsg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
-            let copilotMsg = CopilotDetector.getLastUserMessage worktreePath
-
-            let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
-
-            [ claudeMsg; copilotMsg; vsCodeMsg ]
-            |> List.choose id
-            |> List.sortByDescending snd
-            |> List.tryHead
+            let winner =
+                [ ClaudeDetector.getLastUserMessageFromFiles claudeFiles |> Option.map (fun m -> Claude, m)
+                  CopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m)
+                  VsCodeCopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m) ]
+                |> List.choose id
+                |> List.sortByDescending (fun (_, (_, ts)) -> ts)
+                |> List.tryHead
+            winner |> Option.map snd, winner |> Option.map fst
 
     let lastAssistantMsg =
         match target with
@@ -134,7 +137,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
 
-    { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg }
+    { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "

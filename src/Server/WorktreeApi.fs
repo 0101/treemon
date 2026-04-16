@@ -52,7 +52,8 @@ let private assembleFromState
             { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
               Provider = None
               LastUserMessage = None
-              LastAssistantMessage = None }
+              LastAssistantMessage = None
+              LastMessageProvider = None }
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -117,7 +118,7 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
     |> Seq.tryPick (fun repo ->
         repo.CodingToolData
         |> Map.tryFind path
-        |> Option.bind _.Provider)
+        |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
 
 let private readGlobalConfig () =
     let configPath =
