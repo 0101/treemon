@@ -880,17 +880,11 @@ let newTabButton dispatch (wt: WorktreeStatus) =
 let resumeIcon =
     Svg.svg [
         svg.className "btn-icon"
-        svg.viewBox (0, 0, 24, 24)
-        svg.fill "none"
-        svg.stroke "currentColor"
-        svg.custom ("strokeWidth", "2")
-        svg.custom ("strokeLinecap", "round")
-        svg.custom ("strokeLinejoin", "round")
+        svg.viewBox (0, 0, 48, 48)
+        svg.fill "currentColor"
         svg.children [
-            Svg.path [ svg.d "M12 2v6m0 0l3-3m-3 3L9 5" ]
-            Svg.path [ svg.d "M4 12h2a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2a2 2 0 012-2z" ]
-            Svg.path [ svg.d "M20 12h-2a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2z" ]
-            Svg.path [ svg.d "M8 15h8" ]
+            Svg.path [ svg.d "M25.6,25.6,22.2,29,19,25.8l3.4-3.4a2,2,0,0,0-2.8-2.8L16.2,23l-1.3-1.3a1.9,1.9,0,0,0-2.8,0l-3,3a9.8,9.8,0,0,0-3,7,9.1,9.1,0,0,0,1.8,5.6L4.6,40.6a1.9,1.9,0,0,0,0,2.8,1.9,1.9,0,0,0,2.8,0l3.2-3.2a10.1,10.1,0,0,0,5.9,1.9,10.2,10.2,0,0,0,7.1-2.9l3-3a2,2,0,0,0,.6-1.4,1.7,1.7,0,0,0-.6-1.4L25,31.8l3.4-3.4a2,2,0,0,0-2.8-2.8Z" ]
+            Svg.path [ svg.d "M43.4,4.6a1.9,1.9,0,0,0-2.8,0L37.2,8a10,10,0,0,0-13,.9l-3,3a2,2,0,0,0-.6,1.4,1.7,1.7,0,0,0,.6,1.4L32.9,26.4a1.9,1.9,0,0,0,2.8,0l3-2.9a9.9,9.9,0,0,0,2.9-7.1A10.4,10.4,0,0,0,40,10.9l3.4-3.5A1.9,1.9,0,0,0,43.4,4.6Z" ]
         ]
     ]
 
