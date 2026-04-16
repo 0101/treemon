@@ -33,7 +33,8 @@ let readOnlyApi
       getBranches = fun _ -> async { return [] }
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
       openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" }
-      launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
+      launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
 
 let private assembleFromState
     (activeSessions: Set<string>)
@@ -51,7 +52,8 @@ let private assembleFromState
             { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
               Provider = None
               LastUserMessage = None
-              LastAssistantMessage = None }
+              LastAssistantMessage = None
+              LastMessageProvider = None }
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -116,7 +118,7 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
     |> Seq.tryPick (fun repo ->
         repo.CodingToolData
         |> Map.tryFind path
-        |> Option.bind _.Provider)
+        |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
 
 let private readGlobalConfig () =
     let configPath =
@@ -497,4 +499,14 @@ let worktreeApi
                           | action -> CodingToolStatus.actionPrompt provider action
                       let command = CodingToolStatus.buildInteractiveCommand provider prompt
                       return! SessionManager.launchAction sessionAgent req.Path command
+                  })
+          resumeSession = fun wtPath ->
+              withValidatedPath wtPath "resumeSession" (fun () ->
+                  async {
+                      let path = WorktreePath.value wtPath
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let sessionId = CodingToolStatus.getLastSessionId provider path
+                      let command = CodingToolStatus.buildResumeCommand provider sessionId
+                      return! SessionManager.spawnSession sessionAgent wtPath command
                   }) }

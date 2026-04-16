@@ -53,6 +53,13 @@ let enumerateFiles (worktreePath: string) =
 let private parentFiles (files: (FileInfo * SessionFileKind) list) =
     files |> List.choose (function (fi, Parent) -> Some fi | _ -> None)
 
+let getLastSessionIdFromFiles (files: (FileInfo * SessionFileKind) list) =
+    files
+    |> parentFiles
+    |> List.sortByDescending _.LastWriteTimeUtc
+    |> List.tryHead
+    |> Option.map (fun fi -> Path.GetFileNameWithoutExtension(fi.Name))
+
 let private tryMaxBy projection = function
     | [] -> None
     | items -> items |> List.maxBy projection |> Some
