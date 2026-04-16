@@ -33,7 +33,8 @@ let readOnlyApi
       getBranches = fun _ -> async { return [] }
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
       openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" }
-      launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
+      launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
 
 let private assembleFromState
     (activeSessions: Set<string>)
@@ -497,4 +498,13 @@ let worktreeApi
                           | action -> CodingToolStatus.actionPrompt provider action
                       let command = CodingToolStatus.buildInteractiveCommand provider prompt
                       return! SessionManager.launchAction sessionAgent req.Path command
+                  })
+          resumeSession = fun wtPath ->
+              withValidatedPath wtPath "resumeSession" (fun () ->
+                  async {
+                      let path = WorktreePath.value wtPath
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      let command = CodingToolStatus.buildResumeCommand provider
+                      return! SessionManager.spawnSession sessionAgent wtPath command
                   }) }

@@ -153,6 +153,11 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | ConfigureTests, _ -> configureTestsPrompt "the repo root"
     | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
 
+let buildResumeCommand (provider: CodingToolProvider option) =
+    match provider |> Option.defaultValue CodingToolProvider.Default with
+    | CodingToolProvider.Claude -> "claude --continue"
+    | CodingToolProvider.Copilot -> "copilot --continue"
+
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
     let escapedPrompt = prompt.Replace("'", "''")
     match provider |> Option.defaultValue CodingToolProvider.Default with

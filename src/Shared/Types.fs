@@ -182,4 +182,5 @@ type IWorktreeApi =
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
-      launchAction: ActionRequest -> Async<Result<unit, string>> }
+      launchAction: ActionRequest -> Async<Result<unit, string>>
+      resumeSession: WorktreePath -> Async<Result<unit, string>> }
