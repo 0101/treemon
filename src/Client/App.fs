@@ -60,6 +60,7 @@ type Msg =
     | LaunchAction of path: WorktreePath * action: ActionKind
     | LaunchActionResult of Result<unit, string>
     | ClearActionCooldown of WorktreePath
+    | ResumeSession of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
 
 let worktreeApi =
@@ -141,6 +142,12 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
             DeletedPaths = markDeleted path model.DeletedPaths }
     { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
 
+let canResumeSession (wt: WorktreeStatus) =
+    not wt.HasActiveSession
+    && wt.LastUserMessage.IsSome
+    && wt.CodingTool <> Working
+    && wt.CodingTool <> WaitingForUser
+
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
 
@@ -149,6 +156,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
     | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
+    | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.bind (fun wt -> if not wt.IsMainWorktree then Some (ConfirmDeleteWorktree scopedKey) else None)
@@ -332,6 +340,9 @@ let update msg model =
 
     | OpenNewTab path ->
         model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
+
+    | ResumeSession path ->
+        model, Cmd.OfAsync.perform worktreeApi.resumeSession path SessionResult
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -866,6 +877,32 @@ let newTabButton dispatch (wt: WorktreeStatus) =
         prop.text "+"
     ]
 
+let resumeIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "2")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.children [
+            Svg.path [ svg.d "M12 2v6m0 0l3-3m-3 3L9 5" ]
+            Svg.path [ svg.d "M4 12h2a2 2 0 012 2v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2a2 2 0 012-2z" ]
+            Svg.path [ svg.d "M20 12h-2a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2z" ]
+            Svg.path [ svg.d "M8 15h8" ]
+        ]
+    ]
+
+let resumeButton dispatch (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "resume-btn"
+        prop.title "Resume last session (R)"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); dispatch (ResumeSession wt.Path))
+        prop.children [ resumeIcon ]
+    ]
+
 let binIcon =
     Svg.svg [
         svg.className "btn-icon"
@@ -1010,6 +1047,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<W
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
+                    if canResumeSession wt then resumeButton dispatch wt
                     editorButton dispatch editorName wt
                     archiveButton dispatch scopedKey wt
                     if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
@@ -1047,6 +1085,7 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                             workMetricsView wt.WorkMetrics
                             terminalButton dispatch wt
                             if wt.HasActiveSession then newTabButton dispatch wt
+                            if canResumeSession wt then resumeButton dispatch wt
                             editorButton dispatch editorName wt
                             archiveButton dispatch scopedKey wt
                             if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
