@@ -506,8 +506,7 @@ let worktreeApi
                       let path = WorktreePath.value wtPath
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      let claudeFiles = ClaudeDetector.enumerateFiles path
-                      let sessionId = CodingToolStatus.getLastSessionId provider path claudeFiles
+                      let sessionId = CodingToolStatus.getLastSessionId provider path
                       let command = CodingToolStatus.buildResumeCommand provider sessionId
                       return! SessionManager.spawnSession sessionAgent wtPath command
                   }) }

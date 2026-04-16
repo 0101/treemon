@@ -163,9 +163,11 @@ let buildResumeCommand (provider: CodingToolProvider option) (sessionId: string 
     | CodingToolProvider.Copilot, Some id -> $"copilot --resume {id}"
     | CodingToolProvider.Copilot, None -> "copilot --continue"
 
-let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) (claudeFiles: (System.IO.FileInfo * ClaudeDetector.SessionFileKind) list) =
+let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with
-    | CodingToolProvider.Claude -> ClaudeDetector.getLastSessionIdFromFiles claudeFiles
+    | CodingToolProvider.Claude ->
+        ClaudeDetector.enumerateFiles worktreePath
+        |> ClaudeDetector.getLastSessionIdFromFiles
     | CodingToolProvider.Copilot -> CopilotDetector.getLastSessionId worktreePath
 
 let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
