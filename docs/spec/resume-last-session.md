@@ -27,9 +27,12 @@ The button is **hidden** (not disabled) when conditions aren't met — unlike co
 
 When clicked:
 1. Server resolves which provider was last active (from scheduler state or `.treemon.json` config)
-2. Server builds a resume command: `claude --continue` or `copilot --continue`
-3. Server spawns a new tracked Windows Terminal window with the resume command
-4. The worktree card transitions to `HasActiveSession = true`
+2. Server looks up the specific session ID for that worktree:
+   - Claude: most recent `.jsonl` filename in `~/.claude/projects/{encoded-path}/`
+   - Copilot: most recent session directory name in `~/.copilot/session-state/` matching the worktree's `cwd`
+3. Server builds a resume command: `claude --resume <id>` or `copilot --resume <id>` (falls back to `--continue` if no session ID found)
+4. Server spawns a new tracked Windows Terminal window with the resume command
+5. The worktree card transitions to `HasActiveSession = true`
 
 ### Edge Cases
 
@@ -40,11 +43,17 @@ When clicked:
 
 ### Server: Resume Command Construction
 
-New function `buildResumeCommand` in `CodingToolStatus.fs`:
-- Claude → `claude --continue`
-- Copilot → `copilot --continue`
+New functions in `CodingToolStatus.fs`:
 
-No prompt escaping needed — these are simple flag-only commands.
+`getLastSessionId` — dispatches by provider to find the most recent session ID:
+- Claude: most recent parent JSONL filename (sans extension) from `ClaudeDetector`
+- Copilot: most recent session directory name from `CopilotDetector`
+
+`buildResumeCommand` — takes provider + optional session ID:
+- With session ID: `claude --resume <id>` / `copilot --resume <id>` (targets exact session)
+- Without: `claude --continue` / `copilot --continue` (fallback)
+
+No prompt escaping needed — session IDs are UUIDs.
 
 ### Server: API Endpoint
 
@@ -99,7 +108,7 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 
 ## Decisions
 
-- **`--continue` over `--resume`**: `--continue` auto-selects the most recent session without requiring a session ID or showing a picker — matches the "resume last" intent
+- **`--resume <id>` over `--continue`**: `--continue` is supposed to resume the most recent session in the current directory, but in practice Copilot's `--continue` doesn't reliably scope to the working directory — it can resume sessions from other worktrees. Using `--resume <session-id>` with the specific UUID ensures the correct session is targeted. Falls back to `--continue` if no session ID is found.
 - **Hidden over disabled**: Unlike contextual actions (which show disabled when tool is active), the resume button is hidden when not applicable — it targets a specific scenario (post-reboot) and showing a disabled "resume" button when a session IS active would be confusing
 - **No new shared types needed**: Client already has `HasActiveSession`, `LastUserMessage`, and `CodingTool` — enough to determine visibility. Server resolves provider at request time.
 - **Spawn (not new-tab)**: Resume always spawns a new terminal window since the precondition is "no tracked terminal exists"
