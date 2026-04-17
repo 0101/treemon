@@ -475,8 +475,8 @@ let worktreeApi
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      let command = CodingToolStatus.buildInteractiveCommand provider req.Prompt
-                      return! SessionManager.spawnSession sessionAgent req.Path command
+                      let inv = CodingToolCli.build provider (CodingToolCli.Interactive req.Prompt)
+                      return! SessionManager.spawnSession sessionAgent req.Path inv.AsShellString
                   })
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
@@ -537,8 +537,8 @@ let worktreeApi
                               let root = tryResolveWorktreeContext rootPaths state path |> Option.map _.RepoRoot |> Option.defaultValue path
                               CodingToolStatus.configureTestsPrompt root
                           | action -> CodingToolStatus.actionPrompt provider action
-                      let command = CodingToolStatus.buildInteractiveCommand provider prompt
-                      return! SessionManager.launchAction sessionAgent req.Path command
+                      let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                      return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           resumeSession = fun wtPath ->
@@ -548,6 +548,6 @@ let worktreeApi
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
                       let sessionId = CodingToolStatus.getLastSessionId provider path
-                      let command = CodingToolStatus.buildResumeCommand provider sessionId
-                      return! SessionManager.spawnSession sessionAgent wtPath command
+                      let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
+                      return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   }) }

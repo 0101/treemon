@@ -24,6 +24,7 @@
     <Compile Include="CopilotDetector.fs" />
     <Compile Include="VsCodeCopilotDetector.fs" />
     <Compile Include="CodingToolStatus.fs" />
+    <Compile Include="CodingToolCli.fs" />
     <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
