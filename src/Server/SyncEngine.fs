@@ -240,13 +240,6 @@ let private deleteTestFailureLog (worktreePath: string) =
     with ex ->
         Log.log "SyncEngine" $"Failed to delete test failure log: {ex.Message}"
 
-let private conflictResolutionCommand (provider: Shared.CodingToolProvider option) =
-    match provider |> Option.defaultValue Shared.CodingToolProvider.Default with
-    | Shared.CodingToolProvider.Claude ->
-        "claude", """-p "/conflict" --dangerously-skip-permissions"""
-    | Shared.CodingToolProvider.Copilot ->
-        "copilot", """-p "use conflict skill to resolve conflicts" --allow-all --no-ask-user -s --autopilot"""
-
 let buildFetchArgs (upstreamRemote: string) = $"fetch {upstreamRemote}"
 
 type StepContext =
@@ -320,8 +313,12 @@ module private PipelineSteps =
         }
 
     let resolveConflicts (ctx: StepContext) (provider: Shared.CodingToolProvider option) =
-        let fileName, arguments = conflictResolutionCommand provider
-        runStep ctx SyncStep.ResolveConflicts fileName arguments checkExitCode
+        let conflictPrompt =
+            match provider |> Option.defaultValue Shared.CodingToolProvider.Default with
+            | Shared.CodingToolProvider.Claude -> "/conflict"
+            | Shared.CodingToolProvider.Copilot -> "use conflict skill to resolve conflicts"
+        let inv = CodingToolCli.build provider (CodingToolCli.NonInteractive conflictPrompt)
+        runStep ctx SyncStep.ResolveConflicts inv.Executable inv.Args checkExitCode
 
     let runTests (ctx: StepContext) (repoRoot: string) : Async<Result<unit, StepStatus>> =
         async {

@@ -30,7 +30,7 @@ When clicked:
 2. Server looks up the specific session ID for that worktree:
    - Claude: most recent `.jsonl` filename in `~/.claude/projects/{encoded-path}/`
    - Copilot: most recent session directory name in `~/.copilot/session-state/` matching the worktree's `cwd`
-3. Server builds a resume command: `claude --resume <id>` or `copilot --resume <id>` (falls back to `--continue` if no session ID found)
+3. Server builds a resume command via `CodingToolCli.build provider (Resume sessionId)`, producing `claude --dangerously-skip-permissions --resume <id>` or `copilot --yolo --resume <id>` (falls back to `--continue` with the same permission-skip flag if no session ID is found)
 4. Server spawns a new tracked Windows Terminal window with the resume command
 5. The worktree card transitions to `HasActiveSession = true`
 
@@ -43,15 +43,15 @@ When clicked:
 
 ### Server: Resume Command Construction
 
-New functions in `CodingToolStatus.fs`:
-
-`getLastSessionId` — dispatches by provider to find the most recent session ID:
+`getLastSessionId` in `CodingToolStatus.fs` dispatches by provider to find the most recent session ID:
 - Claude: most recent parent JSONL filename (sans extension) from `ClaudeDetector`
 - Copilot: most recent session directory name from `CopilotDetector`
 
-`buildResumeCommand` — takes provider + optional session ID:
-- With session ID: `claude --resume <id>` / `copilot --resume <id>` (targets exact session)
-- Without: `claude --continue` / `copilot --continue` (fallback)
+`CodingToolCli.build` in `CodingToolCli.fs` unifies all coding-tool CLI invocations across the server (Interactive prompts, Resume, NonInteractive). For the resume case, it takes a provider and an optional session ID via the `Resume` `InvocationMode`:
+- With session ID: `claude --dangerously-skip-permissions --resume <id>` / `copilot --yolo --resume <id>` (targets exact session)
+- Without: `claude --dangerously-skip-permissions --continue` / `copilot --yolo --continue` (fallback)
+
+The permission-skip flags (`--dangerously-skip-permissions` for Claude, `--yolo` for Copilot) are always included so resumed sessions run unattended, matching the behavior of fresh sessions launched from the dashboard.
 
 No prompt escaping needed — session IDs are UUIDs.
 
@@ -65,7 +65,7 @@ resumeSession: WorktreePath -> Async<Result<unit, string>>
 Implementation in `WorktreeApi.fs`:
 1. Validate path against known worktrees
 2. Resolve provider from scheduler state (`resolveProvider`)
-3. Build resume command via `buildResumeCommand`
+3. Build resume command via `CodingToolCli.build provider (Resume sessionId)`
 4. Call `SessionManager.spawnSession` to spawn a new tracked terminal with the command
 
 Reuses the existing `launchSession` flow (spawn tracked terminal with command) — no new `SessionManager` messages needed.
@@ -118,7 +118,8 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 | File | Changes |
 |------|---------|
 | `src/Shared/Types.fs` | Add `resumeSession` to `IWorktreeApi` |
-| `src/Server/CodingToolStatus.fs` | Add `buildResumeCommand` |
+| `src/Server/CodingToolStatus.fs` | Provides `getLastSessionId` |
+| `src/Server/CodingToolCli.fs` | Unified CLI invocation builder — `Resume` mode handles the resume command |
 | `src/Server/WorktreeApi.fs` | Wire `resumeSession` endpoint |
 | `src/Client/App.fs` | Add `ResumeSession` msg, `resumeButton`, `canResumeSession`, keyboard shortcut |
 | `src/Client/index.html` | CSS for `.resume-btn` |

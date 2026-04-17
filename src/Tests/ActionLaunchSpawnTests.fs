@@ -7,6 +7,7 @@ open NUnit.Framework
 open Shared
 open Server.SessionManager
 open Server.CodingToolStatus
+open Server.CodingToolCli
 open Tests.TestUtils
 
 [<TestFixture>]
@@ -58,7 +59,7 @@ type ActionLaunchSpawnTests() =
     member _.``launchAction with no existing session spawns new window and tracks HWND``() =
         let a = agent.Value
         let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42")
-        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
 
         let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction should return Ok when no session exists"
@@ -90,7 +91,7 @@ type ActionLaunchSpawnTests() =
         TestContext.Out.WriteLine($"WT windows before launchAction: {windowCountBefore}")
 
         let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123")
-        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
         let actionResult = runAsync (launchAction a testPath command)
         assertOk actionResult "launchAction should return Ok when session exists (new tab)"
 
@@ -111,7 +112,7 @@ type ActionLaunchSpawnTests() =
     member _.``launchAction spawns session that stays open (interactive mode)``() =
         let a = agent.Value
         let prompt = "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
-        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
 
         let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction should return Ok"
@@ -130,7 +131,7 @@ type ActionLaunchSpawnTests() =
     member _.``launchAction with special characters in prompt succeeds``() =
         let a = agent.Value
         let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc")
-        let command = buildInteractiveCommand (Some CodingToolProvider.Claude) prompt
+        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
 
         let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction with URL containing & and ? should return Ok"
