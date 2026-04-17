@@ -37,7 +37,13 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 |---------|-----|--------|
 | Card | Enter | Open terminal / focus active session |
 | Card | s | Start sync |
+| Card | r | Resume last session (when resumable) |
+| Card | + | Open new tab (when session active) |
+| Card | e | Open editor |
+| Card | a | Archive worktree |
+| Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
+| Repo header | + | Create new worktree |
 
 Adding new bindings = adding a match arm in `keyBinding`.
 

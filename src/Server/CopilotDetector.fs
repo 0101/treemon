@@ -106,19 +106,27 @@ let private statusFromEvent eventKind =
     | AssistantMessage false -> Working
     | TurnEnd -> Done
 
-let private findMostRecentEventsFile (sessionDirs: string list) =
+let private findMostRecentSessionDir (sessionDirs: string list) =
     sessionDirs
     |> List.choose (fun dir ->
         let eventsPath = Path.Combine(dir, "events.jsonl")
         try
             if File.Exists(eventsPath) then
-                Some(FileInfo(eventsPath))
+                Some(dir, FileInfo(eventsPath))
             else
                 None
         with _ ->
             None)
-    |> List.sortByDescending _.LastWriteTimeUtc
+    |> List.sortByDescending (fun (_, fi) -> fi.LastWriteTimeUtc)
     |> List.tryHead
+
+let private findMostRecentEventsFile (sessionDirs: string list) =
+    findMostRecentSessionDir sessionDirs |> Option.map snd
+
+let getLastSessionId (worktreePath: string) =
+    getSessionDirsForPath worktreePath
+    |> findMostRecentSessionDir
+    |> Option.map (fun (dir, _) -> Path.GetFileName(dir))
 
 let getSessionMtime (worktreePath: string) =
     let sessionDirs = getSessionDirsForPath worktreePath

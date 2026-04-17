@@ -184,4 +184,5 @@ type IWorktreeApi =
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
       launchAction: ActionRequest -> Async<Result<unit, string>>
-      saveCollapsedRepos: RepoId list -> Async<unit> }
+      saveCollapsedRepos: RepoId list -> Async<unit>
+      resumeSession: WorktreePath -> Async<Result<unit, string>> }
