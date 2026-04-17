@@ -34,6 +34,7 @@ let readOnlyApi
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
       openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
 
@@ -540,6 +541,7 @@ let worktreeApi
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })
+          reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
