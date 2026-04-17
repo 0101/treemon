@@ -156,22 +156,9 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | ConfigureTests, _ -> configureTestsPrompt "the repo root"
     | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
 
-let buildResumeCommand (provider: CodingToolProvider option) (sessionId: string option) =
-    match provider |> Option.defaultValue CodingToolProvider.Default, sessionId with
-    | CodingToolProvider.Claude, Some id -> $"claude --resume {id}"
-    | CodingToolProvider.Claude, None -> "claude --continue"
-    | CodingToolProvider.Copilot, Some id -> $"copilot --resume {id}"
-    | CodingToolProvider.Copilot, None -> "copilot --continue"
-
 let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with
     | CodingToolProvider.Claude ->
         ClaudeDetector.enumerateFiles worktreePath
         |> ClaudeDetector.getLastSessionIdFromFiles
     | CodingToolProvider.Copilot -> CopilotDetector.getLastSessionId worktreePath
-
-let buildInteractiveCommand (provider: CodingToolProvider option) (prompt: string) =
-    let escapedPrompt = prompt.Replace("'", "''")
-    match provider |> Option.defaultValue CodingToolProvider.Default with
-    | CodingToolProvider.Claude -> $"claude --dangerously-skip-permissions '{escapedPrompt}'"
-    | CodingToolProvider.Copilot -> $"copilot --yolo -i '{escapedPrompt}'"
