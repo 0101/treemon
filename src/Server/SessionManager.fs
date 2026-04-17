@@ -243,19 +243,22 @@ let private replyError (msg: SessionMsg) (sessions: Map<string, nativeint>) (ex:
     | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
     | GetActiveSessions reply -> reply.Reply(sessions)
 
+let private pathOf (wtPath: WorktreePath) =
+    WorktreePath.value wtPath |> PathUtils.normalizePath
+
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     async {
         match msg with
         | Spawn(wtPath, command, reply) ->
-            let path = WorktreePath.value wtPath
+            let path = pathOf wtPath
             return! spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path command) reply
 
         | SpawnTerminal(wtPath, reply) ->
-            let path = WorktreePath.value wtPath
+            let path = pathOf wtPath
             return! spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
 
         | OpenNewTab(wtPath, reply) ->
-            let path = WorktreePath.value wtPath
+            let path = pathOf wtPath
             let validated = validateSessions sessions
 
             match validated |> Map.tryFind path with
@@ -268,7 +271,7 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
                 return validated
 
         | LaunchAction(wtPath, command, reply) ->
-            let path = WorktreePath.value wtPath
+            let path = pathOf wtPath
             let validated = validateSessions sessions
 
             match validated |> Map.tryFind path with
@@ -280,7 +283,7 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
                 return! spawnAndTrack validated path (fun () -> spawnWithCommand path (Some command) "action") reply
 
         | Focus(wtPath, reply) ->
-            let path = WorktreePath.value wtPath
+            let path = pathOf wtPath
             let validated = validateSessions sessions
 
             match validated |> Map.tryFind path with
@@ -296,7 +299,7 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
                 return validated
 
         | Kill(wtPath, reply) ->
-            let path = WorktreePath.value wtPath
+            let path = pathOf wtPath
             let validated = validateSessions sessions
 
             match validated |> Map.tryFind path with

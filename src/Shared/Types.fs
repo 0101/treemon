@@ -189,4 +189,5 @@ type IWorktreeApi =
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
       launchAction: ActionRequest -> Async<Result<unit, string>>
-      reportActivity: ActivityLevel -> Async<unit> }
+      reportActivity: ActivityLevel -> Async<unit>
+      resumeSession: WorktreePath -> Async<Result<unit, string>> }
