@@ -34,6 +34,7 @@ let readOnlyApi
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
       openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      saveCollapsedRepos = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
 
 let private assembleFromState
@@ -120,25 +121,63 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
         |> Map.tryFind path
         |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
 
-let private readGlobalConfig () =
-    let configPath =
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".treemon",
-            "config.json")
+let private globalConfigPath () =
+    Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".treemon",
+        "config.json")
 
-    if not (File.Exists(configPath)) then
-        Map.empty
+let private withConfigDocument (defaultValue: 'a) (f: System.Text.Json.JsonElement -> 'a) : 'a =
+    let path = globalConfigPath ()
+    if not (File.Exists path) then defaultValue
     else
         try
-            let json = File.ReadAllText(configPath)
-            use doc = System.Text.Json.JsonDocument.Parse(json)
-            doc.RootElement.EnumerateObject()
-            |> Seq.map (fun prop -> prop.Name, prop.Value.GetString())
-            |> Map.ofSeq
+            let json = File.ReadAllText path
+            use doc = System.Text.Json.JsonDocument.Parse json
+            f doc.RootElement
         with ex ->
-            Log.log "Config" $"Failed to read global config: {ex.Message}"
-            Map.empty
+            Log.log "Config" $"Failed to read config: {ex.Message}"
+            defaultValue
+
+let private readGlobalConfig () =
+    withConfigDocument Map.empty (fun root ->
+        root.EnumerateObject()
+        |> Seq.choose (fun prop ->
+            if prop.Value.ValueKind = System.Text.Json.JsonValueKind.String
+            then Some (prop.Name, prop.Value.GetString())
+            else None)
+        |> Map.ofSeq)
+
+let private readCollapsedRepos () : Set<RepoId> =
+    withConfigDocument Set.empty (fun root ->
+        match root.TryGetProperty("collapsedRepos") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (RepoId (el.GetString()))
+                else None)
+            |> Set.ofSeq
+        | _ -> Set.empty)
+
+let private writeCollapsedRepos (repos: RepoId list) =
+    let configPath = globalConfigPath ()
+    try
+        let dir = Path.GetDirectoryName(configPath)
+        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+
+        let root =
+            if File.Exists(configPath) then
+                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
+                with _ -> System.Text.Json.Nodes.JsonObject()
+            else System.Text.Json.Nodes.JsonObject()
+
+        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
+        root["collapsedRepos"] <- repoArray
+
+        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
+        File.WriteAllText(configPath, root.ToJsonString(options))
+    with ex ->
+        Log.log "Config" $"Failed to save collapsed repos: {ex.Message}"
 
 let private getEditorConfig () =
     let config = readGlobalConfig ()
@@ -193,7 +232,8 @@ let getWorktrees
               AppVersion = appVersion
               DeployBranch = deployBranch
               SystemMetrics = SystemMetrics.getSystemMetrics ()
-              EditorName = getEditorConfig () |> snd }
+              EditorName = getEditorConfig () |> snd
+              CollapsedRepos = readCollapsedRepos () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -327,7 +367,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos () } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -500,6 +540,7 @@ let worktreeApi
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })
+          saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {

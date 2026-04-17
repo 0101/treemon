@@ -160,7 +160,8 @@ type DashboardResponse =
       AppVersion: string
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
-      EditorName: string }
+      EditorName: string
+      CollapsedRepos: Set<RepoId> }
 
 type FixtureData =
     { Worktrees: DashboardResponse
@@ -183,4 +184,5 @@ type IWorktreeApi =
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
       launchAction: ActionRequest -> Async<Result<unit, string>>
+      saveCollapsedRepos: RepoId list -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>> }
