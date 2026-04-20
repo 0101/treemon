@@ -393,7 +393,8 @@ let worktreeApi
 
                   let post = syncAgent.Post
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
-                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote ct, ct)
+                  let hasPr = repo.PrData |> Map.tryFind branch |> Option.exists (function HasPr _ -> true | _ -> false)
+                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote hasPr ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath

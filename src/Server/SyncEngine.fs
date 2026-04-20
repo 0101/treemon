@@ -17,6 +17,7 @@ type SyncStep =
     | ResolveConflicts
     | Test
     | Commit
+    | Push
 
 [<RequireQualifiedAccess>]
 type SyncState =
@@ -347,12 +348,15 @@ module private PipelineSteps =
             | _ -> return Ok ()
         }
 
+    let push (ctx: StepContext) =
+        runStep ctx SyncStep.Push "git" "push" checkExitCode
+
     let rebase (ctx: StepContext) (upstreamRemote: string) =
         let mergeTarget = GitWorktree.mainRef upstreamRemote
         runStep ctx SyncStep.Rebase "git" $"rebase {mergeTarget}" checkExitCode
 
 
-let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (ct: CancellationToken) : Async<unit> =
+let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (hasPr: bool) (ct: CancellationToken) : Async<unit> =
     let ctx = { Post = post; Branch = branch; WorktreePath = worktreePath; Ct = ct }
 
     let pipeline () =
@@ -369,6 +373,8 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                     do! PipelineSteps.resolveConflicts ctx provider
                 do! PipelineSteps.runTests ctx repoRoot
                 do! PipelineSteps.commitIfNeeded ctx
+                if hasPr then
+                    do! PipelineSteps.push ctx
         }
 
     async {
