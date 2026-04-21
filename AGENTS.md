@@ -22,7 +22,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 **Critical requirements:**
 - **NEVER use loops** — use recursion or higher-order functions (`List.map`, `List.filter`, `List.fold`, `Array.map`, `Seq.map`, etc.)
 - **NEVER use `let mutable`** — all bindings must be immutable; use recursion with accumulators or `fold` instead
-- **NEVER use `break` or `continue`** — restructure with LINQ/higher-order functions
+- **NEVER use `break` or `continue`** — restructure with higher-order functions
 - **NEVER pass collections into methods to be mutated** — return new collections instead
 
 **Patterns:**
@@ -35,6 +35,10 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - **Computation expressions** — `async`, `seq`, `result`, `asyncResult` for workflows
 - **F# 9 shorthand lambdas** — `_.Property`, `_.Method(arg)`, chained `_.Trim().ToUpper()`, nested `_.Value.Name` instead of `fun x -> ...`. No wrapping parens needed: `List.exists _.StartsWith("x")`. Only works with `.` member access — not operators or indexers.
 - **Type inference** — only annotate when needed for clarity
+- **Immutable collections** — use F# `list`, `Map`, `Set` instead of `Dictionary<>`, `ResizeArray`, `List<T>` (mutable .NET types)
+- **String interpolation** — `$"text {x}"` instead of `sprintf "text %s" x`
+- **Modern indexing** — `collection[0]` not `collection.[0]` (dot-bracket obsolete since F# 6)
+- **CSS over inline styles** — use `prop.className` with CSS classes, not `style.*` in Feliz views (inline styles bypass the theme)
 - **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
 
 **FsToolkit.ErrorHandling** (currently referenced in Server project, add to Client/Shared if needed):
