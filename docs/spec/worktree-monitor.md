@@ -49,7 +49,7 @@
 ### Branch Sync
 
 - Available when `MainBehindCount > 0` and worktree is clean
-- Pipeline: CheckClean -> Pull -> Merge -> ResolveConflicts -> Test
+- Pipeline: CheckClean -> Pull -> Merge -> ResolveConflicts -> Test -> Commit -> Push (if PR exists)
 - Conflict resolution uses the detected/configured coding tool CLI (Claude or Copilot)
 - Test step runs the shell command from `.treemon.json` `"testCommand"` (e.g. `"dotnet test src/Tests/Tests.fsproj"`, `"npm test"`, `"pytest"`)
 - If `testCommand` is not configured, the sync engine skips tests and shows a "not configured" status with a clickable action to configure it
