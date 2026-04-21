@@ -356,7 +356,7 @@ module private PipelineSteps =
         runStep ctx SyncStep.Rebase "git" $"rebase {mergeTarget}" checkExitCode
 
 
-let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (hasPr: bool) (ct: CancellationToken) : Async<unit> =
+let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (prStatus: PrStatus) (ct: CancellationToken) : Async<unit> =
     let ctx = { Post = post; Branch = branch; WorktreePath = worktreePath; Ct = ct }
 
     let pipeline () =
@@ -373,8 +373,9 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
                     do! PipelineSteps.resolveConflicts ctx provider
                 do! PipelineSteps.runTests ctx repoRoot
                 do! PipelineSteps.commitIfNeeded ctx
-                if hasPr then
-                    do! PipelineSteps.push ctx
+                match prStatus with
+                | HasPr _ -> do! PipelineSteps.push ctx
+                | NoPr -> ()
         }
 
     async {
