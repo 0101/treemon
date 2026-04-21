@@ -21,6 +21,7 @@ The type system prevents invalid data at compile time. But wrapping every string
   - Values passed through many functions/layers where the type proves it's the right thing
   - Values that need validation on creation (e.g. non-empty, specific format)
 - Do NOT flag single-string parameters, named DU fields, or locally-scoped values where the type's position/name already prevents confusion
+- When a DU already exists for a state, pass the DU through — don't collapse it to a bool at function boundaries. Even when the immediate consumer only needs yes/no, passing the DU is usually equal or less code (e.g. `Option.defaultValue NoPr` vs `Option.exists (function HasPr _ -> true | _ -> false)`) and preserves information for future use. Evaluate the fix concretely: if passing the DU simplifies or doesn't complicate the code, prefer it.
 
 ## Wrong
 ```fsharp
@@ -33,6 +34,10 @@ type Request =
 // Three raw strings easily mixed up at call sites
 let fetchPr (repoName: string) (branchName: string) (userId: string) = ...
 fetchPr userId repoName branchName // compiles, but wrong
+
+// Collapsing an existing DU to bool at function boundary
+let hasPr = prData |> Map.tryFind branch |> Option.exists (function HasPr _ -> true | _ -> false)
+let executePipeline (hasPr: bool) = if hasPr then push()
 ```
 
 ## Correct
@@ -52,4 +57,8 @@ let fetchPr (RepoName repo) (BranchName branch) (UserId user) = ...
 
 // But a single named field is fine as raw string — no mixup risk
 type Msg = | DeleteWorktree of branch: string
+
+// Pass existing DU through — simpler code, preserves information
+let prStatus = prData |> Map.tryFind branch |> Option.defaultValue NoPr
+let executePipeline (prStatus: PrStatus) = match prStatus with HasPr _ -> push() | NoPr -> ()
 ```
