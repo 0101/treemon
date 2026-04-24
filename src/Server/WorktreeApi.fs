@@ -174,8 +174,9 @@ let private readIgnoreBranchPatterns () : string list =
 let internal buildIgnorePredicate (patterns: string list) : string -> bool =
     let regexes =
         patterns
+        |> List.filter (not << System.String.IsNullOrWhiteSpace)
         |> List.choose (fun pattern ->
-            try Some (Regex(pattern, RegexOptions.Compiled))
+            try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
             with :? ArgumentException ->
                 Log.log "Config" $"Invalid ignore branch pattern: '{pattern}'"
                 None)
