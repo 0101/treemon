@@ -340,7 +340,7 @@ let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (bran
     match forkScript with
     | Some scriptPath ->
         let fileName, arguments =
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "powershell", $"-File \"{scriptPath}\" \"{branchName}\""
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{branchName}\""
             else "bash", $"\"{scriptPath}\" \"{branchName}\""
 
         fileName, arguments, Some sourceWorktreePath
