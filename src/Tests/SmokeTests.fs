@@ -343,7 +343,16 @@ type MultiRepoSmokeTests() =
 
             for idx in 0 .. count - 1 do
                 let section = sections.Nth(idx)
+                let header = section.Locator(".repo-header")
                 let! repoName = section.Locator(".repo-name").TextContentAsync()
+
+                // Expand collapsed sections so cards become visible
+                let! headerClass = header.GetAttributeAsync("class")
+                if headerClass <> null && headerClass.Contains("collapsed") then
+                    TestContext.Out.WriteLine($"Repo '{repoName}' is collapsed, expanding")
+                    do! header.ClickAsync()
+                    do! section.Locator(".card-grid").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
                 let cards = section.Locator(".wt-card")
                 let! cardCount = cards.CountAsync()
                 TestContext.Out.WriteLine($"Repo '{repoName}': {cardCount} cards")

@@ -33,7 +33,7 @@ try {
     Write-Host "  Symlink creation failed (needs admin). Requesting elevation..."
     $escapedDest = (Join-Path $worktreePath ".claude") -replace "'", "''"
     $escapedTarget = $claudeTarget -replace "'", "''"
-    Start-Process powershell -Verb RunAs -Wait -ArgumentList "-Command", "New-Item -ItemType SymbolicLink -Path '$escapedDest' -Target '$escapedTarget'"
+    Start-Process pwsh -Verb RunAs -Wait -ArgumentList "-NoProfile", "-Command", "New-Item -ItemType SymbolicLink -Path '$escapedDest' -Target '$escapedTarget'"
     if (Test-Path ".claude") {
         Write-Host "  Symlink created with elevation."
     } else {
@@ -51,7 +51,7 @@ if (Test-Path $dataTarget) {
         Write-Host "  Symlink creation failed (needs admin). Requesting elevation..."
         $escapedDest = (Join-Path $worktreePath "data") -replace "'", "''"
         $escapedTarget = $dataTarget -replace "'", "''"
-        Start-Process powershell -Verb RunAs -Wait -ArgumentList "-Command", "New-Item -ItemType SymbolicLink -Path '$escapedDest' -Target '$escapedTarget'"
+        Start-Process pwsh -Verb RunAs -Wait -ArgumentList "-NoProfile", "-Command", "New-Item -ItemType SymbolicLink -Path '$escapedDest' -Target '$escapedTarget'"
         if (Test-Path "data") {
             Write-Host "  Symlink created with elevation."
         } else {
