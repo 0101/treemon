@@ -152,9 +152,13 @@ let main args =
 
             match config.TestFixtures with
             | Some path ->
-                let fixtures = WorktreeApi.loadFixtures path
-                populateAgentFromFixtures agent fixtures
-                Log.log "Startup" "Fixture mode: scheduler background loop skipped"
+                match WorktreeApi.loadFixtures path with
+                | Ok fixtures ->
+                    populateAgentFromFixtures agent fixtures
+                    Log.log "Startup" "Fixture mode: scheduler background loop skipped"
+                | Error msg ->
+                    Log.log "Startup" $"ERROR: {msg}"
+                    System.Environment.Exit(1)
             | None ->
                 RefreshScheduler.start agent config.WorktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
