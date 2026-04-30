@@ -21,6 +21,44 @@ tm launch --path <worktree-path> --create-pr
 
 Exactly one action must be specified per launch.
 
+#### Prompts — ALWAYS use a file
+
+**NEVER pass multi-line prompts as CLI arguments** — they get truncated to the first line. Instead, write the prompt to a file inside the worktree and tell the agent to read it:
+
+```powershell
+# 1. Write the full prompt to a file INSIDE the worktree
+$promptPath = Join-Path "<worktree-path>" ".agents\prompt.md"
+New-Item -ItemType Directory -Path (Split-Path $promptPath) -Force | Out-Null
+@"
+Your detailed multi-line prompt here.
+
+## Context
+- File locations, root cause analysis, etc.
+
+## Required Changes
+1. First change...
+2. Second change...
+"@ | Set-Content $promptPath -Encoding UTF8
+
+# 2. Launch with a single-line instruction to read the file
+tm launch --path <worktree-path> "Read .agents/prompt.md and follow the instructions there."
+```
+
+This works because:
+- The file lives inside the worktree, so the agent can always find it
+- The single-line prompt is just a pointer — all detail goes in the file
+- No truncation, no encoding issues, no cleanup needed
+
+### Pre-launch checklist
+
+Before launching an agent in a worktree, ensure any context files it needs are present. Files in `.agents/` or other gitignored directories **do not exist in new worktrees**. Copy them explicitly:
+
+```powershell
+# Copy investigation/context docs to the worktree before launching
+New-Item -ItemType Directory -Path "<worktree>\.agents" -Force | Out-Null
+Copy-Item ".\path\to\context.md" "<worktree>\.agents\"
+```
+
 ### Create a worktree
 
 ```bash
