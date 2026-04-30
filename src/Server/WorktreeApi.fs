@@ -161,28 +161,10 @@ let private readCollapsedRepos () : Set<RepoId> =
         | _ -> Set.empty)
 
 let private readIgnoreBranchPatterns () : string list =
-    withConfigDocument [] (fun root ->
-        match root.TryGetProperty("ignoreBranchPatterns") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-            prop.EnumerateArray()
-            |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
-                else None)
-            |> Seq.toList
-        | _ -> [])
+    TreemonConfig.readIgnoreBranchPatterns ()
 
 let internal buildIgnorePredicate (patterns: string list) : string -> bool =
-    let regexes =
-        patterns
-        |> List.filter (not << System.String.IsNullOrWhiteSpace)
-        |> List.choose (fun pattern ->
-            try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
-            with :? ArgumentException ->
-                Log.log "Config" $"Invalid ignore branch pattern: '{pattern}'"
-                None)
-    match regexes with
-    | [] -> fun _ -> false
-    | _ -> fun branch -> regexes |> List.exists _.IsMatch(branch)
+    TreemonConfig.buildIgnorePredicate patterns
 
 let private writeCollapsedRepos (repos: RepoId list) =
     let configPath = globalConfigPath ()
