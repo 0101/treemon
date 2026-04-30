@@ -7,6 +7,7 @@ open Server.RefreshScheduler
 open Shared
 
 let private testRepoId = RepoId "TestRepo"
+let private noFilters: PathFilters = { Archived = Map.empty; Ignored = Map.empty }
 
 let private makeWorktree path branch : WorktreeInfo =
     { Path = path; Head = "abc123"; Branch = Some branch }
@@ -569,7 +570,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
         let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
@@ -598,7 +599,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
@@ -627,7 +628,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
         Assert.That(tasks.Length, Is.EqualTo(15))
@@ -639,7 +640,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         let localTasks =
             tasks
@@ -664,7 +665,7 @@ type BuildTaskListTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths Map.empty repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let perWorktreePaths =
             tasks
@@ -685,7 +686,7 @@ type BuildTaskListTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths Map.empty repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList r -> r = repo1 | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr r -> r = repo1 | _ -> false)
@@ -701,8 +702,8 @@ type BuildTaskListTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
             |> Map.ofList
 
-        let tasksNoArchive = buildTaskList Map.empty Map.empty repos
-        let tasksEmptyArchive = buildTaskList ([ RepoId "Repo1", Set.empty ] |> Map.ofList) Map.empty repos
+        let tasksNoArchive = buildTaskList noFilters repos
+        let tasksEmptyArchive = buildTaskList { Archived = [ RepoId "Repo1", Set.empty ] |> Map.ofList; Ignored = Map.empty } repos
 
         Assert.That(tasksEmptyArchive, Is.EqualTo(tasksNoArchive),
             "Empty archived set should produce identical task list")
@@ -715,7 +716,7 @@ type BuildTaskListTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths Map.empty repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasPerWorktree =
             tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
@@ -766,7 +767,7 @@ type BuildPhase2TasksTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks Map.empty Map.empty repos
+        let tasks = buildPhase2Tasks noFilters repos
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
@@ -784,7 +785,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks Map.empty Map.empty repos
+        let tasks = buildPhase2Tasks noFilters repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList _ -> true | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr _ -> true | _ -> false)
@@ -794,7 +795,7 @@ type BuildPhase2TasksTests() =
 
     [<Test>]
     member _.``Empty repos returns empty task list``() =
-        let tasks = buildPhase2Tasks Map.empty Map.empty Map.empty
+        let tasks = buildPhase2Tasks noFilters Map.empty
         Assert.That(tasks, Is.Empty)
 
     [<Test>]
@@ -803,7 +804,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", PerRepoState.empty ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks Map.empty Map.empty repos
+        let tasks = buildPhase2Tasks noFilters repos
 
         Assert.That(tasks.Length, Is.EqualTo(1))
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
@@ -816,7 +817,7 @@ type BuildPhase2TasksTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks archivedPaths Map.empty repos
+        let tasks = buildPhase2Tasks { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let archivedGit = tasks |> List.filter (function RefreshGit(_, p) -> p = "/r1/feat" | _ -> false)
         let archivedBeads = tasks |> List.filter (function RefreshBeads(_, p) -> p = "/r1/feat" | _ -> false)
@@ -847,7 +848,7 @@ type BuildPhase2TasksTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks archivedPaths Map.empty repos
+        let tasks = buildPhase2Tasks { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
@@ -862,8 +863,8 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
             |> Map.ofList
 
-        let tasksNoArchive = buildPhase2Tasks Map.empty Map.empty repos
-        let tasksEmptyArchive = buildPhase2Tasks ([ RepoId "Repo1", Set.empty ] |> Map.ofList) Map.empty repos
+        let tasksNoArchive = buildPhase2Tasks noFilters repos
+        let tasksEmptyArchive = buildPhase2Tasks { Archived = [ RepoId "Repo1", Set.empty ] |> Map.ofList; Ignored = Map.empty } repos
 
         Assert.That(tasksEmptyArchive, Is.EqualTo(tasksNoArchive),
             "Empty archived set should produce identical phase 2 task list")
@@ -876,7 +877,7 @@ type BuildPhase2TasksTests() =
             |> Map.ofList
 
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks Map.empty ignoredPaths repos
+        let tasks = buildPhase2Tasks { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let ignoredTaskPaths =
             tasks
@@ -906,7 +907,7 @@ type BuildPhase2TasksTests() =
             |> Map.ofList
 
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks Map.empty ignoredPaths repos
+        let tasks = buildPhase2Tasks { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
         Assert.That(hasFetch, Is.True, "RefreshFetch should still be present even when all worktrees ignored")
@@ -921,7 +922,7 @@ type BuildPhase2TasksTests() =
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks archivedPaths ignoredPaths repos
+        let tasks = buildPhase2Tasks { Archived = archivedPaths; Ignored = ignoredPaths } repos
 
         let featTasks =
             tasks
@@ -947,7 +948,7 @@ type BuildTaskListIgnoredTests() =
             |> Map.ofList
 
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList Map.empty ignoredPaths repos
+        let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let perWorktreePaths =
             tasks
@@ -968,7 +969,7 @@ type BuildTaskListIgnoredTests() =
             |> Map.ofList
 
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList Map.empty ignoredPaths repos
+        let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList r -> r = repo1 | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr r -> r = repo1 | _ -> false)
@@ -986,7 +987,7 @@ type BuildTaskListIgnoredTests() =
             |> Map.ofList
 
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList Map.empty ignoredPaths repos
+        let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let hasPerWorktree =
             tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
@@ -1003,7 +1004,7 @@ type BuildTaskListIgnoredTests() =
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
         let ignoredPaths = [ repo1, Set.ofList [ "/r1/dev" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths ignoredPaths repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
 
         let perWorktreePaths =
             tasks
@@ -1022,8 +1023,8 @@ type BuildTaskListIgnoredTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
             |> Map.ofList
 
-        let tasksNoIgnore = buildTaskList Map.empty Map.empty repos
-        let tasksEmptyIgnore = buildTaskList Map.empty ([ RepoId "Repo1", Set.empty ] |> Map.ofList) repos
+        let tasksNoIgnore = buildTaskList noFilters repos
+        let tasksEmptyIgnore = buildTaskList { Archived = Map.empty; Ignored = [ RepoId "Repo1", Set.empty ] |> Map.ofList } repos
 
         Assert.That(tasksEmptyIgnore, Is.EqualTo(tasksNoIgnore),
             "Empty ignored set should produce identical task list")

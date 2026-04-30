@@ -224,19 +224,14 @@ let resolveIgnoredPaths (ignorePredicate: string -> bool) (repos: Map<RepoId, Pe
             |> Option.map (fun _ -> wt.Path))
         |> Set.ofList)
 
-let private isPathArchived (archivedPaths: Map<RepoId, Set<string>>) repoId path =
-    archivedPaths
-    |> Map.tryFind repoId
-    |> Option.map (Set.contains path)
-    |> Option.defaultValue false
+type PathFilters =
+    { Archived: Map<RepoId, Set<string>>
+      Ignored: Map<RepoId, Set<string>> }
 
-let private isPathIgnored (ignoredPaths: Map<RepoId, Set<string>>) repoId path =
-    ignoredPaths
-    |> Map.tryFind repoId
-    |> Option.map (Set.contains path)
-    |> Option.defaultValue false
+let private isPathInSet (paths: Map<RepoId, Set<string>>) repoId path =
+    paths |> Map.tryFind repoId |> Option.map (Set.contains path) |> Option.defaultValue false
 
-let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (ignoredPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
+let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
 
     let worktreeLists =
@@ -247,8 +242,8 @@ let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (ignoredPaths: Map<R
         |> List.collect (fun (repoId, repo) ->
             repo.WorktreeList
             |> List.filter (fun wt ->
-                not (isPathArchived archivedPaths repoId wt.Path)
-                && not (isPathIgnored ignoredPaths repoId wt.Path))
+                not (isPathInSet filters.Archived repoId wt.Path)
+                && not (isPathInSet filters.Ignored repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
@@ -264,15 +259,15 @@ let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (ignoredPaths: Map<R
 let buildPhase1Tasks (rootPaths: Map<RepoId, string>) =
     rootPaths |> Map.toList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
 
-let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (ignoredPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
+let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.toList
     |> List.collect (fun (repoId, repo) ->
         let perWorktree =
             repo.WorktreeList
-            |> List.filter (fun wt -> not (isPathIgnored ignoredPaths repoId wt.Path))
+            |> List.filter (fun wt -> not (isPathInSet filters.Ignored repoId wt.Path))
             |> List.collect (fun wt ->
-                let archived = isPathArchived archivedPaths repoId wt.Path
+                let archived = isPathInSet filters.Archived repoId wt.Path
                 [ RefreshGit(repoId, wt.Path)
                   if not archived then
                       RefreshBeads(repoId, wt.Path)
@@ -435,8 +430,9 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let archivedPaths = resolveArchivedPaths archivedBranchSets state.Repos
         let ignorePredicate = TreemonConfig.readIgnoreBranchPatterns () |> TreemonConfig.buildIgnorePredicate
         let ignoredPaths = resolveIgnoredPaths ignorePredicate state.Repos
+        let filters = { Archived = archivedPaths; Ignored = ignoredPaths }
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
-        let phase2Tasks = buildPhase2Tasks archivedPaths ignoredPaths state.Repos
+        let phase2Tasks = buildPhase2Tasks filters state.Repos
         let! phase2Runs = runPhase agent rootPaths phase2Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
@@ -494,7 +490,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
             let ignorePredicate = TreemonConfig.readIgnoreBranchPatterns () |> TreemonConfig.buildIgnorePredicate
             let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
-            let tasks = buildTaskList archivedPaths ignoredPaths repos
+            let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
             let now = DateTimeOffset.UtcNow
 
             let effectiveLastRuns =
