@@ -404,17 +404,21 @@ function Install-Skill {
 
     $installed = @()
 
-    # Claude Code: ~/.claude/skills/treemon-cli/SKILL.md
-    $claudeDir = Join-Path $HOME ".claude" "skills" "treemon-cli"
-    if (Test-Path (Join-Path $HOME ".claude")) {
-        if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir | Out-Null }
-        Copy-Item $skillSource (Join-Path $claudeDir "SKILL.md") -Force
-        $installed += "Claude Code"
+    $targets = @(
+        @{ Name = "Claude Code"; Dir = Join-Path $HOME ".claude" "skills" "treemon-cli" ; Root = Join-Path $HOME ".claude" }
+        @{ Name = "Copilot CLI"; Dir = Join-Path $HOME ".copilot" "skills" "treemon-cli"; Root = Join-Path $HOME ".copilot" }
+    )
+
+    foreach ($target in $targets) {
+        if (Test-Path $target.Root) {
+            if (-not (Test-Path $target.Dir)) { New-Item -ItemType Directory -Path $target.Dir | Out-Null }
+            Copy-Item $skillSource (Join-Path $target.Dir "SKILL.md") -Force
+            $installed += $target.Name
+        }
     }
 
     if ($installed.Count -eq 0) {
         Write-Host "Warning: no supported AI tool directories found" -ForegroundColor Yellow
-        Write-Host "  Claude Code: ~/.claude/skills/ not found" -ForegroundColor Gray
     } else {
         $installed | ForEach-Object { Write-Host "  Installed for $_" -ForegroundColor Green }
     }
