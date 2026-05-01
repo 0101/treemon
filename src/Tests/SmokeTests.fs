@@ -333,6 +333,14 @@ type MultiRepoSmokeTests() =
             do! sections.First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
             let! count = sections.CountAsync()
 
+            // Expand any collapsed sections first
+            let collapsedHeaders = this.Page.Locator(".repo-section .repo-header.collapsed")
+            let! collapsedCount = collapsedHeaders.CountAsync()
+            for idx in 0 .. collapsedCount - 1 do
+                do! collapsedHeaders.Nth(idx).ClickAsync()
+            if collapsedCount > 0 then
+                do! this.Page.WaitForTimeoutAsync(2000.0f)
+
             for idx in 0 .. count - 1 do
                 let section = sections.Nth(idx)
                 let header = section.Locator(".repo-header")

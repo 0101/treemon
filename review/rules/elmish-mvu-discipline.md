@@ -14,6 +14,7 @@ The MVU (Model-View-Update) pattern guarantees unidirectional data flow and make
 ## Requirements
 - All user interactions in view functions must dispatch a `Msg` — never call APIs, mutate state, or perform side effects inline
 - Side effects (API calls, DOM manipulation, timers) must be expressed as `Cmd` values returned from `update`, never executed directly
+- The `update` function must be pure: same `(Msg, Model)` must produce the same `(Model, Cmd)`. Non-deterministic values (clocks, random) must be captured at the impure boundary (subscriptions, Cmd callbacks) and passed via `Msg` payloads
 - No mutable refs (`ref`, `Ref`, `IRefValue`) used to share state between view renders or between view and update
 - No direct DOM manipulation (e.g., `document.getElementById`, `element.style`, `element.classList`) in view functions — use React props/attributes instead
 - No `async { ... } |> Async.StartImmediate` or `promise { ... }` fire-and-forget in view functions — use `Cmd.OfAsync` or `Cmd.OfPromise` in update
