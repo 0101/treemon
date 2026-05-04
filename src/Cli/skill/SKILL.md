@@ -12,14 +12,14 @@ description: Interacts with the Treemon dashboard via the `tm` CLI. Use when lau
 ### Launch a coding agent
 
 ```bash
-tm launch --path <worktree-path> "your prompt here"
+tm launch --path <worktree-path> --prompt-file <file.md>
 tm launch --path <worktree-path> --fix-pr <pr-url>
 tm launch --path <worktree-path> --fix-build <build-url>
 tm launch --path <worktree-path> --fix-tests
 tm launch --path <worktree-path> --create-pr
 ```
 
-Exactly one action must be specified per launch.
+Exactly one action must be specified per launch. The `--prompt-file` option accepts a path to a markdown file containing instructions. The file is copied into the worktree at `.agents/prompt.md` and the agent is directed to read it.
 
 ### Create a worktree
 

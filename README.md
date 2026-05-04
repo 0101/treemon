@@ -72,7 +72,7 @@ Open http://localhost:5174 (Vite proxies API calls to the server).
 The `tm` command is automatically added to your PATH when you run `.\treemon.ps1 deploy`. Restart your shell to pick it up.
 
 ```powershell
-tm launch --path C:\code\my-project "fix the login bug"    # launch agent with prompt
+tm launch --path C:\code\my-project --prompt-file task.md   # launch agent with prompt file
 tm launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
 tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
 tm launch --path C:\code\my-project --fix-tests             # fix failing tests
