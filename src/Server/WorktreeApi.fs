@@ -160,12 +160,6 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
-let private readIgnoreBranchPatterns () : string list =
-    TreemonConfig.readIgnoreBranchPatterns ()
-
-let internal buildIgnorePredicate (patterns: string list) : string -> bool =
-    TreemonConfig.buildIgnorePredicate patterns
-
 let private writeCollapsedRepos (repos: RepoId list) =
     let configPath = globalConfigPath ()
     try
@@ -208,7 +202,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let ignoreBranch = readIgnoreBranchPatterns () |> buildIgnorePredicate
+        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
 
         let repos =
             state.Repos
@@ -221,7 +215,7 @@ let getWorktrees
 
                 let statuses =
                     repo.WorktreeList
-                    |> List.filter (fun wt -> wt.Branch |> Option.exists ignoreBranch |> not)
+                    |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
                         assembleFromState activeSessionPaths archivedBranches hasLog repo wt)

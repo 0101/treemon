@@ -1049,18 +1049,45 @@ type ResolveIgnoredPathsTests() =
         Assert.That(ignored |> Set.contains "/r1/main", Is.False, "main should not be ignored")
 
     [<Test>]
-    member _.``Worktree with no branch is not ignored``() =
+    member _.``Matches worktrees by folder name``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/archive-foo" "feature/abc" ] ]
+            |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "archive-.*" ]
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored |> Set.contains "/r1/archive-foo", Is.True, "archive-foo folder should be ignored")
+        Assert.That(ignored |> Set.contains "/r1/main", Is.False, "main should not be ignored")
+
+    [<Test>]
+    member _.``Worktree with no branch is ignored when folder matches``() =
         let repo =
             { PerRepoState.empty with
                 WorktreeList = [ { Path = "/r1/detached"; Head = "abc123"; Branch = None } ]
                 KnownPaths = Set.ofList [ "/r1/detached" ] }
         let repos = [ RepoId "Repo1", repo ] |> Map.ofList
 
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ ".*" ]
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "detached" ]
         let result = resolveIgnoredPaths predicate repos
 
         let ignored = result |> Map.find (RepoId "Repo1")
-        Assert.That(ignored, Is.Empty, "Worktree with no branch should never be ignored")
+        Assert.That(ignored |> Set.contains "/r1/detached", Is.True, "detached folder should be ignored")
+
+    [<Test>]
+    member _.``Worktree with no branch is not ignored when folder does not match``() =
+        let repo =
+            { PerRepoState.empty with
+                WorktreeList = [ { Path = "/r1/detached"; Head = "abc123"; Branch = None } ]
+                KnownPaths = Set.ofList [ "/r1/detached" ] }
+        let repos = [ RepoId "Repo1", repo ] |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "archive-.*" ]
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored, Is.Empty, "Worktree with no branch should not be ignored when folder does not match")
 
     [<Test>]
     member _.``No patterns produces empty ignored sets``() =
@@ -1087,7 +1114,7 @@ type BuildIgnorePredicateTests() =
         Assert.That(predicate "feature/abc", Is.False)
 
     [<Test>]
-    member _.``Regex pattern matches branch names``() =
+    member _.``Regex pattern matches values``() =
         let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feature/.*"; "hotfix/.*" ]
         Assert.That(predicate "feature/abc", Is.True)
         Assert.That(predicate "hotfix/urgent", Is.True)
