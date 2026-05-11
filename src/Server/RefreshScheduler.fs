@@ -214,14 +214,16 @@ let resolveArchivedPaths (archivedBranchSets: Map<RepoId, Set<string>>) (repos: 
             |> Option.map (fun _ -> wt.Path))
         |> Set.ofList)
 
+let isWorktreeIgnored (ignorePredicate: string -> bool) (wt: GitWorktree.WorktreeInfo) =
+    (wt.Branch |> Option.exists ignorePredicate)
+    || (wt.Path |> Path.GetFileName |> ignorePredicate)
+
 let resolveIgnoredPaths (ignorePredicate: string -> bool) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.map (fun _ repo ->
         repo.WorktreeList
-        |> List.choose (fun wt ->
-            wt.Branch
-            |> Option.filter ignorePredicate
-            |> Option.map (fun _ -> wt.Path))
+        |> List.filter (isWorktreeIgnored ignorePredicate)
+        |> List.map _.Path
         |> Set.ofList)
 
 type PathFilters =
@@ -428,7 +430,7 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let! state = agent.PostAndAsyncReply(GetState)
         let archivedBranchSets = readArchivedBranchSets rootPaths
         let archivedPaths = resolveArchivedPaths archivedBranchSets state.Repos
-        let ignorePredicate = TreemonConfig.readIgnoreBranchPatterns () |> TreemonConfig.buildIgnorePredicate
+        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
         let ignoredPaths = resolveIgnoredPaths ignorePredicate state.Repos
         let filters = { Archived = archivedPaths; Ignored = ignoredPaths }
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
@@ -488,7 +490,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
-            let ignorePredicate = TreemonConfig.readIgnoreBranchPatterns () |> TreemonConfig.buildIgnorePredicate
+            let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
             let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
             let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
             let now = DateTimeOffset.UtcNow

@@ -111,9 +111,9 @@ let private withGlobalConfig (defaultValue: 'a) (f: JsonElement -> 'a) : 'a =
             Log.log "TreemonConfig" $"Failed to read global config: {ex.Message}"
             defaultValue
 
-let readIgnoreBranchPatterns () : string list =
+let readIgnoreWorktreePatterns () : string list =
     withGlobalConfig [] (fun root ->
-        match root.TryGetProperty("ignoreBranchPatterns") with
+        match root.TryGetProperty("ignoreWorktreePatterns") with
         | true, prop when prop.ValueKind = JsonValueKind.Array ->
             prop.EnumerateArray()
             |> Seq.choose (fun el ->
@@ -129,8 +129,8 @@ let buildIgnorePredicate (patterns: string list) : string -> bool =
         |> List.choose (fun pattern ->
             try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
             with :? ArgumentException ->
-                Log.log "TreemonConfig" $"Invalid ignore branch pattern: '{pattern}'"
+                Log.log "TreemonConfig" $"Invalid ignore worktree pattern: '{pattern}'"
                 None)
     match regexes with
     | [] -> fun _ -> false
-    | _ -> fun branch -> regexes |> List.exists _.IsMatch(branch)
+    | _ -> fun value -> regexes |> List.exists _.IsMatch(value)
