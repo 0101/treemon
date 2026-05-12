@@ -35,7 +35,7 @@ Point Treemon at one or more directories, and it runs a lightweight background p
 
 ## Getting started
 
-Prerequisites: [.NET SDK 9](https://dotnet.microsoft.com/download), [Node.js](https://nodejs.org), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts).
+Prerequisites: [.NET SDK 9+](https://dotnet.microsoft.com/download), [Node.js](https://nodejs.org) (`winget install OpenJS.NodeJS.LTS`), git. Optional: `az` CLI (for Azure DevOps PR/build data), `gh` CLI (for GitHub PR/build data), `bd` CLI (for [beads](https://github.com/steveyegge/beads) counts). Fable and other dotnet tools are restored automatically on first build.
 
 ```powershell
 git clone https://github.com/0101/treemon.git
