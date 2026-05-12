@@ -1,5 +1,6 @@
 module Server.TreemonConfig
 
+open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
@@ -91,3 +92,45 @@ let readUpstreamRemote (repoRoot: string) : string option =
 
 let readTestCommand (repoRoot: string) : string option =
     readStringConfig repoRoot "testCommand"
+
+let globalConfigPath () =
+    Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".treemon",
+        "config.json")
+
+let private withGlobalConfig (defaultValue: 'a) (f: JsonElement -> 'a) : 'a =
+    let path = globalConfigPath ()
+    if not (File.Exists path) then defaultValue
+    else
+        try
+            let json = File.ReadAllText path
+            use doc = JsonDocument.Parse json
+            f doc.RootElement
+        with ex ->
+            Log.log "TreemonConfig" $"Failed to read global config: {ex.Message}"
+            defaultValue
+
+let readIgnoreWorktreePatterns () : string list =
+    withGlobalConfig [] (fun root ->
+        match root.TryGetProperty("ignoreWorktreePatterns") with
+        | true, prop when prop.ValueKind = JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = JsonValueKind.String then Some (el.GetString())
+                else None)
+            |> Seq.toList
+        | _ -> [])
+
+let buildIgnorePredicate (patterns: string list) : string -> bool =
+    let regexes =
+        patterns
+        |> List.filter (not << String.IsNullOrWhiteSpace)
+        |> List.choose (fun pattern ->
+            try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
+            with :? ArgumentException ->
+                Log.log "TreemonConfig" $"Invalid ignore worktree pattern: '{pattern}'"
+                None)
+    match regexes with
+    | [] -> fun _ -> false
+    | _ -> fun value -> regexes |> List.exists _.IsMatch(value)

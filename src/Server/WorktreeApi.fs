@@ -160,30 +160,6 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
-let private readIgnoreBranchPatterns () : string list =
-    withConfigDocument [] (fun root ->
-        match root.TryGetProperty("ignoreBranchPatterns") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-            prop.EnumerateArray()
-            |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
-                else None)
-            |> Seq.toList
-        | _ -> [])
-
-let internal buildIgnorePredicate (patterns: string list) : string -> bool =
-    let regexes =
-        patterns
-        |> List.filter (not << System.String.IsNullOrWhiteSpace)
-        |> List.choose (fun pattern ->
-            try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
-            with :? ArgumentException ->
-                Log.log "Config" $"Invalid ignore branch pattern: '{pattern}'"
-                None)
-    match regexes with
-    | [] -> fun _ -> false
-    | _ -> fun branch -> regexes |> List.exists _.IsMatch(branch)
-
 let private writeCollapsedRepos (repos: RepoId list) =
     let configPath = globalConfigPath ()
     try
@@ -226,7 +202,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let ignoreBranch = readIgnoreBranchPatterns () |> buildIgnorePredicate
+        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
 
         let repos =
             state.Repos
@@ -239,7 +215,7 @@ let getWorktrees
 
                 let statuses =
                     repo.WorktreeList
-                    |> List.filter (fun wt -> wt.Branch |> Option.exists ignoreBranch |> not)
+                    |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
                         assembleFromState activeSessionPaths archivedBranches hasLog repo wt)

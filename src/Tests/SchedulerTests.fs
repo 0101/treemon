@@ -7,6 +7,7 @@ open Server.RefreshScheduler
 open Shared
 
 let private testRepoId = RepoId "TestRepo"
+let private noFilters: PathFilters = { Archived = Map.empty; Ignored = Map.empty }
 
 let private makeWorktree path branch : WorktreeInfo =
     { Path = path; Head = "abc123"; Branch = Some branch }
@@ -569,7 +570,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
         let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
@@ -598,7 +599,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
@@ -627,7 +628,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
         Assert.That(tasks.Length, Is.EqualTo(15))
@@ -639,7 +640,7 @@ type BuildTaskListTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildTaskList Map.empty repos
+        let tasks = buildTaskList noFilters repos
 
         let localTasks =
             tasks
@@ -664,7 +665,7 @@ type BuildTaskListTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let perWorktreePaths =
             tasks
@@ -685,7 +686,7 @@ type BuildTaskListTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList r -> r = repo1 | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr r -> r = repo1 | _ -> false)
@@ -701,8 +702,8 @@ type BuildTaskListTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
             |> Map.ofList
 
-        let tasksNoArchive = buildTaskList Map.empty repos
-        let tasksEmptyArchive = buildTaskList ([ RepoId "Repo1", Set.empty ] |> Map.ofList) repos
+        let tasksNoArchive = buildTaskList noFilters repos
+        let tasksEmptyArchive = buildTaskList { Archived = [ RepoId "Repo1", Set.empty ] |> Map.ofList; Ignored = Map.empty } repos
 
         Assert.That(tasksEmptyArchive, Is.EqualTo(tasksNoArchive),
             "Empty archived set should produce identical task list")
@@ -715,7 +716,7 @@ type BuildTaskListTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildTaskList archivedPaths repos
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasPerWorktree =
             tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
@@ -766,7 +767,7 @@ type BuildPhase2TasksTests() =
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks Map.empty repos
+        let tasks = buildPhase2Tasks noFilters repos
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
@@ -784,7 +785,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main" ] ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks Map.empty repos
+        let tasks = buildPhase2Tasks noFilters repos
 
         let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList _ -> true | _ -> false)
         let hasPr = tasks |> List.exists (function RefreshPr _ -> true | _ -> false)
@@ -794,7 +795,7 @@ type BuildPhase2TasksTests() =
 
     [<Test>]
     member _.``Empty repos returns empty task list``() =
-        let tasks = buildPhase2Tasks Map.empty Map.empty
+        let tasks = buildPhase2Tasks noFilters Map.empty
         Assert.That(tasks, Is.Empty)
 
     [<Test>]
@@ -803,7 +804,7 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", PerRepoState.empty ]
             |> Map.ofList
 
-        let tasks = buildPhase2Tasks Map.empty repos
+        let tasks = buildPhase2Tasks noFilters repos
 
         Assert.That(tasks.Length, Is.EqualTo(1))
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
@@ -816,7 +817,7 @@ type BuildPhase2TasksTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks archivedPaths repos
+        let tasks = buildPhase2Tasks { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let archivedGit = tasks |> List.filter (function RefreshGit(_, p) -> p = "/r1/feat" | _ -> false)
         let archivedBeads = tasks |> List.filter (function RefreshBeads(_, p) -> p = "/r1/feat" | _ -> false)
@@ -847,7 +848,7 @@ type BuildPhase2TasksTests() =
             |> Map.ofList
 
         let archivedPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
-        let tasks = buildPhase2Tasks archivedPaths repos
+        let tasks = buildPhase2Tasks { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
@@ -862,11 +863,281 @@ type BuildPhase2TasksTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
             |> Map.ofList
 
-        let tasksNoArchive = buildPhase2Tasks Map.empty repos
-        let tasksEmptyArchive = buildPhase2Tasks ([ RepoId "Repo1", Set.empty ] |> Map.ofList) repos
+        let tasksNoArchive = buildPhase2Tasks noFilters repos
+        let tasksEmptyArchive = buildPhase2Tasks { Archived = [ RepoId "Repo1", Set.empty ] |> Map.ofList; Ignored = Map.empty } repos
 
         Assert.That(tasksEmptyArchive, Is.EqualTo(tasksNoArchive),
             "Empty archived set should produce identical phase 2 task list")
+
+    [<Test>]
+    member _.``Ignored worktree excluded from all per-worktree tasks``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildPhase2Tasks { Archived = Map.empty; Ignored = ignoredPaths } repos
+
+        let ignoredTaskPaths =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+            |> List.filter ((=) "/r1/feat")
+
+        Assert.That(ignoredTaskPaths, Is.Empty,
+            "Ignored worktree should have no per-worktree tasks (not even RefreshGit)")
+
+        let activePaths =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+            |> List.filter ((=) "/r1/main")
+
+        Assert.That(activePaths.Length, Is.EqualTo(3),
+            "Non-ignored worktree should have Git, Beads, CodingTool tasks")
+
+    [<Test>]
+    member _.``RefreshFetch unaffected by ignored paths``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildPhase2Tasks { Archived = Map.empty; Ignored = ignoredPaths } repos
+
+        let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
+        Assert.That(hasFetch, Is.True, "RefreshFetch should still be present even when all worktrees ignored")
+        Assert.That(tasks.Length, Is.EqualTo(1), "Only RefreshFetch when all worktrees ignored")
+
+    [<Test>]
+    member _.``Ignored and archived together — ignored takes full precedence``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat"; makeWorktree "/r1/dev" "dev" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildPhase2Tasks { Archived = archivedPaths; Ignored = ignoredPaths } repos
+
+        let featTasks =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+            |> List.filter ((=) "/r1/feat")
+
+        Assert.That(featTasks, Is.Empty,
+            "Worktree that is both ignored and archived should have no tasks (ignored wins)")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildTaskListIgnoredTests() =
+
+    [<Test>]
+    member _.``Ignored worktree excluded from all per-worktree tasks``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
+
+        let perWorktreePaths =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+
+        Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"),
+            "Ignored worktree should not appear in per-worktree tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
+            "Non-ignored worktree should have Git, Beads, CodingTool tasks")
+
+    [<Test>]
+    member _.``Repo-level tasks unaffected by ignored paths``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
+
+        let hasWorktreeList = tasks |> List.exists (function RefreshWorktreeList r -> r = repo1 | _ -> false)
+        let hasPr = tasks |> List.exists (function RefreshPr r -> r = repo1 | _ -> false)
+        let hasFetch = tasks |> List.exists (function RefreshFetch r -> r = repo1 | _ -> false)
+
+        Assert.That(hasWorktreeList, Is.True, "RefreshWorktreeList should still be present")
+        Assert.That(hasPr, Is.True, "RefreshPr should still be present")
+        Assert.That(hasFetch, Is.True, "RefreshFetch should still be present")
+
+    [<Test>]
+    member _.``All worktrees ignored leaves only repo-level tasks``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/main"; "/r1/feat" ] ] |> Map.ofList
+        let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
+
+        let hasPerWorktree =
+            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+
+        Assert.That(hasPerWorktree, Is.False, "No per-worktree tasks when all worktrees ignored")
+        Assert.That(tasks.Length, Is.EqualTo(3), "Should have WorktreeList + Pr + Fetch")
+
+    [<Test>]
+    member _.``Ignored and archived together — both filter correctly``() =
+        let repo1 = RepoId "Repo1"
+        let repos =
+            [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat"; makeWorktree "/r1/dev" "dev" ] ]
+            |> Map.ofList
+
+        let archivedPaths = [ repo1, Set.ofList [ "/r1/feat" ] ] |> Map.ofList
+        let ignoredPaths = [ repo1, Set.ofList [ "/r1/dev" ] ] |> Map.ofList
+        let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
+
+        let perWorktreePaths =
+            tasks
+            |> List.choose (function
+                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | _ -> None)
+
+        Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"), "Archived excluded")
+        Assert.That(perWorktreePaths, Does.Not.Contain("/r1/dev"), "Ignored excluded")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
+            "Active worktree should have Git, Beads, CodingTool tasks")
+
+    [<Test>]
+    member _.``Empty ignored set produces same results as no filtering``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let tasksNoIgnore = buildTaskList noFilters repos
+        let tasksEmptyIgnore = buildTaskList { Archived = Map.empty; Ignored = [ RepoId "Repo1", Set.empty ] |> Map.ofList } repos
+
+        Assert.That(tasksEmptyIgnore, Is.EqualTo(tasksNoIgnore),
+            "Empty ignored set should produce identical task list")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ResolveIgnoredPathsTests() =
+
+    [<Test>]
+    member _.``Matches worktrees by branch predicate``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feature/abc" ] ]
+            |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feature/.*" ]
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored |> Set.contains "/r1/feat", Is.True, "feature/abc should be ignored")
+        Assert.That(ignored |> Set.contains "/r1/main", Is.False, "main should not be ignored")
+
+    [<Test>]
+    member _.``Matches worktrees by folder name``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/archive-foo" "feature/abc" ] ]
+            |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "archive-.*" ]
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored |> Set.contains "/r1/archive-foo", Is.True, "archive-foo folder should be ignored")
+        Assert.That(ignored |> Set.contains "/r1/main", Is.False, "main should not be ignored")
+
+    [<Test>]
+    member _.``Worktree with no branch is ignored when folder matches``() =
+        let repo =
+            { PerRepoState.empty with
+                WorktreeList = [ { Path = "/r1/detached"; Head = "abc123"; Branch = None } ]
+                KnownPaths = Set.ofList [ "/r1/detached" ] }
+        let repos = [ RepoId "Repo1", repo ] |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "detached" ]
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored |> Set.contains "/r1/detached", Is.True, "detached folder should be ignored")
+
+    [<Test>]
+    member _.``Worktree with no branch is not ignored when folder does not match``() =
+        let repo =
+            { PerRepoState.empty with
+                WorktreeList = [ { Path = "/r1/detached"; Head = "abc123"; Branch = None } ]
+                KnownPaths = Set.ofList [ "/r1/detached" ] }
+        let repos = [ RepoId "Repo1", repo ] |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "archive-.*" ]
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored, Is.Empty, "Worktree with no branch should not be ignored when folder does not match")
+
+    [<Test>]
+    member _.``No patterns produces empty ignored sets``() =
+        let repos =
+            [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
+            |> Map.ofList
+
+        let predicate = Server.TreemonConfig.buildIgnorePredicate []
+        let result = resolveIgnoredPaths predicate repos
+
+        let ignored = result |> Map.find (RepoId "Repo1")
+        Assert.That(ignored, Is.Empty, "No patterns should produce empty ignored set")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BuildIgnorePredicateTests() =
+
+    [<Test>]
+    member _.``Empty patterns matches nothing``() =
+        let predicate = Server.TreemonConfig.buildIgnorePredicate []
+        Assert.That(predicate "main", Is.False)
+        Assert.That(predicate "feature/abc", Is.False)
+
+    [<Test>]
+    member _.``Regex pattern matches values``() =
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feature/.*"; "hotfix/.*" ]
+        Assert.That(predicate "feature/abc", Is.True)
+        Assert.That(predicate "hotfix/urgent", Is.True)
+        Assert.That(predicate "main", Is.False)
+        Assert.That(predicate "develop", Is.False)
+
+    [<Test>]
+    member _.``Pattern is anchored``() =
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feat" ]
+        Assert.That(predicate "feat", Is.True)
+        Assert.That(predicate "feature", Is.False)
+        Assert.That(predicate "my-feat", Is.False)
+
+    [<Test>]
+    member _.``Invalid regex is skipped``() =
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "[invalid"; "main" ]
+        Assert.That(predicate "main", Is.True)
+
+    [<Test>]
+    member _.``Whitespace-only patterns are skipped``() =
+        let predicate = Server.TreemonConfig.buildIgnorePredicate [ ""; "  "; "main" ]
+        Assert.That(predicate "main", Is.True)
+        Assert.That(predicate "", Is.False)
 
 
 [<TestFixture>]

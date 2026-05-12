@@ -82,11 +82,29 @@ let formatPr = function
 
         $"PR #{pr.Id}%s{flagStr}: %s{sanitizeForTerminal pr.Title}"
 
+let metaPrompt = "Read and follow the instructions in @.agents/prompt.md"
+
+let copyPromptFile (wtPath: WorktreePath) (promptFilePath: string) =
+    let fullPromptPath = Path.GetFullPath promptFilePath
+    let agentsDir = Path.Combine(WorktreePath.value wtPath, ".agents")
+    let destPath = Path.Combine(agentsDir, "prompt.md")
+    let fullDestPath = Path.GetFullPath destPath
+
+    if fullPromptPath = fullDestPath then
+        Ok()
+    else
+        try
+            Directory.CreateDirectory(agentsDir) |> ignore
+            File.Copy(fullPromptPath, fullDestPath, overwrite = true)
+            Ok()
+        with ex ->
+            Error $"Failed to copy prompt file: {ex.Message}"
+
 let launchCmd =
     let handler
         (
             path: string,
-            prompt: string option,
+            promptFile: string option,
             fixPr: string option,
             fixBuild: string option,
             fixTests: bool,
@@ -95,7 +113,7 @@ let launchCmd =
         ) =
         withPort port (fun port ->
             let actions =
-                [ prompt |> Option.map Choice1Of2
+                [ promptFile |> Option.map Choice1Of2
                   fixPr |> Option.map (FixPr >> Choice2Of2)
                   fixBuild |> Option.map (FixBuild >> Choice2Of2)
                   (if fixTests then Some(Choice2Of2 FixTests) else None)
@@ -107,12 +125,24 @@ let launchCmd =
                 let wtPath = path |> Path.GetFullPath |> WorktreePath
 
                 match single with
-                | Choice1Of2 text ->
-                    runApi port (fun api -> api.launchSession { Path = wtPath; Prompt = text }) "Session launched"
+                | Choice1Of2 filePath ->
+                    if not (File.Exists filePath) then
+                        eprintfn $"Error: Prompt file not found: %s{filePath}"
+                        1
+                    elif not (Directory.Exists(WorktreePath.value wtPath)) then
+                        eprintfn $"Error: Worktree path does not exist: %s{WorktreePath.value wtPath}"
+                        1
+                    else
+                        match copyPromptFile wtPath filePath with
+                        | Error e ->
+                            eprintfn $"Error: %s{e}"
+                            1
+                        | Ok() ->
+                            runApi port (fun api -> api.launchSession { Path = wtPath; Prompt = metaPrompt }) "Session launched"
                 | Choice2Of2 action ->
                     runApi port (fun api -> api.launchAction { Path = wtPath; Action = action }) "Action launched"
             | _ ->
-                eprintfn "Error: Provide exactly one of: <prompt>, --fix-pr, --fix-build, --fix-tests, or --create-pr"
+                eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, --fix-tests, or --create-pr"
                 1)
 
     command "launch" {
@@ -120,7 +150,7 @@ let launchCmd =
 
         inputs (
             option<string> "--path" |> desc "Worktree path" |> required,
-            argumentMaybe<string> "prompt" |> desc "Free-form prompt text",
+            optionMaybe<string> "--prompt-file" |> desc "Path to a prompt file (e.g. instructions.md)",
             optionMaybe<string> "--fix-pr" |> desc "Fix PR comments (provide PR URL)",
             optionMaybe<string> "--fix-build" |> desc "Fix failed build (provide build URL)",
             option<bool> "--fix-tests" |> def false |> desc "Fix failing tests",

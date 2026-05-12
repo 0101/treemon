@@ -436,9 +436,18 @@ function Install-Skill {
         $installed += "Claude Code"
     }
 
+    # GitHub Copilot CLI: ~/.copilot/skills/treemon-cli/SKILL.md
+    $copilotDir = Join-Path $HOME ".copilot" "skills" "treemon-cli"
+    if (Test-Path (Join-Path $HOME ".copilot")) {
+        if (-not (Test-Path $copilotDir)) { New-Item -ItemType Directory -Path $copilotDir | Out-Null }
+        Copy-Item $skillSource (Join-Path $copilotDir "SKILL.md") -Force
+        $installed += "GitHub Copilot CLI"
+    }
+
     if ($installed.Count -eq 0) {
         Write-Host "Warning: no supported AI tool directories found" -ForegroundColor Yellow
         Write-Host "  Claude Code: ~/.claude/skills/ not found" -ForegroundColor Gray
+        Write-Host "  GitHub Copilot CLI: ~/.copilot/skills/ not found" -ForegroundColor Gray
     } else {
         $installed | ForEach-Object { Write-Host "  Installed for $_" -ForegroundColor Green }
     }
