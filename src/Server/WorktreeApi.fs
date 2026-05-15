@@ -9,10 +9,13 @@ open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 
-let loadFixtures (path: string) =
-    let json = File.ReadAllText(path)
-    let converter = Fable.Remoting.Json.FableJsonConverter()
-    JsonConvert.DeserializeObject<FixtureData>(json, converter)
+let loadFixtures (path: string) : Result<FixtureData, string> =
+    try
+        let json = File.ReadAllText(path)
+        let converter = Fable.Remoting.Json.FableJsonConverter()
+        Ok(JsonConvert.DeserializeObject<FixtureData>(json, converter))
+    with ex ->
+        Error $"Failed to load fixture file '{path}': {ex.Message}"
 
 let readOnlyApi
     (modeName: string)
@@ -343,7 +346,7 @@ let worktreeApi
     (appVersion: string)
     (deployBranch: string option)
     : IWorktreeApi =
-    let fixtures = testFixtures |> Option.map loadFixtures
+    let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
 
