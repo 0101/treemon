@@ -1135,7 +1135,7 @@ type DashboardTests() =
     member this.``Commit overflow indicator shown for high commit count``() =
         task {
             let overflows = this.Page.Locator(".wt-card .commit-overflow")
-            do! overflows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! overflows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
             let! count = overflows.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has branch with 95 commits (>90); overflow indicator should be present")
 
@@ -1220,8 +1220,8 @@ type DashboardTests() =
     [<Test>]
     member this.``Work metrics appear in card header``() =
         task {
-            let metricsInHeader = this.Page.Locator(".wt-card .card-header .work-metrics")
-            do! Assertions.Expect(metricsInHeader.First).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
+            let metricsInHeader = this.Page.Locator(".wt-card .card-header .commit-grid")
+            do! metricsInHeader.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
             let! count = metricsInHeader.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside card header")
         }
@@ -1231,7 +1231,8 @@ type DashboardTests() =
         task {
             do! (compactBtn this.Page).ClickAsync()
 
-            let metricsInHeader = this.Page.Locator(".wt-card.compact .card-header .work-metrics")
+            let metricsInHeader = this.Page.Locator(".wt-card.compact .card-header .commit-grid")
+            do! metricsInHeader.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f, State = WaitForSelectorState.Attached))
             let! count = metricsInHeader.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Work metrics should be inside compact card header")
         }
