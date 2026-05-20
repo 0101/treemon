@@ -1106,6 +1106,7 @@ let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName
         ]
 
 let workMetricsView = ArchiveViews.workMetricsView
+let FitOrHide = ArchiveViews.FitOrHide
 
 let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
@@ -1118,9 +1119,14 @@ let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<W
             Html.div [
                 prop.className "card-header"
                 prop.children [
-                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                    Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
-                    workMetricsView wt.WorkMetrics
+                    Html.div [
+                        prop.className "header-info"
+                        prop.children [
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                            Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                            FitOrHide (workMetricsView wt.WorkMetrics)
+                        ]
+                    ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                     terminalButton dispatch wt
                     if wt.HasActiveSession then newTabButton dispatch wt
@@ -1157,9 +1163,14 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                     Html.div [
                         prop.className "card-header"
                         prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                            Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
-                            workMetricsView wt.WorkMetrics
+                            Html.div [
+                                prop.className "header-info"
+                                prop.children [
+                                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                                    Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                                    FitOrHide (workMetricsView wt.WorkMetrics)
+                                ]
+                            ]
                             terminalButton dispatch wt
                             if wt.HasActiveSession then newTabButton dispatch wt
                             if canResumeSession wt then resumeButton dispatch wt

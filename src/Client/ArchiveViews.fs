@@ -3,6 +3,8 @@ module ArchiveViews
 open Shared
 open Elmish
 open Feliz
+open Fable.Core
+open Fable.Core.JsInterop
 
 type Msg =
     | Archive of WorktreePath
@@ -31,6 +33,51 @@ let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
     | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
+
+// ResizeObserver interop for fitOrHide component
+[<Emit("new ResizeObserver($0)")>]
+let private createResizeObserver (callback: obj -> unit) : obj = jsNative
+
+[<Emit("$0.observe($1)")>]
+let private observeElement (observer: obj) (el: Browser.Types.Element) : unit = jsNative
+
+[<Emit("$0.disconnect()")>]
+let private disconnectObserver (observer: obj) : unit = jsNative
+
+[<Emit("$0.scrollWidth > $0.clientWidth")>]
+let private hasOverflow (el: Browser.Types.Element) : bool = jsNative
+
+/// Wrapper that hides its children when they would cause the parent to overflow.
+/// Parent must have overflow:hidden for scrollWidth detection to work.
+[<ReactComponent>]
+let FitOrHide (children: ReactElement) =
+    let elRef = React.useRef<Browser.Types.Element option>(None)
+
+    let checkOverflow () =
+        match elRef.current with
+        | Some el when not (isNull el.parentElement) ->
+            el?style?display <- ""
+            if hasOverflow el.parentElement then
+                el?style?display <- "none"
+        | _ -> ()
+
+    React.useEffect(fun () -> checkOverflow ())
+
+    React.useEffect((fun () ->
+        match elRef.current with
+        | Some el when not (isNull el.parentElement) ->
+            let observer = createResizeObserver (fun _ -> checkOverflow ())
+            observeElement observer el.parentElement
+            React.createDisposable (fun () -> disconnectObserver observer)
+        | _ ->
+            React.createDisposable ignore
+    ), [| |])
+
+    Html.span [
+        prop.ref (fun el -> elRef.current <- if isNull el then None else Some el)
+        prop.className "fit-or-hide"
+        prop.children [ children ]
+    ]
 
 let workMetricsView (metrics: WorkMetrics option) =
     match metrics with
