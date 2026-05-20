@@ -1106,6 +1106,7 @@ let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName
         ]
 
 let workMetricsView = ArchiveViews.workMetricsView
+let workMetricsItems = ArchiveViews.workMetricsItems
 let FitOrHide = ArchiveViews.FitOrHide
 
 let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
@@ -1124,7 +1125,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<W
                         prop.children [
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
                             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
-                            FitOrHide (workMetricsView wt.WorkMetrics)
+                            FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
                     ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
@@ -1168,7 +1169,7 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                                 prop.children [
                                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
                                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
-                                    FitOrHide (workMetricsView wt.WorkMetrics)
+                                    FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
                             ]
                             terminalButton dispatch wt
