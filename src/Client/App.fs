@@ -29,7 +29,9 @@ type Model =
       DeletedPaths: Set<string>
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
-      ActionCooldowns: Set<WorktreePath> }
+      ActionCooldowns: Set<WorktreePath>
+      LastActivityTime: float
+      ActivityLevel: ActivityLevel }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -37,7 +39,7 @@ type Msg =
     | ToggleSort
     | ToggleCompact
     | ToggleCollapse of repoId: RepoId
-    | Tick
+    | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
     | StartSync of path: WorktreePath * scopedKey: string
@@ -62,6 +64,8 @@ type Msg =
     | ClearActionCooldown of WorktreePath
     | ResumeSession of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
+    | UserActivity of now: float
+    | NoOp
 
 let worktreeApi =
     Remoting.createApi ()
@@ -99,8 +103,10 @@ let init () =
       DeletedPaths = Set.empty
       DeployBranch = None
       SystemMetrics = None
-      ActionCooldowns = Set.empty },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+      ActionCooldowns = Set.empty
+      LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
+      ActivityLevel = ActivityLevel.Active },
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
 
 let rng = System.Random()
 
@@ -163,6 +169,16 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
+
+let idleThresholdMs = 180_000.0
+let deepIdleThresholdMs = 900_000.0
+
+let computeActivityLevel (lastActivityTime: float) (now: float) =
+    let elapsed = now - lastActivityTime
+
+    if elapsed < idleThresholdMs then ActivityLevel.Active
+    elif elapsed < deepIdleThresholdMs then ActivityLevel.Idle
+    else ActivityLevel.DeepIdle
 
 let update msg model =
     match msg with
@@ -248,15 +264,41 @@ let update msg model =
             |> List.filter _.IsCollapsed
             |> List.map _.RepoId
         { updatedModel with FocusedElement = focusAdjusted },
-        Cmd.OfAsync.attempt worktreeApi.saveCollapsedRepos collapsedRepos (fun _ -> Tick)
+        Cmd.OfAsync.attempt worktreeApi.saveCollapsedRepos collapsedRepos (fun _ -> NoOp)
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick)
+        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEditor path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick)
+        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
-    | Tick ->
-        model, Cmd.batch [ fetchWorktrees (); fetchSyncStatus () ]
+    | Tick now ->
+        let newLevel = computeActivityLevel model.LastActivityTime now
+
+        let reportCmd =
+            if newLevel <> model.ActivityLevel then
+                Cmd.OfAsync.attempt worktreeApi.reportActivity newLevel (fun _ -> NoOp)
+            else
+                Cmd.none
+
+        { model with ActivityLevel = newLevel },
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
+
+    | UserActivity now ->
+        let wasActive = model.ActivityLevel = ActivityLevel.Active
+
+        let wakeUpCmd =
+            if not wasActive then
+                Cmd.batch [
+                    Cmd.ofMsg (Tick now)
+                    Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp)
+                ]
+            else
+                Cmd.none
+
+        { model with
+            LastActivityTime = now
+            ActivityLevel = ActivityLevel.Active },
+        wakeUpCmd
 
     | StartSync (path, key) ->
         let syntheticEvent =
@@ -286,7 +328,7 @@ let update msg model =
         { model with BranchEvents = events }, Cmd.none
 
     | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick)
+        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -321,13 +363,13 @@ let update msg model =
         | ConfirmModal.DeleteAfterKillSession path ->
             model, Cmd.OfAsync.perform worktreeApi.killSession path (function
                 | Ok () -> SessionKilledForDelete path
-                | Error _ -> Tick)
+                | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
             model, Cmd.OfAsync.perform worktreeApi.killSession path (function
                 | Ok () -> SessionKilledForArchive path
-                | Error _ -> Tick)
+                | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | DeleteCompleted (Ok _) ->
         model, fetchWorktrees ()
@@ -440,10 +482,23 @@ let update msg model =
                 | Some action -> model, Cmd.ofMsg action
                 | None -> model, Cmd.none
 
-let pollingSubscription (model: Model) : Sub<Msg> =
+    | NoOp -> model, Cmd.none
+
+let appSubscriptions (model: Model) : Sub<Msg> =
+    let pollingIntervalMs =
+        match model.ActivityLevel with
+        | ActivityLevel.Active | ActivityLevel.Idle -> 1000
+        | ActivityLevel.DeepIdle -> 15000
+
+    let activityLevelKey =
+        match model.ActivityLevel with
+        | ActivityLevel.Active -> "active"
+        | ActivityLevel.Idle -> "idle"
+        | ActivityLevel.DeepIdle -> "deep-idle"
+
     let worktreePolling (dispatch: Dispatch<Msg>) =
         let intervalId =
-            Fable.Core.JS.setInterval (fun () -> dispatch Tick) 1000
+            Fable.Core.JS.setInterval (fun () -> dispatch (Tick(Fable.Core.JS.Constructors.Date.now ()))) pollingIntervalMs
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
@@ -453,11 +508,32 @@ let pollingSubscription (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
+    let activityDetection (dispatch: Dispatch<Msg>) =
+        let mutable lastDispatchTime = Fable.Core.JS.Constructors.Date.now ()
+        let throttleMs = 5000.0
+
+        let handler =
+            fun (_: Browser.Types.Event) ->
+                let now = Fable.Core.JS.Constructors.Date.now ()
+                if now - lastDispatchTime >= throttleMs then
+                    lastDispatchTime <- now
+                    dispatch (UserActivity now)
+
+        let events = [| "mousemove"; "keydown"; "click"; "scroll" |]
+        events |> Array.iter (fun evt -> Dom.document.addEventListener (evt, handler))
+
+        { new System.IDisposable with
+            member _.Dispose() =
+                events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
+
+    let subs =
+        [ [ "polling"; activityLevelKey ], worktreePolling
+          [ "activity" ], activityDetection ]
+
     if hasSyncRunning model.BranchEvents then
-        [ [ "polling" ], worktreePolling
-          [ "sync-polling" ], syncPolling ]
+        ([ "sync-polling" ], syncPolling) :: subs
     else
-        [ [ "polling" ], worktreePolling ]
+        subs
 
 let relativeTime = ArchiveViews.relativeTime
 
@@ -1165,7 +1241,7 @@ let sortLabel =
     | ByName -> "A-Z"
     | ByActivity -> "Recent"
 
-let viewEyeOpen (pupilColor: string) (dx: float, dy: float) =
+let viewEyeOpen (pupilColor: string) (activity: ActivityLevel) (dx: float, dy: float) =
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
@@ -1206,6 +1282,30 @@ let viewEyeOpen (pupilColor: string) (dx: float, dy: float) =
                 svg.r 2
                 svg.fill "rgba(255, 255, 255, 0.8)"
             ]
+            match activity with
+            | ActivityLevel.Idle ->
+                Svg.path [
+                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 4 20 5 Q10 4 2 10 Z"
+                    svg.fill "#b0b0b0"
+                ]
+                Svg.path [
+                    svg.d "M2 10 Q10 4 20 5 Q30 4 38 10"
+                    svg.fill "none"
+                    svg.stroke "#56b6c2"
+                    svg.strokeWidth 2.0
+                ]
+            | ActivityLevel.DeepIdle ->
+                Svg.path [
+                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 9 20 12 Q10 9 2 10 Z"
+                    svg.fill "#b0b0b0"
+                ]
+                Svg.path [
+                    svg.d "M2 10 Q10 9 20 12 Q30 9 38 10"
+                    svg.fill "none"
+                    svg.stroke "#56b6c2"
+                    svg.strokeWidth 2.0
+                ]
+            | ActivityLevel.Active -> ()
         ]
     ]
 
@@ -1446,7 +1546,7 @@ let viewAppHeader model dispatch =
                     if model.HasError then viewEyeRolledBack
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
-                        viewEyeOpen pupilColor model.EyeDirection
+                        viewEyeOpen pupilColor model.ActivityLevel model.EyeDirection
                     else viewEyeClosed
                 ]
             ]
@@ -1518,6 +1618,6 @@ let view model dispatch =
 open Elmish.React
 
 Program.mkProgram init update view
-|> Program.withSubscription pollingSubscription
+|> Program.withSubscription appSubscriptions
 |> Program.withReactSynchronous "app"
 |> Program.run

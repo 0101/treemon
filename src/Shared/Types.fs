@@ -40,6 +40,12 @@ type CodingToolProvider =
     | Copilot
     static member Default = Copilot
 
+[<RequireQualifiedAccess>]
+type ActivityLevel =
+    | Active
+    | Idle
+    | DeepIdle
+
 type BuildStatus =
     | Building
     | Succeeded
@@ -184,5 +190,6 @@ type IWorktreeApi =
       createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
       launchAction: ActionRequest -> Async<Result<unit, string>>
+      reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>> }

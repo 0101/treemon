@@ -17,6 +17,7 @@ Redundant comments add noise and become stale. Code should be self-documenting t
 - No TODO comments
 - Only include comments that explain non-obvious algorithms or warn about critical edge cases that can't be expressed through naming
 - XML doc comments on public API are acceptable but should add value beyond the name
+- **Test files exception:** Section dividers (`// --- Name ---`, `// === Name ===`) are acceptable in test files for navigating long fixtures. In production code, dividers usually indicate code that should be extracted into named functions — flag those.
 
 ## Wrong
 ```fsharp
