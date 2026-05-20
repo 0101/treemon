@@ -535,7 +535,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     else
         subs
 
-let relativeTime = ArchiveViews.relativeTime
+let relativeTime = Components.relativeTime
 
 let ctClassName =
     function
@@ -1105,9 +1105,9 @@ let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName
             prop.children [ prBadgeContent dispatch cooldowns wt repoName pr ]
         ]
 
-let workMetricsView = ArchiveViews.workMetricsView
-let workMetricsItems = ArchiveViews.workMetricsItems
-let FitOrHide = ArchiveViews.FitOrHide
+let workMetricsView = Components.workMetricsView
+let workMetricsItems = Components.workMetricsItems
+let FitOrHide = Components.FitOrHide
 
 let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
