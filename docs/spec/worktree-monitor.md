@@ -180,9 +180,18 @@ Intervals adapt to user activity level (Active / Idle / Deep Idle). See `docs/sp
 For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects and uses the correct remote:
 
 - **Resolution order**: `.treemon.json` `"upstreamRemote"` field → auto-detect `upstream` remote → fall back to `origin`
-- **Affects**: PR fetching (remote URL), main branch comparisons (`{remote}/main`), fetch cycle, sync merge target
+- **Affects**: PR fetching (remote URL), base branch comparisons (`{remote}/{baseBranch}`), fetch cycle, sync merge target
 - **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh
 - **Config example**: `{ "upstreamRemote": "upstream" }` in `.treemon.json` at repo root
+
+### Base Branch Resolution
+
+Each repo can configure which branch is considered the "base" for ahead/behind counts, diff stats, fetch, fast-forward, and sync operations:
+
+- **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
+- **Affects**: `git rev-list` behind/commit counts, `git diff --shortstat`, `git fetch`, fast-forward, merge/rebase targets, branch sort priority
+- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh
+- **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
 ### CommentSummary
 
