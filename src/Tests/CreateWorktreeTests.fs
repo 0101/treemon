@@ -577,7 +577,8 @@ type EnterKeySuppressedWhileModalOpenTests() =
           ArchivedWorktrees = []
           IsReady = true
           IsCollapsed = false
-          Provider = None }
+          Provider = None
+          BaseBranch = "main" }
 
     let openForm =
         Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }

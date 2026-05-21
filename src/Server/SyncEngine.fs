@@ -291,8 +291,8 @@ module private PipelineSteps =
     let fetch (ctx: StepContext) (upstreamRemote: string) =
         runStep ctx SyncStep.Pull "git" (buildFetchArgs upstreamRemote) checkExitCode
 
-    let merge (ctx: StepContext) (upstreamRemote: string) : Async<Result<bool, StepStatus>> =
-        let mergeTarget = GitWorktree.mainRef upstreamRemote
+    let merge (ctx: StepContext) (upstreamRemote: string) (baseBranch: string) : Async<Result<bool, StepStatus>> =
+        let mergeTarget = GitWorktree.mainRef upstreamRemote baseBranch
         let cmdString = $"git merge {mergeTarget}"
         async {
             ctx.Post (UpdateProcessState (ctx.Branch, SyncState.Running SyncStep.Merge))
@@ -351,24 +351,24 @@ module private PipelineSteps =
     let push (ctx: StepContext) =
         runStep ctx SyncStep.Push "git" "push" checkExitCode
 
-    let rebase (ctx: StepContext) (upstreamRemote: string) =
-        let mergeTarget = GitWorktree.mainRef upstreamRemote
+    let rebase (ctx: StepContext) (upstreamRemote: string) (baseBranch: string) =
+        let mergeTarget = GitWorktree.mainRef upstreamRemote baseBranch
         runStep ctx SyncStep.Rebase "git" $"rebase {mergeTarget}" checkExitCode
 
 
-let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (prStatus: PrStatus) (ct: CancellationToken) : Async<unit> =
+let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: string) (repoRoot: string) (provider: Shared.CodingToolProvider option) (upstreamRemote: string) (baseBranch: string) (prStatus: PrStatus) (ct: CancellationToken) : Async<unit> =
     let ctx = { Post = post; Branch = branch; WorktreePath = worktreePath; Ct = ct }
 
     let pipeline () =
         asyncResult {
             do! PipelineSteps.checkClean ctx
             do! PipelineSteps.fetch ctx upstreamRemote
-            let mainRef = GitWorktree.mainRef upstreamRemote
+            let mainRef = GitWorktree.mainRef upstreamRemote baseBranch
             let! commitCount = GitWorktree.getCommitCount ctx.WorktreePath mainRef |> Async.map Ok
             if commitCount = 0 then
-                do! PipelineSteps.rebase ctx upstreamRemote
+                do! PipelineSteps.rebase ctx upstreamRemote baseBranch
             else
-                let! hasConflicts = PipelineSteps.merge ctx upstreamRemote
+                let! hasConflicts = PipelineSteps.merge ctx upstreamRemote baseBranch
                 if hasConflicts then
                     do! PipelineSteps.resolveConflicts ctx provider
                 do! PipelineSteps.runTests ctx repoRoot

@@ -31,7 +31,8 @@ module NavHelpers =
           ArchivedWorktrees = []
           IsReady = true
           IsCollapsed = false
-          Provider = None }
+          Provider = None
+          BaseBranch = "main" }
 
     let scrollHint (_, _, hint) = hint
 

@@ -16,6 +16,7 @@ type PerRepoState =
       PrData: Map<string, PrStatus>
       Provider: RepoProvider option
       UpstreamRemote: string
+      BaseBranch: string
       IsReady: bool }
 
 module PerRepoState =
@@ -28,6 +29,7 @@ module PerRepoState =
           PrData = Map.empty
           Provider = None
           UpstreamRemote = "origin"
+          BaseBranch = "main"
           IsReady = false }
 
 type DashboardState =
@@ -57,6 +59,7 @@ type StateMsg =
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
     | UpdateUpstreamRemote of repoId: RepoId * remote: string
+    | UpdateBaseBranch of repoId: RepoId * baseBranch: string
     | RemoveWorktree of repoId: RepoId * path: string
     | GetState of AsyncReplyChannel<DashboardState>
     | LogSchedulerEvent of CardEvent
@@ -144,6 +147,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | UpdateUpstreamRemote(repoId, remote) ->
         let repo = getRepo repoId state
         updateRepo repoId { repo with UpstreamRemote = remote } state
+
+    | UpdateBaseBranch(repoId, baseBranch) ->
+        let repo = getRepo repoId state
+        updateRepo repoId { repo with BaseBranch = baseBranch } state
 
     | RemoveWorktree(repoId, path) ->
         let repo = getRepo repoId state
@@ -341,6 +348,8 @@ let private executeTask
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             agent.Post(UpdateWorktreeList(repoId, worktrees))
             agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
+            let baseBranch = TreemonConfig.readBaseBranch root
+            agent.Post(UpdateBaseBranch(repoId, baseBranch))
             let! state = agent.PostAndAsyncReply(GetState)
             let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then
@@ -351,7 +360,7 @@ let private executeTask
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            let mainRef = GitWorktree.mainRef repo.UpstreamRemote
+            let mainRef = GitWorktree.mainRef repo.UpstreamRemote repo.BaseBranch
 
             let branch =
                 repo.WorktreeList
@@ -387,7 +396,7 @@ let private executeTask
             let root = rootPaths |> Map.find repoId
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            do! GitWorktree.fetchUpstream root repo.UpstreamRemote
+            do! GitWorktree.fetchUpstream root repo.UpstreamRemote repo.BaseBranch
     }
 
 let private timeoutMs = 60_000

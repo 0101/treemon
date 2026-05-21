@@ -34,7 +34,8 @@ let private makeRepo repoId worktrees : RepoModel =
       ArchivedWorktrees = []
       IsReady = true
       IsCollapsed = false
-      Provider = None }
+      Provider = None
+      BaseBranch = "main" }
 
 let private defaultModel : Model =
     { Repos = [ makeRepo "repo" [ makeWorktree "feature-branch" true; makeWorktree "main" false ] ]

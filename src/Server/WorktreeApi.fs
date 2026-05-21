@@ -227,7 +227,8 @@ let getWorktrees
                   RootFolderName = Path.GetFileName(originalPath)
                   Worktrees = statuses
                   IsReady = repo.IsReady
-                  Provider = repo.Provider })
+                  Provider = repo.Provider
+                  BaseBranch = repo.BaseBranch })
 
         return
             { Repos = repos
@@ -399,7 +400,7 @@ let worktreeApi
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
                   let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
                   let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote prStatus ct, ct)
+                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath
@@ -503,7 +504,7 @@ let worktreeApi
                       |> Option.map (fun repo ->
                           repo.WorktreeList
                           |> List.choose _.Branch
-                          |> List.sortBy GitWorktree.branchSortKey)
+                          |> List.sortBy (GitWorktree.branchSortKey repo.BaseBranch))
                       |> Option.defaultValue []
               }
           createWorktree = fun req ->
