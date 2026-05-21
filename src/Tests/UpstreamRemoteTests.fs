@@ -297,6 +297,42 @@ type ReadBaseBranchTests() =
         let remote = readUpstreamRemote tempDir
         Assert.That(remote, Is.EqualTo(Some "upstream"), "Other fields should still be readable")
 
+    [<Test>]
+    member _.``readBaseBranch accepts slash-based branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "release/2026.05" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("release/2026.05"))
+
+    [<Test>]
+    member _.``readBaseBranch accepts nested slash branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "feature/team/auth" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("feature/team/auth"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects --all flag injection``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "--all" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects single dash prefix``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "-branch" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
 
 // ─── Git command construction: mainRef, fetch, merge targets ───
 

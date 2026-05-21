@@ -11,6 +11,7 @@ let private configLock = obj ()
 let private configPath repoRoot = Path.Combine(repoRoot, ".treemon.json")
 
 let private validRemoteNamePattern = Regex(@"^[a-zA-Z0-9._-]+$")
+let private validBranchNamePattern = Regex(@"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
 
 let private withJsonProperty (path: string) (propertyName: string) (onFound: JsonElement -> 'a) (defaultValue: 'a) : 'a =
     if not (File.Exists(path)) then
@@ -93,7 +94,7 @@ let readUpstreamRemote (repoRoot: string) : string option =
 let readBaseBranch (repoRoot: string) : string =
     readStringConfig repoRoot "baseBranch"
     |> Option.bind (fun value ->
-        if validRemoteNamePattern.IsMatch(value) then Some value
+        if validBranchNamePattern.IsMatch(value) then Some value
         else
             Log.log "TreemonConfig" $"Rejected invalid baseBranch value: '{value}'"
             None)
