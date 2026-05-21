@@ -358,7 +358,7 @@ type ArchiveE2ETests() =
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[]}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[]}}"""
 
     let emptySyncStatus = "{}"
 
