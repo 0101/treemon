@@ -227,7 +227,8 @@ let getWorktrees
                   RootFolderName = Path.GetFileName(originalPath)
                   Worktrees = statuses
                   IsReady = repo.IsReady
-                  Provider = repo.Provider })
+                  Provider = repo.Provider
+                  BaseBranch = repo.BaseBranch })
 
         return
             { Repos = repos

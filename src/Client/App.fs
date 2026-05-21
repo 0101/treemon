@@ -209,7 +209,8 @@ let update msg model =
                       IsCollapsed =
                           if isFirstLoad then response.CollapsedRepos |> Set.contains r.RepoId
                           else existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
-                      Provider = r.Provider })
+                      Provider = r.Provider
+                      BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
             { model with
                 Repos = repos
@@ -1458,6 +1459,8 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
             Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
             Html.span [ prop.className "repo-name"; prop.text repo.Name ]
             providerIcon repo.Provider
+            if repo.BaseBranch <> "main" then
+                Html.span [ prop.className "deploy-branch"; prop.text repo.BaseBranch ]
             if repo.IsCollapsed then
                 Html.span [
                     prop.className "repo-ct-dots"

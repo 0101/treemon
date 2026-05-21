@@ -152,7 +152,8 @@ type RepoWorktrees =
       RootFolderName: string
       Worktrees: WorktreeStatus list
       IsReady: bool
-      Provider: RepoProvider option }
+      Provider: RepoProvider option
+      BaseBranch: string }
 
 type SystemMetrics =
     { CpuPercent: float

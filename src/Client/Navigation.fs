@@ -15,7 +15,8 @@ type RepoModel =
       ArchivedWorktrees: WorktreeStatus list
       IsReady: bool
       IsCollapsed: bool
-      Provider: RepoProvider option }
+      Provider: RepoProvider option
+      BaseBranch: string }
 
 type NavAction =
     | NoAction
