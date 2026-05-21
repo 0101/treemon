@@ -291,8 +291,8 @@ module private PipelineSteps =
     let fetch (ctx: StepContext) (upstreamRemote: string) =
         runStep ctx SyncStep.Pull "git" (buildFetchArgs upstreamRemote) checkExitCode
 
-    let merge (ctx: StepContext) (upstreamRemote: string) : Async<Result<bool, StepStatus>> =
-        let mergeTarget = GitWorktree.mainRef upstreamRemote
+    let merge (ctx: StepContext) (upstreamRemote: string) (baseBranch: string) : Async<Result<bool, StepStatus>> =
+        let mergeTarget = GitWorktree.mainRef upstreamRemote baseBranch
         let cmdString = $"git merge {mergeTarget}"
         async {
             ctx.Post (UpdateProcessState (ctx.Branch, SyncState.Running SyncStep.Merge))
@@ -351,8 +351,8 @@ module private PipelineSteps =
     let push (ctx: StepContext) =
         runStep ctx SyncStep.Push "git" "push" checkExitCode
 
-    let rebase (ctx: StepContext) (upstreamRemote: string) =
-        let mergeTarget = GitWorktree.mainRef upstreamRemote
+    let rebase (ctx: StepContext) (upstreamRemote: string) (baseBranch: string) =
+        let mergeTarget = GitWorktree.mainRef upstreamRemote baseBranch
         runStep ctx SyncStep.Rebase "git" $"rebase {mergeTarget}" checkExitCode
 
 
@@ -363,12 +363,12 @@ let executeSyncPipeline (post: SyncMsg -> unit) (branch: string) (worktreePath: 
         asyncResult {
             do! PipelineSteps.checkClean ctx
             do! PipelineSteps.fetch ctx upstreamRemote
-            let mainRef = GitWorktree.mainRef upstreamRemote
+            let mainRef = GitWorktree.mainRef upstreamRemote "main"
             let! commitCount = GitWorktree.getCommitCount ctx.WorktreePath mainRef |> Async.map Ok
             if commitCount = 0 then
-                do! PipelineSteps.rebase ctx upstreamRemote
+                do! PipelineSteps.rebase ctx upstreamRemote "main"
             else
-                let! hasConflicts = PipelineSteps.merge ctx upstreamRemote
+                let! hasConflicts = PipelineSteps.merge ctx upstreamRemote "main"
                 if hasConflicts then
                     do! PipelineSteps.resolveConflicts ctx provider
                 do! PipelineSteps.runTests ctx repoRoot

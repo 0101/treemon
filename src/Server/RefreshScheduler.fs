@@ -351,7 +351,7 @@ let private executeTask
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            let mainRef = GitWorktree.mainRef repo.UpstreamRemote
+            let mainRef = GitWorktree.mainRef repo.UpstreamRemote "main"
 
             let branch =
                 repo.WorktreeList
@@ -387,7 +387,7 @@ let private executeTask
             let root = rootPaths |> Map.find repoId
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            do! GitWorktree.fetchUpstream root repo.UpstreamRemote
+            do! GitWorktree.fetchUpstream root repo.UpstreamRemote "main"
     }
 
 let private timeoutMs = 60_000

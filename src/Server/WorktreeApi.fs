@@ -503,7 +503,7 @@ let worktreeApi
                       |> Option.map (fun repo ->
                           repo.WorktreeList
                           |> List.choose _.Branch
-                          |> List.sortBy GitWorktree.branchSortKey)
+                          |> List.sortBy (GitWorktree.branchSortKey "main"))
                       |> Option.defaultValue []
               }
           createWorktree = fun req ->

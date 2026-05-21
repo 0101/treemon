@@ -106,26 +106,26 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
-let private tryFastForwardMain (repoRoot: string) (mainRef: string) =
+let private tryFastForwardMain (repoRoot: string) (baseBranch: string) (mainRef: string) =
     async {
         let! currentBranch = runGit repoRoot "rev-parse --abbrev-ref HEAD"
 
         match currentBranch |> Option.map _.Trim() with
-        | Some "main" ->
+        | Some branch when branch = baseBranch ->
             let! result = runGitResult repoRoot $"merge --ff-only {mainRef}"
 
             match result with
-            | Ok _ -> Log.log "Git" $"Fast-forwarded main in {repoRoot}"
+            | Ok _ -> Log.log "Git" $"Fast-forwarded {baseBranch} in {repoRoot}"
             | Error msg -> Log.log "Git" $"Fast-forward skipped in {repoRoot}: {msg}"
         | _ -> ()
     }
 
-let mainRef (upstreamRemote: string) = $"{upstreamRemote}/main"
+let mainRef (upstreamRemote: string) (baseBranch: string) = $"{upstreamRemote}/{baseBranch}"
 
-let fetchUpstream (repoRoot: string) (upstreamRemote: string) =
+let fetchUpstream (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
     async {
-        let! _ = runGit repoRoot $"fetch {upstreamRemote} main"
-        do! tryFastForwardMain repoRoot (mainRef upstreamRemote)
+        let! _ = runGit repoRoot $"fetch {upstreamRemote} {baseBranch}"
+        do! tryFastForwardMain repoRoot baseBranch (mainRef upstreamRemote baseBranch)
     }
 
 let getMainBehindCount (worktreePath: string) (mainRef: string) =
@@ -320,9 +320,10 @@ let removeWorktree (repoRoot: string) (worktreePath: string) (branch: string opt
                 |> AsyncResult.ignore
     }
 
-let branchSortKey (name: string) =
+let branchSortKey (baseBranch: string) (name: string) =
     match name with
-    | "main" -> (0, name)
+    | n when n = baseBranch -> (0, name)
+    | "main" -> (1, name)
     | "master" -> (1, name)
     | "develop" -> (2, name)
     | n when n.StartsWith("dev") -> (3, name)

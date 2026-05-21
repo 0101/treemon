@@ -307,15 +307,23 @@ type GitCommandConstructionTests() =
 
     [<Test>]
     member _.``mainRef with origin produces origin/main``() =
-        Assert.That(mainRef "origin", Is.EqualTo("origin/main"))
+        Assert.That(mainRef "origin" "main", Is.EqualTo("origin/main"))
 
     [<Test>]
     member _.``mainRef with upstream produces upstream/main``() =
-        Assert.That(mainRef "upstream", Is.EqualTo("upstream/main"))
+        Assert.That(mainRef "upstream" "main", Is.EqualTo("upstream/main"))
 
     [<Test>]
     member _.``mainRef with custom remote produces custom/main``() =
-        Assert.That(mainRef "my-fork", Is.EqualTo("my-fork/main"))
+        Assert.That(mainRef "my-fork" "main", Is.EqualTo("my-fork/main"))
+
+    [<Test>]
+    member _.``mainRef with custom baseBranch produces remote/baseBranch``() =
+        Assert.That(mainRef "origin" "dev", Is.EqualTo("origin/dev"))
+
+    [<Test>]
+    member _.``mainRef with upstream and develop produces upstream/develop``() =
+        Assert.That(mainRef "upstream" "develop", Is.EqualTo("upstream/develop"))
 
     [<Test>]
     member _.``SyncEngine buildFetchArgs with origin produces fetch origin``() =
@@ -344,6 +352,30 @@ type GitCommandConstructionTests() =
         let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\myproject" "upstream"
         Assert.That(args, Does.Contain("Q:\\code\\myproject"))
         Assert.That(args, Does.Contain("remote get-url upstream"))
+
+    [<Test>]
+    member _.``branchSortKey gives configured baseBranch priority 0``() =
+        Assert.That(branchSortKey "dev" "dev", Is.EqualTo((0, "dev")))
+
+    [<Test>]
+    member _.``branchSortKey gives main priority 0 when baseBranch is main``() =
+        Assert.That(branchSortKey "main" "main", Is.EqualTo((0, "main")))
+
+    [<Test>]
+    member _.``branchSortKey gives main priority 1 when baseBranch is not main``() =
+        Assert.That(branchSortKey "dev" "main", Is.EqualTo((1, "main")))
+
+    [<Test>]
+    member _.``branchSortKey gives master priority 1``() =
+        Assert.That(branchSortKey "dev" "master", Is.EqualTo((1, "master")))
+
+    [<Test>]
+    member _.``branchSortKey gives develop priority 2 when not baseBranch``() =
+        Assert.That(branchSortKey "main" "develop", Is.EqualTo((2, "develop")))
+
+    [<Test>]
+    member _.``branchSortKey gives feature branch priority 4``() =
+        Assert.That(branchSortKey "main" "feature/xyz", Is.EqualTo((4, "feature/xyz")))
 
 
 // ─── RefreshScheduler: PerRepoState defaults and UpdateUpstreamRemote ───
