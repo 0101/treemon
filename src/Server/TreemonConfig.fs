@@ -90,6 +90,15 @@ let readUpstreamRemote (repoRoot: string) : string option =
             Log.log "TreemonConfig" $"Rejected invalid upstreamRemote value: '{value}'"
             None)
 
+let readBaseBranch (repoRoot: string) : string =
+    readStringConfig repoRoot "baseBranch"
+    |> Option.bind (fun value ->
+        if validRemoteNamePattern.IsMatch(value) then Some value
+        else
+            Log.log "TreemonConfig" $"Rejected invalid baseBranch value: '{value}'"
+            None)
+    |> Option.defaultValue "main"
+
 let readTestCommand (repoRoot: string) : string option =
     readStringConfig repoRoot "testCommand"
 

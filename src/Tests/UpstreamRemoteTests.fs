@@ -153,6 +153,151 @@ type ReadUpstreamRemoteTests() =
         Assert.That(result, Is.EqualTo(Some "origin.backup"))
 
 
+// ─── TreemonConfig: readBaseBranch ───
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReadBaseBranchTests() =
+
+    let mutable tempDir = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-test-{Guid.NewGuid()}")
+        Directory.CreateDirectory(tempDir) |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        if Directory.Exists(tempDir) then
+            Directory.Delete(tempDir, recursive = true)
+
+    [<Test>]
+    member _.``readBaseBranch returns main when file does not exist``() =
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main when file has no baseBranch field``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["a"] }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns configured value``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "dev" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("dev"))
+
+    [<Test>]
+    member _.``readBaseBranch returns develop branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "develop" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("develop"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main for empty string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main for whitespace-only string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "   " }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main for malformed JSON``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """not valid json""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main when baseBranch is not a string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": 42 }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main when baseBranch is null``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": null }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects value with spaces``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "main; rm -rf /" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects value starting with double dash``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "--upload-pack=evil" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch accepts hyphenated branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "release-2.0" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("release-2.0"))
+
+    [<Test>]
+    member _.``readBaseBranch accepts branch with dots``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "release.2.0" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("release.2.0"))
+
+    [<Test>]
+    member _.``readBaseBranch coexists with other fields``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["old"], "baseBranch": "dev", "upstreamRemote": "upstream" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("dev"))
+
+        let remote = readUpstreamRemote tempDir
+        Assert.That(remote, Is.EqualTo(Some "upstream"), "Other fields should still be readable")
+
+
 // ─── Git command construction: mainRef, fetch, merge targets ───
 
 [<TestFixture>]
