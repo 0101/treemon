@@ -16,6 +16,7 @@ type PerRepoState =
       PrData: Map<string, PrStatus>
       Provider: RepoProvider option
       UpstreamRemote: string
+      BaseBranch: string
       IsReady: bool }
 
 module PerRepoState =
@@ -28,6 +29,7 @@ module PerRepoState =
           PrData = Map.empty
           Provider = None
           UpstreamRemote = "origin"
+          BaseBranch = "main"
           IsReady = false }
 
 type DashboardState =
@@ -35,7 +37,9 @@ type DashboardState =
       SchedulerEvents: CardEvent list
       PinnedErrors: Map<string * string, CardEvent>
       LatestByCategory: Map<string, CardEvent>
-      ExpeditedRepos: Set<RepoId> }
+      ExpeditedRepos: Set<RepoId>
+      ClientActivity: ActivityLevel
+      ClientActivityAt: DateTimeOffset }
 
 module DashboardState =
     let empty =
@@ -43,7 +47,9 @@ module DashboardState =
           SchedulerEvents = []
           PinnedErrors = Map.empty
           LatestByCategory = Map.empty
-          ExpeditedRepos = Set.empty }
+          ExpeditedRepos = Set.empty
+          ClientActivity = ActivityLevel.Idle
+          ClientActivityAt = DateTimeOffset.MinValue }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
@@ -53,11 +59,13 @@ type StateMsg =
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
     | UpdateUpstreamRemote of repoId: RepoId * remote: string
+    | UpdateBaseBranch of repoId: RepoId * baseBranch: string
     | RemoveWorktree of repoId: RepoId * path: string
     | GetState of AsyncReplyChannel<DashboardState>
     | LogSchedulerEvent of CardEvent
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
+    | ReportClientActivity of ActivityLevel * DateTimeOffset
 
 let private maxEvents = 50
 
@@ -140,6 +148,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         let repo = getRepo repoId state
         updateRepo repoId { repo with UpstreamRemote = remote } state
 
+    | UpdateBaseBranch(repoId, baseBranch) ->
+        let repo = getRepo repoId state
+        updateRepo repoId { repo with BaseBranch = baseBranch } state
+
     | RemoveWorktree(repoId, path) ->
         let repo = getRepo repoId state
         updateRepo repoId (removeWorktreeData path repo) state
@@ -159,6 +171,9 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
     | ClearExpedite repoId ->
         { state with ExpeditedRepos = state.ExpeditedRepos |> Set.remove repoId }
+
+    | ReportClientActivity(activity, timestamp) ->
+        { state with ClientActivity = activity; ClientActivityAt = timestamp }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
@@ -187,13 +202,47 @@ let private taskLabel = function
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
-let private intervalOf = function
-    | RefreshWorktreeList _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshGit _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshBeads _ -> TimeSpan.FromSeconds(60.0)
-    | RefreshCodingTool _ -> TimeSpan.FromSeconds(15.0)
-    | RefreshPr _ -> TimeSpan.FromSeconds(120.0)
-    | RefreshFetch _ -> TimeSpan.FromSeconds(120.0)
+let internal intervalOf (activity: ActivityLevel) (task: RefreshTask) =
+    match activity, task with
+    | ActivityLevel.Active,   RefreshWorktreeList _ -> TimeSpan.FromSeconds(10.0)
+    | ActivityLevel.Idle,     RefreshWorktreeList _ -> TimeSpan.FromSeconds(15.0)
+    | ActivityLevel.DeepIdle, RefreshWorktreeList _ -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.Active,   RefreshGit _          -> TimeSpan.FromSeconds(5.0)
+    | ActivityLevel.Idle,     RefreshGit _          -> TimeSpan.FromSeconds(15.0)
+    | ActivityLevel.DeepIdle, RefreshGit _          -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.Active,   RefreshBeads _        -> TimeSpan.FromSeconds(30.0)
+    | ActivityLevel.Idle,     RefreshBeads _        -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.DeepIdle, RefreshBeads _        -> TimeSpan.FromSeconds(240.0)
+    | ActivityLevel.Active,   RefreshCodingTool _   -> TimeSpan.FromSeconds(5.0)
+    | ActivityLevel.Idle,     RefreshCodingTool _   -> TimeSpan.FromSeconds(15.0)
+    | ActivityLevel.DeepIdle, RefreshCodingTool _   -> TimeSpan.FromSeconds(60.0)
+    | ActivityLevel.Active,   RefreshPr _           -> TimeSpan.FromSeconds(10.0)
+    | ActivityLevel.Idle,     RefreshPr _           -> TimeSpan.FromSeconds(120.0)
+    | ActivityLevel.DeepIdle, RefreshPr _           -> TimeSpan.FromSeconds(600.0)
+    | ActivityLevel.Active,   RefreshFetch _        -> TimeSpan.FromSeconds(10.0)
+    | ActivityLevel.Idle,     RefreshFetch _        -> TimeSpan.FromSeconds(120.0)
+    | ActivityLevel.DeepIdle, RefreshFetch _        -> TimeSpan.FromSeconds(600.0)
+
+let private codingToolActivityThreshold = TimeSpan.FromMinutes(5.0)
+let private clientActivityTimeout = TimeSpan.FromMinutes(5.0)
+let private clientDeepIdleTimeout = TimeSpan.FromMinutes(20.0)
+
+let effectiveActivity (now: DateTimeOffset) (state: DashboardState) =
+    let hasCodingToolActivity =
+        state.Repos
+        |> Map.exists (fun _ repo ->
+            repo.CodingToolData
+            |> Map.exists (fun _ ct ->
+                ct.LastUserMessage
+                |> Option.exists (fun (_, ts) -> now - ts < codingToolActivityThreshold)))
+
+    if hasCodingToolActivity then ActivityLevel.Active
+    else
+        let elapsed = now - state.ClientActivityAt
+
+        if elapsed >= clientDeepIdleTimeout then ActivityLevel.DeepIdle
+        elif elapsed >= clientActivityTimeout && state.ClientActivity = ActivityLevel.Active then ActivityLevel.Idle
+        else state.ClientActivity
 
 let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths
@@ -214,13 +263,26 @@ let resolveArchivedPaths (archivedBranchSets: Map<RepoId, Set<string>>) (repos: 
             |> Option.map (fun _ -> wt.Path))
         |> Set.ofList)
 
-let private isPathArchived (archivedPaths: Map<RepoId, Set<string>>) repoId path =
-    archivedPaths
-    |> Map.tryFind repoId
-    |> Option.map (Set.contains path)
-    |> Option.defaultValue false
+let isWorktreeIgnored (ignorePredicate: string -> bool) (wt: GitWorktree.WorktreeInfo) =
+    (wt.Branch |> Option.exists ignorePredicate)
+    || (wt.Path |> Path.GetFileName |> ignorePredicate)
 
-let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
+let resolveIgnoredPaths (ignorePredicate: string -> bool) (repos: Map<RepoId, PerRepoState>) =
+    repos
+    |> Map.map (fun _ repo ->
+        repo.WorktreeList
+        |> List.filter (isWorktreeIgnored ignorePredicate)
+        |> List.map _.Path
+        |> Set.ofList)
+
+type PathFilters =
+    { Archived: Map<RepoId, Set<string>>
+      Ignored: Map<RepoId, Set<string>> }
+
+let private isPathInSet (paths: Map<RepoId, Set<string>>) repoId path =
+    paths |> Map.tryFind repoId |> Option.map (Set.contains path) |> Option.defaultValue false
+
+let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
 
     let worktreeLists =
@@ -230,7 +292,9 @@ let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, 
         repoList
         |> List.collect (fun (repoId, repo) ->
             repo.WorktreeList
-            |> List.filter (fun wt -> not (isPathArchived archivedPaths repoId wt.Path))
+            |> List.filter (fun wt ->
+                not (isPathInSet filters.Archived repoId wt.Path)
+                && not (isPathInSet filters.Ignored repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
                   RefreshBeads(repoId, wt.Path)
@@ -246,14 +310,15 @@ let buildTaskList (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, 
 let buildPhase1Tasks (rootPaths: Map<RepoId, string>) =
     rootPaths |> Map.toList |> List.map (fun (repoId, _) -> RefreshWorktreeList repoId)
 
-let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
+let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.toList
     |> List.collect (fun (repoId, repo) ->
         let perWorktree =
             repo.WorktreeList
+            |> List.filter (fun wt -> not (isPathInSet filters.Ignored repoId wt.Path))
             |> List.collect (fun wt ->
-                let archived = isPathArchived archivedPaths repoId wt.Path
+                let archived = isPathInSet filters.Archived repoId wt.Path
                 [ RefreshGit(repoId, wt.Path)
                   if not archived then
                       RefreshBeads(repoId, wt.Path)
@@ -264,10 +329,10 @@ let buildPhase2Tasks (archivedPaths: Map<RepoId, Set<string>>) (repos: Map<RepoI
 let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
     repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
 
-let private deadlineOf (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
+let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
-    |> Option.map (fun t -> t + intervalOf task)
+    |> Option.map (fun t -> t + intervalOf activity task)
     |> Option.defaultValue DateTimeOffset.MinValue
 
 let private executeTask
@@ -283,6 +348,8 @@ let private executeTask
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             agent.Post(UpdateWorktreeList(repoId, worktrees))
             agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
+            let baseBranch = TreemonConfig.readBaseBranch root
+            agent.Post(UpdateBaseBranch(repoId, baseBranch))
             let! state = agent.PostAndAsyncReply(GetState)
             let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then
@@ -293,7 +360,7 @@ let private executeTask
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            let mainRef = GitWorktree.mainRef repo.UpstreamRemote
+            let mainRef = GitWorktree.mainRef repo.UpstreamRemote repo.BaseBranch
 
             let branch =
                 repo.WorktreeList
@@ -329,7 +396,7 @@ let private executeTask
             let root = rootPaths |> Map.find repoId
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            do! GitWorktree.fetchUpstream root repo.UpstreamRemote
+            do! GitWorktree.fetchUpstream root repo.UpstreamRemote repo.BaseBranch
     }
 
 let private timeoutMs = 60_000
@@ -414,8 +481,11 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let! state = agent.PostAndAsyncReply(GetState)
         let archivedBranchSets = readArchivedBranchSets rootPaths
         let archivedPaths = resolveArchivedPaths archivedBranchSets state.Repos
+        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
+        let ignoredPaths = resolveIgnoredPaths ignorePredicate state.Repos
+        let filters = { Archived = archivedPaths; Ignored = ignoredPaths }
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
-        let phase2Tasks = buildPhase2Tasks archivedPaths state.Repos
+        let phase2Tasks = buildPhase2Tasks filters state.Repos
         let! phase2Runs = runPhase agent rootPaths phase2Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
@@ -431,16 +501,16 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
             |> Map.ofList
     }
 
-let pickMostOverdue (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+let pickMostOverdue (activity: ActivityLevel) (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
-    |> List.filter (fun task -> deadlineOf lastRuns task <= now)
-    |> List.sortBy (deadlineOf lastRuns)
+    |> List.filter (fun task -> deadlineOf activity lastRuns task <= now)
+    |> List.sortBy (deadlineOf activity lastRuns)
     |> List.tryHead
 
-let computeSleepMs (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
+let computeSleepMs (activity: ActivityLevel) (now: DateTimeOffset) (lastRuns: Map<RefreshTask, DateTimeOffset>) (tasks: RefreshTask list) =
     tasks
     |> List.map (fun task ->
-        let deadline = deadlineOf lastRuns task
+        let deadline = deadlineOf activity lastRuns task
         (deadline - now).TotalMilliseconds |> int)
     |> List.fold min Int32.MaxValue
     |> max 100
@@ -471,8 +541,11 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
-            let tasks = buildTaskList archivedPaths repos
+            let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
+            let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
+            let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
             let now = DateTimeOffset.UtcNow
+            let activity = effectiveActivity now state
 
             let effectiveLastRuns =
                 tasks
@@ -482,7 +555,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                         runs |> Map.remove task
                     | _ -> runs) lastRuns
 
-            match pickMostOverdue now effectiveLastRuns tasks with
+            match pickMostOverdue activity now effectiveLastRuns tasks with
             | Some task ->
                 let! result = executeWithTimeout agent rootPaths task
                 logTaskResult agent task result
@@ -495,7 +568,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 let updatedRuns = lastRuns |> Map.add task now
                 return! loop updatedRuns
             | None ->
-                let sleepMs = computeSleepMs now effectiveLastRuns tasks
+                let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
                 return! loop lastRuns
         }

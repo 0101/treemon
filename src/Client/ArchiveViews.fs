@@ -3,6 +3,7 @@ module ArchiveViews
 open Shared
 open Elmish
 open Feliz
+open Components
 
 type Msg =
     | Archive of WorktreePath
@@ -23,47 +24,6 @@ let update (api: Lazy<IWorktreeApi>) msg : UpdateResult * Cmd<Msg> =
         { RefreshWorktrees = true }, Cmd.none
     | OpCompleted (Error _) ->
         { RefreshWorktrees = false }, Cmd.none
-
-let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
-    let diff = now - dt
-    match diff with
-    | d when d.TotalMinutes < 1.0 -> "just now"
-    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
-    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
-    | d -> $"{int d.TotalDays}d ago"
-
-let workMetricsView (metrics: WorkMetrics option) =
-    match metrics with
-    | None -> Html.none
-    | Some m when m.CommitCount = 0 -> Html.none
-    | Some m ->
-        let displayCount = min m.CommitCount 90
-        let overflow = m.CommitCount - displayCount
-        Html.span [
-            prop.className "work-metrics"
-            prop.children [
-                Html.span [
-                    prop.className "commit-grid"
-                    prop.children (
-                        List.init displayCount (fun _ ->
-                            Html.span [ prop.className "commit-square" ])
-                    )
-                ]
-                if overflow > 0 then
-                    Html.span [ prop.className "commit-overflow"; prop.text $"+{overflow}" ]
-                match m.LinesAdded, m.LinesRemoved with
-                | 0, 0 -> Html.none
-                | added, removed ->
-                    Html.span [
-                        prop.className "diff-stats"
-                        prop.children [
-                            Html.span [ prop.className "diff-added"; prop.text $"+{added}" ]
-                            Html.text " "
-                            Html.span [ prop.className "diff-removed"; prop.text $"-{removed}" ]
-                        ]
-                    ]
-            ]
-        ]
 
 let archiveIcon =
     Svg.svg [

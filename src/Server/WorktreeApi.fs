@@ -38,6 +38,7 @@ let readOnlyApi
       createWorktree = fun _ -> async { return Error $"Create is not available in {modeName}" }
       openNewTab = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
 
@@ -163,30 +164,6 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
-let private readIgnoreBranchPatterns () : string list =
-    withConfigDocument [] (fun root ->
-        match root.TryGetProperty("ignoreBranchPatterns") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-            prop.EnumerateArray()
-            |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
-                else None)
-            |> Seq.toList
-        | _ -> [])
-
-let internal buildIgnorePredicate (patterns: string list) : string -> bool =
-    let regexes =
-        patterns
-        |> List.filter (not << System.String.IsNullOrWhiteSpace)
-        |> List.choose (fun pattern ->
-            try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
-            with :? ArgumentException ->
-                Log.log "Config" $"Invalid ignore branch pattern: '{pattern}'"
-                None)
-    match regexes with
-    | [] -> fun _ -> false
-    | _ -> fun branch -> regexes |> List.exists _.IsMatch(branch)
-
 let private writeCollapsedRepos (repos: RepoId list) =
     let configPath = globalConfigPath ()
     try
@@ -229,7 +206,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let ignoreBranch = readIgnoreBranchPatterns () |> buildIgnorePredicate
+        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
 
         let repos =
             state.Repos
@@ -242,7 +219,7 @@ let getWorktrees
 
                 let statuses =
                     repo.WorktreeList
-                    |> List.filter (fun wt -> wt.Branch |> Option.exists ignoreBranch |> not)
+                    |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
                         assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
@@ -253,7 +230,8 @@ let getWorktrees
                   RootFolderName = Path.GetFileName(originalPath)
                   Worktrees = statuses
                   IsReady = repo.IsReady
-                  Provider = repo.Provider })
+                  Provider = repo.Provider
+                  BaseBranch = repo.BaseBranch })
 
         return
             { Repos = repos
@@ -425,7 +403,7 @@ let worktreeApi
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
                   let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
                   let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote prStatus ct, ct)
+                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath
@@ -529,7 +507,7 @@ let worktreeApi
                       |> Option.map (fun repo ->
                           repo.WorktreeList
                           |> List.choose _.Branch
-                          |> List.sortBy GitWorktree.branchSortKey)
+                          |> List.sortBy (GitWorktree.branchSortKey repo.BaseBranch))
                       |> Option.defaultValue []
               }
           createWorktree = fun req ->
@@ -572,6 +550,7 @@ let worktreeApi
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })
+          reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->

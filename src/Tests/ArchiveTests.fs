@@ -236,7 +236,8 @@ type NavigationArchiveTests() =
           ArchivedWorktrees = archivedWorktrees
           IsReady = true
           IsCollapsed = false
-          Provider = None }
+          Provider = None
+          BaseBranch = "main" }
 
     let makeWorktreeStatus branch isArchived : WorktreeStatus =
         { Path = WorktreePath $"/repo/{branch}"
@@ -357,7 +358,7 @@ type ArchiveE2ETests() =
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[]}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[]}}"""
 
     let emptySyncStatus = "{}"
 

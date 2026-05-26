@@ -24,7 +24,7 @@
         .header-right { display: flex; align-items: center; gap: 12px; }
         .app-header .eye-logo { width: 40px; height: 25px; margin-top: 0; }
         .eye-logo { display: block; opacity: 0.7; }
-        .eye-closed { opacity: 0.4; }
+        .eye-closed { }
         .eye-iris { transition: transform 0.3s ease; }
         .deploy-branch {
             background: #3a2e20; color: #f9e2af; font-size: 0.78em; font-weight: 600;
@@ -71,6 +71,10 @@
         .beads-inline { display: flex; gap: 4px; align-items: center; color: #a6adc8; }
 
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+        .header-info { display: flex; flex: 1 1 auto; min-width: 0; overflow: hidden; align-items: center; gap: 8px; }
+        .header-info .branch-name { flex: 1 1 auto; min-width: 100px; }
+        .fit-or-hide { flex-shrink: 0; display: flex; align-items: center; gap: 4px; }
+        .fit-or-hide > span { flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
         .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
         .terminal-btn, .new-tab-btn, .editor-btn, .delete-btn, .resume-btn {

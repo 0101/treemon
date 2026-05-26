@@ -153,6 +153,187 @@ type ReadUpstreamRemoteTests() =
         Assert.That(result, Is.EqualTo(Some "origin.backup"))
 
 
+// ─── TreemonConfig: readBaseBranch ───
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReadBaseBranchTests() =
+
+    let mutable tempDir = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-test-{Guid.NewGuid()}")
+        Directory.CreateDirectory(tempDir) |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        if Directory.Exists(tempDir) then
+            Directory.Delete(tempDir, recursive = true)
+
+    [<Test>]
+    member _.``readBaseBranch returns main when file does not exist``() =
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main when file has no baseBranch field``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["a"] }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns configured value``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "dev" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("dev"))
+
+    [<Test>]
+    member _.``readBaseBranch returns develop branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "develop" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("develop"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main for empty string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main for whitespace-only string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "   " }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main for malformed JSON``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """not valid json""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main when baseBranch is not a string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": 42 }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch returns main when baseBranch is null``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": null }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects value with spaces``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "main; rm -rf /" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects value starting with double dash``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "--upload-pack=evil" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch accepts hyphenated branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "release-2.0" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("release-2.0"))
+
+    [<Test>]
+    member _.``readBaseBranch accepts branch with dots``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "release.2.0" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("release.2.0"))
+
+    [<Test>]
+    member _.``readBaseBranch coexists with other fields``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["old"], "baseBranch": "dev", "upstreamRemote": "upstream" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("dev"))
+
+        let remote = readUpstreamRemote tempDir
+        Assert.That(remote, Is.EqualTo(Some "upstream"), "Other fields should still be readable")
+
+    [<Test>]
+    member _.``readBaseBranch accepts slash-based branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "release/2026.05" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("release/2026.05"))
+
+    [<Test>]
+    member _.``readBaseBranch accepts nested slash branch name``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "feature/team/auth" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("feature/team/auth"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects --all flag injection``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "--all" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+    [<Test>]
+    member _.``readBaseBranch rejects single dash prefix``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "baseBranch": "-branch" }""")
+
+        let result = readBaseBranch tempDir
+        Assert.That(result, Is.EqualTo("main"))
+
+
 // ─── Git command construction: mainRef, fetch, merge targets ───
 
 [<TestFixture>]
@@ -162,15 +343,23 @@ type GitCommandConstructionTests() =
 
     [<Test>]
     member _.``mainRef with origin produces origin/main``() =
-        Assert.That(mainRef "origin", Is.EqualTo("origin/main"))
+        Assert.That(mainRef "origin" "main", Is.EqualTo("origin/main"))
 
     [<Test>]
     member _.``mainRef with upstream produces upstream/main``() =
-        Assert.That(mainRef "upstream", Is.EqualTo("upstream/main"))
+        Assert.That(mainRef "upstream" "main", Is.EqualTo("upstream/main"))
 
     [<Test>]
     member _.``mainRef with custom remote produces custom/main``() =
-        Assert.That(mainRef "my-fork", Is.EqualTo("my-fork/main"))
+        Assert.That(mainRef "my-fork" "main", Is.EqualTo("my-fork/main"))
+
+    [<Test>]
+    member _.``mainRef with custom baseBranch produces remote/baseBranch``() =
+        Assert.That(mainRef "origin" "dev", Is.EqualTo("origin/dev"))
+
+    [<Test>]
+    member _.``mainRef with upstream and develop produces upstream/develop``() =
+        Assert.That(mainRef "upstream" "develop", Is.EqualTo("upstream/develop"))
 
     [<Test>]
     member _.``SyncEngine buildFetchArgs with origin produces fetch origin``() =
@@ -199,6 +388,30 @@ type GitCommandConstructionTests() =
         let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\myproject" "upstream"
         Assert.That(args, Does.Contain("Q:\\code\\myproject"))
         Assert.That(args, Does.Contain("remote get-url upstream"))
+
+    [<Test>]
+    member _.``branchSortKey gives configured baseBranch priority 0``() =
+        Assert.That(branchSortKey "dev" "dev", Is.EqualTo((0, "dev")))
+
+    [<Test>]
+    member _.``branchSortKey gives main priority 0 when baseBranch is main``() =
+        Assert.That(branchSortKey "main" "main", Is.EqualTo((0, "main")))
+
+    [<Test>]
+    member _.``branchSortKey gives main priority 1 when baseBranch is not main``() =
+        Assert.That(branchSortKey "dev" "main", Is.EqualTo((1, "main")))
+
+    [<Test>]
+    member _.``branchSortKey gives master priority 1``() =
+        Assert.That(branchSortKey "dev" "master", Is.EqualTo((1, "master")))
+
+    [<Test>]
+    member _.``branchSortKey gives develop priority 2 when not baseBranch``() =
+        Assert.That(branchSortKey "main" "develop", Is.EqualTo((2, "develop")))
+
+    [<Test>]
+    member _.``branchSortKey gives feature branch priority 4``() =
+        Assert.That(branchSortKey "main" "feature/xyz", Is.EqualTo((4, "feature/xyz")))
 
 
 // ─── RefreshScheduler: PerRepoState defaults and UpdateUpstreamRemote ───
