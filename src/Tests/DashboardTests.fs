@@ -458,8 +458,8 @@ type DashboardTests() =
             let! text = mainBehindElements.First.TextContentAsync()
             Assert.That(
                 text,
-                Does.Contain("behind main").Or.EqualTo("up to date"),
-                "Main-behind indicator should show 'N behind main' or 'up to date'"
+                Does.Contain(" behind ").Or.EqualTo("up to date"),
+                "Main-behind indicator should show 'N behind {baseBranch}' or 'up to date'"
             )
         }
 
@@ -487,7 +487,7 @@ type DashboardTests() =
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with high MainBehindCount; behind-warning indicators should be present")
 
             let! text = behindWarning.First.TextContentAsync()
-            Assert.That(text, Does.Contain("behind main"))
+            Assert.That(text, Does.Contain(" behind "))
 
             let! color = behindWarning.First |> computedStyle "color"
             Assert.That(color, Is.EqualTo("rgb(243, 139, 168)"), "behind-warning should be red (#f38ba8)")
