@@ -1,6 +1,7 @@
 module CanvasPane
 
 open Shared
+open Navigation
 open Feliz
 open Browser
 
@@ -26,7 +27,70 @@ let private tabBar (docs: CanvasDoc list) (activeDoc: CanvasDoc) (selectDoc: str
         )
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) =
+let private latestDocModified (wt: WorktreeStatus) =
+    wt.CanvasDocs
+    |> List.map _.LastModified
+    |> List.sortDescending
+    |> List.tryHead
+
+let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) =
+    let entries =
+        repos
+        |> List.collect (fun repo ->
+            repo.Worktrees
+            |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
+            |> List.map (fun wt ->
+                let scopedKey = $"{RepoId.value repo.RepoId}/{wt.Branch}"
+                repo.Name, wt, scopedKey))
+
+    let sorted =
+        entries
+        |> List.sortByDescending (fun (_, wt, _) -> latestDocModified wt)
+
+    let grouped =
+        sorted
+        |> List.groupBy (fun (repoName, _, _) -> repoName)
+
+    Html.div [
+        prop.className "canvas-overview"
+        prop.children [
+            Html.div [
+                prop.className "canvas-overview-title"
+                prop.text "Canvas Docs"
+            ]
+            yield! grouped |> List.map (fun (repoName, worktrees) ->
+                Html.div [
+                    prop.className "canvas-overview-repo"
+                    prop.children [
+                        Html.div [
+                            prop.className "canvas-overview-repo-name"
+                            prop.text repoName
+                        ]
+                        yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
+                            Html.div [
+                                prop.className "canvas-overview-entry"
+                                prop.onClick (fun _ -> onClickEntry scopedKey)
+                                prop.children [
+                                    Html.span [
+                                        prop.className "canvas-overview-branch"
+                                        prop.text wt.Branch
+                                    ]
+                                    Html.span [
+                                        prop.className "canvas-overview-count"
+                                        prop.text (
+                                            if wt.CanvasDocs.Length = 1 then "1 doc"
+                                            else $"{wt.CanvasDocs.Length} docs")
+                                    ]
+                                ]
+                            ]
+                        )
+                    ]
+                ]
+            )
+        ]
+    ]
+
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -62,10 +126,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 ]
             ]
         | None ->
-            Html.div [
-                prop.className "canvas-empty"
-                prop.text "No canvas doc"
-            ]
+            overviewView allRepos onOverviewClick
 
     Html.div [
         prop.className (if isOpen then "canvas-pane open" else "canvas-pane")

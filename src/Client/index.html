@@ -503,6 +503,47 @@
         }
         .canvas-tab:hover { background: #45475a; border-color: #585b70; }
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
+        .canvas-overview {
+            padding: 16px;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .canvas-overview-title {
+            font-size: 0.9em;
+            color: #6c7086;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .canvas-overview-repo {
+            margin-bottom: 12px;
+        }
+        .canvas-overview-repo-name {
+            font-size: 0.8em;
+            color: #6c7086;
+            margin-bottom: 4px;
+            padding-left: 4px;
+        }
+        .canvas-overview-entry {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .canvas-overview-entry:hover {
+            background: #313244;
+        }
+        .canvas-overview-branch {
+            color: #cdd6f4;
+            font-size: 0.85em;
+        }
+        .canvas-overview-count {
+            color: #6c7086;
+            font-size: 0.75em;
+        }
 
     </style>
 </head>

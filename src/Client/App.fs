@@ -1718,8 +1718,12 @@ let view model dispatch =
         | Some (Card scopedKey) -> dispatch (SelectCanvasDoc (scopedKey, filename))
         | _ -> ()
 
+    let onOverviewClick scopedKey =
+        dispatch (SetFocus (Some (Card scopedKey)))
+        if not model.CanvasPaneOpen then dispatch ToggleCanvasPane
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) (SetCanvasPosition >> dispatch) selectCanvasDoc
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick
 
     let children =
         match model.CanvasPosition with
