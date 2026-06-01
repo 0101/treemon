@@ -149,6 +149,7 @@ Minimal `extension.mjs`:
 - **No heartbeat**: registration is one-shot; if the extension dies, `sendCanvasMessage` will fail and return an error — acceptable for MVP
 - **`ConcurrentDictionary` for bridge registry**: simple, no persistence needed (ephemeral by design), accessed from Remoting handler threads
 - **Extension provides no tools**: agents already have file-writing tools; the extension's only job is the bridge
+- **Extension SDK mismatch**: Spec mentions `@github/copilot-sdk/extension` with `joinSession()` but implementation uses a simpler `export default function activate(session)` pattern and depends on unused `@anthropic-ai/claude-code`. The Copilot CLI extensions dir (`~/.copilot/extensions/`) uses the `@github/copilot-sdk/extension` SDK (see `html-interact` extension as reference). The extension needs to be updated to use `joinSession` from the SDK, or the `activate(session)` pattern needs validation against the CLI's actual extension loading mechanism. The `@anthropic-ai/claude-code` dependency should be removed.
 
 ## Key Files
 
