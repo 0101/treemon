@@ -113,8 +113,11 @@ type CanvasPaneTests() =
         task {
             do! focusFirstCard this.Page
 
-            let db = dashboard this.Page
-            do! db.PressAsync("c")
+            // Use page.Keyboard (not locator.PressAsync) to avoid Playwright's
+            // locator-level focus/actionability checks which can interfere with
+            // React synthetic event dispatch. focusFirstCard already ensures the
+            // dashboard div has focus.
+            do! this.Page.Keyboard.PressAsync("c")
 
             let paneOpen = canvasPaneOpen this.Page
             do! paneOpen.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
