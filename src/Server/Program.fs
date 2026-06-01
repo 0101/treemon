@@ -159,6 +159,7 @@ module CanvasDocServer =
         if lastSlash < 1 then
             ctx.Response.StatusCode <- 400
             do! ctx.Response.WriteAsync("Invalid path format")
+            Log.log "Canvas" $"Doc request 400: invalid path format — {catchAll}"
         else
             let worktreePathEncoded = catchAll.Substring(0, lastSlash)
             let filename = catchAll.Substring(lastSlash + 1)
@@ -169,9 +170,11 @@ module CanvasDocServer =
             if not (filename.EndsWith(".html")) then
                 ctx.Response.StatusCode <- 400
                 do! ctx.Response.WriteAsync("Only .html files are served")
+                Log.log "Canvas" $"Doc request 400: non-html file — {filename}"
             elif not isKnown then
                 ctx.Response.StatusCode <- 404
                 do! ctx.Response.WriteAsync("Unknown worktree")
+                Log.log "Canvas" $"Doc request 404: unknown worktree — {worktreePath}"
             else
                 let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
                 let resolvedPath = Path.GetFullPath(Path.Combine(canvasDir, filename))
@@ -180,14 +183,17 @@ module CanvasDocServer =
                 if not (resolvedPath.StartsWith(canonicalCanvasDir, System.StringComparison.OrdinalIgnoreCase)) then
                     ctx.Response.StatusCode <- 400
                     do! ctx.Response.WriteAsync("Path traversal rejected")
+                    Log.log "Canvas" $"Doc request 400: path traversal — {filename}"
                 elif not (File.Exists resolvedPath) then
                     ctx.Response.StatusCode <- 404
                     do! ctx.Response.WriteAsync("File not found")
+                    Log.log "Canvas" $"Doc request 404: file not found — {resolvedPath}"
                 else
                     let! content = File.ReadAllBytesAsync(resolvedPath)
                     ctx.Response.ContentType <- "text/html"
                     ctx.Response.Headers["Cache-Control"] <- "no-cache"
                     do! ctx.Response.Body.WriteAsync(content)
+                    Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
     }
 
     let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (cts: CancellationToken) =

@@ -2,6 +2,7 @@ module Server.CanvasBridge
 
 open System
 open System.Collections.Concurrent
+open System.IO
 open System.Net.Http
 open System.Text
 open FsToolkit.ErrorHandling
@@ -38,4 +39,6 @@ let sendMessage (request: CanvasMessageRequest) =
         if not response.IsSuccessStatusCode then
             let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
             return! Error $"bridge returned {int response.StatusCode}: {body}"
+        else
+            Log.log "CanvasBridge" $"Message forwarded to {Path.GetFileName(key)}"
     }

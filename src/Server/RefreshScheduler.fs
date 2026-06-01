@@ -33,15 +33,17 @@ module CanvasScanner =
 
     let tryCreateWatcher (post: CanvasDoc list -> unit) (worktreePath: string) : FileSystemWatcher option =
         let dir = canvasDir worktreePath
+        let branch = Path.GetFileName(worktreePath)
         if Directory.Exists(dir) then
             let watcher = new FileSystemWatcher(dir, "*.html")
-            let handler _ =
+            let handleEvent (eventType: string) (e: FileSystemEventArgs) =
+                Log.log "CanvasWatcher" $"{eventType}: {e.Name} in {branch}"
                 try scan worktreePath |> post
                 with _ -> ()
-            watcher.Changed.Add(handler)
-            watcher.Created.Add(handler)
-            watcher.Deleted.Add(handler)
-            watcher.Renamed.Add(handler)
+            watcher.Changed.Add(handleEvent "Changed")
+            watcher.Created.Add(handleEvent "Created")
+            watcher.Deleted.Add(handleEvent "Deleted")
+            watcher.Renamed.Add(handleEvent "Renamed")
             watcher.EnableRaisingEvents <- true
             Some watcher
         else
@@ -183,6 +185,26 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | UpdateCanvasDoc(repoId, path, canvasDocs) ->
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
+            let branch = Path.GetFileName(path)
+            let previous = repo.CanvasData |> Map.tryFind path |> Option.defaultValue []
+            let prevNames = previous |> List.map _.Filename |> Set.ofList
+            let currNames = canvasDocs |> List.map _.Filename |> Set.ofList
+            let added = Set.difference currNames prevNames
+            let removed = Set.difference prevNames currNames
+            let changed =
+                canvasDocs
+                |> List.filter (fun doc ->
+                    previous |> List.exists (fun prev -> prev.Filename = doc.Filename && prev.ContentHash <> doc.ContentHash))
+                |> List.map _.Filename
+            if not (Set.isEmpty added) then
+                let names = added |> String.concat ", "
+                Log.log "CanvasScanner" $"Added in {branch}: {names}"
+            if not (Set.isEmpty removed) then
+                let names = removed |> String.concat ", "
+                Log.log "CanvasScanner" $"Removed from {branch}: {names}"
+            if not (List.isEmpty changed) then
+                let names = changed |> String.concat ", "
+                Log.log "CanvasScanner" $"Changed in {branch}: {names}"
             updateRepo repoId { repo with CanvasData = repo.CanvasData |> Map.add path canvasDocs } state
         else
             state
@@ -422,6 +444,12 @@ let private executeTask
             agent.Post(UpdateGit(repoId, path, gitData))
 
             let canvasDocs = CanvasScanner.scan path
+            let branch = Path.GetFileName(path)
+            match canvasDocs with
+            | [] -> ()
+            | docs ->
+                let names = docs |> List.map _.Filename |> String.concat ", "
+                Log.log "CanvasScanner" $"Found {docs.Length} doc(s) in {branch}: {names}"
             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
 
         | RefreshBeads(repoId, path) ->
