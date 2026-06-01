@@ -9,7 +9,7 @@ let [<Literal>] private MaxPayloadBytes = 64_000
 
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
-    $"{CanvasOrigin}/{encodedPath}/{doc.Filename}"
+    $"{CanvasOrigin}/{encodedPath}/{doc.Filename}?v={doc.ContentHash}"
 
 let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (setPosition: CanvasPosition -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =

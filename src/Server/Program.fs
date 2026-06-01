@@ -186,6 +186,7 @@ module CanvasDocServer =
                 else
                     let! content = File.ReadAllBytesAsync(resolvedPath)
                     ctx.Response.ContentType <- "text/html"
+                    ctx.Response.Headers["Cache-Control"] <- "no-cache"
                     do! ctx.Response.Body.WriteAsync(content)
     }
 
