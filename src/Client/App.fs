@@ -33,7 +33,8 @@ type Model =
       LastActivityTime: float
       ActivityLevel: ActivityLevel
       CanvasPaneOpen: bool
-      CanvasPosition: CanvasPosition }
+      CanvasPosition: CanvasPosition
+      ActiveCanvasDoc: Map<string, string> }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -69,6 +70,7 @@ type Msg =
     | UserActivity of now: float
     | ToggleCanvasPane
     | SetCanvasPosition of CanvasPosition
+    | SelectCanvasDoc of scopedKey: string * filename: string
     | CanvasMessageReceived of payload: string
     | CanvasMessageResult of Result<unit, string>
     | NoOp
@@ -113,7 +115,8 @@ let init () =
       LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
       ActivityLevel = ActivityLevel.Active
       CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right },
+      CanvasPosition = CanvasPosition.Right
+      ActiveCanvasDoc = Map.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
 
 let rng = System.Random()
@@ -502,6 +505,10 @@ let update msg model =
     | SetCanvasPosition position ->
         { model with CanvasPosition = position },
         Cmd.OfAsync.attempt worktreeApi.saveCanvasPosition position (fun _ -> NoOp)
+
+    | SelectCanvasDoc (scopedKey, filename) ->
+        { model with ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename },
+        Cmd.none
 
     | CanvasMessageReceived payload ->
         match model.FocusedElement with
@@ -1551,7 +1558,13 @@ let focusedWorktreeCanvasDoc (model: Model) =
     | Some (Card scopedKey) ->
         findWorktree scopedKey model
         |> Option.bind (fun wt ->
-            wt.CanvasDocs |> List.tryHead |> Option.map (fun doc -> wt, doc))
+            let activeFilename = model.ActiveCanvasDoc |> Map.tryFind scopedKey
+            let doc =
+                match activeFilename with
+                | Some name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name)
+                | None -> None
+                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
+            doc |> Option.map (fun d -> wt, d))
     | _ -> None
 
 let viewMetricBar (pct: float) (label: string) =
@@ -1700,8 +1713,13 @@ let view model dispatch =
             ]
         ]
 
+    let selectCanvasDoc filename =
+        match model.FocusedElement with
+        | Some (Card scopedKey) -> dispatch (SelectCanvasDoc (scopedKey, filename))
+        | _ -> ()
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) (SetCanvasPosition >> dispatch)
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) (SetCanvasPosition >> dispatch) selectCanvasDoc
 
     let children =
         match model.CanvasPosition with

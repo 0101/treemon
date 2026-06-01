@@ -486,6 +486,23 @@
             color: #6c7086;
             font-size: 0.9em;
         }
+        .canvas-tab-bar {
+            display: flex;
+            gap: 2px;
+            padding: 4px 8px;
+            background: #181825;
+            border-bottom: 1px solid #313244;
+            flex-shrink: 0;
+            overflow-x: auto;
+        }
+        .canvas-tab {
+            background: #313244; border: 1px solid #45475a; border-radius: 4px;
+            padding: 2px 10px; font-size: 0.8em; cursor: pointer; color: #bac2de;
+            font-family: inherit; transition: background 0.15s, border-color 0.15s;
+            line-height: 1.4; white-space: nowrap;
+        }
+        .canvas-tab:hover { background: #45475a; border-color: #585b70; }
+        .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
 
     </style>
 </head>

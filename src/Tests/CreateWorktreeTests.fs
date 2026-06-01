@@ -34,7 +34,8 @@ let private defaultModel : Model =
       LastActivityTime = 0.0
       ActivityLevel = ActivityLevel.Active
       CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right }
+      CanvasPosition = CanvasPosition.Right
+      ActiveCanvasDoc = Map.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the

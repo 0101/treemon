@@ -11,7 +11,22 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     $"{CanvasOrigin}/{encodedPath}/{doc.Filename}?v={doc.ContentHash}"
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (setPosition: CanvasPosition -> unit) =
+let private tabBar (docs: CanvasDoc list) (activeDoc: CanvasDoc) (selectDoc: string -> unit) =
+    Html.div [
+        prop.className "canvas-tab-bar"
+        prop.children (
+            docs |> List.map (fun doc ->
+                Html.button [
+                    prop.className (if doc.Filename = activeDoc.Filename then "canvas-tab active" else "canvas-tab")
+                    prop.onClick (fun _ -> selectDoc doc.Filename)
+                    prop.title doc.Filename
+                    prop.text (doc.Filename.Replace(".html", ""))
+                ]
+            )
+        )
+    ]
+
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -34,10 +49,17 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
-            Html.iframe [
-                prop.className "canvas-iframe"
-                prop.src (iframeSrc wt doc)
-                prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms")
+            let tabs =
+                if wt.CanvasDocs.Length > 1
+                then [ tabBar wt.CanvasDocs doc selectDoc ]
+                else []
+            React.fragment [
+                yield! tabs
+                Html.iframe [
+                    prop.className "canvas-iframe"
+                    prop.src (iframeSrc wt doc)
+                    prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms")
+                ]
             ]
         | None ->
             Html.div [
