@@ -43,6 +43,9 @@ let readOnlyApi
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return Error "not implemented" } }
 
+let private sendCanvasMessageImpl (request: CanvasMessageRequest) =
+    CanvasBridge.sendMessage request
+
 let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
@@ -564,4 +567,4 @@ let worktreeApi
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
-          sendCanvasMessage = fun _ -> async { return Error "not implemented" } }
+          sendCanvasMessage = sendCanvasMessageImpl }

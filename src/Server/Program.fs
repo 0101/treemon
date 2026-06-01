@@ -1,4 +1,5 @@
 open Saturn
+open Giraffe
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Builder
@@ -120,6 +121,19 @@ let private buildRemotingHandler (api: IWorktreeApi) =
         Propagate ex.Message)
     |> Remoting.buildHttpHandler
 
+[<CLIMutable>]
+type CanvasRegisterRequest =
+    { worktreePath: string
+      injectUrl: string }
+
+let private canvasRegisterHandler : HttpHandler =
+    fun next ctx -> task {
+        let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
+        CanvasBridge.register body.worktreePath body.injectUrl
+        Log.log "Canvas" $"Bridge registered: {body.worktreePath} -> {body.injectUrl}"
+        return! Successful.OK "registered" next ctx
+    }
+
 module CanvasDocServer =
     open Microsoft.AspNetCore.Hosting
     open Microsoft.Extensions.DependencyInjection
@@ -239,9 +253,15 @@ let main args =
 
     schedulerAgent |> Option.iter (fun agent -> CanvasDocServer.start agent cts.Token)
 
+    let combinedRouter =
+        choose [
+            route "/api/canvas/register" >=> POST >=> canvasRegisterHandler
+            remotingApi
+        ]
+
     let app =
         application {
-            use_router remotingApi
+            use_router combinedRouter
             url serverUrl
             use_static "wwwroot"
             use_gzip
