@@ -3,9 +3,48 @@ module Server.RefreshScheduler
 open System
 open System.Diagnostics
 open System.IO
+open System.Security.Cryptography
 open System.Threading
 open Shared
 open Shared.EventUtils
+
+module CanvasScanner =
+    let private canvasDir path = Path.Combine(path, ".agents", "canvas")
+
+    let private hashFile (filePath: string) =
+        use stream = File.OpenRead(filePath)
+        use sha = SHA256.Create()
+        sha.ComputeHash(stream)
+        |> Array.map (fun b -> b.ToString("x2"))
+        |> String.Concat
+
+    let scan (worktreePath: string) : CanvasDoc option =
+        let dir = canvasDir worktreePath
+        if Directory.Exists(dir) then
+            Directory.GetFiles(dir, "*.html")
+            |> Array.sort
+            |> Array.tryHead
+            |> Option.map (fun filePath ->
+                { Filename = Path.GetFileName(filePath)
+                  ContentHash = hashFile filePath })
+        else
+            None
+
+    let tryCreateWatcher (post: CanvasDoc option -> unit) (worktreePath: string) : FileSystemWatcher option =
+        let dir = canvasDir worktreePath
+        if Directory.Exists(dir) then
+            let watcher = new FileSystemWatcher(dir, "*.html")
+            let handler _ =
+                try scan worktreePath |> post
+                with _ -> ()
+            watcher.Changed.Add(handler)
+            watcher.Created.Add(handler)
+            watcher.Deleted.Add(handler)
+            watcher.Renamed.Add(handler)
+            watcher.EnableRaisingEvents <- true
+            Some watcher
+        else
+            None
 
 type PerRepoState =
     { WorktreeList: GitWorktree.WorktreeInfo list
@@ -14,6 +53,7 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
+      CanvasData: Map<string, CanvasDoc option>
       Provider: RepoProvider option
       UpstreamRemote: string
       BaseBranch: string
@@ -27,6 +67,7 @@ module PerRepoState =
           BeadsData = Map.empty
           CodingToolData = Map.empty
           PrData = Map.empty
+          CanvasData = Map.empty
           Provider = None
           UpstreamRemote = "origin"
           BaseBranch = "main"
@@ -56,6 +97,7 @@ type StateMsg =
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
     | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
+    | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc option
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
     | UpdateUpstreamRemote of repoId: RepoId * remote: string
@@ -94,7 +136,8 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         WorktreeList = repo.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
-        CodingToolData = repo.CodingToolData |> Map.remove path }
+        CodingToolData = repo.CodingToolData |> Map.remove path
+        CanvasData = repo.CanvasData |> Map.remove path }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -133,6 +176,13 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
             updateRepo repoId { repo with CodingToolData = repo.CodingToolData |> Map.add path data } state
+        else
+            state
+
+    | UpdateCanvasDoc(repoId, path, canvasDoc) ->
+        let repo = getRepo repoId state
+        if Set.contains path repo.KnownPaths then
+            updateRepo repoId { repo with CanvasData = repo.CanvasData |> Map.add path canvasDoc } state
         else
             state
 
@@ -370,6 +420,9 @@ let private executeTask
             let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
 
+            let canvasDoc = CanvasScanner.scan path
+            agent.Post(UpdateCanvasDoc(repoId, path, canvasDoc))
+
         | RefreshBeads(repoId, path) ->
             let! beads = BeadsStatus.getBeadsSummary path
             agent.Post(UpdateBeads(repoId, path, beads))
@@ -520,6 +573,55 @@ let buildRootPaths (worktreeRoots: string list) =
     |> List.map (fun root -> PathUtils.toRepoId root, root)
     |> Map.ofList
 
+module CanvasWatchers =
+    let reconcile
+        (agent: MailboxProcessor<StateMsg>)
+        (repos: Map<RepoId, PerRepoState>)
+        (current: Map<string, FileSystemWatcher>)
+        : Map<string, FileSystemWatcher> =
+        let allPaths =
+            repos
+            |> Map.toSeq
+            |> Seq.collect (fun (_, repo) -> repo.KnownPaths)
+            |> Set.ofSeq
+
+        let removed =
+            current
+            |> Map.filter (fun path _ -> not (Set.contains path allPaths))
+
+        removed |> Map.iter (fun path watcher ->
+            try watcher.Dispose()
+            with _ -> ()
+            Log.log "CanvasWatcher" $"Disposed watcher for {Path.GetFileName(path)}")
+
+        let surviving = current |> Map.filter (fun path _ -> Set.contains path allPaths)
+
+        let repoIdByPath =
+            repos
+            |> Map.toSeq
+            |> Seq.collect (fun (repoId, repo) -> repo.KnownPaths |> Seq.map (fun p -> p, repoId))
+            |> Map.ofSeq
+
+        let newPaths = Set.difference allPaths (current |> Map.keys |> Set.ofSeq)
+
+        let added =
+            newPaths
+            |> Set.toList
+            |> List.choose (fun path ->
+                let repoId = repoIdByPath |> Map.find path
+                let post canvasDoc = agent.Post(UpdateCanvasDoc(repoId, path, canvasDoc))
+                CanvasScanner.tryCreateWatcher post path
+                |> Option.map (fun watcher ->
+                    Log.log "CanvasWatcher" $"Created watcher for {Path.GetFileName(path)}"
+                    path, watcher))
+            |> Map.ofList
+
+        Map.fold (fun acc k v -> Map.add k v acc) surviving added
+
+    let disposeAll (watchers: Map<string, FileSystemWatcher>) =
+        watchers |> Map.iter (fun _ watcher ->
+            try watcher.Dispose() with _ -> ())
+
 let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
     let rootPaths = buildRootPaths worktreeRoots
 
@@ -531,13 +633,15 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
     |> Map.iter (fun repoId _ ->
         agent.Post(UpdateWorktreeList(repoId, [])))
 
-    let rec loop (lastRuns: Map<RefreshTask, DateTimeOffset>) =
+    let rec loop (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
         async {
             let! state = agent.PostAndAsyncReply(GetState)
 
             let repos =
                 if Map.isEmpty state.Repos then initialRepos
                 else state.Repos
+
+            let watchers = CanvasWatchers.reconcile agent repos watchers
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
@@ -566,17 +670,22 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 | _ -> ()
 
                 let updatedRuns = lastRuns |> Map.add task now
-                return! loop updatedRuns
+                return! loop updatedRuns watchers
             | None ->
                 let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
-                return! loop lastRuns
+                return! loop lastRuns watchers
         }
 
     let startup =
         async {
             let! lastRuns = runInitialBurst agent rootPaths
-            return! loop lastRuns
+            let! state = agent.PostAndAsyncReply(GetState)
+            let watchers = CanvasWatchers.reconcile agent state.Repos Map.empty
+            try
+                return! loop lastRuns watchers
+            finally
+                CanvasWatchers.disposeAll watchers
         }
 
     Async.Start(startup, ct)

@@ -83,7 +83,7 @@ let private assembleFromState
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
         |> Option.defaultValue false
-      CanvasDoc = None }
+      CanvasDoc = repo.CanvasData |> Map.tryFind wt.Path |> Option.flatten }
 
 type WorktreeContext =
     { Worktree: GitWorktree.WorktreeInfo
