@@ -29,7 +29,7 @@ let sendMessage (request: CanvasMessageRequest) =
             | true, url -> Ok url
             | false, _ -> Error "no bridge registered for this worktree"
 
-        let content = new StringContent(request.Payload, Encoding.UTF8, "application/json")
+        use content = new StringContent(request.Payload, Encoding.UTF8, "application/json")
 
         let! response =
             httpClient.PostAsync(injectUrl, content) |> Async.AwaitTask

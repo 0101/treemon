@@ -186,24 +186,26 @@ let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     | None -> ()
     | Some _ ->
         Dom.window?requestAnimationFrame(fun (_: float) ->
-            Dom.document.querySelector ".focused"
-            |> Option.ofObj
-            |> Option.iter (fun el ->
+            let dashboardEl = Dom.document.querySelector ".dashboard"
+            match Dom.document.querySelector ".focused", Option.ofObj dashboardEl with
+            | null, _ | _, None -> ()
+            | el, Some container ->
                 let rect = el?getBoundingClientRect()
+                let containerRect = container?getBoundingClientRect()
                 let rectTop: float = rect?top
                 let rectBottom: float = rect?bottom
-                let viewH: float = Dom.window?innerHeight
-                let scrollY: float = Dom.window?scrollY
-                let elTop = rectTop + scrollY
-                let elBottom = rectBottom + scrollY
-                let docHeight: float = Dom.document.documentElement?scrollHeight
-                let scrollTo top = Dom.window?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
+                let containerTop: float = containerRect?top
+                let containerBottom: float = containerRect?bottom
+                let scrollTop: float = container?scrollTop
+                let containerHeight: float = container?clientHeight
+                let scrollHeight: float = container?scrollHeight
+                let scrollTo top = container?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
                 match hint with
                 | ScrollToTop -> scrollTo 0
-                | ScrollToBottom -> scrollTo docHeight
-                | Normal when rectTop < headerOffset -> scrollTo (elTop - headerOffset)
-                | Normal when rectBottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
-                | _ -> ()))
+                | ScrollToBottom -> scrollTo scrollHeight
+                | Normal when rectTop < containerTop + headerOffset -> scrollTo (scrollTop + rectTop - containerTop - headerOffset)
+                | Normal when rectBottom > containerBottom - scrollPadding -> scrollTo (scrollTop + rectBottom - containerBottom + scrollPadding)
+                | _ -> ())
 
 let navigateToFirst (repos: RepoModel list) =
     let targets = visibleFocusTargets repos

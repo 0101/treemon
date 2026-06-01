@@ -15,7 +15,7 @@ module CanvasScanner =
         use stream = File.OpenRead(filePath)
         use sha = SHA256.Create()
         sha.ComputeHash(stream)
-        |> Array.map (fun b -> b.ToString("x2"))
+        |> Array.map _.ToString("x2")
         |> String.Concat
 
     let scan (worktreePath: string) : CanvasDoc list =

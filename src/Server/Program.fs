@@ -163,7 +163,7 @@ module CanvasDocServer =
         else
             let worktreePathEncoded = catchAll.Substring(0, lastSlash)
             let filename = catchAll.Substring(lastSlash + 1)
-            let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded
+            let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded |> Server.PathUtils.normalizePath
 
             let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
 

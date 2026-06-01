@@ -71,6 +71,7 @@ type Msg =
     | ToggleCanvasPane
     | SetCanvasPosition of CanvasPosition
     | SelectCanvasDoc of scopedKey: string * filename: string
+    | FocusOverviewCard of scopedKey: string
     | CanvasMessageReceived of payload: string
     | CanvasMessageResult of Result<unit, string>
     | NoOp
@@ -509,6 +510,12 @@ let update msg model =
     | SelectCanvasDoc (scopedKey, filename) ->
         { model with ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename },
         Cmd.none
+
+    | FocusOverviewCard scopedKey ->
+        let openPane = not model.CanvasPaneOpen
+        { model with FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
+        if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
+        else Cmd.none
 
     | CanvasMessageReceived payload ->
         match model.FocusedElement with
@@ -1719,8 +1726,7 @@ let view model dispatch =
         | _ -> ()
 
     let onOverviewClick scopedKey =
-        dispatch (SetFocus (Some (Card scopedKey)))
-        if not model.CanvasPaneOpen then dispatch ToggleCanvasPane
+        dispatch (FocusOverviewCard scopedKey)
 
     let canvasEl =
         CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick

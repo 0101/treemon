@@ -10,7 +10,8 @@ let [<Literal>] private MaxPayloadBytes = 64_000
 
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
-    $"{CanvasOrigin}/{encodedPath}/{doc.Filename}?v={doc.ContentHash}"
+    let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
+    $"{CanvasOrigin}/{encodedPath}/{encodedFilename}?v={doc.ContentHash}"
 
 let private tabBar (docs: CanvasDoc list) (activeDoc: CanvasDoc) (selectDoc: string -> unit) =
     Html.div [
