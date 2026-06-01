@@ -56,7 +56,7 @@ These are **intentional cuts** vs the full spec — each has a planned later pha
 
 ### Interaction (postMessage → Extension Bridge)
 
-- The agent-authored HTML calls `window.parent.postMessage({ action, ... }, "http://127.0.0.1:5000")`
+- The agent-authored HTML calls `window.parent.postMessage({ action, ... }, '*')` — using `'*'` as target origin is safe because the listener validates the **source** origin. Hardcoding the parent origin (e.g., `http://127.0.0.1:5000`) breaks when the dashboard is accessed via `localhost` or installed as a PWA.
 - The Elmish client has a `window` `message` subscription:
   - Validates `event.origin === "http://127.0.0.1:5002"` (canvas origin)
   - Dispatches `CanvasMessageReceived` Msg
@@ -138,9 +138,11 @@ Subscription: `window` `message` event listener that validates origin and dispat
 ### Extension (`src/Extension/`)
 
 Minimal `extension.mjs`:
-- `joinSession({ tools: [], hooks: { onSessionStart } })`
-- `onSessionStart`: POST to `http://127.0.0.1:5000/api/canvas/register` with `{ worktreePath: cwd, injectUrl }`
-- HTTP server on ephemeral port exposing `POST /inject` → `session.send()`
+- Top-level `await joinSession({})` from `@github/copilot-sdk/extension`
+- Start inject HTTP server on ephemeral port: `POST /inject` → `session.send({ prompt: "[canvas] <json>" })`
+- Register with Treemon: POST to `http://127.0.0.1:{TREEMON_PORT}/api/canvas/register` with `{ worktreePath: cwd, injectUrl }`
+- Port configurable via `TREEMON_PORT` env var (default 5000)
+- Installed to `~/.copilot/extensions/canvas-bridge/` by `treemon.ps1 deploy`
 
 ## Decisions
 
@@ -149,7 +151,7 @@ Minimal `extension.mjs`:
 - **No heartbeat**: registration is one-shot; if the extension dies, `sendCanvasMessage` will fail and return an error — acceptable for MVP
 - **`ConcurrentDictionary` for bridge registry**: simple, no persistence needed (ephemeral by design), accessed from Remoting handler threads
 - **Extension provides no tools**: agents already have file-writing tools; the extension's only job is the bridge
-- **Extension SDK mismatch**: Spec mentions `@github/copilot-sdk/extension` with `joinSession()` but implementation uses a simpler `export default function activate(session)` pattern and depends on unused `@anthropic-ai/claude-code`. The Copilot CLI extensions dir (`~/.copilot/extensions/`) uses the `@github/copilot-sdk/extension` SDK (see `html-interact` extension as reference). The extension needs to be updated to use `joinSession` from the SDK, or the `activate(session)` pattern needs validation against the CLI's actual extension loading mechanism. The `@anthropic-ai/claude-code` dependency should be removed.
+- **Extension SDK mismatch (RESOLVED)**: Extension now uses `joinSession()` from `@github/copilot-sdk/extension` (matching `html-interact` pattern). Installed to `~/.copilot/extensions/canvas-bridge/` via `treemon.ps1 deploy`.
 
 ## Key Files
 
@@ -160,8 +162,11 @@ Minimal `extension.mjs`:
 | `src/Server/Program.fs` | Second Kestrel on `:5002`, bridge registration route, canvas serving route |
 | `src/Server/WorktreeApi.fs` | `sendCanvasMessage` implementation |
 | `src/Client/App.fs` | `CanvasPaneOpen`, `ToggleCanvasPane`, `CanvasMessageReceived`, pane view, postMessage subscription |
-| `src/Client/styles.css` | Canvas pane styles |
-| `src/Extension/extension.mjs` | Minimal bridge extension (new file) |
+| `src/Client/CanvasPane.fs` | Canvas pane view, iframe src, postMessage listener (extracted module) |
+| `src/Server/CanvasBridge.fs` | Bridge registration (`ConcurrentDictionary`), message forwarding |
+| `src/Extension/extension.mjs` | Bridge extension — `joinSession`, inject server, Treemon registration |
+| `src/Tests/CanvasPaneTests.fs` | Playwright E2E tests for canvas pane |
+| `treemon.ps1` | `Install-Extension` in deploy pipeline |
 
 ## Related Specs
 

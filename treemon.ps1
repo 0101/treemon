@@ -453,6 +453,15 @@ function Install-Skill {
     }
 }
 
+function Install-Extension {
+    $src = Join-Path $PSScriptRoot "src" "Extension"
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "canvas-bridge"
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
+    Copy-Item (Join-Path $src "package.json") $dest -Force
+    Write-Host "Canvas bridge extension installed to $dest" -ForegroundColor Green
+}
+
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
     Build-Frontend
@@ -460,6 +469,7 @@ function Deploy-Frontend {
 
     try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
+    try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
 
     $runningPid = Get-RunningPid
     if ($runningPid) {
