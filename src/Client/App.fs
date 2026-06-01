@@ -233,6 +233,7 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
                 CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
@@ -494,7 +495,9 @@ let update msg model =
                 | None -> model, Cmd.none
 
     | ToggleCanvasPane ->
-        { model with CanvasPaneOpen = not model.CanvasPaneOpen }, Cmd.none
+        let newState = not model.CanvasPaneOpen
+        { model with CanvasPaneOpen = newState },
+        Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen newState (fun _ -> NoOp)
 
     | SetCanvasPosition position ->
         { model with CanvasPosition = position },

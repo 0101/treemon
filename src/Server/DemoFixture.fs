@@ -353,6 +353,7 @@ let private baseDashboard: DashboardResponse =
       SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code"
       CollapsedRepos = Set.empty
+      CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right }
 
 let private baseFixture: FixtureData =

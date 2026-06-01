@@ -40,6 +40,7 @@ let readOnlyApi
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
+      saveCanvasPaneOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return Error "not implemented" } }
@@ -190,6 +191,32 @@ let private writeCollapsedRepos (repos: RepoId list) =
     with ex ->
         Log.log "Config" $"Failed to save collapsed repos: {ex.Message}"
 
+let private readCanvasPaneOpen () : bool =
+    withConfigDocument false (fun root ->
+        match root.TryGetProperty("canvasPaneOpen") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.True -> true
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.False -> false
+        | _ -> false)
+
+let private writeCanvasPaneOpen (isOpen: bool) =
+    let configPath = globalConfigPath ()
+    try
+        let dir = Path.GetDirectoryName(configPath)
+        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+
+        let root =
+            if File.Exists(configPath) then
+                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
+                with _ -> System.Text.Json.Nodes.JsonObject()
+            else System.Text.Json.Nodes.JsonObject()
+
+        root["canvasPaneOpen"] <- System.Text.Json.Nodes.JsonValue.Create(isOpen)
+
+        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
+        File.WriteAllText(configPath, root.ToJsonString(options))
+    with ex ->
+        Log.log "Config" $"Failed to save canvas pane open state: {ex.Message}"
+
 let private readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->
         match root.TryGetProperty("canvasPosition") with
@@ -285,6 +312,7 @@ let getWorktrees
               SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd
               CollapsedRepos = readCollapsedRepos ()
+              CanvasPaneOpen = readCanvasPaneOpen ()
               CanvasPosition = readCanvasPosition () }
     }
 
@@ -419,7 +447,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPosition = readCanvasPosition () } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = readCanvasPaneOpen (); CanvasPosition = readCanvasPosition () } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -596,6 +624,7 @@ let worktreeApi
                   })
           reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
+          saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
           saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->

@@ -186,6 +186,7 @@ type DashboardResponse =
       SystemMetrics: SystemMetrics option
       EditorName: string
       CollapsedRepos: Set<RepoId>
+      CanvasPaneOpen: bool
       CanvasPosition: CanvasPosition }
 
 type FixtureData =
@@ -211,6 +212,7 @@ type IWorktreeApi =
       launchAction: ActionRequest -> Async<Result<unit, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
+      saveCanvasPaneOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>> }
