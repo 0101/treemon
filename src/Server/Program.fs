@@ -139,15 +139,19 @@ module CanvasDocServer =
     open Microsoft.Extensions.DependencyInjection
     let private canvasPort = 5002
 
-    let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) =
-        let state = agent.PostAndReply RefreshScheduler.GetState
-        state.Repos
-        |> Map.values
-        |> Seq.collect _.KnownPaths
-        |> Set.ofSeq
+    let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
+        let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
+        return
+            state.Repos
+            |> Map.values
+            |> Seq.collect _.KnownPaths
+            |> Set.ofSeq
+    }
 
-    let private isKnownWorktree agent path =
-        allKnownPaths agent |> Set.contains path
+    let private isKnownWorktree agent path = async {
+        let! paths = allKnownPaths agent
+        return paths |> Set.contains path
+    }
 
     let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
         let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -160,10 +164,12 @@ module CanvasDocServer =
             let filename = catchAll.Substring(lastSlash + 1)
             let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded
 
+            let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
+
             if not (filename.EndsWith(".html")) then
                 ctx.Response.StatusCode <- 400
                 do! ctx.Response.WriteAsync("Only .html files are served")
-            elif not (isKnownWorktree agent worktreePath) then
+            elif not isKnown then
                 ctx.Response.StatusCode <- 404
                 do! ctx.Response.WriteAsync("Unknown worktree")
             else
@@ -196,7 +202,10 @@ module CanvasDocServer =
                         endpoints.MapGet("/{**path}", RequestDelegate(handleCanvasRequest agent)) |> ignore) |> ignore)
                 .Build()
         Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"
-        host.StartAsync(cts) |> ignore
+        host.StartAsync(cts).ContinueWith(fun (t: System.Threading.Tasks.Task) ->
+            if t.IsFaulted then
+                Log.log "Canvas" $"Canvas doc server failed to start: {t.Exception.InnerException.Message}")
+        |> ignore
 
 [<EntryPoint>]
 let main args =
