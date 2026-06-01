@@ -98,3 +98,7 @@ When the canvas pane is open but no focused worktree has docs (or no worktree is
 
 - `docs/spec/canvas-pane.md` — Full feature spec (all phases)
 - `docs/spec/canvas-pane-mvp.md` — Phase 1 MVP spec
+
+## Decisions
+
+- **E2E fixture null-list fix**: Test fixtures omitting `CanvasDocs` caused the Fable.Remoting client to fail silently during deserialization (`Cannot convert null to ["List",null]`). F# list types cannot be null, but Newtonsoft.Json's deserialization of missing JSON fields produces null. Fix: (1) fixture JSON always includes `"CanvasDocs": []`, (2) server's `loadFixtures` sanitizes null `CanvasDocs` to `[]` defensively. This was the root cause of all E2E tests timing out — the page rendered but stayed in skeleton/loading state because `DataFailed` was dispatched with no visible error.

@@ -76,7 +76,8 @@
               }
             },
             "MainBehindCount": 5,
-            "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 }
+            "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 },
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-idle"},
@@ -87,7 +88,8 @@
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-stale"},
@@ -99,7 +101,8 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 42,
-            "IsDirty": true
+            "IsDirty": true,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-merged"},
@@ -128,7 +131,8 @@
                 "HasConflicts": false
               }
             },
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-draft"},
@@ -166,7 +170,8 @@
               }
             },
             "MainBehindCount": 2,
-            "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 }
+            "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 },
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-unknown"},
@@ -177,7 +182,8 @@
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
-            "MainBehindCount": 10
+            "MainBehindCount": 10,
+            "CanvasDocs": []
           }
         ],
         "IsReady": true,
@@ -217,7 +223,8 @@
                 "HasConflicts": false
               }
             },
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/treemon/test-add-editorconfig"},
@@ -249,7 +256,8 @@
                 "HasConflicts": false
               }
             },
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/treemon/multirepo"},
@@ -260,7 +268,8 @@
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
-            "MainBehindCount": 3
+            "MainBehindCount": 3,
+            "CanvasDocs": []
           }
         ],
         "IsReady": true,

@@ -13,7 +13,24 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
     try
         let json = File.ReadAllText(path)
         let converter = Fable.Remoting.Json.FableJsonConverter()
-        Ok(JsonConvert.DeserializeObject<FixtureData>(json, converter))
+        let data = JsonConvert.DeserializeObject<FixtureData>(json, converter)
+        // Sanitize null lists — Fable.Remoting client can't deserialize null as F# list
+        let sanitized =
+            { data with
+                Worktrees =
+                    { data.Worktrees with
+                        Repos =
+                            data.Worktrees.Repos
+                            |> List.map (fun r ->
+                                { r with
+                                    Worktrees =
+                                        r.Worktrees
+                                        |> List.map (fun wt ->
+                                            { wt with
+                                                CanvasDocs =
+                                                    if obj.ReferenceEquals(wt.CanvasDocs, null) then []
+                                                    else wt.CanvasDocs }) }) } }
+        Ok sanitized
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
 
