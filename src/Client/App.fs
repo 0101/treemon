@@ -553,23 +553,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                 events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
 
     let canvasMessageListener (dispatch: Dispatch<Msg>) =
-        let canvasOrigin = "http://127.0.0.1:5002"
-        let maxPayloadBytes = 64_000
-        let handler =
-            fun (e: Browser.Types.Event) ->
-                let me = e :?> Browser.Types.MessageEvent
-                if me.origin = canvasOrigin
-                   && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
-                then
-                    let payload = Fable.Core.JS.JSON.stringify me.data
-                    if payload.Length <= maxPayloadBytes
-                    then dispatch (CanvasMessageReceived payload)
-
-        Dom.window.addEventListener ("message", handler)
-
-        { new System.IDisposable with
-            member _.Dispose() =
-                Dom.window.removeEventListener ("message", handler) }
+        CanvasPane.messageListener (CanvasMessageReceived >> dispatch)
 
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
@@ -1559,29 +1543,6 @@ let focusedWorktreeCanvasDoc (model: Model) =
             wt.CanvasDoc |> Option.map (fun doc -> wt, doc))
     | _ -> None
 
-let canvasIframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
-    let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
-    $"http://127.0.0.1:5002/{encodedPath}/{doc.Filename}"
-
-let canvasPane (model: Model) =
-    let content =
-        match focusedWorktreeCanvasDoc model with
-        | Some (wt, doc) ->
-            Html.iframe [
-                prop.className "canvas-iframe"
-                prop.src (canvasIframeSrc wt doc)
-                prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms")
-            ]
-        | None ->
-            Html.div [
-                prop.className "canvas-empty"
-                prop.text "No canvas doc"
-            ]
-    Html.div [
-        prop.className (if model.CanvasPaneOpen then "canvas-pane open" else "canvas-pane")
-        prop.children [ content ]
-    ]
-
 let viewMetricBar (pct: float) (label: string) =
     Html.div [
         prop.className "metric-bar-row"
@@ -1716,7 +1677,7 @@ let view model dispatch =
                         ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
                     ]
                 ]
-                canvasPane model
+                CanvasPane.view model.CanvasPaneOpen (focusedWorktreeCanvasDoc model)
             ]
         ]
     ]
