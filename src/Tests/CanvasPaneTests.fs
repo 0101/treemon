@@ -11,6 +11,7 @@ open Microsoft.Playwright.NUnit
 /// instead of calling getCurrentBranch() (which returns the live repo's
 /// branch, not a fixture branch).
 let [<Literal>] private FixtureCanvasBranch = "feature-active"
+let [<Literal>] private FixtureMultiDocBranch = "feature-multidoc"
 
 /// E2E tests for the canvas pane feature.
 /// Prerequisites:
@@ -39,6 +40,12 @@ type CanvasPaneTests() =
 
     let canvasEmpty (page: IPage) =
         page.Locator(".canvas-pane .canvas-empty")
+
+    let canvasTabBar (page: IPage) =
+        page.Locator(".canvas-pane .canvas-tab-bar")
+
+    let canvasTabs (page: IPage) =
+        page.Locator(".canvas-pane .canvas-tab")
 
     let dashboard (page: IPage) =
         page.Locator(".dashboard")
@@ -364,4 +371,81 @@ type CanvasPaneTests() =
 
             do! System.Threading.Tasks.Task.Delay(2000)
             Assert.That(apiCallReceived.Task.IsCompleted, Is.False, "Messages without object data + action should not trigger API calls")
+        }
+
+    // ── Multi-doc Tab Bar ───────────────────────────────────────────────
+
+    [<Test>]
+    member this.``Multi-doc worktree shows tab bar with one button per doc``() =
+        task {
+            do! focusCanvasCard this.Page FixtureMultiDocBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let tabBarEl = canvasTabBar this.Page
+            do! tabBarEl.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let tabs = canvasTabs this.Page
+            let! tabCount = tabs.CountAsync()
+            Assert.That(tabCount, Is.EqualTo(3), "Tab bar should have one button per canvas doc (3 docs in fixture)")
+
+            // Verify tab labels match filenames (without .html extension)
+            let! tab0Text = tabs.Nth(0).TextContentAsync()
+            let! tab1Text = tabs.Nth(1).TextContentAsync()
+            let! tab2Text = tabs.Nth(2).TextContentAsync()
+            Assert.That(tab0Text, Is.EqualTo("overview"), "First tab should be 'overview'")
+            Assert.That(tab1Text, Is.EqualTo("details"), "Second tab should be 'details'")
+            Assert.That(tab2Text, Is.EqualTo("metrics"), "Third tab should be 'metrics'")
+        }
+
+    [<Test>]
+    member this.``Clicking a tab switches the iframe src to selected doc``() =
+        task {
+            do! focusCanvasCard this.Page FixtureMultiDocBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let iframe = canvasIframe this.Page
+            do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            // Capture initial iframe src — should be the first doc (overview.html)
+            let! initialSrc = iframe.GetAttributeAsync("src")
+            Assert.That(initialSrc, Does.Contain("overview.html"), "Initial iframe src should contain the first doc filename")
+
+            // Click the second tab (details)
+            let tabs = canvasTabs this.Page
+            do! tabs.Nth(1).ClickAsync()
+
+            // Wait for iframe src to change
+            let! _ = this.Page.WaitForFunctionAsync(
+                $"(oldSrc) => {{
+                    const iframe = document.querySelector('.canvas-iframe');
+                    return iframe && iframe.getAttribute('src') !== oldSrc;
+                }}",
+                initialSrc,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! newSrc = iframe.GetAttributeAsync("src")
+            Assert.That(newSrc, Does.Contain("details.html"), "After clicking second tab, iframe src should contain 'details.html'")
+
+            // Verify the clicked tab has the active class
+            let! secondTabClass = tabs.Nth(1).GetAttributeAsync("class")
+            Assert.That(secondTabClass, Does.Contain("active"), "Clicked tab should have 'active' class")
+        }
+
+    [<Test>]
+    member this.``Single-doc worktree does not show tab bar``() =
+        task {
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Wait for the iframe to appear (confirms canvas doc is loaded)
+            let iframe = canvasIframe this.Page
+            do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            // Tab bar should not be present for single-doc worktree
+            let tabBarEl = canvasTabBar this.Page
+            let! tabBarCount = tabBarEl.CountAsync()
+            Assert.That(tabBarCount, Is.EqualTo(0), "Single-doc worktree should not show tab bar")
         }
