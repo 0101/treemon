@@ -43,13 +43,18 @@ type CanvasPaneTests() =
     let dashboard (page: IPage) =
         page.Locator(".dashboard")
 
+    /// Press ArrowDown from the dashboard until a wt-card receives focus.
+    /// The first ArrowDown typically lands on a repo-header; the second
+    /// reaches the first wt-card.
     let focusFirstCard (page: IPage) =
         task {
             let db = dashboard page
             do! db.FocusAsync()
+            // First ArrowDown lands on repo-header, second on first wt-card
+            do! page.Keyboard.PressAsync("ArrowDown")
             do! page.Keyboard.PressAsync("ArrowDown")
             let! _ = page.WaitForFunctionAsync(
-                "() => document.querySelector('.focused') !== null",
+                "() => document.querySelector('.wt-card.focused') !== null",
                 null, PageWaitForFunctionOptions(Timeout = 5000.0f))
             ()
         }
