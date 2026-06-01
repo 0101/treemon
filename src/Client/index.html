@@ -408,6 +408,45 @@
             75% { content: '...'; }
         }
 
+        /* Canvas pane */
+        .app-layout {
+            display: flex;
+            min-height: calc(100vh - 36px);
+        }
+        .app-layout > .dashboard {
+            flex: 1;
+            min-width: 0;
+            transition: flex 0.2s ease;
+        }
+        .canvas-pane {
+            width: 0;
+            overflow: hidden;
+            transition: width 0.2s ease;
+            background: #181825;
+            border-left: 1px solid #313244;
+            margin-top: 36px;
+            display: flex;
+            flex-direction: column;
+        }
+        .canvas-pane.open {
+            width: 420px;
+        }
+        .canvas-iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            flex: 1;
+            background: #1e1e2e;
+        }
+        .canvas-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #6c7086;
+            font-size: 0.9em;
+        }
+
     </style>
 </head>
 <body>

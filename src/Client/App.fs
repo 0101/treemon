@@ -31,7 +31,8 @@ type Model =
       SystemMetrics: SystemMetrics option
       ActionCooldowns: Set<WorktreePath>
       LastActivityTime: float
-      ActivityLevel: ActivityLevel }
+      ActivityLevel: ActivityLevel
+      CanvasPaneOpen: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -65,6 +66,9 @@ type Msg =
     | ResumeSession of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
     | UserActivity of now: float
+    | ToggleCanvasPane
+    | CanvasMessageReceived of payload: string
+    | CanvasMessageResult of Result<unit, string>
     | NoOp
 
 let worktreeApi =
@@ -105,7 +109,8 @@ let init () =
       SystemMetrics = None
       ActionCooldowns = Set.empty
       LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
-      ActivityLevel = ActivityLevel.Active },
+      ActivityLevel = ActivityLevel.Active
+      CanvasPaneOpen = false },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
 
 let rng = System.Random()
@@ -164,6 +169,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
+    | Card scopedKey, "c" -> Some ToggleCanvasPane
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.bind (fun wt -> if not wt.IsMainWorktree then Some (ConfirmDeleteWorktree scopedKey) else None)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
@@ -483,6 +489,25 @@ let update msg model =
                 | Some action -> model, Cmd.ofMsg action
                 | None -> model, Cmd.none
 
+    | ToggleCanvasPane ->
+        { model with CanvasPaneOpen = not model.CanvasPaneOpen }, Cmd.none
+
+    | CanvasMessageReceived payload ->
+        match model.FocusedElement with
+        | Some (Card scopedKey) ->
+            match findWorktree scopedKey model with
+            | Some wt ->
+                model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Payload = payload } CanvasMessageResult (_.Message >> Error >> CanvasMessageResult)
+            | None -> model, Cmd.none
+        | _ -> model, Cmd.none
+
+    | CanvasMessageResult (Error msg) ->
+        Fable.Core.JS.console.error ("Canvas message error:", msg)
+        model, Cmd.none
+
+    | CanvasMessageResult (Ok _) ->
+        model, Cmd.none
+
     | NoOp -> model, Cmd.none
 
 let appSubscriptions (model: Model) : Sub<Msg> =
@@ -527,9 +552,25 @@ let appSubscriptions (model: Model) : Sub<Msg> =
             member _.Dispose() =
                 events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
 
+    let canvasMessageListener (dispatch: Dispatch<Msg>) =
+        let canvasOrigin = "http://127.0.0.1:5002"
+        let handler =
+            fun (e: Browser.Types.Event) ->
+                let me = e :?> Browser.Types.MessageEvent
+                if me.origin = canvasOrigin then
+                    let payload = Fable.Core.JS.JSON.stringify me.data
+                    dispatch (CanvasMessageReceived payload)
+
+        Dom.window.addEventListener ("message", handler)
+
+        { new System.IDisposable with
+            member _.Dispose() =
+                Dom.window.removeEventListener ("message", handler) }
+
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
-          [ "activity" ], activityDetection ]
+          [ "activity" ], activityDetection
+          [ "canvas-messages" ], canvasMessageListener ]
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
@@ -1506,6 +1547,37 @@ let labelColor (pct: float) =
     elif pct >= 50.0 then Some "#f9e2af"
     else None
 
+let focusedWorktreeCanvasDoc (model: Model) =
+    match model.FocusedElement with
+    | Some (Card scopedKey) ->
+        findWorktree scopedKey model
+        |> Option.bind (fun wt ->
+            wt.CanvasDoc |> Option.map (fun doc -> wt, doc))
+    | _ -> None
+
+let canvasIframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
+    let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
+    $"http://127.0.0.1:5002/{encodedPath}/{doc.Filename}"
+
+let canvasPane (model: Model) =
+    let content =
+        match focusedWorktreeCanvasDoc model with
+        | Some (wt, doc) ->
+            Html.iframe [
+                prop.className "canvas-iframe"
+                prop.src (canvasIframeSrc wt doc)
+                prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms")
+            ]
+        | None ->
+            Html.div [
+                prop.className "canvas-empty"
+                prop.text "No canvas doc"
+            ]
+    Html.div [
+        prop.className (if model.CanvasPaneOpen then "canvas-pane open" else "canvas-pane")
+        prop.children [ content ]
+    ]
+
 let viewMetricBar (pct: float) (label: string) =
     Html.div [
         prop.className "metric-bar-row"
@@ -1587,6 +1659,13 @@ let viewAppHeader model dispatch =
                                 prop.onClick (fun _ -> dispatch ToggleCompact)
                                 prop.text "Compact"
                             ]
+                            Html.button [
+                                prop.className (if model.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleCanvasPane)
+                                prop.title "Toggle canvas pane (C)"
+                                prop.text "Canvas"
+                            ]
                         ]
                     ]
                 ]
@@ -1595,37 +1674,45 @@ let viewAppHeader model dispatch =
     ]
 
 let view model dispatch =
+    let dashboardClass =
+        if model.CanvasPaneOpen then "dashboard canvas-open" else "dashboard"
     React.fragment [
         viewAppHeader model dispatch
         Html.div [
-            prop.className "dashboard"
-            prop.tabIndex 0
-            prop.autoFocus true
-            prop.onKeyDown (fun e ->
-                match e.key with
-                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                    e.preventDefault()
-                    dispatch (KeyPressed (e.key, false))
-                | key ->
-                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                    dispatch (KeyPressed (key, hasModifier)))
+            prop.className "app-layout"
             prop.children [
-                if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
-                    Html.div [
-                        prop.className "status-bar"
-                        prop.children [ Html.span "Waiting for first refresh..." ]
-                    ]
-                    skeletonGrid ()
-                else
-                    Html.div [
-                        prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
-                    ]
+                Html.div [
+                    prop.className dashboardClass
+                    prop.tabIndex 0
+                    prop.autoFocus true
+                    prop.onKeyDown (fun e ->
+                        match e.key with
+                        | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                            e.preventDefault()
+                            dispatch (KeyPressed (e.key, false))
+                        | key ->
+                            let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                            dispatch (KeyPressed (key, hasModifier)))
+                    prop.children [
+                        if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
+                            Html.div [
+                                prop.className "status-bar"
+                                prop.children [ Html.span "Waiting for first refresh..." ]
+                            ]
+                            skeletonGrid ()
+                        else
+                            Html.div [
+                                prop.className "repo-list"
+                                prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
+                            ]
 
-                schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+                        schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
-                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
-                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
+                        CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                        ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
+                    ]
+                ]
+                canvasPane model
             ]
         ]
     ]
