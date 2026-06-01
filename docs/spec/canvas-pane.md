@@ -451,11 +451,24 @@ Phase 1 (MVP) is specified separately in `docs/spec/canvas-pane-mvp.md` and trac
 beads feature `tm-canvas48-4cn`. It validates the core end-to-end loop with one doc per
 worktree, no registry, no badges, iframe reload (not morph), and no liveness/queue.
 
-Later phases (not yet planned):
+Later phases:
 
-2. **Multi-doc + polish**: `registry.json`, multiple docs per worktree with tabs, badges,
-   DOM-morph (idiomorph), `worktreeId` hashing.
-3. **Liveness + resilience**: per-doc session liveness (🟢/⚪), heartbeat protocol,
+2. **UX polish + logging**: canvas position selector (done), persist canvas open/closed
+   state, `C` key opens focused card's canvas, comprehensive lifecycle logging (server +
+   client), `Cache-Control` + hash-busted iframe src for reliable reload.
+3. **Multi-doc + discovery**: `registry.json`, multiple docs per worktree with tabs,
+   unviewed-doc dots on tabs. **Empty canvas overview** — when no worktree is focused (or
+   focused worktree has no docs), show a list of all worktrees that have canvas docs,
+   grouped by repo, sorted by most-recently-updated. Clicking one focuses that worktree and
+   shows its canvas.
+4. **Badges + notifications**: "new doc" badge on the Canvas header button with count of
+   unviewed docs across all worktrees. Unviewed-doc dots on worktree cards. **Card console
+   notification** — when a worktree publishes a new/updated doc, show it in the card's event
+   area (e.g. "5m ago published *overview*"), clickable to open the canvas for that worktree.
+   `LastViewedHashes` persistence, `MarkDocViewed` Msg.
+5. **DOM morph**: replace iframe reload with idiomorph/morphdom, preserving scroll/focus/
+   inputs on content change. `worktreeId` hashing.
+6. **Liveness + resilience**: per-doc session liveness (🟢/⚪), heartbeat protocol,
    resume-on-interact with message queue and expiry, "start new session with doc as context".
-4. **Templates + ecosystem**: bundled `html-effectiveness`-style reference templates;
+7. **Templates + ecosystem**: bundled `html-effectiveness`-style reference templates;
    automated E2E tests.
