@@ -1,16 +1,46 @@
 module Tests.CanvasPaneTests
 
 open System
+open System.Diagnostics
 open System.IO
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 
+let private repoRoot =
+    Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
+
+let private canvasDir =
+    Path.Combine(repoRoot, ".agents", "canvas")
+
+let private canvasTestFile =
+    Path.Combine(canvasDir, "e2e-test.html")
+
+let private testHtmlContent = """<!DOCTYPE html>
+<html><head><title>Canvas E2E Test</title></head>
+<body>
+<h1>Canvas E2E Test</h1>
+<button id="send-msg" onclick="window.parent.postMessage({action:'test',data:'e2e-probe'}, '*')">Send Message</button>
+</body></html>"""
+
+let private getCurrentBranch () =
+    let psi =
+        ProcessStartInfo(
+            FileName = "git",
+            Arguments = "branch --show-current",
+            WorkingDirectory = repoRoot,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true)
+    use proc = Process.Start(psi)
+    let branch = proc.StandardOutput.ReadToEnd().Trim()
+    proc.WaitForExit()
+    branch
+
 /// E2E tests for the canvas pane feature.
 /// Prerequisites:
 ///   - Server running on :5001 with canvas doc server on :5002
 ///   - Vite dev server on :5174
-///   - At least one tracked worktree with .agents/canvas/test.html
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
@@ -19,6 +49,8 @@ type CanvasPaneTests() =
 
     let baseUrl = ServerFixture.viteUrl
     let canvasOrigin = "http://127.0.0.1:5002"
+    let mutable previousContent: string option = None
+    let mutable canvasBranch = ""
 
     let canvasToggleBtn (page: IPage) =
         page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
@@ -49,10 +81,47 @@ type CanvasPaneTests() =
             ()
         }
 
+    /// Focus the card for a specific branch (the worktree with the canvas doc).
+    let focusCanvasCard (page: IPage) (branch: string) =
+        task {
+            let card =
+                page.Locator(
+                    ".wt-card",
+                    PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
+            do! card.First.ScrollIntoViewIfNeededAsync()
+            do! card.First.ClickAsync()
+            let! _ = page.WaitForFunctionAsync(
+                "() => document.querySelector('.focused') !== null",
+                null, PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
+        }
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
         opts
+
+    [<OneTimeSetUp>]
+    member _.EnsureCanvasDoc() =
+        task {
+            canvasBranch <- getCurrentBranch ()
+            Directory.CreateDirectory(canvasDir) |> ignore
+            previousContent <-
+                if File.Exists(canvasTestFile) then Some(File.ReadAllText(canvasTestFile))
+                else None
+            File.WriteAllText(canvasTestFile, testHtmlContent)
+            // Allow the server's refresh cycle to detect the canvas doc (~5-15s).
+            // The file watcher may trigger earlier if .agents/canvas/ dir already existed.
+            do! System.Threading.Tasks.Task.Delay(3000)
+        }
+
+    [<OneTimeTearDown>]
+    member _.CleanupCanvasDoc() =
+        match previousContent with
+        | Some content -> File.WriteAllText(canvasTestFile, content)
+        | None ->
+            if File.Exists(canvasTestFile) then
+                File.Delete(canvasTestFile)
 
     [<SetUp>]
     member this.NavigateToDashboard() =
@@ -147,18 +216,14 @@ type CanvasPaneTests() =
     [<Test>]
     member this.``Canvas iframe src points to canvas doc server``() =
         task {
-            do! focusFirstCard this.Page
+            do! focusCanvasCard this.Page canvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let iframe = canvasIframe this.Page
-            let! iframeCount = iframe.CountAsync()
-
-            if iframeCount > 0 then
-                let! src = iframe.GetAttributeAsync("src")
-                Assert.That(src, Does.StartWith(canvasOrigin), $"Canvas iframe src should start with {canvasOrigin}, got: {src}")
-            else
-                Assert.Inconclusive("No canvas iframe — focused worktree may not have a canvas doc")
+            do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            let! src = iframe.GetAttributeAsync("src")
+            Assert.That(src, Does.StartWith(canvasOrigin), $"Canvas iframe src should start with {canvasOrigin}, got: {src}")
         }
 
     [<Test>]
@@ -197,51 +262,47 @@ type CanvasPaneTests() =
     [<Test>]
     member this.``Canvas iframe updates when contentHash changes``() =
         task {
-            do! focusFirstCard this.Page
+            do! focusCanvasCard this.Page canvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let iframe = canvasIframe this.Page
-            let! iframeCount = iframe.CountAsync()
+            do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            if iframeCount = 0 then
-                Assert.Inconclusive("No canvas iframe — focused worktree has no canvas doc. Ensure .agents/canvas/test.html exists.")
+            // Capture initial iframe src
+            let! initialSrc = iframe.GetAttributeAsync("src")
+            Assert.That(initialSrc, Is.Not.Null.And.Not.Empty, "Iframe should have a src attribute")
+
+            // Find the worktree path from the iframe src to locate the file on disk
+            // src format: http://127.0.0.1:5002/{urlEncode(path)}/{filename}
+            let pathPart = initialSrc.Substring(canvasOrigin.Length + 1)
+            let parts = pathPart.Split('/')
+            let worktreePath = Uri.UnescapeDataString(parts[0])
+            let filename = parts[1]
+            let canvasFile = Path.Combine(worktreePath, ".agents", "canvas", filename)
+
+            if not (File.Exists(canvasFile)) then
+                Assert.Inconclusive($"Canvas file not found at {canvasFile}")
             else
-                // Capture initial iframe src
-                let! initialSrc = iframe.GetAttributeAsync("src")
-                Assert.That(initialSrc, Is.Not.Null.And.Not.Empty, "Iframe should have a src attribute")
+                // Modify the file to trigger a content hash change
+                let originalContent = File.ReadAllText(canvasFile)
+                let marker = $"<!-- e2e-reload-test-{Guid.NewGuid()} -->"
+                try
+                    File.WriteAllText(canvasFile, originalContent + marker)
 
-                // Find the worktree path from the iframe src to locate the file on disk
-                // src format: http://127.0.0.1:5002/{urlEncode(path)}/{filename}
-                let pathPart = initialSrc.Substring(canvasOrigin.Length + 1)
-                let parts = pathPart.Split('/')
-                let worktreePath = Uri.UnescapeDataString(parts[0])
-                let filename = parts[1]
-                let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
-                let canvasFile = Path.Combine(canvasDir, filename)
+                    // Wait for iframe src to change (poll cycle ~1s, allow up to 10s)
+                    let! _ = this.Page.WaitForFunctionAsync(
+                        $"(oldSrc) => {{
+                            const iframe = document.querySelector('.canvas-iframe');
+                            return iframe && iframe.src !== oldSrc;
+                        }}",
+                        initialSrc,
+                        PageWaitForFunctionOptions(Timeout = 10000.0f))
 
-                if not (File.Exists(canvasFile)) then
-                    Assert.Inconclusive($"Canvas file not found at {canvasFile}")
-                else
-                    // Modify the file to trigger a content hash change
-                    let originalContent = File.ReadAllText(canvasFile)
-                    let marker = $"<!-- e2e-reload-test-{Guid.NewGuid()} -->"
-                    try
-                        File.WriteAllText(canvasFile, originalContent + marker)
-
-                        // Wait for iframe src to change (poll cycle ~1s, allow up to 10s)
-                        let! _ = this.Page.WaitForFunctionAsync(
-                            $"(oldSrc) => {{
-                                const iframe = document.querySelector('.canvas-iframe');
-                                return iframe && iframe.src !== oldSrc;
-                            }}",
-                            initialSrc,
-                            PageWaitForFunctionOptions(Timeout = 10000.0f))
-
-                        let! newSrc = iframe.GetAttributeAsync("src")
-                        Assert.That(newSrc, Is.Not.EqualTo(initialSrc), "Iframe src should change after canvas file modification")
-                    finally
-                        File.WriteAllText(canvasFile, originalContent)
+                    let! newSrc = iframe.GetAttributeAsync("src")
+                    Assert.That(newSrc, Is.Not.EqualTo(initialSrc), "Iframe src should change after canvas file modification")
+                finally
+                    File.WriteAllText(canvasFile, originalContent)
         }
 
     // ── Step 8: PostMessage Dispatch ────────────────────────────────────
@@ -249,57 +310,51 @@ type CanvasPaneTests() =
     [<Test>]
     member this.``PostMessage from canvas iframe triggers sendCanvasMessage API call``() =
         task {
-            do! focusFirstCard this.Page
+            do! focusCanvasCard this.Page canvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let iframe = canvasIframe this.Page
-            let! iframeCount = iframe.CountAsync()
+            do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            if iframeCount = 0 then
-                Assert.Inconclusive("No canvas iframe — focused worktree has no canvas doc")
+            // Set up network interception to capture the sendCanvasMessage Remoting call
+            let apiCallReceived = System.Threading.Tasks.TaskCompletionSource<bool>()
+
+            this.Page.Request.Add(fun req ->
+                if req.Url.Contains("sendCanvasMessage") then
+                    apiCallReceived.TrySetResult(true) |> ignore)
+
+            let! src = iframe.GetAttributeAsync("src")
+            Assert.That(src, Is.Not.Null, "Iframe must have src")
+
+            // Execute postMessage from within the iframe context
+            // We evaluate JS in the page context that posts a message as if from the canvas origin
+            let! _ = this.Page.EvaluateAsync(
+                $"() => {{
+                    const iframe = document.querySelector('.canvas-iframe');
+                    if (iframe && iframe.contentWindow) {{
+                        const msg = {{ action: 'test', data: 'e2e-probe' }};
+                        window.dispatchEvent(new MessageEvent('message', {{
+                            data: msg,
+                            origin: '{canvasOrigin}'
+                        }}));
+                    }}
+                }}")
+
+            // Wait for the API call (with timeout)
+            let timeoutTask = System.Threading.Tasks.Task.Delay(5000)
+            let! completed = System.Threading.Tasks.Task.WhenAny(apiCallReceived.Task, timeoutTask)
+
+            if Object.ReferenceEquals(completed, apiCallReceived.Task) then
+                let! result = apiCallReceived.Task
+                Assert.That(result, Is.True, "sendCanvasMessage API call should be triggered by postMessage")
             else
-                // Set up network interception to capture the sendCanvasMessage Remoting call
-                let apiCallReceived = System.Threading.Tasks.TaskCompletionSource<bool>()
-
-                this.Page.Request.Add(fun req ->
-                    if req.Url.Contains("sendCanvasMessage") then
-                        apiCallReceived.TrySetResult(true) |> ignore)
-
-                // Wait for iframe to load
-                let iframeElement = iframe
-                do! iframeElement.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-                let! src = iframeElement.GetAttributeAsync("src")
-                Assert.That(src, Is.Not.Null, "Iframe must have src")
-
-                // Execute postMessage from within the iframe context
-                // We evaluate JS in the page context that posts a message as if from the canvas origin
-                let! _ = this.Page.EvaluateAsync(
-                    $"() => {{
-                        const iframe = document.querySelector('.canvas-iframe');
-                        if (iframe && iframe.contentWindow) {{
-                            const msg = {{ action: 'test', data: 'e2e-probe' }};
-                            window.dispatchEvent(new MessageEvent('message', {{
-                                data: msg,
-                                origin: '{canvasOrigin}'
-                            }}));
-                        }}
-                    }}")
-
-                // Wait for the API call (with timeout)
-                let timeoutTask = System.Threading.Tasks.Task.Delay(5000)
-                let! completed = System.Threading.Tasks.Task.WhenAny(apiCallReceived.Task, timeoutTask)
-
-                if Object.ReferenceEquals(completed, apiCallReceived.Task) then
-                    let! result = apiCallReceived.Task
-                    Assert.That(result, Is.True, "sendCanvasMessage API call should be triggered by postMessage")
-                else
-                    // API call might fail if no bridge is registered — that's OK for this test.
-                    // The key assertion is that the Elmish dispatch happened, which we verify
-                    // by checking the network request was attempted.
-                    Assert.Inconclusive(
-                        "sendCanvasMessage API call not observed within 5s. " +
-                        "This may happen if no canvas bridge is registered (extension not running).")
+                // API call might fail if no bridge is registered — that's OK for this test.
+                // The key assertion is that the Elmish dispatch happened, which we verify
+                // by checking the network request was attempted.
+                Assert.Inconclusive(
+                    "sendCanvasMessage API call not observed within 5s. " +
+                    "This may happen if no canvas bridge is registered (extension not running).")
         }
 
     [<Test>]
