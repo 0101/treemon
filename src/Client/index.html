@@ -8,7 +8,14 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <style>
         * { box-sizing: border-box; }
-        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; }
+        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; overflow: hidden; }
+
+        /* Scrollbar styling */
+        * { scrollbar-width: thin; scrollbar-color: rgba(88, 91, 112, 0.5) transparent; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(88, 91, 112, 0.5); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(88, 91, 112, 0.8); }
 
         .dashboard { padding: 16px; padding-top: 52px; padding-bottom: 0; max-width: 2000px; margin: 0 auto; }
 
@@ -430,11 +437,13 @@
         .canvas-pane {
             overflow: hidden;
             background: #181825;
-            margin-top: 36px;
             display: flex;
             flex-direction: column;
             flex: 0 0 0;
             transition: flex 0.2s ease;
+        }
+        .app-layout:not(.canvas-top):not(.canvas-bottom) > .canvas-pane {
+            margin-top: 36px;
         }
         .app-layout.canvas-left > .canvas-pane.open,
         .app-layout.canvas-right > .canvas-pane.open {
