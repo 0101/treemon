@@ -2,6 +2,8 @@ open Saturn
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Http
+open System.IO
 open System.Threading
 open Shared
 open Server
@@ -118,6 +120,70 @@ let private buildRemotingHandler (api: IWorktreeApi) =
         Propagate ex.Message)
     |> Remoting.buildHttpHandler
 
+module CanvasDocServer =
+    open Microsoft.AspNetCore.Hosting
+    open Microsoft.Extensions.DependencyInjection
+    let private canvasPort = 5002
+
+    let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) =
+        let state = agent.PostAndReply RefreshScheduler.GetState
+        state.Repos
+        |> Map.values
+        |> Seq.collect _.KnownPaths
+        |> Set.ofSeq
+
+    let private isKnownWorktree agent path =
+        allKnownPaths agent |> Set.contains path
+
+    let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+        let catchAll = ctx.Request.RouteValues["path"] :?> string
+        let lastSlash = catchAll.LastIndexOf('/')
+        if lastSlash < 1 then
+            ctx.Response.StatusCode <- 400
+            do! ctx.Response.WriteAsync("Invalid path format")
+        else
+            let worktreePathEncoded = catchAll.Substring(0, lastSlash)
+            let filename = catchAll.Substring(lastSlash + 1)
+            let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded
+
+            if not (filename.EndsWith(".html")) then
+                ctx.Response.StatusCode <- 400
+                do! ctx.Response.WriteAsync("Only .html files are served")
+            elif not (isKnownWorktree agent worktreePath) then
+                ctx.Response.StatusCode <- 404
+                do! ctx.Response.WriteAsync("Unknown worktree")
+            else
+                let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
+                let resolvedPath = Path.GetFullPath(Path.Combine(canvasDir, filename))
+                let canonicalCanvasDir = Path.GetFullPath(canvasDir + string Path.DirectorySeparatorChar)
+
+                if not (resolvedPath.StartsWith(canonicalCanvasDir, System.StringComparison.OrdinalIgnoreCase)) then
+                    ctx.Response.StatusCode <- 400
+                    do! ctx.Response.WriteAsync("Path traversal rejected")
+                elif not (File.Exists resolvedPath) then
+                    ctx.Response.StatusCode <- 404
+                    do! ctx.Response.WriteAsync("File not found")
+                else
+                    let! content = File.ReadAllBytesAsync(resolvedPath)
+                    ctx.Response.ContentType <- "text/html"
+                    do! ctx.Response.Body.WriteAsync(content)
+    }
+
+    let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (cts: CancellationToken) =
+        let host =
+            WebHostBuilder()
+                .UseKestrel(fun opts ->
+                    opts.Listen(System.Net.IPAddress.Loopback, canvasPort))
+                .ConfigureServices(fun services ->
+                    services.AddRouting() |> ignore)
+                .Configure(fun (app: IApplicationBuilder) ->
+                    app.UseRouting() |> ignore
+                    app.UseEndpoints(fun endpoints ->
+                        endpoints.MapGet("/{**path}", RequestDelegate(handleCanvasRequest agent)) |> ignore) |> ignore)
+                .Build()
+        Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"
+        host.StartAsync(cts) |> ignore
+
 [<EntryPoint>]
 let main args =
     let config = parseArgs args
@@ -141,10 +207,10 @@ let main args =
 
     let cts = new CancellationTokenSource()
 
-    let remotingApi =
+    let remotingApi, schedulerAgent =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None
         else
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = SyncEngine.createSyncAgent ()
@@ -164,12 +230,14 @@ let main args =
                 Log.log "Startup" "Scheduler background loop started"
 
             WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch
-            |> buildRemotingHandler
+            |> buildRemotingHandler, Some agent
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"
         cts.Cancel()
         cts.Dispose())
+
+    schedulerAgent |> Option.iter (fun agent -> CanvasDocServer.start agent cts.Token)
 
     let app =
         application {

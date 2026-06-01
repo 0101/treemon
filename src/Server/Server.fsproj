@@ -37,6 +37,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="FsToolkit.ErrorHandling" Version="5.2.0" />
     <PackageReference Include="Saturn" Version="0.17.0" />
     <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
