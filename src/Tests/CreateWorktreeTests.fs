@@ -32,7 +32,8 @@ let private defaultModel : Model =
       EditorName = "VS Code"
       ActionCooldowns = Set.empty
       LastActivityTime = 0.0
-      ActivityLevel = ActivityLevel.Active }
+      ActivityLevel = ActivityLevel.Active
+      CanvasPaneOpen = false }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the

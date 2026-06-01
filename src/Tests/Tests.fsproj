@@ -40,6 +40,7 @@
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
+    <Compile Include="CanvasPaneTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
