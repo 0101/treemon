@@ -633,7 +633,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
     |> Map.iter (fun repoId _ ->
         agent.Post(UpdateWorktreeList(repoId, [])))
 
-    let rec loop (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
+    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
         async {
             let! state = agent.PostAndAsyncReply(GetState)
 
@@ -642,6 +642,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 else state.Repos
 
             let watchers = CanvasWatchers.reconcile agent repos watchers
+            latestWatchers.Value <- watchers
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
@@ -670,22 +671,22 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 | _ -> ()
 
                 let updatedRuns = lastRuns |> Map.add task now
-                return! loop updatedRuns watchers
+                return! loop latestWatchers updatedRuns watchers
             | None ->
                 let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
-                return! loop lastRuns watchers
+                return! loop latestWatchers lastRuns watchers
         }
 
     let startup =
         async {
             let! lastRuns = runInitialBurst agent rootPaths
             let! state = agent.PostAndAsyncReply(GetState)
-            let watchers = CanvasWatchers.reconcile agent state.Repos Map.empty
+            let latestWatchers = ref (CanvasWatchers.reconcile agent state.Repos Map.empty)
             try
-                return! loop lastRuns watchers
+                return! loop latestWatchers lastRuns latestWatchers.Value
             finally
-                CanvasWatchers.disposeAll watchers
+                CanvasWatchers.disposeAll latestWatchers.Value
         }
 
     Async.Start(startup, ct)
