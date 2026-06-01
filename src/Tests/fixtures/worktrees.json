@@ -44,7 +44,8 @@
               }
             },
             "MainBehindCount": 25,
-            "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 }
+            "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 },
+            "CanvasDoc": { "Filename": "e2e-test.html", "ContentHash": "fixture-abc123" }
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-recent"},

@@ -1,41 +1,16 @@
 module Tests.CanvasPaneTests
 
 open System
-open System.Diagnostics
 open System.IO
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 
-let private repoRoot =
-    Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
-
-let private canvasDir =
-    Path.Combine(repoRoot, ".agents", "canvas")
-
-let private canvasTestFile =
-    Path.Combine(canvasDir, "e2e-test.html")
-
-let private testHtmlContent = """<!DOCTYPE html>
-<html><head><title>Canvas E2E Test</title></head>
-<body>
-<h1>Canvas E2E Test</h1>
-<button id="send-msg" onclick="window.parent.postMessage({action:'test',data:'e2e-probe'}, '*')">Send Message</button>
-</body></html>"""
-
-let private getCurrentBranch () =
-    let psi =
-        ProcessStartInfo(
-            FileName = "git",
-            Arguments = "branch --show-current",
-            WorkingDirectory = repoRoot,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true)
-    use proc = Process.Start(psi)
-    let branch = proc.StandardOutput.ReadToEnd().Trim()
-    proc.WaitForExit()
-    branch
+/// Branch name of the fixture worktree that has a CanvasDoc defined in
+/// src/Tests/fixtures/worktrees.json.  Tests target this known branch
+/// instead of calling getCurrentBranch() (which returns the live repo's
+/// branch, not a fixture branch).
+let [<Literal>] private FixtureCanvasBranch = "feature-active"
 
 /// E2E tests for the canvas pane feature.
 /// Prerequisites:
@@ -49,8 +24,6 @@ type CanvasPaneTests() =
 
     let baseUrl = ServerFixture.viteUrl
     let canvasOrigin = "http://127.0.0.1:5002"
-    let mutable previousContent: string option = None
-    let mutable canvasBranch = ""
 
     let canvasToggleBtn (page: IPage) =
         page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
@@ -100,28 +73,6 @@ type CanvasPaneTests() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
         opts
-
-    [<OneTimeSetUp>]
-    member _.EnsureCanvasDoc() =
-        task {
-            canvasBranch <- getCurrentBranch ()
-            Directory.CreateDirectory(canvasDir) |> ignore
-            previousContent <-
-                if File.Exists(canvasTestFile) then Some(File.ReadAllText(canvasTestFile))
-                else None
-            File.WriteAllText(canvasTestFile, testHtmlContent)
-            // Allow the server's refresh cycle to detect the canvas doc (~5-15s).
-            // The file watcher may trigger earlier if .agents/canvas/ dir already existed.
-            do! System.Threading.Tasks.Task.Delay(3000)
-        }
-
-    [<OneTimeTearDown>]
-    member _.CleanupCanvasDoc() =
-        match previousContent with
-        | Some content -> File.WriteAllText(canvasTestFile, content)
-        | None ->
-            if File.Exists(canvasTestFile) then
-                File.Delete(canvasTestFile)
 
     [<SetUp>]
     member this.NavigateToDashboard() =
@@ -216,7 +167,7 @@ type CanvasPaneTests() =
     [<Test>]
     member this.``Canvas iframe src points to canvas doc server``() =
         task {
-            do! focusCanvasCard this.Page canvasBranch
+            do! focusCanvasCard this.Page FixtureCanvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
@@ -262,7 +213,7 @@ type CanvasPaneTests() =
     [<Test>]
     member this.``Canvas iframe updates when contentHash changes``() =
         task {
-            do! focusCanvasCard this.Page canvasBranch
+            do! focusCanvasCard this.Page FixtureCanvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
@@ -310,7 +261,7 @@ type CanvasPaneTests() =
     [<Test>]
     member this.``PostMessage from canvas iframe triggers sendCanvasMessage API call``() =
         task {
-            do! focusCanvasCard this.Page canvasBranch
+            do! focusCanvasCard this.Page FixtureCanvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
