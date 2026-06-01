@@ -1,18 +1,19 @@
 module Server.CanvasBridge
 
+open System
 open System.Collections.Concurrent
-open System.IO
 open System.Net.Http
 open System.Text
 open FsToolkit.ErrorHandling
 open Shared
 
-let private registry = ConcurrentDictionary<string, string>()
+let private normalizePath = Server.PathUtils.normalizePath
+
+// Mutable: ConcurrentDictionary used for thread-safe bridge registry;
+// simple two-operation access pattern doesn't warrant MailboxProcessor overhead.
+let private registry = ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase)
 
 let private httpClient = new HttpClient()
-
-let private normalizePath (path: string) =
-    Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
 
 let register (worktreePath: string) (injectUrl: string) =
     let key = normalizePath worktreePath
@@ -31,6 +32,8 @@ let sendMessage (request: CanvasMessageRequest) =
 
         let! response =
             httpClient.PostAsync(injectUrl, content) |> Async.AwaitTask
+
+        use _ = response
 
         if not response.IsSuccessStatusCode then
             let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
