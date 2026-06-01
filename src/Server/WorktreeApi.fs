@@ -40,7 +40,8 @@ let readOnlyApi
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
-      resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
+      resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      sendCanvasMessage = fun _ -> async { return Error "not implemented" } }
 
 let private assembleFromState
     (activeSessions: Set<string>)
@@ -81,7 +82,8 @@ let private assembleFromState
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
-        |> Option.defaultValue false }
+        |> Option.defaultValue false
+      CanvasDoc = None }
 
 type WorktreeContext =
     { Worktree: GitWorktree.WorktreeInfo
@@ -561,4 +563,5 @@ let worktreeApi
                       let sessionId = CodingToolStatus.getLastSessionId provider path
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
-                  }) }
+                  })
+          sendCanvasMessage = fun _ -> async { return Error "not implemented" } }

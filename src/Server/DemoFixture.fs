@@ -163,7 +163,8 @@ let private wtAzDoMain: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = true
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 let private wtRetryLogic: WorktreeStatus =
     { Path = azDoPath "feature-retry"
@@ -181,7 +182,8 @@ let private wtRetryLogic: WorktreeStatus =
       HasActiveSession = true
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
@@ -199,7 +201,8 @@ let private wtConfigLoading: WorktreeStatus =
       HasActiveSession = true
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
@@ -217,7 +220,8 @@ let private wtAuthMiddleware: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 let private wtArchived: WorktreeStatus =
     { Path = azDoPath "old-migration"
@@ -235,7 +239,8 @@ let private wtArchived: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = true }
+      IsArchived = true
+      CanvasDoc = None }
 
 let private wtGithubMain: WorktreeStatus =
     { Path = githubPath "main"
@@ -253,7 +258,8 @@ let private wtGithubMain: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = true
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 let private wtStreaming: WorktreeStatus =
     { Path = githubPath "streaming"
@@ -271,7 +277,8 @@ let private wtStreaming: WorktreeStatus =
       HasActiveSession = true
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
@@ -289,7 +296,8 @@ let private wtCsvFix: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDoc = None }
 
 // --- Scheduler footer (all 6 categories populated) ---
 

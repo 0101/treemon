@@ -22,7 +22,8 @@ module NavHelpers =
           HasActiveSession = false
           HasTestFailureLog = false
           IsMainWorktree = false
-          IsArchived = false }
+          IsArchived = false
+          CanvasDoc = None }
 
     let makeRepo repoId branches : RepoModel =
         { RepoId = RepoId repoId

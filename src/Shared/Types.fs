@@ -85,6 +85,14 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
+type CanvasDoc =
+    { Filename: string
+      ContentHash: string }
+
+type CanvasMessageRequest =
+    { WorktreePath: WorktreePath
+      Payload: string }
+
 type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
@@ -121,7 +129,8 @@ type WorktreeStatus =
       HasActiveSession: bool
       HasTestFailureLog: bool
       IsMainWorktree: bool
-      IsArchived: bool }
+      IsArchived: bool
+      CanvasDoc: CanvasDoc option }
 
 [<RequireQualifiedAccess>]
 type StepStatus =
@@ -193,4 +202,5 @@ type IWorktreeApi =
       launchAction: ActionRequest -> Async<Result<unit, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
-      resumeSession: WorktreePath -> Async<Result<unit, string>> }
+      resumeSession: WorktreePath -> Async<Result<unit, string>>
+      sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>> }
