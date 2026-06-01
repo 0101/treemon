@@ -285,7 +285,10 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 3,
-            "CanvasDocs": []
+            "CanvasDocs": [
+              { "Filename": "dashboard.html", "ContentHash": "treemon-hash-001", "LastModified": "2026-02-22T13:00:00+00:00" },
+              { "Filename": "status.html", "ContentHash": "treemon-hash-002", "LastModified": "2026-02-22T13:30:00+00:00" }
+            ]
           }
         ],
         "IsReady": true,

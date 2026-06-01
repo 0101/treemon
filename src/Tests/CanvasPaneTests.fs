@@ -449,3 +449,106 @@ type CanvasPaneTests() =
             let! tabBarCount = tabBarEl.CountAsync()
             Assert.That(tabBarCount, Is.EqualTo(0), "Single-doc worktree should not show tab bar")
         }
+
+    // ── Empty Canvas Overview ───────────────────────────────────────────
+
+    [<Test>]
+    member this.``Overview shows worktrees grouped by repo when focused worktree has no docs``() =
+        task {
+            // Focus a worktree that has no canvas docs (feature-recent has CanvasDocs: [])
+            do! focusCanvasCard this.Page "feature-recent"
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Overview should render (no iframe, since focused worktree has no docs)
+            let overview = this.Page.Locator(".canvas-overview")
+            do! overview.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Should have repo groups — fixture has canvas docs in both TestProject and treemon repos
+            let repoGroups = this.Page.Locator(".canvas-overview-repo")
+            let! groupCount = repoGroups.CountAsync()
+            Assert.That(groupCount, Is.GreaterThanOrEqualTo(2), "Overview should show worktrees grouped by at least 2 repos")
+
+            // Each group should have a repo name header
+            let repoNames = this.Page.Locator(".canvas-overview-repo-name")
+            let! nameCount = repoNames.CountAsync()
+            Assert.That(nameCount, Is.GreaterThanOrEqualTo(2), "Each repo group should have a repo name label")
+        }
+
+    [<Test>]
+    member this.``Overview entries show branch name and doc count``() =
+        task {
+            // Focus a worktree with no canvas docs to trigger overview
+            do! focusCanvasCard this.Page "feature-recent"
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let overview = this.Page.Locator(".canvas-overview")
+            do! overview.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Each entry should have a branch name and doc count
+            let entries = this.Page.Locator(".canvas-overview-entry")
+            let! entryCount = entries.CountAsync()
+            Assert.That(entryCount, Is.GreaterThanOrEqualTo(3), "Overview should list all worktrees with canvas docs (at least 3 in fixtures)")
+
+            // Verify branch names are rendered
+            let branches = this.Page.Locator(".canvas-overview-branch")
+            let! branchCount = branches.CountAsync()
+            Assert.That(branchCount, Is.EqualTo(entryCount), "Each entry should have a branch name")
+
+            // Verify doc counts are rendered
+            let counts = this.Page.Locator(".canvas-overview-count")
+            let! countCount = counts.CountAsync()
+            Assert.That(countCount, Is.EqualTo(entryCount), "Each entry should have a doc count")
+
+            // Spot-check: the multi-doc fixture branch should show "3 docs"
+            let multiDocEntry =
+                this.Page.Locator(
+                    ".canvas-overview-entry",
+                    PageLocatorOptions(Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = "feature-multidoc"))))
+            let! multiDocCount = multiDocEntry.CountAsync()
+            Assert.That(multiDocCount, Is.EqualTo(1), "Should have an entry for feature-multidoc")
+            let! docCountText = multiDocEntry.Locator(".canvas-overview-count").TextContentAsync()
+            Assert.That(docCountText, Is.EqualTo("3 docs"), "feature-multidoc should show '3 docs'")
+
+            // Spot-check: the single-doc fixture branch should show "1 doc"
+            let singleDocEntry =
+                this.Page.Locator(
+                    ".canvas-overview-entry",
+                    PageLocatorOptions(Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = "feature-active"))))
+            let! singleDocCountText = singleDocEntry.Locator(".canvas-overview-count").TextContentAsync()
+            Assert.That(singleDocCountText, Is.EqualTo("1 doc"), "feature-active should show '1 doc'")
+        }
+
+    [<Test>]
+    member this.``Clicking overview entry focuses that worktree card``() =
+        task {
+            // Focus a worktree with no canvas docs to trigger overview
+            do! focusCanvasCard this.Page "feature-recent"
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let overview = this.Page.Locator(".canvas-overview")
+            do! overview.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Click the entry for feature-active (single doc worktree in TestProject)
+            let targetEntry =
+                this.Page.Locator(
+                    ".canvas-overview-entry",
+                    PageLocatorOptions(Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = "feature-active"))))
+            do! targetEntry.ClickAsync()
+
+            // After clicking, the canvas pane should show an iframe (not overview) for the focused worktree
+            let iframe = canvasIframe this.Page
+            do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! src = iframe.GetAttributeAsync("src")
+            Assert.That(src, Does.Contain("e2e-test.html"), "After clicking overview entry, iframe should show the focused worktree's canvas doc")
+
+            // The worktree card should be focused
+            let focusedCard =
+                this.Page.Locator(
+                    ".wt-card.focused",
+                    PageLocatorOptions(Has = this.Page.Locator(".branch-name", PageLocatorOptions(HasText = "feature-active"))))
+            let! focusedCount = focusedCard.CountAsync()
+            Assert.That(focusedCount, Is.EqualTo(1), "Clicking overview entry should focus the corresponding worktree card")
+        }
