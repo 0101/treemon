@@ -554,12 +554,16 @@ let appSubscriptions (model: Model) : Sub<Msg> =
 
     let canvasMessageListener (dispatch: Dispatch<Msg>) =
         let canvasOrigin = "http://127.0.0.1:5002"
+        let maxPayloadBytes = 64_000
         let handler =
             fun (e: Browser.Types.Event) ->
                 let me = e :?> Browser.Types.MessageEvent
-                if me.origin = canvasOrigin then
+                if me.origin = canvasOrigin
+                   && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
+                then
                     let payload = Fable.Core.JS.JSON.stringify me.data
-                    dispatch (CanvasMessageReceived payload)
+                    if payload.Length <= maxPayloadBytes
+                    then dispatch (CanvasMessageReceived payload)
 
         Dom.window.addEventListener ("message", handler)
 
