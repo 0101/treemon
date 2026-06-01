@@ -638,7 +638,7 @@ let beadsProgressBar (b: BeadsSummary) =
         ]
     ]
 
-let mainBehindIndicator (count: int) =
+let mainBehindIndicator (baseBranch: string) (count: int) =
     if count = 0 then
         Html.span [
             prop.className "main-behind up-to-date"
@@ -647,7 +647,7 @@ let mainBehindIndicator (count: int) =
     else
         Html.span [
             prop.className (if count > 20 then "main-behind behind-warning" else "main-behind")
-            prop.text ($"{count} behind main")
+            prop.text ($"{count} behind {baseBranch}")
         ]
 
 let isBranchSyncing (events: CardEvent list) =
@@ -659,7 +659,7 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some Copilot -> "Copilot"
     | None -> "Coding tool"
 
-let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let syncButton dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     if isPending then
         Html.button [
             prop.className "sync-starting-btn"
@@ -684,22 +684,22 @@ let syncButton dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isP
                 prop.disabled disabled
                 yield! noFocusProps
                 prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
-                prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else "Sync with main (S)")
+                prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else $"Sync with {baseBranch} (S)")
                 prop.text "Sync"
             ]
 
-let mainBehindWithSync dispatch (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let mainBehindWithSync dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
-            mainBehindIndicator wt.MainBehindCount
+            mainBehindIndicator baseBranch wt.MainBehindCount
             if wt.MainBehindCount > 0 then
                 if wt.IsDirty then
                     Html.span [
                         prop.className "dirty-warning"
                         prop.text "uncommitted changes"
                     ]
-                else syncButton dispatch wt branchEvents isPending scopedKey
+                else syncButton dispatch baseBranch wt branchEvents isPending scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -1147,7 +1147,7 @@ let workMetricsView = Components.workMetricsView
 let workMetricsItems = Components.workMetricsItems
 let FitOrHide = Components.FitOrHide
 
-let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
@@ -1179,14 +1179,14 @@ let compactWorktreeCard dispatch editorName (repoName: string) (cooldowns: Set<W
                 prop.className "compact-detail"
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
-                    mainBehindIndicator wt.MainBehindCount
+                    mainBehindIndicator baseBranch wt.MainBehindCount
                     prSection dispatch cooldowns wt repoName
                 ]
             ]
         ]
     ]
 
-let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
@@ -1228,7 +1228,7 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
                             ]
                         ]
 
-                    mainBehindWithSync dispatch wt branchEvents isPending scopedKey
+                    mainBehindWithSync dispatch baseBranch wt branchEvents isPending scopedKey
 
                     prRow dispatch cooldowns wt repoName
                 ]
@@ -1254,13 +1254,13 @@ let worktreeCard dispatch editorName (repoName: string) (cooldowns: Set<Worktree
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName cooldowns scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName cooldowns events isPending scopedKey isFocused wt
+    if isCompact then compactWorktreeCard dispatch editorName repoName baseBranch cooldowns scopedKey isFocused wt
+    else worktreeCard dispatch editorName repoName baseBranch cooldowns events isPending scopedKey isFocused wt
 
 let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
 
@@ -1527,7 +1527,7 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name branchEvents syncPending cooldowns))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns))
                     ]
                     archiveSection dispatch repo.ArchivedWorktrees
         ]
