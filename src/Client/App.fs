@@ -32,7 +32,8 @@ type Model =
       ActionCooldowns: Set<WorktreePath>
       LastActivityTime: float
       ActivityLevel: ActivityLevel
-      CanvasPaneOpen: bool }
+      CanvasPaneOpen: bool
+      CanvasPosition: CanvasPosition }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -67,6 +68,7 @@ type Msg =
     | ModalMsg of CreateWorktreeModal.Msg
     | UserActivity of now: float
     | ToggleCanvasPane
+    | SetCanvasPosition of CanvasPosition
     | CanvasMessageReceived of payload: string
     | CanvasMessageResult of Result<unit, string>
     | NoOp
@@ -110,7 +112,8 @@ let init () =
       ActionCooldowns = Set.empty
       LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
       ActivityLevel = ActivityLevel.Active
-      CanvasPaneOpen = false },
+      CanvasPaneOpen = false
+      CanvasPosition = CanvasPosition.Right },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
 
 let rng = System.Random()
@@ -229,7 +232,8 @@ let update msg model =
                 EyeDirection = randomEyeDirection ()
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
-                SystemMetrics = response.SystemMetrics }
+                SystemMetrics = response.SystemMetrics
+                CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             Cmd.none
 
@@ -491,6 +495,10 @@ let update msg model =
 
     | ToggleCanvasPane ->
         { model with CanvasPaneOpen = not model.CanvasPaneOpen }, Cmd.none
+
+    | SetCanvasPosition position ->
+        { model with CanvasPosition = position },
+        Cmd.OfAsync.attempt worktreeApi.saveCanvasPosition position (fun _ -> NoOp)
 
     | CanvasMessageReceived payload ->
         match model.FocusedElement with
@@ -1639,46 +1647,71 @@ let viewAppHeader model dispatch =
     ]
 
 let view model dispatch =
+    let canvasPositionClass =
+        match model.CanvasPosition with
+        | CanvasPosition.Left -> "canvas-left"
+        | CanvasPosition.Right -> "canvas-right"
+        | CanvasPosition.Top -> "canvas-top"
+        | CanvasPosition.Bottom -> "canvas-bottom"
+
     let dashboardClass =
-        if model.CanvasPaneOpen then "dashboard canvas-open" else "dashboard"
+        match model.CanvasPaneOpen with
+        | true -> $"dashboard canvas-open {canvasPositionClass}"
+        | false -> "dashboard"
+
+    let layoutClass =
+        match model.CanvasPaneOpen with
+        | true -> $"app-layout canvas-open {canvasPositionClass}"
+        | false -> "app-layout"
+
+    let dashboardEl =
+        Html.div [
+            prop.className dashboardClass
+            prop.tabIndex 0
+            prop.autoFocus true
+            prop.onKeyDown (fun e ->
+                match e.key with
+                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                    e.preventDefault()
+                    dispatch (KeyPressed (e.key, false))
+                | key ->
+                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                    dispatch (KeyPressed (key, hasModifier)))
+            prop.children [
+                if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
+                    Html.div [
+                        prop.className "status-bar"
+                        prop.children [ Html.span "Waiting for first refresh..." ]
+                    ]
+                    skeletonGrid ()
+                else
+                    Html.div [
+                        prop.className "repo-list"
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
+                    ]
+
+                schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+
+                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
+            ]
+        ]
+
+    let canvasEl =
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) (SetCanvasPosition >> dispatch)
+
+    let children =
+        match model.CanvasPosition with
+        | CanvasPosition.Left
+        | CanvasPosition.Top -> [ canvasEl; dashboardEl ]
+        | CanvasPosition.Right
+        | CanvasPosition.Bottom -> [ dashboardEl; canvasEl ]
+
     React.fragment [
         viewAppHeader model dispatch
         Html.div [
-            prop.className "app-layout"
-            prop.children [
-                Html.div [
-                    prop.className dashboardClass
-                    prop.tabIndex 0
-                    prop.autoFocus true
-                    prop.onKeyDown (fun e ->
-                        match e.key with
-                        | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                            e.preventDefault()
-                            dispatch (KeyPressed (e.key, false))
-                        | key ->
-                            let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                            dispatch (KeyPressed (key, hasModifier)))
-                    prop.children [
-                        if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
-                            Html.div [
-                                prop.className "status-bar"
-                                prop.children [ Html.span "Waiting for first refresh..." ]
-                            ]
-                            skeletonGrid ()
-                        else
-                            Html.div [
-                                prop.className "repo-list"
-                                prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
-                            ]
-
-                        schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
-
-                        CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
-                        ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
-                    ]
-                ]
-                CanvasPane.view model.CanvasPaneOpen (focusedWorktreeCanvasDoc model)
-            ]
+            prop.className layoutClass
+            prop.children children
         ]
     ]
 

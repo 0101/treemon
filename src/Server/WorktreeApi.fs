@@ -40,6 +40,7 @@ let readOnlyApi
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
+      saveCanvasPosition = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return Error "not implemented" } }
 
@@ -189,6 +190,43 @@ let private writeCollapsedRepos (repos: RepoId list) =
     with ex ->
         Log.log "Config" $"Failed to save collapsed repos: {ex.Message}"
 
+let private readCanvasPosition () : CanvasPosition =
+    withConfigDocument CanvasPosition.Right (fun root ->
+        match root.TryGetProperty("canvasPosition") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String ->
+            match prop.GetString() with
+            | "left" -> CanvasPosition.Left
+            | "right" -> CanvasPosition.Right
+            | "top" -> CanvasPosition.Top
+            | "bottom" -> CanvasPosition.Bottom
+            | _ -> CanvasPosition.Right
+        | _ -> CanvasPosition.Right)
+
+let private writeCanvasPosition (position: CanvasPosition) =
+    let configPath = globalConfigPath ()
+    try
+        let dir = Path.GetDirectoryName(configPath)
+        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+
+        let root =
+            if File.Exists(configPath) then
+                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
+                with _ -> System.Text.Json.Nodes.JsonObject()
+            else System.Text.Json.Nodes.JsonObject()
+
+        let value =
+            match position with
+            | CanvasPosition.Left -> "left"
+            | CanvasPosition.Right -> "right"
+            | CanvasPosition.Top -> "top"
+            | CanvasPosition.Bottom -> "bottom"
+        root["canvasPosition"] <- System.Text.Json.Nodes.JsonValue.Create(value)
+
+        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
+        File.WriteAllText(configPath, root.ToJsonString(options))
+    with ex ->
+        Log.log "Config" $"Failed to save canvas position: {ex.Message}"
+
 let private getEditorConfig () =
     let config = readGlobalConfig ()
     let command = config |> Map.tryFind "editor" |> Option.defaultValue "code"
@@ -246,7 +284,8 @@ let getWorktrees
               DeployBranch = deployBranch
               SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd
-              CollapsedRepos = readCollapsedRepos () }
+              CollapsedRepos = readCollapsedRepos ()
+              CanvasPosition = readCanvasPosition () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -380,7 +419,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos () } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPosition = readCanvasPosition () } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -557,6 +596,7 @@ let worktreeApi
                   })
           reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
+          saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {

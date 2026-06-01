@@ -33,7 +33,8 @@ let private defaultModel : Model =
       ActionCooldowns = Set.empty
       LastActivityTime = 0.0
       ActivityLevel = ActivityLevel.Active
-      CanvasPaneOpen = false }
+      CanvasPaneOpen = false
+      CanvasPosition = CanvasPosition.Right }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the

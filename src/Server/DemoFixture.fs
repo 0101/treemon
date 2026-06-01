@@ -352,7 +352,8 @@ let private baseDashboard: DashboardResponse =
       DeployBranch = None
       SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code"
-      CollapsedRepos = Set.empty }
+      CollapsedRepos = Set.empty
+      CanvasPosition = CanvasPosition.Right }
 
 let private baseFixture: FixtureData =
     { Worktrees = baseDashboard

@@ -11,7 +11,26 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     $"{CanvasOrigin}/{encodedPath}/{doc.Filename}"
 
-let view (isOpen: bool) (focusedDoc: (WorktreeStatus * CanvasDoc) option) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (setPosition: CanvasPosition -> unit) =
+    let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
+        Html.button [
+            prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
+            prop.onClick (fun _ -> setPosition canvasPosition)
+            prop.title title
+            prop.text label
+        ]
+
+    let toolbar =
+        Html.div [
+            prop.className "canvas-toolbar"
+            prop.children [
+                positionButton CanvasPosition.Left "◧" "Dock left"
+                positionButton CanvasPosition.Right "◨" "Dock right"
+                positionButton CanvasPosition.Top "⬒" "Dock top"
+                positionButton CanvasPosition.Bottom "⬓" "Dock bottom"
+            ]
+        ]
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
@@ -25,9 +44,10 @@ let view (isOpen: bool) (focusedDoc: (WorktreeStatus * CanvasDoc) option) =
                 prop.className "canvas-empty"
                 prop.text "No canvas doc"
             ]
+
     Html.div [
         prop.className (if isOpen then "canvas-pane open" else "canvas-pane")
-        prop.children [ content ]
+        prop.children [ toolbar; content ]
     ]
 
 let messageListener (dispatch: string -> unit) =

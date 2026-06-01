@@ -85,6 +85,13 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
+[<RequireQualifiedAccess>]
+type CanvasPosition =
+    | Left
+    | Right
+    | Top
+    | Bottom
+
 type CanvasDoc =
     { Filename: string
       ContentHash: string }
@@ -177,7 +184,8 @@ type DashboardResponse =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       EditorName: string
-      CollapsedRepos: Set<RepoId> }
+      CollapsedRepos: Set<RepoId>
+      CanvasPosition: CanvasPosition }
 
 type FixtureData =
     { Worktrees: DashboardResponse
@@ -202,5 +210,6 @@ type IWorktreeApi =
       launchAction: ActionRequest -> Async<Result<unit, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
+      saveCanvasPosition: CanvasPosition -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>> }
