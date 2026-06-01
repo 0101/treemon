@@ -94,7 +94,8 @@ type CanvasPosition =
 
 type CanvasDoc =
     { Filename: string
-      ContentHash: string }
+      ContentHash: string
+      LastModified: DateTimeOffset }
 
 type CanvasMessageRequest =
     { WorktreePath: WorktreePath
@@ -137,7 +138,7 @@ type WorktreeStatus =
       HasTestFailureLog: bool
       IsMainWorktree: bool
       IsArchived: bool
-      CanvasDoc: CanvasDoc option }
+      CanvasDocs: CanvasDoc list }
 
 [<RequireQualifiedAccess>]
 type StepStatus =

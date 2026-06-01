@@ -164,7 +164,7 @@ let private wtAzDoMain: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = true
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtRetryLogic: WorktreeStatus =
     { Path = azDoPath "feature-retry"
@@ -183,7 +183,7 @@ let private wtRetryLogic: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
@@ -202,7 +202,7 @@ let private wtConfigLoading: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
@@ -221,7 +221,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtArchived: WorktreeStatus =
     { Path = azDoPath "old-migration"
@@ -240,7 +240,7 @@ let private wtArchived: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = true
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtGithubMain: WorktreeStatus =
     { Path = githubPath "main"
@@ -259,7 +259,7 @@ let private wtGithubMain: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = true
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtStreaming: WorktreeStatus =
     { Path = githubPath "streaming"
@@ -278,7 +278,7 @@ let private wtStreaming: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
@@ -297,7 +297,7 @@ let private wtCsvFix: WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 // --- Scheduler footer (all 6 categories populated) ---
 

@@ -26,7 +26,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
-      CanvasDoc = None }
+      CanvasDocs = [] }
 
 let private makeRepo repoId worktrees : RepoModel =
     { RepoId = RepoId repoId

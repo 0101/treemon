@@ -45,7 +45,7 @@
             },
             "MainBehindCount": 25,
             "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 },
-            "CanvasDoc": { "Filename": "e2e-test.html", "ContentHash": "fixture-abc123" }
+            "CanvasDocs": [{ "Filename": "e2e-test.html", "ContentHash": "fixture-abc123", "LastModified": "2026-01-15T10:00:00+00:00" }]
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-recent"},

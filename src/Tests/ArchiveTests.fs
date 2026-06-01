@@ -256,7 +256,7 @@ type NavigationArchiveTests() =
           HasTestFailureLog = false
           IsMainWorktree = false
           IsArchived = isArchived
-          CanvasDoc = None }
+          CanvasDocs = [] }
 
     [<Test>]
     member _.``visibleFocusTargets excludes archived worktrees``() =

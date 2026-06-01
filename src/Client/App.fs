@@ -1548,7 +1548,7 @@ let focusedWorktreeCanvasDoc (model: Model) =
     | Some (Card scopedKey) ->
         findWorktree scopedKey model
         |> Option.bind (fun wt ->
-            wt.CanvasDoc |> Option.map (fun doc -> wt, doc))
+            wt.CanvasDocs |> List.tryHead |> Option.map (fun doc -> wt, doc))
     | _ -> None
 
 let viewMetricBar (pct: float) (label: string) =

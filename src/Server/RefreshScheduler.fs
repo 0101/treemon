@@ -18,19 +18,20 @@ module CanvasScanner =
         |> Array.map (fun b -> b.ToString("x2"))
         |> String.Concat
 
-    let scan (worktreePath: string) : CanvasDoc option =
+    let scan (worktreePath: string) : CanvasDoc list =
         let dir = canvasDir worktreePath
         if Directory.Exists(dir) then
             Directory.GetFiles(dir, "*.html")
             |> Array.sort
-            |> Array.tryHead
-            |> Option.map (fun filePath ->
+            |> Array.map (fun filePath ->
                 { Filename = Path.GetFileName(filePath)
-                  ContentHash = hashFile filePath })
+                  ContentHash = hashFile filePath
+                  LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero) })
+            |> Array.toList
         else
-            None
+            []
 
-    let tryCreateWatcher (post: CanvasDoc option -> unit) (worktreePath: string) : FileSystemWatcher option =
+    let tryCreateWatcher (post: CanvasDoc list -> unit) (worktreePath: string) : FileSystemWatcher option =
         let dir = canvasDir worktreePath
         if Directory.Exists(dir) then
             let watcher = new FileSystemWatcher(dir, "*.html")
@@ -53,7 +54,7 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
-      CanvasData: Map<string, CanvasDoc option>
+      CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
       UpstreamRemote: string
       BaseBranch: string
@@ -97,7 +98,7 @@ type StateMsg =
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
     | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
-    | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc option
+    | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
     | UpdateUpstreamRemote of repoId: RepoId * remote: string
@@ -179,10 +180,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         else
             state
 
-    | UpdateCanvasDoc(repoId, path, canvasDoc) ->
+    | UpdateCanvasDoc(repoId, path, canvasDocs) ->
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
-            updateRepo repoId { repo with CanvasData = repo.CanvasData |> Map.add path canvasDoc } state
+            updateRepo repoId { repo with CanvasData = repo.CanvasData |> Map.add path canvasDocs } state
         else
             state
 
@@ -420,8 +421,8 @@ let private executeTask
             let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
 
-            let canvasDoc = CanvasScanner.scan path
-            agent.Post(UpdateCanvasDoc(repoId, path, canvasDoc))
+            let canvasDocs = CanvasScanner.scan path
+            agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
 
         | RefreshBeads(repoId, path) ->
             let! beads = BeadsStatus.getBeadsSummary path
@@ -609,7 +610,7 @@ module CanvasWatchers =
             |> Set.toList
             |> List.choose (fun path ->
                 let repoId = repoIdByPath |> Map.find path
-                let post canvasDoc = agent.Post(UpdateCanvasDoc(repoId, path, canvasDoc))
+                let post canvasDocs = agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                 CanvasScanner.tryCreateWatcher post path
                 |> Option.map (fun watcher ->
                     Log.log "CanvasWatcher" $"Created watcher for {Path.GetFileName(path)}"
