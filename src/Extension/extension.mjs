@@ -1,6 +1,7 @@
 import http from "node:http";
 
-const TREEMON_REGISTER_URL = "http://127.0.0.1:5000/api/canvas/register";
+const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
+const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
 
 function startInjectServer(session) {
   return new Promise((resolve, reject) => {
