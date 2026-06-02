@@ -559,10 +559,25 @@
         .canvas-overview-branch {
             color: #cdd6f4;
             font-size: 0.85em;
+            cursor: pointer;
         }
-        .canvas-overview-count {
+        .canvas-overview-docs {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .canvas-overview-doc {
             color: #6c7086;
             font-size: 0.75em;
+            cursor: pointer;
+            transition: color 0.15s, text-decoration-color 0.15s;
+            text-decoration: underline;
+            text-decoration-color: transparent;
+            text-underline-offset: 2px;
+        }
+        .canvas-overview-doc:hover {
+            color: #89b4fa;
+            text-decoration-color: #89b4fa;
         }
 
     </style>

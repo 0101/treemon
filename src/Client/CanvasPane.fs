@@ -19,7 +19,7 @@ let private latestDocModified (wt: WorktreeStatus) =
     |> List.sortDescending
     |> List.tryHead
 
-let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) =
+let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
     let entries =
         repos
         |> List.collect (fun repo ->
@@ -55,17 +55,25 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
                             Html.div [
                                 prop.className "canvas-overview-entry"
-                                prop.onClick (fun _ -> onClickEntry scopedKey)
                                 prop.children [
                                     Html.span [
                                         prop.className "canvas-overview-branch"
+                                        prop.onClick (fun _ -> onClickEntry scopedKey)
                                         prop.text wt.Branch
                                     ]
                                     Html.span [
-                                        prop.className "canvas-overview-count"
-                                        prop.text (
-                                            if wt.CanvasDocs.Length = 1 then "1 doc"
-                                            else $"{wt.CanvasDocs.Length} docs")
+                                        prop.className "canvas-overview-docs"
+                                        prop.children (
+                                            wt.CanvasDocs |> List.map (fun doc ->
+                                                Html.span [
+                                                    prop.className "canvas-overview-doc"
+                                                    prop.onClick (fun e ->
+                                                        e.stopPropagation ()
+                                                        onClickDoc scopedKey doc.Filename)
+                                                    prop.text (doc.Filename.Replace(".html", ""))
+                                                ]
+                                            )
+                                        )
                                     ]
                                 ]
                             ]
@@ -76,7 +84,7 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (archiveDoc: string -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -146,7 +154,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         | None ->
             React.fragment [
                 headerBar [] None
-                overviewView allRepos onOverviewClick
+                overviewView allRepos onOverviewClick onOverviewDocClick
             ]
 
     Html.div [

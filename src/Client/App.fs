@@ -1767,13 +1767,17 @@ let view model dispatch =
     let onOverviewClick scopedKey =
         dispatch (FocusOverviewCard scopedKey)
 
+    let onOverviewDocClick scopedKey filename =
+        dispatch (FocusOverviewCard scopedKey)
+        dispatch (SelectCanvasDoc (scopedKey, filename))
+
     let archiveCanvasDoc filename =
         match model.FocusedElement with
         | Some (Card scopedKey) -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
         | _ -> ()
 
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick archiveCanvasDoc
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc
 
     let children =
         match model.CanvasPosition with
