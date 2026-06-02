@@ -123,13 +123,9 @@ let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
             { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains (WorktreePath.value wt.Path) deleted)) })
 
 let findWorktree (scopedKey: string) (model: Model) =
-    let parts = scopedKey.Split('/', 2)
-    if parts.Length < 2 then None
-    else
-        let repoId, branch = parts[0], parts[1]
-        model.Repos
-        |> List.tryFind (fun r -> RepoId.value r.RepoId = repoId)
-        |> Option.bind (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
+    model.Repos
+    |> List.tryPick (fun r ->
+        r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
 
 let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     let pathStr = WorktreePath.value path
@@ -258,7 +254,7 @@ let update msg model =
                     if r.RepoId = repoId then { r with IsCollapsed = not r.IsCollapsed }
                     else r) }
         let focusAdjusted =
-            if isCollapsing then adjustFocusAfterCollapse repoId updatedModel.FocusedElement
+            if isCollapsing then adjustFocusAfterCollapse repoId updatedModel.Repos updatedModel.FocusedElement
             else updatedModel.FocusedElement
         let collapsedRepos =
             updatedModel.Repos
@@ -1114,7 +1110,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
-        prop.key wt.Branch
+        prop.key (WorktreePath.value wt.Path)
         prop.className className
         prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
@@ -1125,7 +1121,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
                         prop.className "header-info"
                         prop.children [
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                            Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                            Html.span [ prop.className "branch-name"; prop.text (WorktreePath.displayName wt.Path) ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
                     ]
@@ -1155,7 +1151,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
     let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
-        prop.key wt.Branch
+        prop.key (WorktreePath.value wt.Path)
         prop.className className
         prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
         prop.children [
@@ -1169,7 +1165,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                                 prop.className "header-info"
                                 prop.children [
                                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                                    Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+                                    Html.span [ prop.className "branch-name"; prop.text (WorktreePath.displayName wt.Path) ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
                             ]
@@ -1218,7 +1214,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
     ]
 
 let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) =
-    let scopedKey = $"{repoId}/{wt.Branch}"
+    let scopedKey = WorktreePath.value wt.Path
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)

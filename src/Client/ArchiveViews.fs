@@ -44,10 +44,10 @@ let archiveIcon =
 
 let archiveCard dispatch (wt: WorktreeStatus) =
     Html.div [
-        prop.key wt.Branch
+        prop.key (WorktreePath.value wt.Path)
         prop.className "archive-card"
         prop.children [
-            Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
+            Html.span [ prop.className "branch-name"; prop.text (WorktreePath.displayName wt.Path) ]
             workMetricsView wt.WorkMetrics
             Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
             Html.button [

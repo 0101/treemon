@@ -31,11 +31,10 @@ type RepoNav =
 let visibleFocusTargets (repos: RepoModel list) =
     repos
     |> List.collect (fun repo ->
-        let repoId = RepoId.value repo.RepoId
         let header = RepoHeader repo.RepoId
         if repo.IsCollapsed then [ header ]
         else
-            header :: (repo.Worktrees |> List.map (fun wt -> Card $"{repoId}/{wt.Branch}")))
+            header :: (repo.Worktrees |> List.map (fun wt -> Card (WorktreePath.value wt.Path))))
 
 let getColumnCount () =
     Dom.document.querySelector ".card-grid"
@@ -48,12 +47,11 @@ let getColumnCount () =
 let repoNavSections (repos: RepoModel list) =
     repos
     |> List.map (fun repo ->
-        let repoId = RepoId.value repo.RepoId
         { RepoId = repo.RepoId
           Header = RepoHeader repo.RepoId
           Cards =
             if repo.IsCollapsed then []
-            else repo.Worktrees |> List.map (fun wt -> Card $"{repoId}/{wt.Branch}") })
+            else repo.Worktrees |> List.map (fun wt -> Card (WorktreePath.value wt.Path)) })
 
 let navigateLinear (direction: int) (targets: FocusTarget list) (current: FocusTarget option) =
     match targets, current with
@@ -217,12 +215,13 @@ let navigateToLast (repos: RepoModel list) =
     | [] -> None
     | _ -> Some (List.last targets)
 
-let adjustFocusAfterCollapse (collapsedRepoId: RepoId) (focusedElement: FocusTarget option) =
+let adjustFocusAfterCollapse (collapsedRepoId: RepoId) (repos: RepoModel list) (focusedElement: FocusTarget option) =
     match focusedElement with
-    | Some (Card scopedKey) ->
-        let repoIdStr = RepoId.value collapsedRepoId
-        if scopedKey.StartsWith(repoIdStr + "/") then Some (RepoHeader collapsedRepoId)
-        else focusedElement
+    | Some (Card path) ->
+        repos
+        |> List.tryFind (fun r -> r.RepoId = collapsedRepoId)
+        |> Option.exists (fun r -> r.Worktrees |> List.exists (fun wt -> WorktreePath.value wt.Path = path))
+        |> fun belongs -> if belongs then Some (RepoHeader collapsedRepoId) else focusedElement
     | other -> other
 
 let adjustFocusForVisibility (repos: RepoModel list) (focusedElement: FocusTarget option) =
