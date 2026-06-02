@@ -525,7 +525,7 @@ let update msg model =
     | ArchiveCanvasDoc (scopedKey, filename) ->
         match findWorktree scopedKey model with
         | Some wt ->
-            let request: ArchiveCanvasDocRequest = { WorktreePath = WorktreePath.value wt.Path; Filename = filename }
+            let request: ArchiveCanvasDocRequest = { WorktreePath = wt.Path; Filename = filename }
             model, Cmd.OfAsync.either worktreeApi.archiveCanvasDoc request (fun r -> ArchiveCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ArchiveCanvasDocResult (scopedKey, filename, r))
         | None -> model, Cmd.none
 

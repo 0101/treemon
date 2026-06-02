@@ -67,8 +67,9 @@ let private sendCanvasMessageImpl (request: CanvasMessageRequest) =
     CanvasBridge.sendMessage request
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
+    let path = WorktreePath.value request.WorktreePath
     asyncResult {
-        let canvasDir = Path.Combine(request.WorktreePath, ".agents", "canvas")
+        let canvasDir = Path.Combine(path, ".agents", "canvas")
         let sourcePath = Path.Combine(canvasDir, request.Filename)
         let normalizedSource = Server.PathUtils.normalizePath sourcePath
         let normalizedCanvasDir = Server.PathUtils.normalizePath canvasDir
@@ -674,4 +675,6 @@ let worktreeApi
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
           sendCanvasMessage = sendCanvasMessageImpl
-          archiveCanvasDoc = archiveCanvasDocImpl }
+          archiveCanvasDoc = fun req ->
+              withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
+                  archiveCanvasDocImpl req) }

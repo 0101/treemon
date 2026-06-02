@@ -194,7 +194,7 @@ type FixtureData =
       SyncStatus: Map<string, CardEvent list> }
 
 type ArchiveCanvasDocRequest =
-    { WorktreePath: string
+    { WorktreePath: WorktreePath
       Filename: string }
 
 type IWorktreeApi =

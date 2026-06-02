@@ -88,7 +88,7 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
         let worktreeInfos =
             repo.Worktrees
             |> List.map (fun wt ->
-                { Path = WorktreePath.value wt.Path
+                { Path = WorktreePath.value wt.Path |> Server.PathUtils.normalizePath
                   Head = ""
                   Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
