@@ -3,6 +3,8 @@ import { createServer } from "node:http";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
+const HEARTBEAT_INTERVAL_MS = 30000;
+const HEARTBEAT_MAX_INTERVAL_MS = 120000;
 
 const log = (msg) => console.error(`[canvas-bridge] ${msg}`);
 
@@ -53,12 +55,49 @@ async function registerWithTreemon(worktreePath, injectUrl) {
     });
     if (!res.ok) {
       log(`registration failed: ${res.status} ${res.statusText}`);
-    } else {
-      log(`registered ${worktreePath} → ${injectUrl}`);
+      return false;
     }
+    log(`registered ${worktreePath} → ${injectUrl}`);
+    return true;
   } catch (err) {
     log(`could not reach Treemon: ${err.message}`);
+    return false;
   }
+}
+
+function startHeartbeat(worktreePath, injectUrl) {
+  let currentInterval = HEARTBEAT_INTERVAL_MS;
+  let wasDisconnected = false;
+  let timerId = null;
+
+  const scheduleNext = () => {
+    timerId = setTimeout(tick, currentInterval);
+  };
+
+  const tick = async () => {
+    const ok = await registerWithTreemon(worktreePath, injectUrl);
+    if (ok) {
+      if (wasDisconnected) {
+        log("Bridge reconnected to Treemon");
+        wasDisconnected = false;
+      }
+      currentInterval = HEARTBEAT_INTERVAL_MS;
+    } else {
+      wasDisconnected = true;
+      currentInterval = Math.min(currentInterval * 2, HEARTBEAT_MAX_INTERVAL_MS);
+      log(`heartbeat failed, retrying in ${currentInterval / 1000}s`);
+    }
+    scheduleNext();
+  };
+
+  scheduleNext();
+
+  return () => {
+    if (timerId != null) {
+      clearTimeout(timerId);
+      timerId = null;
+    }
+  };
 }
 
 const session = await joinSession({});
@@ -69,5 +108,11 @@ const injectUrl = `http://127.0.0.1:${port}/inject`;
 await registerWithTreemon(worktreePath, injectUrl);
 log(`● canvas-bridge listening on ${injectUrl}`);
 
-process.on("SIGTERM", () => server.close());
-process.on("SIGINT", () => server.close());
+const stopHeartbeat = startHeartbeat(worktreePath, injectUrl);
+
+const cleanup = () => {
+  stopHeartbeat();
+  server.close();
+};
+process.on("SIGTERM", cleanup);
+process.on("SIGINT", cleanup);
