@@ -6,7 +6,7 @@ open Fable.Core.JsInterop
 
 type FocusTarget =
     | RepoHeader of RepoId
-    | Card of scopedKey: string
+    | Card of path: string
 
 type RepoModel =
     { RepoId: RepoId

@@ -4,8 +4,8 @@ open System
 open System.IO
 open System.Runtime.InteropServices
 open FsToolkit.ErrorHandling
+open Shared
 
-let [<Literal>] DetachedBranchName = "(detached)"
 
 type WorktreeInfo =
     { Path: string
@@ -231,7 +231,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
 
         return
             { Path = worktreePath
-              Branch = branch |> Option.defaultValue DetachedBranchName
+              Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
               LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch

@@ -128,9 +128,7 @@ type WorktreeStatus =
       IsArchived: bool }
 
 module WorktreeStatus =
-    let cardTitle (wt: WorktreeStatus) =
-        if wt.Branch = "(detached)" then WorktreePath.displayName wt.Path
-        else wt.Branch
+    let [<Literal>] DetachedBranchName = "(detached)"
 
 [<RequireQualifiedAccess>]
 type StepStatus =

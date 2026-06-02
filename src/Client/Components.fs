@@ -13,6 +13,10 @@ let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
 
+let cardTitle (wt: WorktreeStatus) =
+    if wt.Branch = WorktreeStatus.DetachedBranchName then WorktreePath.displayName wt.Path
+    else wt.Branch
+
 // ResizeObserver interop
 [<Emit("new ResizeObserver($0)")>]
 let private createResizeObserver (callback: obj -> unit) : obj = jsNative

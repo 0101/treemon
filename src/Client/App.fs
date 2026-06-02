@@ -1105,6 +1105,7 @@ let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName
 let workMetricsView = Components.workMetricsView
 let workMetricsItems = Components.workMetricsItems
 let FitOrHide = Components.FitOrHide
+let cardTitle = Components.cardTitle
 
 let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
@@ -1121,7 +1122,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
                         prop.className "header-info"
                         prop.children [
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                            Html.span [ prop.className "branch-name"; prop.text (WorktreeStatus.cardTitle wt) ]
+                            Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
                     ]
@@ -1165,7 +1166,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                                 prop.className "header-info"
                                 prop.children [
                                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                                    Html.span [ prop.className "branch-name"; prop.text (WorktreeStatus.cardTitle wt) ]
+                                    Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
                             ]

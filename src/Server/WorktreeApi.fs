@@ -64,7 +64,7 @@ let private assembleFromState
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
     { Path = PathUtils.toWorktreePath wt.Path
-      Branch = wt.Branch |> Option.defaultValue GitWorktree.DetachedBranchName
+      Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
