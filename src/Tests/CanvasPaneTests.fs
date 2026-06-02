@@ -100,7 +100,7 @@ type CanvasPaneTests() =
     member this.``Canvas pane is closed by default``() =
         task {
             let pane = canvasPane this.Page
-            do! pane.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! pane.WaitForAsync(LocatorWaitForOptions(State = WaitForSelectorState.Attached, Timeout = 5000.0f))
 
             let paneOpen = canvasPaneOpen this.Page
             let! openCount = paneOpen.CountAsync()
@@ -434,7 +434,7 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Single-doc worktree does not show tab bar``() =
+    member this.``Single-doc worktree shows header bar but no tabs``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
@@ -444,10 +444,15 @@ type CanvasPaneTests() =
             let iframe = canvasIframe this.Page
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
-            // Tab bar should not be present for single-doc worktree
+            // Header bar always renders (contains position buttons + archive)
             let tabBarEl = canvasTabBar this.Page
             let! tabBarCount = tabBarEl.CountAsync()
-            Assert.That(tabBarCount, Is.EqualTo(0), "Single-doc worktree should not show tab bar")
+            Assert.That(tabBarCount, Is.EqualTo(1), "Header bar should always render")
+
+            // But no tab buttons for single-doc worktree
+            let tabs = canvasTabs this.Page
+            let! tabCount = tabs.CountAsync()
+            Assert.That(tabCount, Is.EqualTo(0), "Single-doc worktree should not show doc tabs")
         }
 
     // ── Empty Canvas Overview ───────────────────────────────────────────
@@ -476,7 +481,7 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Overview entries show branch name and doc count``() =
+    member this.``Overview entries show branch name and doc names``() =
         task {
             // Focus a worktree with no canvas docs to trigger overview
             do! focusCanvasCard this.Page "feature-recent"
@@ -486,7 +491,7 @@ type CanvasPaneTests() =
             let overview = this.Page.Locator(".canvas-overview")
             do! overview.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // Each entry should have a branch name and doc count
+            // Each entry should have a branch name and doc names
             let entries = this.Page.Locator(".canvas-overview-entry")
             let! entryCount = entries.CountAsync()
             Assert.That(entryCount, Is.GreaterThanOrEqualTo(3), "Overview should list all worktrees with canvas docs (at least 3 in fixtures)")
@@ -496,28 +501,28 @@ type CanvasPaneTests() =
             let! branchCount = branches.CountAsync()
             Assert.That(branchCount, Is.EqualTo(entryCount), "Each entry should have a branch name")
 
-            // Verify doc counts are rendered
-            let counts = this.Page.Locator(".canvas-overview-count")
-            let! countCount = counts.CountAsync()
-            Assert.That(countCount, Is.EqualTo(entryCount), "Each entry should have a doc count")
+            // Verify doc names are rendered inline (not counts)
+            let docs = this.Page.Locator(".canvas-overview-doc")
+            let! docCount = docs.CountAsync()
+            Assert.That(docCount, Is.GreaterThanOrEqualTo(3), "Overview should show individual doc names")
 
-            // Spot-check: the multi-doc fixture branch should show "3 docs"
+            // Spot-check: the multi-doc fixture branch should show 3 doc name spans
             let multiDocEntry =
                 this.Page.Locator(
                     ".canvas-overview-entry",
                     PageLocatorOptions(Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = "feature-multidoc"))))
             let! multiDocCount = multiDocEntry.CountAsync()
             Assert.That(multiDocCount, Is.EqualTo(1), "Should have an entry for feature-multidoc")
-            let! docCountText = multiDocEntry.Locator(".canvas-overview-count").TextContentAsync()
-            Assert.That(docCountText, Is.EqualTo("3 docs"), "feature-multidoc should show '3 docs'")
+            let! multiDocDocs = multiDocEntry.Locator(".canvas-overview-doc").CountAsync()
+            Assert.That(multiDocDocs, Is.EqualTo(3), "feature-multidoc should show 3 doc name spans")
 
-            // Spot-check: the single-doc fixture branch should show "1 doc"
+            // Spot-check: the single-doc fixture branch should show 1 doc name span
             let singleDocEntry =
                 this.Page.Locator(
                     ".canvas-overview-entry",
                     PageLocatorOptions(Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = "feature-active"))))
-            let! singleDocCountText = singleDocEntry.Locator(".canvas-overview-count").TextContentAsync()
-            Assert.That(singleDocCountText, Is.EqualTo("1 doc"), "feature-active should show '1 doc'")
+            let! singleDocDocs = singleDocEntry.Locator(".canvas-overview-doc").CountAsync()
+            Assert.That(singleDocDocs, Is.EqualTo(1), "feature-active should show 1 doc name span")
         }
 
     [<Test>]
@@ -531,12 +536,12 @@ type CanvasPaneTests() =
             let overview = this.Page.Locator(".canvas-overview")
             do! overview.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // Click the entry for feature-active (single doc worktree in TestProject)
-            let targetEntry =
+            // Click the branch name for feature-active (single doc worktree in TestProject)
+            let targetBranch =
                 this.Page.Locator(
-                    ".canvas-overview-entry",
-                    PageLocatorOptions(Has = this.Page.Locator(".canvas-overview-branch", PageLocatorOptions(HasText = "feature-active"))))
-            do! targetEntry.ClickAsync()
+                    ".canvas-overview-branch",
+                    PageLocatorOptions(HasText = "feature-active"))
+            do! targetBranch.First.ClickAsync()
 
             // After clicking, the canvas pane should show an iframe (not overview) for the focused worktree
             let iframe = canvasIframe this.Page
@@ -551,4 +556,82 @@ type CanvasPaneTests() =
                     PageLocatorOptions(Has = this.Page.Locator(".branch-name", PageLocatorOptions(HasText = "feature-active"))))
             let! focusedCount = focusedCard.CountAsync()
             Assert.That(focusedCount, Is.EqualTo(1), "Clicking overview entry should focus the corresponding worktree card")
+        }
+
+    // ── Toolbar Consolidation ───────────────────────────────────────────
+
+    [<Test>]
+    member this.``Position buttons render inside header bar``() =
+        task {
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Position buttons should be inside .canvas-tab-bar
+            let posButtons = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn")
+            let! count = posButtons.CountAsync()
+            Assert.That(count, Is.EqualTo(4), "Should have 4 position buttons (◧ ◨ ⬒ ⬓) inside the header bar")
+        }
+
+    [<Test>]
+    member this.``Position buttons have low opacity by default``() =
+        task {
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let posBtn = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn").First
+            do! posBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Check computed opacity via evaluate
+            let! opacity = posBtn.EvaluateAsync<string>("el => getComputedStyle(el).opacity")
+            let opacityVal = System.Double.Parse(opacity, System.Globalization.CultureInfo.InvariantCulture)
+            Assert.That(opacityVal, Is.LessThanOrEqualTo(0.5), "Position buttons should have low opacity (0.4) by default")
+        }
+
+    [<Test>]
+    member this.``No separate canvas-toolbar exists``() =
+        task {
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // The old separate toolbar should not exist
+            let toolbar = this.Page.Locator(".canvas-pane .canvas-toolbar")
+            let! count = toolbar.CountAsync()
+            Assert.That(count, Is.EqualTo(0), "Separate canvas-toolbar should not exist — position buttons are now in the header bar")
+        }
+
+    // ── Archive Button ──────────────────────────────────────────────────
+
+    [<Test>]
+    member this.``Archive button appears in header bar for active doc``() =
+        task {
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let archiveBtn = this.Page.Locator(".canvas-tab-bar .canvas-archive-btn")
+            do! archiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = archiveBtn.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Archive button should appear in header bar when a doc is active")
+        }
+
+    [<Test>]
+    member this.``Header bar renders with position buttons when overview is shown``() =
+        task {
+            // Focus worktree with no canvas docs — triggers overview
+            do! focusCanvasCard this.Page "feature-recent"
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Header bar should still render with position buttons
+            let posButtons = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn")
+            let! count = posButtons.CountAsync()
+            Assert.That(count, Is.EqualTo(4), "Position buttons should render in header bar even in overview mode")
+
+            // Archive button should NOT appear (no active doc)
+            let archiveBtn = this.Page.Locator(".canvas-tab-bar .canvas-archive-btn")
+            let! archiveCount = archiveBtn.CountAsync()
+            Assert.That(archiveCount, Is.EqualTo(0), "Archive button should not appear when no doc is active")
         }
