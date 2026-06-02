@@ -213,10 +213,16 @@ module CanvasDocServer =
                     do! ctx.Response.WriteAsync("File not found")
                     Log.log "Canvas" $"Doc request 404: file not found — {resolvedPath}"
                 else
-                    let! content = File.ReadAllBytesAsync(resolvedPath)
-                    ctx.Response.ContentType <- "text/html"
+                    let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
+                    let html = System.Text.Encoding.UTF8.GetString(rawBytes)
+                    let baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}</style>"
+                    let injected =
+                        if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
+                        then html.Replace("</head>", baseStyle + "</head>")
+                        else baseStyle + html
+                    ctx.Response.ContentType <- "text/html; charset=utf-8"
                     ctx.Response.Headers["Cache-Control"] <- "no-cache"
-                    do! ctx.Response.Body.WriteAsync(content)
+                    do! ctx.Response.WriteAsync(injected)
                     Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
     }
 
