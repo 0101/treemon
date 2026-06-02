@@ -60,10 +60,30 @@ let readOnlyApi
       saveCanvasPaneOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
-      sendCanvasMessage = fun _ -> async { return Error "not implemented" } }
+      sendCanvasMessage = fun _ -> async { return Error "not implemented" }
+      archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" } }
 
 let private sendCanvasMessageImpl (request: CanvasMessageRequest) =
     CanvasBridge.sendMessage request
+
+let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
+    asyncResult {
+        let canvasDir = Path.Combine(request.WorktreePath, ".agents", "canvas")
+        let sourcePath = Path.Combine(canvasDir, request.Filename)
+        let normalizedSource = Server.PathUtils.normalizePath sourcePath
+        let normalizedCanvasDir = Server.PathUtils.normalizePath canvasDir
+
+        if not (normalizedSource.StartsWith(normalizedCanvasDir + (string Path.DirectorySeparatorChar))) then
+            return! Error "Invalid filename: path escapes canvas directory"
+
+        if not (File.Exists sourcePath) then
+            return! Error $"File not found: {request.Filename}"
+
+        let archiveDir = Path.Combine(canvasDir, "archive")
+        Directory.CreateDirectory archiveDir |> ignore
+        let destPath = Path.Combine(archiveDir, request.Filename)
+        File.Move(sourcePath, destPath, overwrite = true)
+    }
 
 let private assembleFromState
     (activeSessions: Set<string>)
@@ -653,4 +673,5 @@ let worktreeApi
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
-          sendCanvasMessage = sendCanvasMessageImpl }
+          sendCanvasMessage = sendCanvasMessageImpl
+          archiveCanvasDoc = archiveCanvasDocImpl }

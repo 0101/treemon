@@ -193,6 +193,10 @@ type FixtureData =
     { Worktrees: DashboardResponse
       SyncStatus: Map<string, CardEvent list> }
 
+type ArchiveCanvasDocRequest =
+    { WorktreePath: string
+      Filename: string }
+
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
@@ -215,4 +219,5 @@ type IWorktreeApi =
       saveCanvasPaneOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
-      sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>> }
+      sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>>
+      archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>> }
