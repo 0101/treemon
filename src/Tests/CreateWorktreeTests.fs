@@ -38,11 +38,9 @@ let private defaultModel : Model =
       ActiveCanvasDoc = Map.empty
       LastViewedHashes = Map.empty
       AutoDisplayedDocs = Set.empty
-      PreviousCanvasDocs = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasMessageError = None
-      CanvasMessageWaiting = false
       CanvasMessageQueuedAt = None
       BridgeLiveness = Map.empty }
 

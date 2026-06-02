@@ -42,11 +42,9 @@ type Model =
       ActiveCanvasDoc: Map<string, string>
       LastViewedHashes: Map<string, Map<string, string>>
       AutoDisplayedDocs: Set<string * string>
-      PreviousCanvasDocs: Map<string, string list>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasMessageError: string option
-      CanvasMessageWaiting: bool
       CanvasMessageQueuedAt: float option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
@@ -141,11 +139,9 @@ let init () =
       ActiveCanvasDoc = Map.empty
       LastViewedHashes = Map.empty
       AutoDisplayedDocs = Set.empty
-      PreviousCanvasDocs = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasMessageError = None
-      CanvasMessageWaiting = false
       CanvasMessageQueuedAt = None
       BridgeLiveness = Map.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
@@ -192,16 +188,6 @@ let unviewedDocsByScopedKey (model: Model) : Map<string, string list> =
                 |> List.map _.Filename
             if List.isEmpty unviewed then None
             else Some (scopedKey, unviewed)))
-    |> Map.ofList
-
-let canvasDocsByScopedKey (repos: RepoModel list) : Map<string, string list> =
-    repos
-    |> List.collect (fun r ->
-        r.Worktrees
-        |> List.choose (fun wt ->
-            let docs = wt.CanvasDocs |> List.map _.Filename
-            if List.isEmpty docs then None
-            else Some ($"{RepoId.value r.RepoId}/{wt.Branch}", docs)))
     |> Map.ofList
 
 let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, string>> =
@@ -252,18 +238,21 @@ let expireCanvasEvents (events: Map<string, CanvasEvent list>) : Map<string, Can
     |> Map.map (fun _ evts -> evts |> List.filter (fun e -> e.Timestamp > cutoff))
     |> Map.filter (fun _ evts -> not (List.isEmpty evts))
 
-let detectNewCanvasDocs (previous: Map<string, string list>) (current: Map<string, string list>) : (string * string) list =
+let detectNewCanvasDocs (previous: Map<string, Map<string, string>>) (current: Map<string, Map<string, string>>) : (string * string) list =
     current
     |> Map.toList
-    |> List.collect (fun (scopedKey, filenames) ->
+    |> List.collect (fun (scopedKey, hashes) ->
         let prevFilenames =
             previous
             |> Map.tryFind scopedKey
-            |> Option.defaultValue []
-            |> Set.ofList
-        filenames
-        |> List.filter (fun f -> not (Set.contains f prevFilenames))
-        |> List.map (fun f -> scopedKey, f))
+            |> Option.defaultValue Map.empty
+            |> Map.keys
+            |> Set.ofSeq
+        hashes
+        |> Map.keys
+        |> Seq.filter (fun f -> not (Set.contains f prevFilenames))
+        |> Seq.map (fun f -> scopedKey, f)
+        |> Seq.toList)
 
 let findMostRecentNewDoc (repos: RepoModel list) (newDocs: (string * string) list) =
     newDocs
@@ -363,7 +352,6 @@ let update msg model =
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
-            let currentCanvasDocs = canvasDocsByScopedKey repos
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let canvasEvents =
                 if isFirstLoad then model.CanvasEvents
@@ -374,7 +362,7 @@ let update msg model =
             let newDocs =
                 if isFirstLoad then []
                 else
-                    detectNewCanvasDocs model.PreviousCanvasDocs currentCanvasDocs
+                    detectNewCanvasDocs model.PreviousCanvasHashes currentCanvasHashes
                     |> List.filter (fun (sk, fn) -> not (Set.contains (sk, fn) model.AutoDisplayedDocs))
             let now = Fable.Core.JS.Constructors.Date.now ()
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
@@ -409,7 +397,6 @@ let update msg model =
                 SystemMetrics = response.SystemMetrics
                 CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
                 CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition
-                PreviousCanvasDocs = currentCanvasDocs
                 PreviousCanvasHashes = currentCanvasHashes
                 CanvasEvents = canvasEvents
                 AutoDisplayedDocs = updatedAutoDisplayed }
@@ -487,7 +474,6 @@ let update msg model =
         let model =
             if messageQueueExpired then
                 { model with
-                    CanvasMessageWaiting = false
                     CanvasMessageQueuedAt = None
                     CanvasMessageError = Some "Message expired \u2014 no session responded" }
             else
@@ -787,15 +773,15 @@ let update msg model =
         match result with
         | CanvasMessageResult.Error msg ->
             Fable.Core.JS.console.error ("Canvas message error:", msg)
-            { model with CanvasMessageError = Some msg; CanvasMessageWaiting = false; CanvasMessageQueuedAt = None }, Cmd.none
+            { model with CanvasMessageError = Some msg; CanvasMessageQueuedAt = None }, Cmd.none
         | CanvasMessageResult.Ok ->
-            { model with CanvasMessageError = None; CanvasMessageWaiting = false; CanvasMessageQueuedAt = None }, Cmd.none
+            { model with CanvasMessageError = None; CanvasMessageQueuedAt = None }, Cmd.none
         | CanvasMessageResult.Queued ->
             Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-            { model with CanvasMessageError = None; CanvasMessageWaiting = true; CanvasMessageQueuedAt = Some (Fable.Core.JS.Constructors.Date.now ()) }, Cmd.none
+            { model with CanvasMessageError = None; CanvasMessageQueuedAt = Some (Fable.Core.JS.Constructors.Date.now ()) }, Cmd.none
 
     | DismissCanvasMessageError ->
-        { model with CanvasMessageError = None; CanvasMessageWaiting = false; CanvasMessageQueuedAt = None }, Cmd.none
+        { model with CanvasMessageError = None; CanvasMessageQueuedAt = None }, Cmd.none
 
     | MarkDocViewed (scopedKey, filename) ->
         match findWorktree scopedKey model with
@@ -2071,7 +2057,7 @@ let view model dispatch =
         | _ -> ()
 
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageWaiting model.BridgeLiveness (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageQueuedAt.IsSome model.BridgeLiveness (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
 
     let children =
         match model.CanvasPosition with
