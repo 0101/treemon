@@ -34,7 +34,8 @@ type Model =
       ActivityLevel: ActivityLevel
       CanvasPaneOpen: bool
       CanvasPosition: CanvasPosition
-      ActiveCanvasDoc: Map<string, string> }
+      ActiveCanvasDoc: Map<string, string>
+      CanvasMessageError: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -76,6 +77,7 @@ type Msg =
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | CanvasMessageReceived of payload: string
     | CanvasMessageResult of Result<unit, string>
+    | ClearCanvasMessageError
     | NoOp
 
 let worktreeApi =
@@ -119,7 +121,8 @@ let init () =
       ActivityLevel = ActivityLevel.Active
       CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
-      ActiveCanvasDoc = Map.empty },
+      ActiveCanvasDoc = Map.empty
+      CanvasMessageError = false },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
 
 let rng = System.Random()
@@ -561,16 +564,27 @@ let update msg model =
         | Some (Card scopedKey) ->
             match findWorktree scopedKey model with
             | Some wt ->
+                Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} (payload length={payload.Length})")
                 model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Payload = payload } CanvasMessageResult (_.Message >> Error >> CanvasMessageResult)
-            | None -> model, Cmd.none
-        | _ -> model, Cmd.none
+            | None ->
+                Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
+                model, Cmd.none
+        | other ->
+            let focusDesc = match other with Some f -> $"{f}" | None -> "none"
+            Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: no focused card (focus={focusDesc})")
+            model, Cmd.none
 
     | CanvasMessageResult (Error msg) ->
         Fable.Core.JS.console.error ("Canvas message error:", msg)
-        model, Cmd.none
+        { model with CanvasMessageError = true },
+        Cmd.ofEffect (fun dispatch ->
+            Fable.Core.JS.setTimeout (fun () -> dispatch ClearCanvasMessageError) 2000 |> ignore)
 
     | CanvasMessageResult (Ok _) ->
         model, Cmd.none
+
+    | ClearCanvasMessageError ->
+        { model with CanvasMessageError = false }, Cmd.none
 
     | NoOp -> model, Cmd.none
 
@@ -1777,7 +1791,7 @@ let view model dispatch =
         | _ -> ()
 
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc
 
     let children =
         match model.CanvasPosition with

@@ -84,7 +84,7 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: bool) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -157,8 +157,14 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 overviewView allRepos onOverviewClick onOverviewDocClick
             ]
 
+    let paneClass =
+        [ "canvas-pane"
+          if isOpen then "open"
+          if messageError then "canvas-msg-error" ]
+        |> String.concat " "
+
     Html.div [
-        prop.className (if isOpen then "canvas-pane open" else "canvas-pane")
+        prop.className paneClass
         prop.children [ content ]
     ]
 
@@ -170,8 +176,11 @@ let messageListener (dispatch: string -> unit) =
                && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
             then
                 let payload = Fable.Core.JS.JSON.stringify me.data
+                let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
+                Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
                 if payload.Length <= MaxPayloadBytes
                 then dispatch payload
+                else Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
 
     Dom.window.addEventListener ("message", handler)
 

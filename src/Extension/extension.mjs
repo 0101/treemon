@@ -10,8 +10,8 @@ let sendQueue = Promise.resolve();
 const enqueueSend = (session, prompt) => {
   sendQueue = sendQueue
     .then(() => session.send({ prompt }))
-    .then(() => log(`forwarded: ${prompt.slice(0, 80)}…`))
-    .catch((err) => log(`send failed: ${err?.message ?? err}`));
+    .then(() => log(`session.send succeeded (${prompt.length} chars)`))
+    .catch((err) => log(`session.send FAILED: ${err?.message ?? err}`));
 };
 
 function readBody(req) {
@@ -27,6 +27,7 @@ function startInjectServer(session) {
     const server = createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/inject") {
         const body = await readBody(req);
+        log(`/inject received: payload length=${body.length}`);
         enqueueSend(session, `[canvas] ${body}`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));

@@ -128,10 +128,21 @@ type CanvasRegisterRequest =
 
 let private canvasRegisterHandler : HttpHandler =
     fun next ctx -> task {
-        let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
-        CanvasBridge.register body.worktreePath body.injectUrl
-        Log.log "Canvas" $"Bridge registered: {body.worktreePath} -> {body.injectUrl}"
-        return! Successful.OK "registered" next ctx
+        try
+            let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
+
+            if System.String.IsNullOrWhiteSpace body.worktreePath then
+                Log.log "Canvas" "Registration failed: missing worktreePath"
+                return! RequestErrors.BAD_REQUEST "missing worktreePath" next ctx
+            elif System.String.IsNullOrWhiteSpace body.injectUrl then
+                Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
+                return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
+            else
+                CanvasBridge.register body.worktreePath body.injectUrl
+                return! Successful.OK "registered" next ctx
+        with ex ->
+            Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
+            return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
     }
 
 module CanvasDocServer =
