@@ -145,6 +145,19 @@ let private canvasRegisterHandler : HttpHandler =
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
     }
 
+let private bridgeStatusHandler : HttpHandler =
+    fun next ctx ->
+        let worktreePath = ctx.GetQueryStringValue "worktreePath"
+
+        match worktreePath with
+        | Ok path when not (System.String.IsNullOrWhiteSpace path) ->
+            let status = CanvasBridge.getStatus path
+            Successful.ok
+                (json {| registered = status.Registered; lastHeartbeatAge = status.LastHeartbeatAge |})
+                next ctx
+        | _ ->
+            RequestErrors.BAD_REQUEST "missing worktreePath query parameter" next ctx
+
 module CanvasDocServer =
     open Microsoft.AspNetCore.Hosting
     open Microsoft.Extensions.DependencyInjection
@@ -283,6 +296,7 @@ let main args =
     let combinedRouter =
         choose [
             route "/api/canvas/register" >=> POST >=> canvasRegisterHandler
+            route "/api/canvas/bridge-status" >=> GET >=> bridgeStatusHandler
             remotingApi
         ]
 

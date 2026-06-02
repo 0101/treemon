@@ -10,21 +10,26 @@ open Shared
 
 let private normalizePath = Server.PathUtils.normalizePath
 
+type BridgeEntry =
+    { InjectUrl: string
+      LastHeartbeat: DateTime }
+
 // Mutable: ConcurrentDictionary used for thread-safe bridge registry;
 // simple two-operation access pattern doesn't warrant MailboxProcessor overhead.
-let private registry = ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+let private registry = ConcurrentDictionary<string, BridgeEntry>(StringComparer.OrdinalIgnoreCase)
 
 let private httpClient = new HttpClient()
 
 let register (worktreePath: string) (injectUrl: string) =
     let key = normalizePath worktreePath
+    let entry = { InjectUrl = injectUrl; LastHeartbeat = DateTime.UtcNow }
 
     match registry.TryGetValue(key) with
-    | true, oldUrl ->
-        Log.log "CanvasBridge" $"Overwriting registration for {key}: {oldUrl} -> {injectUrl}"
+    | true, oldEntry ->
+        Log.log "CanvasBridge" $"Overwriting registration for {key}: {oldEntry.InjectUrl} -> {injectUrl}"
     | false, _ -> ()
 
-    registry[key] <- injectUrl
+    registry[key] <- entry
     Log.log "CanvasBridge" $"Registered {key} -> {injectUrl} (registry size: {registry.Count})"
 
 let sendMessage (request: CanvasMessageRequest) =
@@ -34,7 +39,7 @@ let sendMessage (request: CanvasMessageRequest) =
 
         let! injectUrl =
             match registry.TryGetValue(key) with
-            | true, url -> Ok url
+            | true, entry -> Ok entry.InjectUrl
             | false, _ ->
                 let registeredKeys = registry.Keys |> Seq.toList |> String.concat "; "
                 Log.log "CanvasBridge" $"sendMessage FAILED: no bridge for key={key}. Registered keys: [{registeredKeys}]"
@@ -54,3 +59,13 @@ let sendMessage (request: CanvasMessageRequest) =
         else
             Log.log "CanvasBridge" $"Message forwarded to {Path.GetFileName(key)}"
     }
+
+let getStatus (worktreePath: string) =
+    let key = normalizePath worktreePath
+
+    match registry.TryGetValue(key) with
+    | true, entry ->
+        let age = (DateTime.UtcNow - entry.LastHeartbeat).TotalSeconds
+        {| Registered = true; LastHeartbeatAge = Some age |}
+    | false, _ ->
+        {| Registered = false; LastHeartbeatAge = None |}
