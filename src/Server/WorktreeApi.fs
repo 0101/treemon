@@ -61,7 +61,9 @@ let readOnlyApi
       saveCanvasPosition = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return Error "not implemented" }
-      archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" } }
+      archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
+      saveLastViewedHashes = fun _ -> async { return () }
+      loadLastViewedHashes = fun () -> async { return Map.empty } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -262,6 +264,35 @@ let private writeCanvasPosition (position: CanvasPosition) =
         | CanvasPosition.Bottom -> "bottom"
     updateGlobalConfig "canvas position" (fun root ->
         root["canvasPosition"] <- System.Text.Json.Nodes.JsonValue.Create(value))
+
+let private readLastViewedHashes () : Map<string, Map<string, string>> =
+    withConfigDocument Map.empty (fun root ->
+        match root.TryGetProperty("lastViewedHashes") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Object ->
+            prop.EnumerateObject()
+            |> Seq.choose (fun worktreeProp ->
+                if worktreeProp.Value.ValueKind = System.Text.Json.JsonValueKind.Object then
+                    let fileHashes =
+                        worktreeProp.Value.EnumerateObject()
+                        |> Seq.choose (fun fileProp ->
+                            if fileProp.Value.ValueKind = System.Text.Json.JsonValueKind.String
+                            then Some (fileProp.Name, fileProp.Value.GetString())
+                            else None)
+                        |> Map.ofSeq
+                    Some (worktreeProp.Name, fileHashes)
+                else None)
+            |> Map.ofSeq
+        | _ -> Map.empty)
+
+let private writeLastViewedHashes (hashes: Map<string, Map<string, string>>) =
+    updateGlobalConfig "last viewed hashes" (fun root ->
+        let outerObj = System.Text.Json.Nodes.JsonObject()
+        hashes |> Map.iter (fun worktreePath fileHashes ->
+            let innerObj = System.Text.Json.Nodes.JsonObject()
+            fileHashes |> Map.iter (fun filename hash ->
+                innerObj[filename] <- System.Text.Json.Nodes.JsonValue.Create(hash))
+            outerObj[worktreePath] <- innerObj)
+        root["lastViewedHashes"] <- outerObj)
 
 let private getEditorConfig () =
     let config = readGlobalConfig ()
@@ -648,4 +679,6 @@ let worktreeApi
           sendCanvasMessage = CanvasBridge.sendMessage
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
-                  archiveCanvasDocImpl req) }
+                  archiveCanvasDocImpl req)
+          saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
+          loadLastViewedHashes = fun () -> async { return readLastViewedHashes () } }

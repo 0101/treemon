@@ -220,4 +220,6 @@ type IWorktreeApi =
       saveCanvasPosition: CanvasPosition -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>>
-      archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>> }
+      archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
+      saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
+      loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>> }

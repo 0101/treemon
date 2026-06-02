@@ -460,25 +460,13 @@ Completed phases:
    (single doc = no tab bar), `LastModified` on `CanvasDoc`, `CanvasDocs` list throughout
    pipeline. **Empty canvas overview** — all worktrees with docs grouped by repo, clickable
    to focus. 17 canvas E2E tests passing.
+3.5. **Toolbar consolidation + doc archive** ✅ (`tm-canvas48-l7t`, spec:
+   `docs/spec/canvas-toolbar-archive.md`): unified header bar (tabs + position buttons at
+   0.4 opacity), doc archive, inline doc names in overview, canvas authoring skill,
+   diagnostics logging. 22 canvas E2E tests passing.
+3.6. **Bridge resilience + UX polish** ✅ (`tm-canvas48-8ge`, spec:
+   `docs/spec/canvas-bridge-resilience.md`): extension auto-reconnect heartbeat (30s with
+   backoff), persistent error banner, bridge health endpoint, archive icon fix, scrollbar
+   CSS injection.
 
-Next phase:
-
-3.5. **Toolbar consolidation + doc archive** (`tm-canvas48-l7t`, spec:
-   `docs/spec/canvas-toolbar-archive.md`): merge position selector buttons into the tab bar
-   (right-aligned, 0.4 opacity unless hovered). Doc archive button (🗑️) moves selected doc
-   to `.agents/canvas/archive/` for recovery. Empty canvas overview shows inline doc names
-   instead of "X docs" count.
-
-Later phases:
-
-4. **Badges + notifications**: "new doc" badge on the Canvas header button with count of
-   unviewed docs across all worktrees. Unviewed-doc dots on worktree cards. **Card console
-   notification** — when a worktree publishes a new/updated doc, show it in the card's event
-   area (e.g. "5m ago published *overview*"), clickable to open the canvas for that worktree.
-   `LastViewedHashes` persistence, `MarkDocViewed` Msg.
-5. **DOM morph**: replace iframe reload with idiomorph/morphdom, preserving scroll/focus/
-   inputs on content change. `worktreeId` hashing.
-6. **Liveness + resilience**: per-doc session liveness (🟢/⚪), heartbeat protocol,
-   resume-on-interact with message queue and expiry, "start new session with doc as context".
-7. **Templates + ecosystem**: bundled `html-effectiveness`-style reference templates;
-   automated E2E tests.
+Roadmap for future phases is maintained in the canvas doc `.agents/canvas/roadmap.html`.
