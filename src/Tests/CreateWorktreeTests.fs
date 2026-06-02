@@ -43,6 +43,7 @@ let private defaultModel : Model =
       CanvasEvents = Map.empty
       CanvasMessageError = None
       CanvasMessageWaiting = false
+      CanvasMessageQueuedAt = None
       BridgeLiveness = Map.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where

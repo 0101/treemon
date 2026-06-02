@@ -47,6 +47,7 @@ type Model =
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasMessageError: string option
       CanvasMessageWaiting: bool
+      CanvasMessageQueuedAt: float option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 type Msg =
@@ -145,6 +146,7 @@ let init () =
       CanvasEvents = Map.empty
       CanvasMessageError = None
       CanvasMessageWaiting = false
+      CanvasMessageQueuedAt = None
       BridgeLiveness = Map.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
 
@@ -477,6 +479,20 @@ let update msg model =
             else
                 Cmd.none
 
+        let messageQueueExpired =
+            match model.CanvasMessageQueuedAt with
+            | Some queuedAt -> now - queuedAt > 300_000.0
+            | None -> false
+
+        let model =
+            if messageQueueExpired then
+                { model with
+                    CanvasMessageWaiting = false
+                    CanvasMessageQueuedAt = None
+                    CanvasMessageError = Some "Message expired \u2014 no session responded" }
+            else
+                model
+
         { model with ActivityLevel = newLevel; CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
@@ -761,15 +777,15 @@ let update msg model =
         match result with
         | CanvasMessageResult.Error msg ->
             Fable.Core.JS.console.error ("Canvas message error:", msg)
-            { model with CanvasMessageError = Some msg; CanvasMessageWaiting = false }, Cmd.none
+            { model with CanvasMessageError = Some msg; CanvasMessageWaiting = false; CanvasMessageQueuedAt = None }, Cmd.none
         | CanvasMessageResult.Ok ->
-            { model with CanvasMessageError = None; CanvasMessageWaiting = false }, Cmd.none
+            { model with CanvasMessageError = None; CanvasMessageWaiting = false; CanvasMessageQueuedAt = None }, Cmd.none
         | CanvasMessageResult.Queued ->
             Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-            { model with CanvasMessageError = None; CanvasMessageWaiting = true }, Cmd.none
+            { model with CanvasMessageError = None; CanvasMessageWaiting = true; CanvasMessageQueuedAt = Some (Fable.Core.JS.Constructors.Date.now ()) }, Cmd.none
 
     | DismissCanvasMessageError ->
-        { model with CanvasMessageError = None; CanvasMessageWaiting = false }, Cmd.none
+        { model with CanvasMessageError = None; CanvasMessageWaiting = false; CanvasMessageQueuedAt = None }, Cmd.none
 
     | MarkDocViewed (scopedKey, filename) ->
         match findWorktree scopedKey model with
