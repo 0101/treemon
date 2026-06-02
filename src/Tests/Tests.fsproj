@@ -41,6 +41,7 @@
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasPaneTests.fs" />
+    <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
