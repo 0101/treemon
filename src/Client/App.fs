@@ -10,6 +10,11 @@ open Browser
 open Fable.Core.JsInterop
 open ActionButtons
 
+type CanvasEvent =
+    { Filename: string
+      Timestamp: System.DateTimeOffset
+      IsNew: bool }
+
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -38,6 +43,8 @@ type Model =
       LastViewedHashes: Map<string, Map<string, string>>
       AutoDisplayedDocs: Set<string * string>
       PreviousCanvasDocs: Map<string, string list>
+      PreviousCanvasHashes: Map<string, Map<string, string>>
+      CanvasEvents: Map<string, CanvasEvent list>
       CanvasMessageError: string option }
 
 type Msg =
@@ -130,6 +137,8 @@ let init () =
       LastViewedHashes = Map.empty
       AutoDisplayedDocs = Set.empty
       PreviousCanvasDocs = Map.empty
+      PreviousCanvasHashes = Map.empty
+      CanvasEvents = Map.empty
       CanvasMessageError = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
 
@@ -186,6 +195,54 @@ let canvasDocsByScopedKey (repos: RepoModel list) : Map<string, string list> =
             if List.isEmpty docs then None
             else Some ($"{RepoId.value r.RepoId}/{wt.Branch}", docs)))
     |> Map.ofList
+
+let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, string>> =
+    repos
+    |> List.collect (fun r ->
+        r.Worktrees
+        |> List.choose (fun wt ->
+            let hashes =
+                wt.CanvasDocs
+                |> List.map (fun d -> d.Filename, d.ContentHash)
+                |> Map.ofList
+            if Map.isEmpty hashes then None
+            else Some ($"{RepoId.value r.RepoId}/{wt.Branch}", hashes)))
+    |> Map.ofList
+
+let canvasEventExpiryMs = 30.0 * 60.0 * 1000.0
+
+let detectCanvasEvents (previousHashes: Map<string, Map<string, string>>) (currentHashes: Map<string, Map<string, string>>) : Map<string, CanvasEvent list> =
+    let now = System.DateTimeOffset.Now
+    currentHashes
+    |> Map.toList
+    |> List.choose (fun (scopedKey, currentDocs) ->
+        let prevDocs =
+            previousHashes
+            |> Map.tryFind scopedKey
+            |> Option.defaultValue Map.empty
+        let events =
+            currentDocs
+            |> Map.toList
+            |> List.choose (fun (filename, hash) ->
+                match prevDocs |> Map.tryFind filename with
+                | None -> Some { Filename = filename; Timestamp = now; IsNew = true }
+                | Some prevHash when prevHash <> hash -> Some { Filename = filename; Timestamp = now; IsNew = false }
+                | _ -> None)
+        if List.isEmpty events then None
+        else Some (scopedKey, events))
+    |> Map.ofList
+
+let mergeCanvasEvents (existing: Map<string, CanvasEvent list>) (newEvents: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
+    newEvents
+    |> Map.fold (fun acc scopedKey evts ->
+        let current = acc |> Map.tryFind scopedKey |> Option.defaultValue []
+        acc |> Map.add scopedKey (current @ evts)) existing
+
+let expireCanvasEvents (events: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
+    let cutoff = System.DateTimeOffset.Now.AddMilliseconds(-canvasEventExpiryMs)
+    events
+    |> Map.map (fun _ evts -> evts |> List.filter (fun e -> e.Timestamp > cutoff))
+    |> Map.filter (fun _ evts -> not (List.isEmpty evts))
 
 let detectNewCanvasDocs (previous: Map<string, string list>) (current: Map<string, string list>) : (string * string) list =
     current
@@ -299,6 +356,13 @@ let update msg model =
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
             let currentCanvasDocs = canvasDocsByScopedKey repos
+            let currentCanvasHashes = canvasHashesByScopedKey repos
+            let canvasEvents =
+                if isFirstLoad then model.CanvasEvents
+                else
+                    let newEvents = detectCanvasEvents model.PreviousCanvasHashes currentCanvasHashes
+                    mergeCanvasEvents model.CanvasEvents newEvents
+                    |> expireCanvasEvents
             let newDocs =
                 if isFirstLoad then []
                 else
@@ -338,6 +402,8 @@ let update msg model =
                 CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
                 CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition
                 PreviousCanvasDocs = currentCanvasDocs
+                PreviousCanvasHashes = currentCanvasHashes
+                CanvasEvents = canvasEvents
                 AutoDisplayedDocs = updatedAutoDisplayed }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
             autoDisplayCmd
@@ -389,6 +455,7 @@ let update msg model =
 
     | Tick now ->
         let newLevel = computeActivityLevel model.LastActivityTime now
+        let expiredEvents = expireCanvasEvents model.CanvasEvents
 
         let reportCmd =
             if newLevel <> model.ActivityLevel then
@@ -396,7 +463,7 @@ let update msg model =
             else
                 Cmd.none
 
-        { model with ActivityLevel = newLevel },
+        { model with ActivityLevel = newLevel; CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
     | UserActivity now ->
@@ -975,6 +1042,31 @@ let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (has
             prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
         ]
 
+let canvasEventEntry dispatch (canvasPaneOpen: bool) (scopedKey: string) (evt: CanvasEvent) =
+    let verb = if evt.IsNew then "published" else "updated"
+    Html.div [
+        prop.className "event-entry canvas-event"
+        prop.onClick (fun e ->
+            e.stopPropagation()
+            dispatch (SetFocus (Some (Card scopedKey)))
+            if not canvasPaneOpen then dispatch ToggleCanvasPane
+            dispatch (SelectCanvasDoc (scopedKey, evt.Filename)))
+        prop.children [
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
+            Html.span [ prop.className "event-message"; prop.text $"{verb} " ]
+            Html.span [ prop.className "event-source"; prop.text evt.Filename ]
+        ]
+    ]
+
+let canvasEventLog dispatch (canvasPaneOpen: bool) (scopedKey: string) (events: CanvasEvent list) =
+    match events with
+    | [] -> Html.none
+    | evts ->
+        Html.div [
+            prop.className "event-log"
+            prop.children (evts |> List.map (canvasEventEntry dispatch canvasPaneOpen scopedKey))
+        ]
+
 let knownCategories =
     [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "CodingToolRefresh"; "PrFetch"; "GitFetch" ]
 
@@ -1373,10 +1465,10 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
         ]
     ]
 
-let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (hasUnviewedCanvas: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (canvasPaneOpen: bool) (isPending: bool) (hasUnviewedCanvas: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
-    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
+    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key wt.Branch
@@ -1437,19 +1529,21 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                     | None -> ()
 
                     eventLog dispatch cooldowns wt.Path wt.HasTestFailureLog branchEvents
+                    canvasEventLog dispatch canvasPaneOpen scopedKey canvasEvents
                 ]
             ]
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
+    let cvEvents = canvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
     let hasUnviewedCanvas = unviewedDocs |> Map.containsKey scopedKey
     if isCompact then compactWorktreeCard dispatch editorName repoName baseBranch cooldowns hasUnviewedCanvas scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName baseBranch cooldowns events isPending hasUnviewedCanvas scopedKey isFocused wt
+    else worktreeCard dispatch editorName repoName baseBranch cooldowns events cvEvents canvasPaneOpen isPending hasUnviewedCanvas scopedKey isFocused wt
 
 let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
 
@@ -1704,7 +1798,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
         ]
     ]
 
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (repo: RepoModel) =
+let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -1716,7 +1810,7 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns unviewedDocs))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns unviewedDocs canvasEvents canvasPaneOpen))
                     ]
                     archiveSection dispatch repo.ArchivedWorktrees
         ]
@@ -1890,7 +1984,7 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns (unviewedDocsByScopedKey model)))
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns (unviewedDocsByScopedKey model) model.CanvasEvents model.CanvasPaneOpen))
                     ]
 
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory

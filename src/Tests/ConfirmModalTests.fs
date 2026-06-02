@@ -63,6 +63,11 @@ let private defaultModel : Model =
       CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
+      LastViewedHashes = Map.empty
+      AutoDisplayedDocs = Set.empty
+      PreviousCanvasDocs = Map.empty
+      PreviousCanvasHashes = Map.empty
+      CanvasEvents = Map.empty
       CanvasMessageError = None }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the
