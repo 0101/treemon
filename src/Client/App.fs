@@ -93,6 +93,7 @@ type Msg =
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>
     | BridgeLivenessLoaded of Map<string, BridgeLiveness>
+    | LaunchCanvasSession of scopedKey: string
     | NoOp
 
 let worktreeApi =
@@ -588,6 +589,13 @@ let update msg model =
 
     | ResumeSession path ->
         model, Cmd.OfAsync.perform worktreeApi.resumeSession path SessionResult
+
+    | LaunchCanvasSession scopedKey ->
+        match findWorktree scopedKey model with
+        | Some wt ->
+            model, Cmd.OfAsync.attempt worktreeApi.openTerminal wt.Path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        | None ->
+            model, Cmd.none
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -2031,8 +2039,13 @@ let view model dispatch =
         | Some (Card scopedKey) -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
         | _ -> ()
 
+    let launchCanvasSession () =
+        match model.FocusedElement with
+        | Some (Card scopedKey) -> dispatch (LaunchCanvasSession scopedKey)
+        | _ -> ()
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageWaiting model.BridgeLiveness (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError)
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageWaiting model.BridgeLiveness (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
 
     let children =
         match model.CanvasPosition with

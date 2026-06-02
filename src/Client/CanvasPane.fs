@@ -99,7 +99,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (bridgeLiveness: Map<string, BridgeLiveness>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (bridgeLiveness: Map<string, BridgeLiveness>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -119,7 +119,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         ]
 
-    let headerBar (tabs: Fable.React.ReactElement list) (activeFilename: string option) =
+    let headerBar (tabs: Fable.React.ReactElement list) (activeFilename: string option) (showLaunchBtn: bool) =
         Html.div [
             prop.className "canvas-tab-bar"
             prop.children [
@@ -130,6 +130,13 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 Html.div [
                     prop.className "canvas-header-actions"
                     prop.children [
+                        if showLaunchBtn then
+                            Html.button [
+                                prop.className "canvas-launch-btn"
+                                prop.onClick (fun _ -> launchSession ())
+                                prop.title "Start a new session in this worktree"
+                                prop.text "▶ Start session"
+                            ]
                         match activeFilename with
                         | Some filename ->
                             Html.button [
@@ -200,7 +207,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     ])
                 else []
             React.fragment [
-                headerBar tabs (Some doc.Filename)
+                headerBar tabs (Some doc.Filename) (not isWtAlive)
                 errorBanner
                 waitingBanner
                 Html.iframe [
@@ -211,7 +218,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         | None ->
             React.fragment [
-                headerBar [] None
+                headerBar [] None false
                 errorBanner
                 waitingBanner
                 overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
