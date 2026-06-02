@@ -121,7 +121,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                                 prop.className "canvas-archive-btn"
                                 prop.onClick (fun _ -> archiveDoc filename)
                                 prop.title "Archive this doc"
-                                prop.text "🗑️"
+                                prop.children [ ArchiveViews.archiveIcon ]
                             ]
                         | None -> ()
                         positionButtons
