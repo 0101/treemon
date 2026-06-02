@@ -1263,7 +1263,7 @@ let workMetricsView = Components.workMetricsView
 let workMetricsItems = Components.workMetricsItems
 let FitOrHide = Components.FitOrHide
 
-let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (hasUnviewedCanvas: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
@@ -1278,6 +1278,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
                         prop.className "header-info"
                         prop.children [
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                            if hasUnviewedCanvas then Html.span [ prop.className "canvas-dot"; prop.title "Unviewed canvas docs" ]
                             Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
@@ -1302,7 +1303,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
         ]
     ]
 
-let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (hasUnviewedCanvas: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
@@ -1322,6 +1323,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                                 prop.className "header-info"
                                 prop.children [
                                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                                    if hasUnviewedCanvas then Html.span [ prop.className "canvas-dot"; prop.title "Unviewed canvas docs" ]
                                     Html.span [ prop.className "branch-name"; prop.text wt.Branch ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
@@ -1370,13 +1372,14 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (wt: WorktreeStatus) =
     let scopedKey = $"{repoId}/{wt.Branch}"
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let isPending = syncPending |> Set.contains scopedKey
     let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName baseBranch cooldowns scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName baseBranch cooldowns events isPending scopedKey isFocused wt
+    let hasUnviewedCanvas = unviewedDocs |> Map.containsKey scopedKey
+    if isCompact then compactWorktreeCard dispatch editorName repoName baseBranch cooldowns hasUnviewedCanvas scopedKey isFocused wt
+    else worktreeCard dispatch editorName repoName baseBranch cooldowns events isPending hasUnviewedCanvas scopedKey isFocused wt
 
 let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
 
@@ -1631,7 +1634,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
         ]
     ]
 
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (repo: RepoModel) =
+let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -1643,7 +1646,7 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns unviewedDocs))
                     ]
                     archiveSection dispatch repo.ArchivedWorktrees
         ]
@@ -1759,7 +1762,15 @@ let viewAppHeader model dispatch =
                                 yield! noFocusProps
                                 prop.onClick (fun _ -> dispatch ToggleCanvasPane)
                                 prop.title "Toggle canvas pane (C)"
-                                prop.text "Canvas"
+                                prop.children [
+                                    Html.text "Canvas"
+                                    let unviewedCount = unviewedDocsByScopedKey model |> Map.values |> Seq.sumBy List.length
+                                    if unviewedCount > 0 then
+                                        Html.span [
+                                            prop.className "canvas-badge"
+                                            prop.text (string unviewedCount)
+                                        ]
+                                ]
                             ]
                         ]
                     ]
@@ -1809,7 +1820,7 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns (unviewedDocsByScopedKey model)))
                     ]
 
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
