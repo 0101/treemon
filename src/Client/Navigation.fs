@@ -187,9 +187,9 @@ let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     | Some _ ->
         Dom.window?requestAnimationFrame(fun (_: float) ->
             let dashboardEl = Dom.document.querySelector ".dashboard"
-            match Dom.document.querySelector ".focused", Option.ofObj dashboardEl with
-            | null, _ | _, None -> ()
-            | el, Some container ->
+            match Option.ofObj (Dom.document.querySelector ".focused"), Option.ofObj dashboardEl with
+            | None, _ | _, None -> ()
+            | Some el, Some container ->
                 let rect = el?getBoundingClientRect()
                 let containerRect = container?getBoundingClientRect()
                 let rectTop: float = rect?top

@@ -63,9 +63,6 @@ let readOnlyApi
       sendCanvasMessage = fun _ -> async { return Error "not implemented" }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" } }
 
-let private sendCanvasMessageImpl (request: CanvasMessageRequest) =
-    CanvasBridge.sendMessage request
-
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
     asyncResult {
@@ -209,7 +206,7 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
-let private writeCollapsedRepos (repos: RepoId list) =
+let private updateGlobalConfig (description: string) (update: System.Text.Json.Nodes.JsonObject -> unit) =
     let configPath = globalConfigPath ()
     try
         let dir = Path.GetDirectoryName(configPath)
@@ -221,13 +218,17 @@ let private writeCollapsedRepos (repos: RepoId list) =
                 with _ -> System.Text.Json.Nodes.JsonObject()
             else System.Text.Json.Nodes.JsonObject()
 
-        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
-        root["collapsedRepos"] <- repoArray
+        update root
 
         let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
         File.WriteAllText(configPath, root.ToJsonString(options))
     with ex ->
-        Log.log "Config" $"Failed to save collapsed repos: {ex.Message}"
+        Log.log "Config" $"Failed to save {description}: {ex.Message}"
+
+let private writeCollapsedRepos (repos: RepoId list) =
+    updateGlobalConfig "collapsed repos" (fun root ->
+        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
+        root["collapsedRepos"] <- repoArray)
 
 let private readCanvasPaneOpen () : bool =
     withConfigDocument false (fun root ->
@@ -237,23 +238,8 @@ let private readCanvasPaneOpen () : bool =
         | _ -> false)
 
 let private writeCanvasPaneOpen (isOpen: bool) =
-    let configPath = globalConfigPath ()
-    try
-        let dir = Path.GetDirectoryName(configPath)
-        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
-
-        let root =
-            if File.Exists(configPath) then
-                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
-                with _ -> System.Text.Json.Nodes.JsonObject()
-            else System.Text.Json.Nodes.JsonObject()
-
-        root["canvasPaneOpen"] <- System.Text.Json.Nodes.JsonValue.Create(isOpen)
-
-        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
-        File.WriteAllText(configPath, root.ToJsonString(options))
-    with ex ->
-        Log.log "Config" $"Failed to save canvas pane open state: {ex.Message}"
+    updateGlobalConfig "canvas pane open state" (fun root ->
+        root["canvasPaneOpen"] <- System.Text.Json.Nodes.JsonValue.Create(isOpen))
 
 let private readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->
@@ -268,29 +254,14 @@ let private readCanvasPosition () : CanvasPosition =
         | _ -> CanvasPosition.Right)
 
 let private writeCanvasPosition (position: CanvasPosition) =
-    let configPath = globalConfigPath ()
-    try
-        let dir = Path.GetDirectoryName(configPath)
-        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
-
-        let root =
-            if File.Exists(configPath) then
-                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
-                with _ -> System.Text.Json.Nodes.JsonObject()
-            else System.Text.Json.Nodes.JsonObject()
-
-        let value =
-            match position with
-            | CanvasPosition.Left -> "left"
-            | CanvasPosition.Right -> "right"
-            | CanvasPosition.Top -> "top"
-            | CanvasPosition.Bottom -> "bottom"
-        root["canvasPosition"] <- System.Text.Json.Nodes.JsonValue.Create(value)
-
-        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
-        File.WriteAllText(configPath, root.ToJsonString(options))
-    with ex ->
-        Log.log "Config" $"Failed to save canvas position: {ex.Message}"
+    let value =
+        match position with
+        | CanvasPosition.Left -> "left"
+        | CanvasPosition.Right -> "right"
+        | CanvasPosition.Top -> "top"
+        | CanvasPosition.Bottom -> "bottom"
+    updateGlobalConfig "canvas position" (fun root ->
+        root["canvasPosition"] <- System.Text.Json.Nodes.JsonValue.Create(value))
 
 let private getEditorConfig () =
     let config = readGlobalConfig ()
@@ -674,7 +645,7 @@ let worktreeApi
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
-          sendCanvasMessage = sendCanvasMessageImpl
+          sendCanvasMessage = CanvasBridge.sendMessage
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req) }
