@@ -69,17 +69,14 @@ let readOnlyApi
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
     asyncResult {
-        let canvasDir = Path.Combine(path, ".agents", "canvas")
-        let sourcePath = Path.Combine(canvasDir, request.Filename)
-        let normalizedSource = Server.PathUtils.normalizePath sourcePath
-        let normalizedCanvasDir = Server.PathUtils.normalizePath canvasDir
-
-        if not (normalizedSource.StartsWith(normalizedCanvasDir + (string Path.DirectorySeparatorChar))) then
-            return! Error "Invalid filename: path escapes canvas directory"
+        let! sourcePath =
+            Server.PathUtils.validateCanvasPath path request.Filename
+            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
 
         if not (File.Exists sourcePath) then
             return! Error $"File not found: {request.Filename}"
 
+        let canvasDir = Path.Combine(path, ".agents", "canvas")
         let archiveDir = Path.Combine(canvasDir, "archive")
         Directory.CreateDirectory archiveDir |> ignore
         let destPath = Path.Combine(archiveDir, request.Filename)

@@ -201,19 +201,16 @@ module CanvasDocServer =
                 do! ctx.Response.WriteAsync("Unknown worktree")
                 Log.log "Canvas" $"Doc request 404: unknown worktree — {worktreePath}"
             else
-                let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
-                let resolvedPath = Path.GetFullPath(Path.Combine(canvasDir, filename))
-                let canonicalCanvasDir = Path.GetFullPath(canvasDir + string Path.DirectorySeparatorChar)
-
-                if not (resolvedPath.StartsWith(canonicalCanvasDir, System.StringComparison.OrdinalIgnoreCase)) then
+                match Server.PathUtils.validateCanvasPath worktreePath filename with
+                | Error reason ->
                     ctx.Response.StatusCode <- 400
-                    do! ctx.Response.WriteAsync("Path traversal rejected")
+                    do! ctx.Response.WriteAsync(reason)
                     Log.log "Canvas" $"Doc request 400: path traversal — {filename}"
-                elif not (File.Exists resolvedPath) then
+                | Ok resolvedPath when not (File.Exists resolvedPath) ->
                     ctx.Response.StatusCode <- 404
                     do! ctx.Response.WriteAsync("File not found")
                     Log.log "Canvas" $"Doc request 404: file not found — {resolvedPath}"
-                else
+                | Ok resolvedPath ->
                     let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                     let html = System.Text.Encoding.UTF8.GetString(rawBytes)
                     let baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}</style>"
