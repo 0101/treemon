@@ -51,10 +51,9 @@ let private enqueue key payload =
     |> ignore
 
 let private drainQueue (key: string) (entry: BridgeEntry) =
-    match messageQueue.TryGetValue(key) with
+    match messageQueue.TryRemove(key) with
     | false, _ -> ()
     | true, queued ->
-        messageQueue.TryRemove(Collections.Generic.KeyValuePair(key, queued)) |> ignore
         let valid = cleanExpired queued
 
         if not (List.isEmpty valid) then
