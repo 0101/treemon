@@ -13,21 +13,6 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
     $"{CanvasOrigin}/{encodedPath}/{encodedFilename}?v={doc.ContentHash}"
 
-let private tabBar (docs: CanvasDoc list) (activeDoc: CanvasDoc) (selectDoc: string -> unit) =
-    Html.div [
-        prop.className "canvas-tab-bar"
-        prop.children (
-            docs |> List.map (fun doc ->
-                Html.button [
-                    prop.className (if doc.Filename = activeDoc.Filename then "canvas-tab active" else "canvas-tab")
-                    prop.onClick (fun _ -> selectDoc doc.Filename)
-                    prop.title doc.Filename
-                    prop.text (doc.Filename.Replace(".html", ""))
-                ]
-            )
-        )
-    ]
-
 let private latestDocModified (wt: WorktreeStatus) =
     wt.CanvasDocs
     |> List.map _.LastModified
@@ -100,9 +85,9 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             prop.text label
         ]
 
-    let toolbar =
+    let positionButtons =
         Html.div [
-            prop.className "canvas-toolbar"
+            prop.className "canvas-pos-group"
             prop.children [
                 positionButton CanvasPosition.Left "◧" "Dock left"
                 positionButton CanvasPosition.Right "◨" "Dock right"
@@ -111,15 +96,33 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         ]
 
+    let headerBar (tabs: Fable.React.ReactElement list) =
+        Html.div [
+            prop.className "canvas-tab-bar"
+            prop.children [
+                Html.div [
+                    prop.className "canvas-tab-group"
+                    prop.children tabs
+                ]
+                positionButtons
+            ]
+        ]
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
             let tabs =
                 if wt.CanvasDocs.Length > 1
-                then [ tabBar wt.CanvasDocs doc selectDoc ]
+                then wt.CanvasDocs |> List.map (fun d ->
+                    Html.button [
+                        prop.className (if d.Filename = doc.Filename then "canvas-tab active" else "canvas-tab")
+                        prop.onClick (fun _ -> selectDoc d.Filename)
+                        prop.title d.Filename
+                        prop.text (d.Filename.Replace(".html", ""))
+                    ])
                 else []
             React.fragment [
-                yield! tabs
+                headerBar tabs
                 Html.iframe [
                     prop.className "canvas-iframe"
                     prop.src (iframeSrc wt doc)
@@ -127,11 +130,14 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 ]
             ]
         | None ->
-            overviewView allRepos onOverviewClick
+            React.fragment [
+                headerBar []
+                overviewView allRepos onOverviewClick
+            ]
 
     Html.div [
         prop.className (if isOpen then "canvas-pane open" else "canvas-pane")
-        prop.children [ toolbar; content ]
+        prop.children [ content ]
     ]
 
 let messageListener (dispatch: string -> unit) =

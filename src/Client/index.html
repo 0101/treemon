@@ -455,22 +455,36 @@
         .app-layout.canvas-left > .canvas-pane { border-right: 1px solid #313244; }
         .app-layout.canvas-top > .canvas-pane { border-bottom: 1px solid #313244; }
         .app-layout.canvas-bottom > .canvas-pane { border-top: 1px solid #313244; }
-        .canvas-toolbar {
+        .canvas-tab-bar {
             display: flex;
-            gap: 4px;
+            justify-content: space-between;
+            align-items: center;
             padding: 4px 8px;
             background: #181825;
             border-bottom: 1px solid #313244;
             flex-shrink: 0;
         }
+        .canvas-tab-group {
+            display: flex;
+            gap: 2px;
+            overflow-x: auto;
+            flex: 1;
+            min-width: 0;
+        }
+        .canvas-pos-group {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+            margin-left: 8px;
+        }
         .canvas-pos-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
             padding: 2px 8px; font-size: 0.85em; cursor: pointer; color: #bac2de;
-            font-family: inherit; transition: background 0.15s, border-color 0.15s;
-            line-height: 1.4;
+            font-family: inherit; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+            line-height: 1.4; opacity: 0.4;
         }
-        .canvas-pos-btn:hover { background: #45475a; border-color: #585b70; }
-        .canvas-pos-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
+        .canvas-pos-btn:hover { background: #45475a; border-color: #585b70; opacity: 1; }
+        .canvas-pos-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; opacity: 1; }
         .canvas-iframe {
             width: 100%;
             height: 100%;
@@ -485,15 +499,6 @@
             height: 100%;
             color: #6c7086;
             font-size: 0.9em;
-        }
-        .canvas-tab-bar {
-            display: flex;
-            gap: 2px;
-            padding: 4px 8px;
-            background: #181825;
-            border-bottom: 1px solid #313244;
-            flex-shrink: 0;
-            overflow-x: auto;
         }
         .canvas-tab {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;

@@ -451,16 +451,26 @@ Phase 1 (MVP) is specified separately in `docs/spec/canvas-pane-mvp.md` and trac
 beads feature `tm-canvas48-4cn`. It validates the core end-to-end loop with one doc per
 worktree, no registry, no badges, iframe reload (not morph), and no liveness/queue.
 
+Completed phases:
+
+2. **UX polish + logging** ✅ (`tm-canvas48-441`): canvas position selector, persist canvas
+   open/closed state, comprehensive lifecycle logging (CanvasScanner, CanvasWatcher, doc
+   server, CanvasBridge). `C` key already worked — covered by existing E2E tests.
+3. **Multi-doc + discovery** ✅ (`tm-canvas48-441`): multiple docs per worktree with tabs
+   (single doc = no tab bar), `LastModified` on `CanvasDoc`, `CanvasDocs` list throughout
+   pipeline. **Empty canvas overview** — all worktrees with docs grouped by repo, clickable
+   to focus. 17 canvas E2E tests passing.
+
+Next phase:
+
+3.5. **Toolbar consolidation + doc archive** (`tm-canvas48-l7t`, spec:
+   `docs/spec/canvas-toolbar-archive.md`): merge position selector buttons into the tab bar
+   (right-aligned, 0.4 opacity unless hovered). Doc archive button (🗑️) moves selected doc
+   to `.agents/canvas/archive/` for recovery. Empty canvas overview shows inline doc names
+   instead of "X docs" count.
+
 Later phases:
 
-2. **UX polish + logging**: canvas position selector (done), persist canvas open/closed
-   state, `C` key opens focused card's canvas, comprehensive lifecycle logging (server +
-   client), `Cache-Control` + hash-busted iframe src for reliable reload.
-3. **Multi-doc + discovery**: `registry.json`, multiple docs per worktree with tabs,
-   unviewed-doc dots on tabs. **Empty canvas overview** — when no worktree is focused (or
-   focused worktree has no docs), show a list of all worktrees that have canvas docs,
-   grouped by repo, sorted by most-recently-updated. Clicking one focuses that worktree and
-   shows its canvas.
 4. **Badges + notifications**: "new doc" badge on the Canvas header button with count of
    unviewed docs across all worktrees. Unviewed-doc dots on worktree cards. **Card console
    notification** — when a worktree publishes a new/updated doc, show it in the card's event
