@@ -609,7 +609,17 @@ let update msg model =
     | LaunchCanvasSession scopedKey ->
         match findWorktree scopedKey model with
         | Some wt ->
-            model, Cmd.OfAsync.attempt worktreeApi.openTerminal wt.Path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+            let activeDoc =
+                model.ActiveCanvasDoc
+                |> Map.tryFind scopedKey
+                |> Option.bind (fun name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name))
+                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
+            let prompt =
+                match activeDoc with
+                | Some doc -> $"Continue working on canvas doc: {doc.Filename}"
+                | None -> ""
+            let request: LaunchRequest = { Path = wt.Path; Prompt = prompt }
+            model, Cmd.OfAsync.perform worktreeApi.launchSession request SessionResult
         | None ->
             model, Cmd.none
 
