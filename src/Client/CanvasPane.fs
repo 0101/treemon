@@ -76,7 +76,7 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (archiveDoc: string -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -96,7 +96,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         ]
 
-    let headerBar (tabs: Fable.React.ReactElement list) =
+    let headerBar (tabs: Fable.React.ReactElement list) (activeFilename: string option) =
         Html.div [
             prop.className "canvas-tab-bar"
             prop.children [
@@ -104,7 +104,21 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     prop.className "canvas-tab-group"
                     prop.children tabs
                 ]
-                positionButtons
+                Html.div [
+                    prop.className "canvas-header-actions"
+                    prop.children [
+                        match activeFilename with
+                        | Some filename ->
+                            Html.button [
+                                prop.className "canvas-archive-btn"
+                                prop.onClick (fun _ -> archiveDoc filename)
+                                prop.title "Archive this doc"
+                                prop.text "🗑️"
+                            ]
+                        | None -> ()
+                        positionButtons
+                    ]
+                ]
             ]
         ]
 
@@ -122,7 +136,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     ])
                 else []
             React.fragment [
-                headerBar tabs
+                headerBar tabs (Some doc.Filename)
                 Html.iframe [
                     prop.className "canvas-iframe"
                     prop.src (iframeSrc wt doc)
@@ -131,7 +145,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         | None ->
             React.fragment [
-                headerBar []
+                headerBar [] None
                 overviewView allRepos onOverviewClick
             ]
 

@@ -72,6 +72,8 @@ type Msg =
     | SetCanvasPosition of CanvasPosition
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
+    | ArchiveCanvasDoc of scopedKey: string * filename: string
+    | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | CanvasMessageReceived of payload: string
     | CanvasMessageResult of Result<unit, string>
     | NoOp
@@ -516,6 +518,43 @@ let update msg model =
         { model with FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
         if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
         else Cmd.none
+
+    | ArchiveCanvasDoc (scopedKey, filename) ->
+        match findWorktree scopedKey model with
+        | Some wt ->
+            let request: ArchiveCanvasDocRequest = { WorktreePath = WorktreePath.value wt.Path; Filename = filename }
+            model, Cmd.OfAsync.either worktreeApi.archiveCanvasDoc request (fun r -> ArchiveCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ArchiveCanvasDocResult (scopedKey, filename, r))
+        | None -> model, Cmd.none
+
+    | ArchiveCanvasDocResult (scopedKey, filename, Ok _) ->
+        let repos =
+            model.Repos
+            |> List.map (fun r ->
+                { r with
+                    Worktrees =
+                        r.Worktrees
+                        |> List.map (fun wt ->
+                            let key = $"{RepoId.value r.RepoId}/{wt.Branch}"
+                            if key = scopedKey
+                            then { wt with CanvasDocs = wt.CanvasDocs |> List.filter (fun d -> d.Filename <> filename) }
+                            else wt) })
+        let remainingDocs =
+            repos
+            |> List.tryPick (fun r ->
+                r.Worktrees
+                |> List.tryPick (fun wt ->
+                    if $"{RepoId.value r.RepoId}/{wt.Branch}" = scopedKey && not (List.isEmpty wt.CanvasDocs)
+                    then Some wt.CanvasDocs
+                    else None))
+        let activeDoc =
+            match remainingDocs with
+            | Some (first :: _) -> model.ActiveCanvasDoc |> Map.add scopedKey first.Filename
+            | _ -> model.ActiveCanvasDoc |> Map.remove scopedKey
+        { model with Repos = repos; ActiveCanvasDoc = activeDoc }, Cmd.none
+
+    | ArchiveCanvasDocResult (_, _, Error msg) ->
+        Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
+        model, Cmd.none
 
     | CanvasMessageReceived payload ->
         match model.FocusedElement with
@@ -1728,8 +1767,13 @@ let view model dispatch =
     let onOverviewClick scopedKey =
         dispatch (FocusOverviewCard scopedKey)
 
+    let archiveCanvasDoc filename =
+        match model.FocusedElement with
+        | Some (Card scopedKey) -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
+        | _ -> ()
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick archiveCanvasDoc
 
     let children =
         match model.CanvasPosition with

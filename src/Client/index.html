@@ -475,8 +475,23 @@
             display: flex;
             gap: 4px;
             flex-shrink: 0;
+        }
+        .canvas-header-actions {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+            align-items: center;
             margin-left: 8px;
         }
+        .canvas-archive-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer;
+            padding: 2px 6px; line-height: 1.4; font-size: 0.8em;
+            transition: color 0.15s, border-color 0.15s;
+            opacity: 0.5;
+        }
+        .canvas-archive-btn:hover { color: #f38ba8; border-color: #f38ba8; opacity: 1; }
         .canvas-pos-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
             padding: 2px 8px; font-size: 0.85em; cursor: pointer; color: #bac2de;
