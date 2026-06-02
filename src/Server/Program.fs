@@ -124,7 +124,8 @@ let private buildRemotingHandler (api: IWorktreeApi) =
 [<CLIMutable>]
 type CanvasRegisterRequest =
     { worktreePath: string
-      injectUrl: string }
+      injectUrl: string
+      sessionId: string option }
 
 let private canvasRegisterHandler : HttpHandler =
     fun next ctx -> task {
@@ -138,7 +139,7 @@ let private canvasRegisterHandler : HttpHandler =
                 Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
             else
-                CanvasBridge.register body.worktreePath body.injectUrl
+                CanvasBridge.register body.worktreePath body.injectUrl body.sessionId
                 return! Successful.OK "registered" next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
@@ -153,7 +154,7 @@ let private bridgeStatusHandler : HttpHandler =
         | Ok path when not (System.String.IsNullOrWhiteSpace path) ->
             let status = CanvasBridge.getStatus path
             Successful.ok
-                (json {| registered = status.Registered; lastHeartbeatAge = status.LastHeartbeatAge |})
+                (json {| registered = status.Registered; lastHeartbeatAge = status.LastHeartbeatAge; isAlive = status.IsAlive; sessionId = status.SessionId |})
                 next ctx
         | _ ->
             RequestErrors.BAD_REQUEST "missing worktreePath query parameter" next ctx

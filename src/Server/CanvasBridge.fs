@@ -12,6 +12,7 @@ let private normalizePath = Server.PathUtils.normalizePath
 
 type BridgeEntry =
     { InjectUrl: string
+      SessionId: string option
       LastHeartbeat: DateTime }
 
 // Mutable: ConcurrentDictionary used for thread-safe bridge registry;
@@ -20,9 +21,9 @@ let private registry = ConcurrentDictionary<string, BridgeEntry>(StringComparer.
 
 let private httpClient = new HttpClient()
 
-let register (worktreePath: string) (injectUrl: string) =
+let register (worktreePath: string) (injectUrl: string) (sessionId: string option) =
     let key = normalizePath worktreePath
-    let entry = { InjectUrl = injectUrl; LastHeartbeat = DateTime.UtcNow }
+    let entry = { InjectUrl = injectUrl; SessionId = sessionId; LastHeartbeat = DateTime.UtcNow }
 
     match registry.TryGetValue(key) with
     | true, oldEntry ->
@@ -60,12 +61,15 @@ let sendMessage (request: CanvasMessageRequest) =
             Log.log "CanvasBridge" $"Message forwarded to {Path.GetFileName(key)}"
     }
 
+let isAlive (entry: BridgeEntry) =
+    (DateTime.UtcNow - entry.LastHeartbeat).TotalSeconds < 60.0
+
 let getStatus (worktreePath: string) =
     let key = normalizePath worktreePath
 
     match registry.TryGetValue(key) with
     | true, entry ->
         let age = (DateTime.UtcNow - entry.LastHeartbeat).TotalSeconds
-        {| Registered = true; LastHeartbeatAge = Some age |}
+        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isAlive entry; SessionId = entry.SessionId |}
     | false, _ ->
-        {| Registered = false; LastHeartbeatAge = None |}
+        {| Registered = false; LastHeartbeatAge = None; IsAlive = false; SessionId = None |}

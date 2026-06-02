@@ -101,6 +101,10 @@ type CanvasMessageRequest =
     { WorktreePath: WorktreePath
       Payload: string }
 
+type BridgeLiveness =
+    { IsAlive: bool
+      SessionId: string option }
+
 type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string

@@ -46,12 +46,12 @@ function startInjectServer(session) {
   });
 }
 
-async function registerWithTreemon(worktreePath, injectUrl) {
+async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
   try {
     const res = await fetch(TREEMON_REGISTER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worktreePath, injectUrl }),
+      body: JSON.stringify({ worktreePath, injectUrl, sessionId }),
     });
     if (!res.ok) {
       log(`registration failed: ${res.status} ${res.statusText}`);
@@ -65,7 +65,7 @@ async function registerWithTreemon(worktreePath, injectUrl) {
   }
 }
 
-function startHeartbeat(worktreePath, injectUrl) {
+function startHeartbeat(worktreePath, injectUrl, sessionId) {
   let currentInterval = HEARTBEAT_INTERVAL_MS;
   let wasDisconnected = false;
   let timerId = null;
@@ -75,7 +75,7 @@ function startHeartbeat(worktreePath, injectUrl) {
   };
 
   const tick = async () => {
-    const ok = await registerWithTreemon(worktreePath, injectUrl);
+    const ok = await registerWithTreemon(worktreePath, injectUrl, sessionId);
     if (ok) {
       if (wasDisconnected) {
         log("Bridge reconnected to Treemon");
@@ -101,14 +101,15 @@ function startHeartbeat(worktreePath, injectUrl) {
 }
 
 const session = await joinSession({});
+const sessionId = session.id ?? session.sessionId ?? undefined;
 
 const worktreePath = process.cwd();
 const { server, port } = await startInjectServer(session);
 const injectUrl = `http://127.0.0.1:${port}/inject`;
-await registerWithTreemon(worktreePath, injectUrl);
+await registerWithTreemon(worktreePath, injectUrl, sessionId);
 log(`● canvas-bridge listening on ${injectUrl}`);
 
-const stopHeartbeat = startHeartbeat(worktreePath, injectUrl);
+const stopHeartbeat = startHeartbeat(worktreePath, injectUrl, sessionId);
 
 const cleanup = () => {
   stopHeartbeat();
