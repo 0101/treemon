@@ -68,7 +68,8 @@ let private defaultModel : Model =
       PreviousCanvasDocs = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
-      CanvasMessageError = None }
+      CanvasMessageError = None
+      CanvasMessageWaiting = false }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the
 /// TypeInitializationException (the model is computed before the Cmd).

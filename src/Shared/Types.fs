@@ -101,6 +101,12 @@ type CanvasMessageRequest =
     { WorktreePath: WorktreePath
       Payload: string }
 
+[<RequireQualifiedAccess>]
+type CanvasMessageResult =
+    | Ok
+    | Error of string
+    | Queued
+
 type BridgeLiveness =
     { IsAlive: bool
       SessionId: string option }
@@ -223,7 +229,7 @@ type IWorktreeApi =
       saveCanvasPaneOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
-      sendCanvasMessage: CanvasMessageRequest -> Async<Result<unit, string>>
+      sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
       saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
       loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>> }

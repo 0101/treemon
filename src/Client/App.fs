@@ -45,7 +45,8 @@ type Model =
       PreviousCanvasDocs: Map<string, string list>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
-      CanvasMessageError: string option }
+      CanvasMessageError: string option
+      CanvasMessageWaiting: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -86,7 +87,7 @@ type Msg =
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | CanvasMessageReceived of payload: string
-    | CanvasMessageResult of Result<unit, string>
+    | CanvasSendResult of CanvasMessageResult
     | DismissCanvasMessageError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>
@@ -139,7 +140,8 @@ let init () =
       PreviousCanvasDocs = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
-      CanvasMessageError = None },
+      CanvasMessageError = None
+      CanvasMessageWaiting = false },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let rng = System.Random()
@@ -727,7 +729,7 @@ let update msg model =
             match findWorktree scopedKey model with
             | Some wt ->
                 Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} (payload length={payload.Length})")
-                model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Payload = payload } CanvasMessageResult (_.Message >> Error >> CanvasMessageResult)
+                model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
             | None ->
                 Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
                 model, Cmd.none
@@ -736,15 +738,19 @@ let update msg model =
             Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: no focused card (focus={focusDesc})")
             model, Cmd.none
 
-    | CanvasMessageResult (Error msg) ->
-        Fable.Core.JS.console.error ("Canvas message error:", msg)
-        { model with CanvasMessageError = Some msg }, Cmd.none
-
-    | CanvasMessageResult (Ok _) ->
-        { model with CanvasMessageError = None }, Cmd.none
+    | CanvasSendResult result ->
+        match result with
+        | CanvasMessageResult.Error msg ->
+            Fable.Core.JS.console.error ("Canvas message error:", msg)
+            { model with CanvasMessageError = Some msg; CanvasMessageWaiting = false }, Cmd.none
+        | CanvasMessageResult.Ok ->
+            { model with CanvasMessageError = None; CanvasMessageWaiting = false }, Cmd.none
+        | CanvasMessageResult.Queued ->
+            Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
+            { model with CanvasMessageError = None; CanvasMessageWaiting = true }, Cmd.none
 
     | DismissCanvasMessageError ->
-        { model with CanvasMessageError = None }, Cmd.none
+        { model with CanvasMessageError = None; CanvasMessageWaiting = false }, Cmd.none
 
     | MarkDocViewed (scopedKey, filename) ->
         match findWorktree scopedKey model with
@@ -2012,7 +2018,7 @@ let view model dispatch =
         | _ -> ()
 
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError)
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageWaiting (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError)
 
     let children =
         match model.CanvasPosition with

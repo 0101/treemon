@@ -84,7 +84,7 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -146,6 +146,22 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         | None -> Html.none
 
+    let waitingBanner =
+        if messageWaiting then
+            Html.div [
+                prop.className "canvas-waiting-banner"
+                prop.children [
+                    Html.span [ prop.text "Waiting for session…" ]
+                    Html.button [
+                        prop.className "canvas-waiting-dismiss"
+                        prop.onClick (fun _ -> dismissError ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        else
+            Html.none
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
@@ -162,6 +178,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             React.fragment [
                 headerBar tabs (Some doc.Filename)
                 errorBanner
+                waitingBanner
                 Html.iframe [
                     prop.className "canvas-iframe"
                     prop.src (iframeSrc wt doc)
@@ -172,6 +189,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             React.fragment [
                 headerBar [] None
                 errorBanner
+                waitingBanner
                 overviewView allRepos onOverviewClick onOverviewDocClick
             ]
 
