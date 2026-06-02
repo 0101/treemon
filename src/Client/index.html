@@ -501,13 +501,16 @@
         }
         .canvas-pos-btn:hover { background: #45475a; border-color: #585b70; opacity: 1; }
         .canvas-pos-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; opacity: 1; }
-        .canvas-msg-error .canvas-tab-bar {
-            animation: canvas-error-flash 2s ease-out;
+        .canvas-error-banner {
+            display: flex; align-items: center; justify-content: space-between;
+            background: #3a1e2a; color: #f38ba8; padding: 4px 12px;
+            font-size: 0.85em; line-height: 1.4;
         }
-        @keyframes canvas-error-flash {
-            0%, 10% { background: #5c2030; }
-            100% { background: #181825; }
+        .canvas-error-dismiss {
+            background: none; border: none; color: #f38ba8; cursor: pointer;
+            font-size: 1em; padding: 0 4px; opacity: 0.6;
         }
+        .canvas-error-dismiss:hover { opacity: 1; }
         .canvas-iframe {
             width: 100%;
             height: 100%;

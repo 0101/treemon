@@ -84,7 +84,7 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: bool) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -130,6 +130,22 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         ]
 
+    let errorBanner =
+        match messageError with
+        | Some msg ->
+            Html.div [
+                prop.className "canvas-error-banner"
+                prop.children [
+                    Html.span [ prop.text msg ]
+                    Html.button [
+                        prop.className "canvas-error-dismiss"
+                        prop.onClick (fun _ -> dismissError ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        | None -> Html.none
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
@@ -145,6 +161,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 else []
             React.fragment [
                 headerBar tabs (Some doc.Filename)
+                errorBanner
                 Html.iframe [
                     prop.className "canvas-iframe"
                     prop.src (iframeSrc wt doc)
@@ -154,13 +171,13 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         | None ->
             React.fragment [
                 headerBar [] None
+                errorBanner
                 overviewView allRepos onOverviewClick onOverviewDocClick
             ]
 
     let paneClass =
         [ "canvas-pane"
-          if isOpen then "open"
-          if messageError then "canvas-msg-error" ]
+          if isOpen then "open" ]
         |> String.concat " "
 
     Html.div [
