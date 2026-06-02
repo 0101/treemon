@@ -36,6 +36,8 @@ type Model =
       CanvasPosition: CanvasPosition
       ActiveCanvasDoc: Map<string, string>
       LastViewedHashes: Map<string, Map<string, string>>
+      AutoDisplayedDocs: Set<string * string>
+      PreviousCanvasDocs: Map<string, string list>
       CanvasMessageError: string option }
 
 type Msg =
@@ -126,6 +128,8 @@ let init () =
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
       LastViewedHashes = Map.empty
+      AutoDisplayedDocs = Set.empty
+      PreviousCanvasDocs = Map.empty
       CanvasMessageError = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
 
@@ -173,6 +177,44 @@ let unviewedDocsByScopedKey (model: Model) : Map<string, string list> =
             else Some (scopedKey, unviewed)))
     |> Map.ofList
 
+let canvasDocsByScopedKey (repos: RepoModel list) : Map<string, string list> =
+    repos
+    |> List.collect (fun r ->
+        r.Worktrees
+        |> List.choose (fun wt ->
+            let docs = wt.CanvasDocs |> List.map _.Filename
+            if List.isEmpty docs then None
+            else Some ($"{RepoId.value r.RepoId}/{wt.Branch}", docs)))
+    |> Map.ofList
+
+let detectNewCanvasDocs (previous: Map<string, string list>) (current: Map<string, string list>) : (string * string) list =
+    current
+    |> Map.toList
+    |> List.collect (fun (scopedKey, filenames) ->
+        let prevFilenames =
+            previous
+            |> Map.tryFind scopedKey
+            |> Option.defaultValue []
+            |> Set.ofList
+        filenames
+        |> List.filter (fun f -> not (Set.contains f prevFilenames))
+        |> List.map (fun f -> scopedKey, f))
+
+let findMostRecentNewDoc (repos: RepoModel list) (newDocs: (string * string) list) =
+    newDocs
+    |> List.choose (fun (scopedKey, filename) ->
+        repos
+        |> List.tryPick (fun r ->
+            r.Worktrees
+            |> List.tryPick (fun wt ->
+                if $"{RepoId.value r.RepoId}/{wt.Branch}" = scopedKey
+                then wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename)
+                     |> Option.map (fun doc -> scopedKey, filename, doc.LastModified)
+                else None)))
+    |> List.sortByDescending (fun (_, _, lastModified) -> lastModified)
+    |> List.tryHead
+    |> Option.map (fun (scopedKey, filename, _) -> scopedKey, filename)
+
 let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     let pathStr = WorktreePath.value path
     repos
@@ -215,6 +257,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
 
 let idleThresholdMs = 180_000.0
 let deepIdleThresholdMs = 900_000.0
+let autoDisplayIdleMs = 60_000.0
 
 let computeActivityLevel (lastActivityTime: float) (now: float) =
     let elapsed = now - lastActivityTime
@@ -255,6 +298,31 @@ let update msg model =
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
+            let currentCanvasDocs = canvasDocsByScopedKey repos
+            let newDocs =
+                if isFirstLoad then []
+                else
+                    detectNewCanvasDocs model.PreviousCanvasDocs currentCanvasDocs
+                    |> List.filter (fun (sk, fn) -> not (Set.contains (sk, fn) model.AutoDisplayedDocs))
+            let now = Fable.Core.JS.Constructors.Date.now ()
+            let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
+            let autoDisplayTarget =
+                if isIdle && not (List.isEmpty newDocs)
+                then findMostRecentNewDoc repos newDocs
+                else None
+            let autoDisplayCmd =
+                match autoDisplayTarget with
+                | Some (scopedKey, filename) ->
+                    Cmd.batch [
+                        if not model.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
+                        Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
+                        Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
+                    ]
+                | None -> Cmd.none
+            let updatedAutoDisplayed =
+                match autoDisplayTarget with
+                | Some entry -> model.AutoDisplayedDocs |> Set.add entry
+                | None -> model.AutoDisplayedDocs
             { model with
                 Repos = repos
                 IsLoading = false
@@ -268,9 +336,11 @@ let update msg model =
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
                 CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
-                CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition }
+                CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition
+                PreviousCanvasDocs = currentCanvasDocs
+                AutoDisplayedDocs = updatedAutoDisplayed }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
-            Cmd.none
+            autoDisplayCmd
 
     | DataFailed _ ->
         { model with
