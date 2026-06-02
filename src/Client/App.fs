@@ -1121,7 +1121,7 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
                         prop.className "header-info"
                         prop.children [
                             Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                            Html.span [ prop.className "branch-name"; prop.text (WorktreePath.displayName wt.Path) ]
+                            Html.span [ prop.className "branch-name"; prop.text (WorktreeStatus.cardTitle wt) ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
                     ]
@@ -1165,7 +1165,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                                 prop.className "header-info"
                                 prop.children [
                                     Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                                    Html.span [ prop.className "branch-name"; prop.text (WorktreePath.displayName wt.Path) ]
+                                    Html.span [ prop.className "branch-name"; prop.text (WorktreeStatus.cardTitle wt) ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
                             ]
