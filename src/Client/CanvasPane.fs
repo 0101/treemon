@@ -8,6 +8,12 @@ open Browser
 let [<Literal>] private CanvasOrigin = "http://127.0.0.1:5002"
 let [<Literal>] private MaxPayloadBytes = 64_000
 
+let private livenessDot (isAlive: bool) =
+    Html.span [
+        prop.className (if isAlive then "canvas-liveness-dot alive" else "canvas-liveness-dot")
+        prop.title (if isAlive then "Session alive" else "No active session")
+    ]
+
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
@@ -19,7 +25,7 @@ let private latestDocModified (wt: WorktreeStatus) =
     |> List.sortDescending
     |> List.tryHead
 
-let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
+let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, BridgeLiveness>) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
     let entries =
         repos
         |> List.collect (fun repo ->
@@ -53,13 +59,22 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
                             prop.text repoName
                         ]
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
+                            let wtPath = WorktreePath.value wt.Path
+                            let isAlive =
+                                bridgeLiveness
+                                |> Map.tryFind wtPath
+                                |> Option.map _.IsAlive
+                                |> Option.defaultValue false
                             Html.div [
                                 prop.className "canvas-overview-entry"
                                 prop.children [
                                     Html.span [
                                         prop.className "canvas-overview-branch"
                                         prop.onClick (fun _ -> onClickEntry scopedKey)
-                                        prop.text wt.Branch
+                                        prop.children [
+                                            livenessDot isAlive
+                                            Html.text wt.Branch
+                                        ]
                                     ]
                                     Html.span [
                                         prop.className "canvas-overview-docs"
@@ -84,7 +99,7 @@ let private overviewView (repos: RepoModel list) (onClickEntry: string -> unit) 
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (bridgeLiveness: Map<string, BridgeLiveness>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -165,6 +180,12 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
+            let wtPath = WorktreePath.value wt.Path
+            let isWtAlive =
+                bridgeLiveness
+                |> Map.tryFind wtPath
+                |> Option.map _.IsAlive
+                |> Option.defaultValue false
             let tabs =
                 if wt.CanvasDocs.Length > 1
                 then wt.CanvasDocs |> List.map (fun d ->
@@ -172,7 +193,10 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         prop.className (if d.Filename = doc.Filename then "canvas-tab active" else "canvas-tab")
                         prop.onClick (fun _ -> selectDoc d.Filename)
                         prop.title d.Filename
-                        prop.text (d.Filename.Replace(".html", ""))
+                        prop.children [
+                            livenessDot isWtAlive
+                            Html.text (d.Filename.Replace(".html", ""))
+                        ]
                     ])
                 else []
             React.fragment [
@@ -190,7 +214,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 headerBar [] None
                 errorBanner
                 waitingBanner
-                overviewView allRepos onOverviewClick onOverviewDocClick
+                overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
             ]
 
     let paneClass =

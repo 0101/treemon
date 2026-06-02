@@ -132,3 +132,13 @@ let getStatus (worktreePath: string) =
         {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isAlive entry; SessionId = entry.SessionId |}
     | false, _ ->
         {| Registered = false; LastHeartbeatAge = None; IsAlive = false; SessionId = None |}
+
+let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
+    worktreePaths
+    |> List.choose (fun path ->
+        let key = normalizePath path
+        match registry.TryGetValue(key) with
+        | true, entry ->
+            Some (path, { IsAlive = isAlive entry; SessionId = entry.SessionId })
+        | false, _ -> None)
+    |> Map.ofList

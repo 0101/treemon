@@ -46,7 +46,8 @@ type Model =
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasMessageError: string option
-      CanvasMessageWaiting: bool }
+      CanvasMessageWaiting: bool
+      BridgeLiveness: Map<string, BridgeLiveness> }
 
 type Msg =
     | DataLoaded of DashboardResponse
@@ -91,6 +92,7 @@ type Msg =
     | DismissCanvasMessageError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>
+    | BridgeLivenessLoaded of Map<string, BridgeLiveness>
     | NoOp
 
 let worktreeApi =
@@ -141,7 +143,8 @@ let init () =
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasMessageError = None
-      CanvasMessageWaiting = false },
+      CanvasMessageWaiting = false
+      BridgeLiveness = Map.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let rng = System.Random()
@@ -408,7 +411,15 @@ let update msg model =
                 CanvasEvents = canvasEvents
                 AutoDisplayedDocs = updatedAutoDisplayed }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
-            autoDisplayCmd
+            let allPaths =
+                repos
+                |> List.collect _.Worktrees
+                |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
+                |> List.map (fun wt -> WorktreePath.value wt.Path)
+            let livenessCmd =
+                if List.isEmpty allPaths then Cmd.none
+                else Cmd.OfAsync.perform worktreeApi.getBridgeLiveness allPaths BridgeLivenessLoaded
+            Cmd.batch [ autoDisplayCmd; livenessCmd ]
 
     | DataFailed _ ->
         { model with
@@ -774,6 +785,9 @@ let update msg model =
 
     | LoadLastViewedHashes hashes ->
         { model with LastViewedHashes = hashes }, Cmd.none
+
+    | BridgeLivenessLoaded liveness ->
+        { model with BridgeLiveness = liveness }, Cmd.none
 
     | NoOp -> model, Cmd.none
 
@@ -2018,7 +2032,7 @@ let view model dispatch =
         | _ -> ()
 
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageWaiting (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError)
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageWaiting model.BridgeLiveness (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError)
 
     let children =
         match model.CanvasPosition with

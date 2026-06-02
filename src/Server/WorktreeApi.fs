@@ -63,7 +63,8 @@ let readOnlyApi
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Error "not implemented" }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
-      loadLastViewedHashes = fun () -> async { return Map.empty } }
+      loadLastViewedHashes = fun () -> async { return Map.empty }
+      getBridgeLiveness = fun _ -> async { return Map.empty } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -681,4 +682,5 @@ let worktreeApi
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
-          loadLastViewedHashes = fun () -> async { return readLastViewedHashes () } }
+          loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
+          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths } }
