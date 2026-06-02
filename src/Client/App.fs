@@ -35,6 +35,7 @@ type Model =
       CanvasPaneOpen: bool
       CanvasPosition: CanvasPosition
       ActiveCanvasDoc: Map<string, string>
+      LastViewedHashes: Map<string, Map<string, string>>
       CanvasMessageError: string option }
 
 type Msg =
@@ -78,6 +79,8 @@ type Msg =
     | CanvasMessageReceived of payload: string
     | CanvasMessageResult of Result<unit, string>
     | DismissCanvasMessageError
+    | MarkDocViewed of scopedKey: string * filename: string
+    | LoadLastViewedHashes of Map<string, Map<string, string>>
     | NoOp
 
 let worktreeApi =
@@ -122,8 +125,9 @@ let init () =
       CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
+      LastViewedHashes = Map.empty
       CanvasMessageError = None },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let rng = System.Random()
 
@@ -147,6 +151,27 @@ let findWorktree (scopedKey: string) (model: Model) =
         model.Repos
         |> List.tryFind (fun r -> RepoId.value r.RepoId = repoId)
         |> Option.bind (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
+
+let unviewedDocsByScopedKey (model: Model) : Map<string, string list> =
+    model.Repos
+    |> List.collect (fun r ->
+        r.Worktrees
+        |> List.choose (fun wt ->
+            let scopedKey = $"{RepoId.value r.RepoId}/{wt.Branch}"
+            let viewedHashes =
+                model.LastViewedHashes
+                |> Map.tryFind scopedKey
+                |> Option.defaultValue Map.empty
+            let unviewed =
+                wt.CanvasDocs
+                |> List.filter (fun doc ->
+                    match viewedHashes |> Map.tryFind doc.Filename with
+                    | Some hash -> hash <> doc.ContentHash
+                    | None -> true)
+                |> List.map _.Filename
+            if List.isEmpty unviewed then None
+            else Some (scopedKey, unviewed)))
+    |> Map.ofList
 
 let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     let pathStr = WorktreePath.value path
@@ -514,7 +539,7 @@ let update msg model =
 
     | SelectCanvasDoc (scopedKey, filename) ->
         { model with ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename },
-        Cmd.none
+        Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
 
     | FocusOverviewCard scopedKey ->
         let openPane = not model.CanvasPaneOpen
@@ -583,6 +608,29 @@ let update msg model =
 
     | DismissCanvasMessageError ->
         { model with CanvasMessageError = None }, Cmd.none
+
+    | MarkDocViewed (scopedKey, filename) ->
+        match findWorktree scopedKey model with
+        | Some wt ->
+            let currentHash =
+                wt.CanvasDocs
+                |> List.tryFind (fun d -> d.Filename = filename)
+                |> Option.map _.ContentHash
+            match currentHash with
+            | Some hash ->
+                let innerMap =
+                    model.LastViewedHashes
+                    |> Map.tryFind scopedKey
+                    |> Option.defaultValue Map.empty
+                    |> Map.add filename hash
+                let updatedHashes = model.LastViewedHashes |> Map.add scopedKey innerMap
+                { model with LastViewedHashes = updatedHashes },
+                Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
+            | None -> model, Cmd.none
+        | None -> model, Cmd.none
+
+    | LoadLastViewedHashes hashes ->
+        { model with LastViewedHashes = hashes }, Cmd.none
 
     | NoOp -> model, Cmd.none
 
