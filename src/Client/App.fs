@@ -416,9 +416,11 @@ let update msg model =
                 CanvasEvents = canvasEvents }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
-                let seeded = seedLastViewedHashes m.Repos m.LastViewedHashes
-                if seeded = m.LastViewedHashes then m
-                else { m with LastViewedHashes = seeded })
+                if isFirstLoad then
+                    let seeded = seedLastViewedHashes m.Repos m.LastViewedHashes
+                    if seeded = m.LastViewedHashes then m
+                    else { m with LastViewedHashes = seeded }
+                else m)
             |> (fun updatedModel ->
                 let allPaths =
                     repos
