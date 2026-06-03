@@ -26,7 +26,8 @@ module CanvasScanner =
             |> Array.map (fun filePath ->
                 { Filename = Path.GetFileName(filePath)
                   ContentHash = hashFile filePath
-                  LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero) })
+                  LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
+                  OwnerSessionId = None })
             |> Array.toList
         else
             []

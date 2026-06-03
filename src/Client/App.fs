@@ -803,8 +803,9 @@ let update msg model =
         | Some (Card scopedKey) ->
             match findWorktree scopedKey model with
             | Some wt ->
+                let filename = model.ActiveCanvasDoc |> Map.tryFind scopedKey |> Option.defaultValue ""
                 Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} (payload length={payload.Length})")
-                model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
+                model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
             | None ->
                 Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
                 model, Cmd.none

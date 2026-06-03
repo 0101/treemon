@@ -99,10 +99,12 @@ type CanvasPosition =
 type CanvasDoc =
     { Filename: string
       ContentHash: string
-      LastModified: DateTimeOffset }
+      LastModified: DateTimeOffset
+      OwnerSessionId: string option }
 
 type CanvasMessageRequest =
     { WorktreePath: WorktreePath
+      Filename: string
       Payload: string }
 
 [<RequireQualifiedAccess>]

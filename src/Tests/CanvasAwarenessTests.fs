@@ -39,7 +39,8 @@ let private makeRepo repoId worktrees : RepoModel =
 let private makeDoc filename hash =
     { Filename = filename
       ContentHash = hash
-      LastModified = DateTimeOffset.UtcNow }
+      LastModified = DateTimeOffset.UtcNow
+      OwnerSessionId = None }
 
 let private defaultModel : Model =
     { Repos = []
@@ -268,7 +269,7 @@ type DetectCanvasEventsTests() =
 type AutoDisplayIdleLogicTests() =
 
     let docWithTime filename hash (time: DateTimeOffset) =
-        { Filename = filename; ContentHash = hash; LastModified = time }
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None }
 
     [<Test>]
     member _.``detectChangedCanvasDocs finds new filenames not present in previous``() =

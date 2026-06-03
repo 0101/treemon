@@ -129,7 +129,7 @@ type EnqueueTests() =
     [<Test>]
     member _.``sendMessage to unregistered bridge returns Queued``() =
         let path = uniquePath "enq-basic"
-        let request = { WorktreePath = WorktreePath path; Payload = "test-payload" }
+        let request = { WorktreePath = WorktreePath path; Filename = ""; Payload = "test-payload" }
 
         let result = sendMessage request |> Async.RunSynchronously
 
@@ -142,7 +142,7 @@ type EnqueueTests() =
         let results =
             [ 1..5 ]
             |> List.map (fun i ->
-                let request = { WorktreePath = WorktreePath path; Payload = $"msg-{i}" }
+                let request = { WorktreePath = WorktreePath path; Filename = ""; Payload = $"msg-{i}" }
                 sendMessage request |> Async.RunSynchronously)
 
         results |> List.iter (fun r -> Assert.That(r, Is.EqualTo(CanvasMessageResult.Queued)))
@@ -154,7 +154,7 @@ type EnqueueTests() =
         // Enqueue 12 messages — only last 10 should survive
         [ 1..12 ]
         |> List.iter (fun i ->
-            let request = { WorktreePath = WorktreePath path; Payload = $"msg-{i}" }
+            let request = { WorktreePath = WorktreePath path; Filename = ""; Payload = $"msg-{i}" }
             sendMessage request |> Async.RunSynchronously |> ignore)
 
         // Register a bridge to drain — drain will attempt HTTP and fail,
@@ -176,7 +176,7 @@ type DrainQueueTests() =
         let path = uniquePath "drain-basic"
 
         // Enqueue a message (no bridge registered)
-        let req = { WorktreePath = WorktreePath path; Payload = "queued-msg" }
+        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "queued-msg" }
         sendMessage req |> Async.RunSynchronously |> ignore
 
         // Register bridge — this triggers drainQueue (HTTP will fail silently)
@@ -184,7 +184,7 @@ type DrainQueueTests() =
 
         // After drain, sending another message should go to the bridge (not queue)
         // Since the bridge URL is unreachable, it will return Error, not Queued
-        let req2 = { WorktreePath = WorktreePath path; Payload = "new-msg" }
+        let req2 = { WorktreePath = WorktreePath path; Filename = ""; Payload = "new-msg" }
         let result = sendMessage req2 |> Async.RunSynchronously
 
         Assert.That(result, Is.Not.EqualTo(CanvasMessageResult.Queued),
@@ -205,7 +205,7 @@ type DrainQueueTests() =
         let path = uniquePath "drain-clear"
 
         // Enqueue
-        let req = { WorktreePath = WorktreePath path; Payload = "test" }
+        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "test" }
         sendMessage req |> Async.RunSynchronously |> ignore
 
         // First register drains
