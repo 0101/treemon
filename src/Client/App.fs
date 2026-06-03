@@ -263,8 +263,8 @@ let mergeCanvasEvents (existing: Map<string, CanvasEvent list>) (newEvents: Map<
             |> List.map (fun (_, group) -> group |> List.maxBy _.Timestamp)
         acc |> Map.add scopedKey deduped) existing
 
-let expireCanvasEvents (events: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
-    let cutoff = System.DateTimeOffset.Now.AddMilliseconds(-canvasEventExpiryMs)
+let expireCanvasEvents (now: System.DateTimeOffset) (events: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
+    let cutoff = now.AddMilliseconds(-canvasEventExpiryMs)
     events
     |> Map.map (fun _ evts -> evts |> List.filter (fun e -> e.Timestamp > cutoff))
     |> Map.filter (fun _ evts -> not (List.isEmpty evts))
@@ -379,7 +379,7 @@ let update msg model =
                 else
                     let newEvents = detectCanvasEvents model.PreviousCanvasHashes currentCanvasHashes
                     mergeCanvasEvents model.CanvasEvents newEvents
-                    |> expireCanvasEvents
+                    |> expireCanvasEvents System.DateTimeOffset.Now
             let changedDocs =
                 if isFirstLoad then []
                 else detectChangedCanvasDocs model.PreviousCanvasHashes currentCanvasHashes
@@ -484,7 +484,7 @@ let update msg model =
 
     | Tick now ->
         let newLevel = computeActivityLevel model.LastActivityTime now
-        let expiredEvents = expireCanvasEvents model.CanvasEvents
+        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.CanvasEvents
 
         let reportCmd =
             if newLevel <> model.ActivityLevel then
