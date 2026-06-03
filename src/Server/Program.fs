@@ -218,7 +218,7 @@ module CanvasDocServer =
                     let injection = baseStyle + linkInterceptor
                     let injected =
                         if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
-                        then html.Replace("</head>", injection + "</head>")
+                        then html.Replace("</head>", injection + "</head>", System.StringComparison.OrdinalIgnoreCase)
                         else injection + html
                     ctx.Response.ContentType <- "text/html; charset=utf-8"
                     ctx.Response.Headers["Cache-Control"] <- "no-cache"
