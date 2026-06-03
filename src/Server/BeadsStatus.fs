@@ -34,6 +34,15 @@ let private parseCountResponse (json: string) =
         Log.log "Beads" $"Failed to parse bd JSON: {ex.Message}, raw input: {json}"
         BeadsSummary.zero
 
+let getBeadsIssueList (dbPath: string) =
+    async {
+        if File.Exists(dbPath) then
+            let! output = ProcessRunner.run "Beads" "bd" $"list --json --db \"{dbPath}\""
+            return output |> Option.defaultValue "[]"
+        else
+            return "[]"
+    }
+
 let getBeadsSummary (worktreePath: string) =
     async {
         let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
