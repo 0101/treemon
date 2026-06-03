@@ -325,6 +325,7 @@ let main args =
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = SyncEngine.createSyncAgent ()
             let sessionAgent = SessionManager.createAgent ()
+            CanvasDocOwnership.load ()
 
             match config.TestFixtures with
             | Some path ->
