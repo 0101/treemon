@@ -60,7 +60,7 @@ let readOnlyApi
       saveCanvasPaneOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
-      sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Error "not implemented" }
+      sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
