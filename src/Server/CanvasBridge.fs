@@ -97,13 +97,28 @@ let registerPoll (worktreePath: string) =
     pollRegistry[key] <- DateTime.UtcNow
     Log.log "CanvasBridge" $"Poll heartbeat for {key} (poll registry size: {pollRegistry.Count})"
 
+let private isSessionAlive (entry: SessionEntry) =
+    (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds < 60.0
+
+let private isPollAlive (lastHeartbeat: DateTime) =
+    (DateTime.UtcNow - lastHeartbeat).TotalSeconds < 60.0
+
 let sendMessage (request: CanvasMessageRequest) =
     async {
         let key = normalizePath (WorktreePath.value request.WorktreePath)
         Log.log "CanvasBridge" $"sendMessage: key={key}, payload length={request.Payload.Length}"
 
-        match sessionRegistry.TryGetValue(key) with
-        | true, entry ->
+        let activeEntry =
+            match sessionRegistry.TryGetValue(key) with
+            | true, entry when isSessionAlive entry -> Some entry
+            | true, entry ->
+                Log.log "CanvasBridge" $"sendMessage: stale session for {Path.GetFileName(key)} (age={(DateTime.UtcNow - entry.RegisteredAt).TotalSeconds:F0}s), evicting"
+                sessionRegistry.TryRemove(key) |> ignore
+                None
+            | false, _ -> None
+
+        match activeEntry with
+        | Some entry ->
             try
                 use content = new StringContent(request.Payload, Encoding.UTF8, "application/json")
                 let! response = httpClient.PostAsync(entry.InjectUrl, content) |> Async.AwaitTask
@@ -119,8 +134,8 @@ let sendMessage (request: CanvasMessageRequest) =
             with ex ->
                 Log.log "CanvasBridge" $"sendMessage exception: {ex.Message}"
                 return CanvasMessageResult.Error ex.Message
-        | false, _ ->
-            // No session-backed bridge — queue for poll drain (or future session)
+        | None ->
+            // No alive session-backed bridge — queue for poll drain (or future session)
             let hasPolling = pollRegistry.ContainsKey(key)
             let reason = if hasPolling then "poll-based bridge" else "no bridge"
             Log.log "CanvasBridge" $"sendMessage: {reason} for {Path.GetFileName(key)}, message queued"
@@ -138,12 +153,6 @@ let drainPending (worktreePath: string) : string list =
             Log.log "CanvasBridge" $"Drained {List.length valid} pending message(s) for {Path.GetFileName(key)} via poll"
         valid |> List.map _.Payload
     | false, _ -> []
-
-let private isSessionAlive (entry: SessionEntry) =
-    (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds < 60.0
-
-let private isPollAlive (lastHeartbeat: DateTime) =
-    (DateTime.UtcNow - lastHeartbeat).TotalSeconds < 60.0
 
 let getStatus (worktreePath: string) =
     let key = normalizePath worktreePath

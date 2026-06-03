@@ -801,19 +801,17 @@ let update msg model =
             model, Cmd.none
 
     | CanvasMessageReceived payload ->
-        match model.FocusedElement with
-        | Some (Card scopedKey) ->
+        match activeVisibleDoc model with
+        | Some (scopedKey, filename) ->
             match findWorktree scopedKey model with
             | Some wt ->
-                let filename = model.ActiveCanvasDoc |> Map.tryFind scopedKey |> Option.defaultValue ""
-                Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} (payload length={payload.Length})")
+                Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
                 model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
             | None ->
                 Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
                 model, Cmd.none
-        | other ->
-            let focusDesc = match other with Some f -> $"{f}" | None -> "none"
-            Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: no focused card (focus={focusDesc})")
+        | None ->
+            Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
             model, Cmd.none
 
     | CanvasSendResult result ->
