@@ -259,4 +259,4 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
 - `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges
-- `docs/spec/canvas-pane.md` — per-worktree interactive HTML canvas pane for agent-to-user rich content
+- `docs/spec/canvas-pane.md` — interactive HTML docs in the canvas pane, including awareness, liveness, and bridge routing

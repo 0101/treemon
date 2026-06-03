@@ -1,478 +1,156 @@
-# Treemon Canvas Pane Investigation
-
-## Problem Statement
-
-Add an interactive **canvas pane** to the Treemon dashboard that gives agents running
-in tracked worktrees a rich, visual channel to the user — for decision making, planning,
-design, and review — instead of walls of markdown (see
-https://thariqs.github.io/html-effectiveness for the style we want to enable).
-
-Requirements:
-
-- A pane in Treemon that can be **open (visible) or closed (hidden)**.
-- The pane **belongs to the currently-selected worktree**.
-- It supports **multiple long-lived HTML documents**, shown as **tab buttons** to switch between.
-- Agents in the worktrees can **write to these docs at any time**.
-- Docs **live on disk** and are **picked up after session/computer restart**.
-- Docs are **interactive**: user interaction in the HTML can **send messages back to the
-  agent's CLI session**.
-- Treemon **badges which worktrees have new/updated docs** to view.
-
-The leading implementation idea was a **Copilot CLI extension** (modeled on
-`Q:\code\html-extension`) that hosts HTML and bridges messages, keeping it compatible with
-other tools.
-
-## Symptoms / Drivers
-
-- Markdown is a poor medium for spatial/comparative/interactive artifacts (diffs, design
-  options, plans, dashboards). HTML reads better and can be interactive.
-- Treemon already centralizes visibility across worktrees but has no surface for an agent
-  to present a rich artifact or collect a structured decision from the user.
-- Agents need a durable, restart-safe place to leave artifacts, and a way to receive the
-  user's response.
-
-## Evidence Gathered
-
-### Reference: `Q:\code\html-extension` ("HTML Interact")
-
-A Copilot extension (single Node ES-module, `@github/copilot-sdk/extension`) that serves
-interactive HTML and exchanges structured data with it.
-
-- **Registration**: code-based via `joinSession({ tools, canvases, hooks })`. No manifest.
-  - `extension\extension.mjs:662-708`
-- **Tools (CLI mode)**:
-  - `show_html_page(html, launch_browser?)` → returns `{ page_id, url }`.
-    `extension.mjs:665-684`, return at `:534-540`
-  - `send_to_page(page_id, event?, data)` → pushes an event to a connected page.
-    `extension.mjs:686-699`
-- **Canvas action (GitHub app mode)**: `page` canvas via `createCanvas`, with a `push`
-  action. `extension.mjs:557-649`
-- **HTTP server**: `http.createServer` bound to **127.0.0.1 only**, on a **deterministic
-  high port (49152–65535) seeded from `extensionId + sessionId`**, ephemeral fallback.
-  - `extension.mjs:28-33`, `:390-460`, listen at `:395-408`
-  - Routes: `GET /page`, `GET /events` (SSE), `POST /_message`, `OPTIONS`.
-    `extension.mjs:302-386`
-- **URL formats**:
-  - tool page: `http://127.0.0.1:<port>/page?token=<page_id>` — `extension.mjs:88-90`
-  - canvas page: `http://127.0.0.1:<port>/page?instance=<id>&token=<token>` — `:91-92`
-- **Page → agent messaging**: page calls `fetch('/_message')`; server reads body and calls
-  `session.send({ prompt })` with the payload tagged
-  `[html-interact page_id=<token>] <json>`. Routes **only to the session that owns that
-  extension process**. — `extension.mjs:122-128`, `:369-382`, `:208-215`
-- **Agent → page**: SSE via `/events`, with `Last-Event-ID` replay of missed updates.
-  `extension.mjs:181-206`, `:335-366`
-- **Framing**: `/page` sets **no `X-Frame-Options` and no CSP**, and
-  `Access-Control-Allow-Origin: *`. So the page **can be embedded cross-origin in an
-  iframe**. — `extension.mjs:45-50`, `:302-386`
-
-#### Persistence / restart behavior (critical)
-
-- **Tool pages (`show_html_page`) do NOT persist.** State lives only in an in-memory `pages`
-  map; `page_id` is a fresh `randomUUID()` per call. Nothing survives a restart.
-  `extension.mjs:34-35`, `:515-540`
-- **Canvas pages DO persist to disk** (GitHub-app mode), keyed by `sha256(sessionId\0instanceId)`
-  under `COPILOT_HOME/extensions/html-interact/artifacts/<hash>.json`, atomic write.
-  `extension.mjs:22-23`, `:217-235`, `:609-625`
-- **Port is deterministic only within the same `sessionId`.** A new session (e.g. after a
-  computer restart) → **new port and new token → the previous URL is dead.**
-  `extension.mjs:28-33`, `:425-440`
-- Messaging is bound to the owning live session; **a long-running server does not
-  multiplex to other sessions**. New session = new server/session binding.
-  `extension.mjs:208-215`, `:662-707`
-
-**Conclusion**: the extension's hosted URL is an *ephemeral live-session artifact*, not a
-durable address. It is unsuitable as the source of truth for restart-safe documents.
-
-### Treemon architecture (`Q:\code\tm-canvas48`)
-
-- **Domain types**: `src\Shared\Types.fs:8-196`.
-  - `WorktreeStatus` (per-card record): `:108-124` — exposes `Path`, `HasActiveSession`,
-    `LastUserMessage`, `CodingTool`, etc.
-  - `RepoWorktrees`: `:150-156`; `DashboardResponse`: `:163-171`;
-    `IWorktreeApi` contract: `:177-196`.
-- **No "selected worktree" in shared state.** Selection is client UI focus only:
-  `Navigation.FocusTarget` (`RepoHeader | Card scopedKey`) — `src\Client\Navigation.fs:7-10`;
-  stored as `Model.FocusedElement` — `src\Client\App.fs:13-34`. Card click dispatches
-  `SetFocus (Some (Card scopedKey))` — `App.fs:1157-1160`.
-- **Client is Elmish** (`Program.mkProgram init update view`) — `App.fs:1633-1638`.
-  - `Model`: `App.fs:13-34`; `Msg`: `:36-68`.
-  - Layout: header `viewAppHeader` `:1548-1595`; `.dashboard` container `:1597-1631`;
-    `repoSection` per repo `:1481-1497`; modals `:1625-1628`. A new side pane fits inside
-    `view` under `.dashboard`, alongside the repo list/footer/modals `:1600-1629`.
-- **API is Fable.Remoting over HTTP** (no REST/SSE/SignalR). Handler built at
-  `src\Server\Program.fs:113-120`, mounted with Saturn `use_router` `:174-180`. Methods
-  implemented in `src\Server\WorktreeApi.fs:342-564` (e.g. `launchSession`, `focusSession`,
-  `killSession`, `resumeSession`, `saveCollapsedRepos`).
-- **Real-time updates = client polling + adaptive server refresh.** Client polls worktrees
-  every ~1000ms (15000ms when deep-idle) — `App.fs:488-537`. Server scheduler refreshes
-  worktree state on an adaptive loop — `src\Server\RefreshScheduler.fs:523-583`. **No push
-  channel.**
-- **Worktree discovery**: `git worktree list --porcelain` per root — `GitWorktree.fs:64-73`;
-  scheduler builds `PerRepoState` (`WorktreeList`, `KnownPaths`) — `RefreshScheduler.fs:10-20`,
-  `:345-353`. The server already scans each worktree during refresh — a natural hook to also
-  read a per-worktree canvas registry file.
-- **Session tracking is path-keyed**, not a durable session id. `SessionManager` maps
-  normalized worktree path → window `HWND` — `src\Server\SessionManager.fs:17-20`, `:168-235`.
-  Persisted in `data\sessions.json`. `HasActiveSession` is computed by membership in the
-  active-session set — `WorktreeApi.fs:66-84`. **Copilot sessions do not survive a computer
-  restart.**
-- **Per-worktree indicators already exist** (the pattern for a "new docs" badge):
-  `cardClassName` adds `has-session` `App.fs:560-564`; coding-tool dot `ct-dot` `:1124-1128`;
-  `LastUserMessage` footer `:1203-1212`; event-log entries `:703-753`.
-- **On-disk config patterns to reuse**: per-repo `<repoRoot>\.treemon.json`
-  (`src\Server\TreemonConfig.fs:11-76`) and global `~\.treemon\config.json` (`:106-140`);
-  collapsed-repos persistence via `WorktreeApi.fs:156-185`. All use atomic JSON read/write
-  helpers.
-
-### Affected / relevant components
-
-- `src\Shared\Types.fs:108-124,177-196` — add `CanvasDocs` to `WorktreeStatus` and new
-  `IWorktreeApi` methods.
-- `src\Server\WorktreeApi.fs:342-564` — implement new API methods; populate `CanvasDocs`.
-- `src\Server\RefreshScheduler.fs:345-353,475-489` — read each worktree's canvas registry
-  during refresh.
-- `src\Server\Program.fs:113-180` — add non-remoting HTTP routes for static doc serving
-  and the message-forwarding endpoint.
-- `src\Client\App.fs:13-68,488-537,1597-1631` — pane state, polling-driven doc list,
-  pane view + badges.
-- New: a small Copilot CLI extension (bundled in this repo) acting as the **live message
-  bridge**.
-
-## Root Cause Analysis (why the obvious approach doesn't fully work)
-
-The intuitive design — "extension `html_host(file)` → URL; agent calls
-`treemon_canvas(URL, file)`; Treemon iframes that URL" — fails the **restart-safety**
-requirement because the extension's hosted URL is **ephemeral**: it is in-memory, the port
-is reseeded per session, and the token is regenerated. After a session/computer restart the
-stored URL is dead, so Treemon would render blank/stale iframes.
-
-It also conflates two things that have different lifetimes:
-
-- **Durable**: the document content + identity + "last updated" (must survive restart).
-- **Ephemeral**: the live serving URL/port/token and the message channel into a session
-  (only valid while a session is alive).
-
-Persisting the ephemeral live URL as if it were durable state is the core mistake. The
-correct model separates them: a durable doc registry on disk, and a live "bridge" that is
-discovered/owned at runtime.
-
-### Contributing factors
-
-- Treemon is **path-keyed**; the extension is **session-process-keyed**. Mapping between
-  them is implicit and breaks when multiple sessions run in one worktree.
-- Treemon has **no push channel** and **no inbound generic HTTP endpoint** today (only
-  Fable.Remoting), so message-forwarding needs new server routes.
-- Liveness cannot be reliably inferred from a cross-origin iframe load.
-
-## Chosen Solution — Option C′: Treemon hosts display; extension is the live bridge
-
-*(Selected by the user. Recommended by the investigation and the design critique.)*
-
-**Split durable vs. ephemeral. Treemon owns durable display + UI + liveness. The extension
-owns only the ephemeral message bridge into a live session.**
-
-### Components
-
-1. **Agent writes HTML to disk** in the worktree at **`.agents/canvas/`** (e.g.
-   `.agents/canvas/design-options.html`). These are the durable artifacts.
-
-2. **Durable per-worktree registry** `.agents/canvas/registry.json`, written atomically
-   (temp + rename) by the extension/agent, listing docs only by **durable identity**:
-   ```json
-   {
-     "version": 1,
-     "docs": [
-       { "id": "design-options", "path": "design-options.html",
-         "title": "Design Options" }
-     ]
-   }
-   ```
-   No `url`/`port`/`token`/`contentHash` here — those are ephemeral or computed by Treemon
-   (hash from file bytes; see resolved decision #4). Only durable identity is persisted.
-
-3. **Treemon hosts all display** at stable URLs on a **separate origin** (`:5002`), e.g.
-   `GET /{worktreePath}/{docId}` served from disk under `.agents/canvas/`
-   (path-validated to stay within that directory). Survives restart; one render path.
-   The separate origin ensures doc JS cannot reach the Fable.Remoting API on `:5000`.
-
-4. **Treemon scheduler reads `registry.json`** per worktree during its normal refresh and
-   includes the doc list in `WorktreeStatus.CanvasDocs`. Treemon computes `contentHash`
-   from file bytes (not from the registry). The client polls as today — no new push channel
-   needed for discovery.
-
-5. **Canvas pane (client)**: a collapsible pane bound to the focused worktree, showing
-   **tab buttons per doc** and an **iframe to Treemon's stable URL**. **Badges** mark
-   worktrees whose `contentHash` (Treemon-computed) changed since the client's "last viewed"
-   state (hash-based, not live-URL based).
-
-6. **Live message bridge (the only extension responsibility)**:
-   - On startup in a worktree (cwd), the extension **registers with Treemon's server**
-     ("worktree X is live; my inject endpoint is `http://127.0.0.1:<port>/inject`") as a
-     short-lived **lease/heartbeat**, so Treemon — not the iframe — owns liveness state
-     (`WorktreeStatus.CanvasLive`).
-   - User interaction in a doc calls `window.parent.postMessage(...)` to the Elmish parent
-     (works across origins); the client validates `event.origin`, dispatches a `Msg`, and
-     forwards via Remoting to the server, which **POSTs** to the registered live bridge,
-     which calls `session.send(...)` into the owning session.
-   - When no live bridge exists (post-restart), the pane is **read-only** and offers
-     **launch/resume session** (reusing Treemon's existing `launchSession`/`resumeSession`)
-     to restore interactivity.
-
-7. **Bundled reference templates**: ship a few `html-effectiveness`-style templates
-   (planning / review / design) so agents produce consistent-looking docs.
-
-### Pros
-
-- **Restart-safe display**: docs always render from disk at stable URLs; no dead iframes.
-- **Single render path** (Treemon-served), avoiding extension-vs-fallback divergence in
-  base URLs, CORS, and relative assets.
-- **Central liveness + message routing** in Treemon; the iframe is never the source of truth.
-- **Clean separation** of durable doc state from ephemeral session bridge.
-- **Fits Treemon's existing model**: per-worktree files read during refresh; client polling;
-  path-keyed worktrees; existing per-card badge patterns; existing launch/resume.
-- Still **extension-based** for the agent-facing/interactive part, so it stays usable by
-  other tools that adopt the same registry + bridge contract.
-
-### Cons
-
-- More **Treemon server work** than the pure-extension approach: static doc serving + a
-  message-forwarding endpoint + an in-memory liveness/lease registry (new non-remoting
-  HTTP routes in `Program.fs`).
-- Requires a small **bidirectional bridge protocol** between extension and Treemon
-  (register/heartbeat + forward).
-- Relative-asset and path-traversal **policy** must be defined for served docs.
-
-### Implementation Considerations
-
-- **Doc identity**: prefer stable `id` + normalized relative `path` + `contentHash` over
-  filename alone (rename-safe, collision-safe, traversal-safe). Validate resolved paths stay
-  under `.agents/canvas/`.
-- **Atomic registry I/O**: temp-file + rename; include `version`; on parse failure keep the
-  previous good snapshot to avoid flicker (mirror `TreemonConfig.fs` patterns).
-- **Multiple sessions per worktree**: define explicit ownership — a single interactive
-  bridge per worktree selected by Treemon, or per-doc owner — using **leases with
-  heartbeats**, not last-writer-wins, to avoid wrong-session routing.
-- **Liveness**: derive `CanvasLive` from the Treemon-side lease/heartbeat (and/or a
-  server-side probe), **not** from iframe load behavior.
-- **Badges**: compare registry `updatedAt`/`contentHash` against a client-persisted
-  "last viewed" map per `(worktree, docId)`.
-- **End-to-end wiring of a new remoting method** (per the explored pattern): add to
-  `IWorktreeApi` (`Types.fs:177-196`) → implement in `WorktreeApi.fs:384-564` (reuse
-  `withValidatedPath` `:362-373`) → add `Msg` + `Cmd.OfAsync` in `App.fs` → render in `view`.
-- **Selected-worktree binding**: resolve the focused `WorktreeStatus` from
-  `Model.FocusedElement` to drive which worktree's docs the pane shows.
-
-### Decision Notes
-
-- **`sandbox` = false (original user choice — now superseded).** The critique flagged that
-  agent-written HTML which can inject prompts into a live session is a **trust boundary**. The
-  resolution (see *Resolved Design Decisions*) is stronger than sandboxing: serve docs from a
-  **separate origin** so they cannot reach the app API at all, and route the single allowed
-  action through the Elmish parent via `postMessage`. The iframe need not be sandboxed for
-  interactivity, because origin isolation already removes its dangerous capabilities.
-- **Interactivity after restart = read-only + launch/resume** (user choice): honest UI —
-  "read-only: no live agent session", with a button to launch/resume.
-
-## Resolved Design Decisions (post GPT‑5.5 review)
-
-Decisions captured interactively (via an html-interact decisions page). These resolve the
-review's blocking gaps and **supersede** the earlier `sandbox=false` / same-origin notes.
-
-| # | Decision | Choice |
-|---|----------|--------|
-| 1 | Message routing / ownership | **Per-doc author session (by sessionId)** + liveness + resume-on-interact (see below) |
-| 2 | Doc origin & security | **Separate origin / port** (e.g. `127.0.0.1:5002`) serving only static docs + one message route |
-| 3 | Message path (doc → agent) | **doc → `parent.postMessage` → Elmish client** → Remoting → server → session |
-| 4 | contentHash authority | **Treemon computes hash from file bytes**; registry holds only `id`/`path`/`title` |
-| 5 | On-change update | **DOM-morph** (idiomorph/morphdom), preserving scroll/focus/inputs |
-| 6 | `worktreeId` scheme | **`base64url(sha256(normalizedPath))`** (normalize case/sep first) |
-
-### Ownership model (refined by user — supersedes "per-worktree single owner")
-
-Each doc records its **authoring `sessionId`**. Routing and liveness are per-doc:
-
-- **Liveness dot** — Treemon maps each author `sessionId` → alive/dead via the extension
-  bridge **heartbeat**. 🟢 alive / ⚪ dead, shown in the doc/tab UI.
-- **Resume-on-interact** — interacting with a doc whose author session is dead **resumes that
-  session in the worktree terminal** (Treemon already does this, see
-  `docs/spec/resume-last-session.md` / `native-session-management.md`), **queues** the message,
-  and delivers it once the bridge re-registers.
-- **"Start new session with this doc as context"** — a separate button that launches a fresh
-  session seeded with the doc, independent of the original author.
-- **Phaseable** — v1 can ship as: dot + "author offline → queue & show waiting" without
-  auto-resume; resume/new-session land later.
-
-Three details to pin down during planning (not blockers):
-
-1. **Resume must re-bind the same `sessionId`** so a queued message routes back to the right
-   doc/worktree — otherwise the resumed process is effectively a new session and the queue
-   can't target it. Confirm the resume mechanism preserves/reports the original id.
-2. **Queue needs expiry + UI feedback** ("waiting for session…") and **click coalescing** so
-   repeated clicks don't pile up duplicate prompts.
-3. **Liveness requires the bridge to heartbeat its `sessionId`** so Treemon can map
-   `sessionId` → alive; the bridge contract must include it.
-
-### Why separate-origin + postMessage (security, and how they compose)
-
-The doc is treated as **untrusted**. Two layers, browser-enforced where possible:
-
-- **Separate origin** (docs on `:5002`, app + Fable.Remoting API on `:5000`): the browser's
-  same-origin policy stops doc JS from reaching `launchSession`/`killSession` or any app API.
-  The doc's only same-origin surface is static files — no app capabilities at all. This is
-  strictly stronger than `sandbox=false` on the app origin and **resolves the trust-boundary
-  concern without sandboxing interactivity**.
-- **postMessage → parent** is *not* blocked by separate origin — `postMessage` is designed to
-  cross origins. The doc calls `window.parent.postMessage(payload, "http://127.0.0.1:5000")`
-  (pinning the target origin); the Elmish client's `window` `message` subscription validates
-  `event.origin === "http://127.0.0.1:5002"` (pinning the sender) before dispatching a `Msg`.
-  **Elmish is the parent page and the single trusted gatekeeper** — the doc can do nothing but
-  hand it a message; the client decides what's allowed and forwards via Remoting.
-
-So the doc has exactly **one** outbound capability (post a message to its parent), and the
-client is the only thing that can call privileged APIs. (The rejected "direct fetch"
-alternative would bypass Elmish and force the doc to carry the endpoint + a token.)
-
-## Update Model (interaction → content refresh)
-
-**Chosen: the agent is the sole writer of document content; Treemon never writes it.**
-Content flows one way (agent → file → Treemon → page); messages flow the other way
-(page → Treemon → extension → agent). There is **no direct agent→DOM push** in the base
-design.
-
-### Round-trip for an in-doc action (e.g. "expand on this")
-
-1. User clicks a control in the doc → doc calls `window.parent.postMessage({ docId, action, … })`
-   (doc is served from the **separate canvas origin**; it cannot call the app API directly).
-   The Elmish client's `message` subscription validates `event.origin` and dispatches a `Msg`.
-2. The client forwards via Remoting; Treemon makes a **one-shot POST** to the **author
-   session's** extension `/inject` endpoint → extension calls `session.send("[canvas <id>] …")`.
-   If that session is **dead**, Treemon **resumes** it and **queues** the message until its
-   bridge re-registers (see Ownership model above).
-3. The agent receives the turn and **edits the HTML file on disk** in `.agents/canvas/`.
-4. Treemon detects the changed `contentHash` and the open page **re-fetches its stable URL
-   and DOM-morphs** (idiomorph/morphdom-style) so only changed nodes update — scroll, focus,
-   and form inputs are preserved. Feels near-live without a second source of truth.
-
-### Why file-as-source-of-truth (not live DOM patching)
-
-- **Restart-safe by construction** — disk is canonical; no replay log of updates to persist.
-- **No divergence** between what's on screen and what's on disk.
-- **Agents are already excellent at editing files**; no bespoke DOM-patch protocol needed.
-- The flicker/state-loss cost of a naive reload is removed by the DOM-morph step.
-- Live agent→DOM streaming is intentionally **out of scope for v1**; add it later only if a
-  streaming use case (token stream, animation) demands it, as an opt-in layer.
-
-Purely-local interactions (toggle a section, tick a checkbox) need **no round trip** — that
-is just in-page JS. The extension bridge is used **only** when the user wants the agent to
-change/add content or to record a decision.
-
-### File watching → scheduler state machine
-
-Treemon's server state is an actor: `MailboxProcessor<StateMsg>` with an immutable
-`DashboardState` fold (`RefreshScheduler.fs:54`, `:99`, `:179`). The scheduler already
-drives it via `agent.Post(...)`. A file-watcher slots straight in:
-
-- Add a `StateMsg` case, e.g. `UpdateCanvasDocs of RepoId * path * CanvasDoc list`.
-- Run **one `FileSystemWatcher` per worktree's `.agents/canvas/` dir** (filter
-  `registry.json` + `*.html`). On change, re-read that worktree's registry and
-  `agent.Post(UpdateCanvasDocs …)`; `processMessage` folds it into state, and the next
-  client poll carries the new docs/hashes.
-- **Watch all worktrees, not just the open doc**: the "new doc" badges on *non-selected*
-  cards need change events across all worktrees. The open doc is just one consumer.
-
-Caveats (all minor):
-- `FileSystemWatcher` fires **multiple events per save** (temp+rename, repeated `Changed`).
-  Harmless here — a re-read with an unchanged `contentHash` is a no-op; optional light
-  debounce.
-- Handle the `Error`/buffer-overflow event by triggering a **full re-scan** of that worktree.
-- One handle per worktree dir (fine for dozens); **dispose** on shutdown and when a root is
-  removed.
-- The watcher freshens **server** state instantly (great for badges and beats the 15 s
-  deep-idle poll backoff). The **browser** still learns via its existing ~1 s active poll
-  carrying the hash — adequate for v1. A browser SSE push is an optional later upgrade for
-  sub-second open-doc morphing while idle.
-
-### Client (MVU / Elmish)
-
-The client is already Elmish, and the pane is a natural MVU fit:
-
-- **Model**: `CanvasPaneOpen`, `ActiveDocByWorktree`, `LastViewedHashes`. The doc list itself
-  arrives on the existing `DashboardResponse` poll and flows through `update`.
-- **Msg**: `ToggleCanvasPane`, `SelectCanvasDoc`, `MarkDocViewed`, `CanvasMessageFromDoc`.
-- **View**: pure render of tabs/badges/iframe from the model.
-
-Two edges are imperative and handled the standard Elmish way (not in the VDOM diff):
-
-- **The iframe content + morph-reload** is a foreign-DOM *island*. Trigger the fetch+morph
-  from a `Feliz.useEffect` keyed on the open doc's `contentHash` (or a `Cmd`).
-- **User clicks inside the iframe** arrive via `postMessage`, not `dispatch`. Capture them
-  with a **subscription** (a `window` `message` listener) that converts them into a
-  `CanvasMessageFromDoc` `Msg`; `LastViewedHashes` persistence is a `Cmd` side effect.
-
-## Impact Assessment
-
-- **Scope**: new client pane + state; new shared types; new server static + bridge routes +
-  registry reading in the scheduler; a new bundled extension. No change to existing worktree
-  discovery/refresh semantics.
-- **Risk Level**: Medium. The bridge protocol, multi-session ownership, and the new
-  non-remoting HTTP routes are the riskiest parts; display/registry reading is low-risk and
-  fits existing patterns.
-- **Breaking Changes**: None to existing behavior. Adding fields to `WorktreeStatus` and
-  methods to `IWorktreeApi` requires recompiling client+server together (Fable.Remoting
-  contract), which is the normal flow here.
-- **Security**: docs are served from a **separate origin/port** so doc JS cannot reach the
-  Fable.Remoting API (browser-enforced); the only outbound channel is `postMessage` to the
-  Elmish parent, which validates `event.origin` and is the sole privileged caller. Validate
-  served paths stay within `.agents/canvas/` (path-traversal). This supersedes the earlier
-  `sandbox=false` same-origin note.
-- **Testing Requirements**: registry parse/atomic-write + path validation (unit); scheduler
-  surfacing `CanvasDocs` (unit); message forwarding bridge happy-path + no-live-bridge
-  fallback; E2E (Playwright) for pane open/close, tab switching, badge on update, and
-  read-only state when no session — asserting on CSS classes/DOM structure per repo convention.
-
-## Verification Strategy
-
-- **Display**: write a doc to `.agents/canvas/`, confirm it appears as a tab and renders in
-  the iframe from a stable Treemon URL; restart Treemon and confirm it still renders.
-- **Badges**: update a doc's content/`updatedAt`; confirm the worktree badges as "new" until
-  viewed.
-- **Interactivity (live)**: with a session running, click a control in the doc and confirm
-  the prompt arrives in the owning session.
-- **Restart/no-session**: kill the session; confirm the pane goes read-only and the
-  launch/resume affordance restores interactivity.
-- **Robustness**: write the registry concurrently while the scheduler reads; confirm no
-  flicker/parse errors (atomic write + previous-snapshot fallback).
-- **Multi-session**: open two sessions in one worktree; confirm messages route to the
-  Treemon-selected owner and the registry isn't clobbered.
-
-## Phasing
-
-Completed phases:
-
-1. **MVP** ✅ (`tm-canvas48-4cn`): core end-to-end loop — agent writes HTML to
-   `.agents/canvas/`, Treemon detects + serves at `:5002`, iframe renders in dashboard,
-   user interaction reaches agent via postMessage → bridge → CLI session. One doc per
-   worktree, iframe reload on hash change, no badges.
-2. **UX polish + logging** ✅ (`tm-canvas48-441`): canvas position selector, persist canvas
-   open/closed state, comprehensive lifecycle logging (CanvasScanner, CanvasWatcher, doc
-   server, CanvasBridge). `C` key already worked — covered by existing E2E tests.
-3. **Multi-doc + discovery** ✅ (`tm-canvas48-441`): multiple docs per worktree with tabs
-   (single doc = no tab bar), `LastModified` on `CanvasDoc`, `CanvasDocs` list throughout
-   pipeline. **Empty canvas overview** — all worktrees with docs grouped by repo, clickable
-   to focus. 17 canvas E2E tests passing.
-3.5. **Toolbar consolidation + doc archive** ✅ (`tm-canvas48-l7t`): unified header bar
-   (tabs + position buttons at 0.4 opacity), doc archive to `.agents/canvas/archive/`,
-   inline doc names in overview, canvas authoring skill, diagnostics logging. 22 canvas
-   E2E tests passing.
-3.6. **Bridge resilience + UX polish** ✅ (`tm-canvas48-8ge`): extension auto-reconnect
-   heartbeat (30s with backoff), persistent error banner (replaces 2s flash), bridge health
-   endpoint (`GET /api/canvas/bridge-status`), archive icon fix, scrollbar CSS injection.
-4. **Canvas awareness + liveness** ✅ (`tm-canvas48-3ic`, spec:
-   `docs/spec/canvas-awareness-liveness.md`): unviewed doc tracking with
-   `LastViewedHashes` persistence, canvas header badge (unviewed count), auto-display when
-   idle (60s threshold), card console notifications for new/updated docs, per-doc liveness
-   indicator (sessionId + isAlive), message queue with drain-on-register (max 10, 5min
-   TTL), "Start session" button, 40 unit tests + 22 E2E. Bugfix follow-up:
-   `tm-canvas48-dst`.
-
-Roadmap for future phases is maintained in the canvas doc `.agents/canvas/roadmap.html`.
+# Canvas Pane
+
+## Goals
+
+- Rich visual channel for agents to present interactive HTML documents to users
+- Per-worktree doc management with tabs, archive, and overview-driven discovery
+- Awareness so users notice new or updated docs through badges, auto-display, and card notifications
+- Per-doc liveness so users can see which docs still have a live author session
+- Per-doc message routing so interactions reach the session that authored the doc
+- Restart-safe rendering from disk so docs survive session, app, and machine restarts
+- Separate origin for doc content so canvas JavaScript is isolated from the app API
+
+## Expected Behavior
+
+### Doc Lifecycle
+
+- Agents create or update `.html` files in `.agents/canvas/`.
+- `RefreshScheduler.CanvasScanner` scans those files and computes `ContentHash` from file bytes.
+- `CanvasWatchers` keeps one `FileSystemWatcher` per worktree `.agents/canvas/` directory and posts `UpdateCanvasDoc` into the scheduler mailbox when files change.
+- The canvas doc server serves each file at `http://127.0.0.1:5002/{encodedWorktreePath}/{filename}`.
+- The client renders the selected doc in an iframe whose URL includes the current `contentHash`.
+- Disk files are the source of truth, so docs keep rendering after Treemon, session, or computer restart.
+
+### Pane UI
+
+- The pane opens and closes from the header Canvas button and the `C` key.
+- Open or closed state persists in global config.
+- Position selector supports left, right, top, and bottom docking, and the selected position persists.
+- The pane is scoped to the focused worktree. If that worktree has docs, the pane shows its active doc.
+- Worktrees with multiple docs show tab buttons. A single doc skips the tab bar.
+- Selecting a tab marks that doc viewed.
+- Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
+- The archive button moves the active doc to `.agents/canvas/archive/`.
+
+### Canvas Overview
+
+- When no worktree is focused, or the focused worktree has no docs, the pane shows a canvas overview.
+- The overview groups worktrees with docs by repository and orders entries by latest canvas activity.
+- Clicking a worktree entry focuses that card.
+- Clicking a doc entry focuses the worktree, opens the pane if needed, and selects that doc.
+
+### Doc Awareness
+
+- The server persists `LastViewedHashes: Map<worktreePath, Map<filename, contentHash>>` in global config.
+- On first load, existing docs are seeded into `LastViewedHashes` so pre-existing docs do not appear new.
+- A doc is unviewed when its current `contentHash` differs from the last viewed hash, or no viewed hash exists.
+- The Canvas header button shows the total unviewed doc count across all worktrees and hides the badge when the count is 0.
+- When the pane is open, selecting a doc or showing the active visible doc marks it viewed.
+- If any doc changes while the user has been idle for at least 60 seconds, Treemon opens the pane, focuses the changed worktree, and selects the most recently modified changed doc.
+- Worktree cards show yellow canvas notifications for new or updated docs. Notifications expire after 5 minutes, deduplicate by filename, replace `LastUserMessage` while present, and click through to the relevant worktree or doc.
+- Viewed tabs dim to 0.5 opacity so unviewed docs stand out.
+
+### Liveness and Session Routing
+
+- Current shipped behavior uses a per-worktree bridge registry keyed by normalized worktree path.
+- Session registration for the same worktree is last-writer-wins.
+- The liveness dot shown in tabs and overview reflects bridge registration and heartbeat state only; it does not use `HasActiveSession`.
+- When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button.
+- `LaunchCanvasSession` uses the existing action-launch flow and includes the full absolute doc path plus canvas context in the prompt.
+- 🔮 Each doc records its author `sessionId`.
+- 🔮 Liveness becomes per-doc rather than per-worktree.
+- 🔮 Canvas messages route to the author session for the selected doc.
+- 🔮 If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
+
+### Message Flow
+
+- A canvas doc sends interaction data with `window.parent.postMessage(...)`.
+- The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
+- The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
+- The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
+- The extension bridge calls `session.send()` with the canvas payload.
+- Client send state is modeled as `CanvasSendState = Idle | Waiting of queuedAt | Failed of message`.
+
+### Message Queue
+
+- If no session-backed bridge is registered, the server queues the message per worktree and returns `Queued`.
+- The queue keeps at most 10 messages per worktree and expires entries after 5 minutes.
+- Queued messages drain when a session bridge registers and when a poll heartbeat drains pending work.
+- While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
+- If the waiting window passes 5 minutes, the client surfaces `Message expired — no session responded`.
+
+### Bridge Protocol
+
+- The session bridge is the extension process started inside a coding session.
+- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, and `sessionId`.
+- After startup it re-registers every 30 seconds as a heartbeat.
+- Failed extension heartbeats back off exponentially up to 120 seconds, then reset after reconnect.
+- Served docs receive an injected heartbeat script that posts to `/bridge/heartbeat` every 30 seconds.
+- `CanvasBridge` keeps separate `sessionRegistry` and `pollRegistry` maps so poll heartbeats do not overwrite session registrations.
+- `GET /api/canvas/bridge-status?worktreePath=...` exposes bridge registration, heartbeat age, liveness, and session ID.
+
+### Doc Server
+
+- The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
+- Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
+- The server injects scrollbar CSS, the canvas link interceptor, and the bridge heartbeat script into `</head>`.
+- `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
+- If no `<head>` close tag exists, the injected content is prepended.
+- Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
+
+### 🔮 DOM Morph and State Persistence
+
+- On `contentHash` change, an open doc morphs in place instead of reloading the iframe.
+- Scroll position, focused elements, and in-progress inputs stay intact across updates.
+- This is not implemented today; the current system reloads the iframe by changing the `?v={contentHash}` URL.
+
+### Link Handling
+
+- Relative `.html` links and same-origin canvas doc links are intercepted and converted into `navigate-canvas-doc` messages for tab switching.
+- External links open in the system browser.
+
+## Technical Approach
+
+- The client is Elmish/Fable. It polls `DashboardResponse`, stores canvas UI state locally, and routes iframe messages through Elmish before calling Remoting.
+- The server keeps `CanvasDoc list` in scheduler state beside git, PR, and coding-tool data. `CanvasScanner` computes hashes and `CanvasWatchers` pushes filesystem changes into the same mailbox.
+- `Program.fs` hosts the main app/API on port 5000 and the canvas doc server on port 5002. `CanvasBridge` owns live registration, queueing, forwarding, and liveness.
+- Security relies on separate origin plus `postMessage`: docs cannot call privileged app endpoints directly, and the parent validates sender origin before forwarding anything.
+- Canvas awareness helpers stay pure: `detectCanvasEvents` and `expireCanvasEvents` take `now` as an argument instead of capturing the clock internally.
+
+## Key Files
+
+| File | Purpose |
+|---|---|
+| `src/Shared/Types.fs` | Shared canvas domain types, API methods, bridge liveness, send results, pane position |
+| `src/Client/App.fs` | Elmish model and update logic for pane state, awareness, auto-display, routing, archive, and launch actions |
+| `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, liveness dot, iframe, banners, and message listener |
+| `src/Client/Navigation.fs` | `CanvasSendState` DU |
+| `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
+| `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
+| `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
+| `src/Server/CanvasBridge.fs` | Session registry, poll registry, queueing, liveness, and bridge forwarding |
+| `src/Server/Program.fs` | Canvas register endpoint, bridge status endpoint, doc server, HTML injection, heartbeat route |
+| `src/Server/PathUtils.fs` | Canvas path normalization and validation |
+| `src/Extension/extension.mjs` | Session bridge registration, `/inject` server, heartbeat, and reconnect backoff |
+| `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
+
+## Decisions
+
+- **Separate origin + postMessage** — docs run on `:5002`, the app stays on `:5000`, and Elmish is the only privileged message gate.
+- **File as source of truth** — Treemon renders HTML from disk and derives `contentHash` from file bytes instead of keeping a separate live-doc state.
+- **Split bridge registry** — `sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
+- **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
+- **`CanvasSendState` DU** — send state is `Idle`, `Waiting`, or `Failed`, avoiding illegal combinations of optional fields.
+- **🔮 Per-doc author routing** — the target model is per-doc ownership by `sessionId`, but current routing remains per-worktree until ownership is implemented.
+
+## Implementation Status
+
+- Shipped: Phase 1-4, multi-doc discovery, overview, toolbar positioning, archive, bridge resilience, awareness, liveness indicators, queueing, and review fixes.
+- 🔮 Per-doc author routing is not implemented yet. See `.agents/canvas-bridge-handover.md`.
+- 🔮 DOM morph and state persistence are not implemented yet.
+- 🔮 Bundled templates and wider canvas ecosystem work have not started.
+
+## Related Specs
+
+- `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
+- `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
