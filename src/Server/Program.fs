@@ -139,7 +139,7 @@ let private canvasRegisterHandler : HttpHandler =
                 Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
             else
-                CanvasBridge.register body.worktreePath body.injectUrl body.sessionId
+                CanvasBridge.registerSession body.worktreePath body.injectUrl body.sessionId
                 return! Successful.OK "registered" next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
@@ -197,7 +197,7 @@ module CanvasDocServer =
                         ctx.Response.StatusCode <- 404
                         do! ctx.Response.WriteAsync("Unknown worktree")
                     else
-                        CanvasBridge.register worktreePath CanvasBridge.PollInjectUrl None
+                        CanvasBridge.registerPoll worktreePath
                         let messages = CanvasBridge.drainPending worktreePath
                         ctx.Response.ContentType <- "application/json"
                         do! ctx.Response.WriteAsJsonAsync(messages)

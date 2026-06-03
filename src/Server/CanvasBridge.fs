@@ -9,10 +9,10 @@ open Shared
 
 let private normalizePath = Server.PathUtils.normalizePath
 
-type BridgeEntry =
+type SessionEntry =
     { InjectUrl: string
       SessionId: string option
-      LastHeartbeat: DateTime }
+      RegisteredAt: DateTime }
 
 type QueuedMessage =
     { EnqueuedAt: DateTime
@@ -20,14 +20,13 @@ type QueuedMessage =
 
 // Mutable: ConcurrentDictionary used for thread-safe bridge registry;
 // simple two-operation access pattern doesn't warrant MailboxProcessor overhead.
-let private registry = ConcurrentDictionary<string, BridgeEntry>(StringComparer.OrdinalIgnoreCase)
+// Split into two maps to prevent heartbeat polling from overwriting session registrations.
+let private sessionRegistry = ConcurrentDictionary<string, SessionEntry>(StringComparer.OrdinalIgnoreCase)
+let private pollRegistry = ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase)
 
 let private messageQueue = ConcurrentDictionary<string, QueuedMessage list>(StringComparer.OrdinalIgnoreCase)
 
 let private httpClient = new HttpClient()
-
-/// Sentinel inject URL for iframe-based registrations (heartbeat polling, no HTTP push).
-let [<Literal>] PollInjectUrl = "poll://iframe"
 
 let private maxQueueSize = 10
 let private queueTtl = TimeSpan.FromMinutes 5.0
@@ -53,10 +52,7 @@ let private enqueue key payload =
     )
     |> ignore
 
-let private drainQueue (key: string) (entry: BridgeEntry) =
-    if entry.InjectUrl = PollInjectUrl then () // poll-based bridges drain via heartbeat (drainPending), not HTTP push
-    else
-
+let private drainQueue (key: string) (entry: SessionEntry) =
     match messageQueue.TryRemove(key) with
     | false, _ -> ()
     | true, queued ->
@@ -83,34 +79,30 @@ let private drainQueue (key: string) (entry: BridgeEntry) =
                 }
                 |> Async.Start)
 
-let register (worktreePath: string) (injectUrl: string) (sessionId: string option) =
+let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
     let key = normalizePath worktreePath
-    let entry = { InjectUrl = injectUrl; SessionId = sessionId; LastHeartbeat = DateTime.UtcNow }
+    let entry = { InjectUrl = injectUrl; SessionId = sessionId; RegisteredAt = DateTime.UtcNow }
 
-    match registry.TryGetValue(key) with
+    match sessionRegistry.TryGetValue(key) with
     | true, oldEntry ->
-        Log.log "CanvasBridge" $"Overwriting registration for {key}: {oldEntry.InjectUrl} -> {injectUrl}"
+        Log.log "CanvasBridge" $"Overwriting session registration for {key}: {oldEntry.InjectUrl} -> {injectUrl}"
     | false, _ -> ()
 
-    registry[key] <- entry
-    Log.log "CanvasBridge" $"Registered {key} -> {injectUrl} (registry size: {registry.Count})"
+    sessionRegistry[key] <- entry
+    Log.log "CanvasBridge" $"Session registered {key} -> {injectUrl} (session registry size: {sessionRegistry.Count})"
     drainQueue key entry
+
+let registerPoll (worktreePath: string) =
+    let key = normalizePath worktreePath
+    pollRegistry[key] <- DateTime.UtcNow
+    Log.log "CanvasBridge" $"Poll heartbeat for {key} (poll registry size: {pollRegistry.Count})"
 
 let sendMessage (request: CanvasMessageRequest) =
     async {
         let key = normalizePath (WorktreePath.value request.WorktreePath)
         Log.log "CanvasBridge" $"sendMessage: key={key}, payload length={request.Payload.Length}"
 
-        match registry.TryGetValue(key) with
-        | false, _ ->
-            let registeredKeys = registry.Keys |> Seq.toList |> String.concat "; "
-            Log.log "CanvasBridge" $"sendMessage: no bridge for key={key}, message queued. Registered keys: [{registeredKeys}]"
-            enqueue key request.Payload
-            return CanvasMessageResult.Queued
-        | true, entry when entry.InjectUrl = PollInjectUrl ->
-            Log.log "CanvasBridge" $"sendMessage: poll-based bridge for {Path.GetFileName(key)}, message queued for heartbeat drain"
-            enqueue key request.Payload
-            return CanvasMessageResult.Queued
+        match sessionRegistry.TryGetValue(key) with
         | true, entry ->
             try
                 use content = new StringContent(request.Payload, Encoding.UTF8, "application/json")
@@ -127,6 +119,13 @@ let sendMessage (request: CanvasMessageRequest) =
             with ex ->
                 Log.log "CanvasBridge" $"sendMessage exception: {ex.Message}"
                 return CanvasMessageResult.Error ex.Message
+        | false, _ ->
+            // No session-backed bridge — queue for poll drain (or future session)
+            let hasPolling = pollRegistry.ContainsKey(key)
+            let reason = if hasPolling then "poll-based bridge" else "no bridge"
+            Log.log "CanvasBridge" $"sendMessage: {reason} for {Path.GetFileName(key)}, message queued"
+            enqueue key request.Payload
+            return CanvasMessageResult.Queued
     }
 
 /// Atomically drain pending messages for a worktree (used by heartbeat polling).
@@ -140,25 +139,43 @@ let drainPending (worktreePath: string) : string list =
         valid |> List.map _.Payload
     | false, _ -> []
 
-let isAlive (entry: BridgeEntry) =
-    (DateTime.UtcNow - entry.LastHeartbeat).TotalSeconds < 60.0
+let private isSessionAlive (entry: SessionEntry) =
+    (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds < 60.0
+
+let private isPollAlive (lastHeartbeat: DateTime) =
+    (DateTime.UtcNow - lastHeartbeat).TotalSeconds < 60.0
 
 let getStatus (worktreePath: string) =
     let key = normalizePath worktreePath
+    let session = sessionRegistry.TryGetValue(key)
+    let poll = pollRegistry.TryGetValue(key)
 
-    match registry.TryGetValue(key) with
-    | true, entry ->
-        let age = (DateTime.UtcNow - entry.LastHeartbeat).TotalSeconds
-        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isAlive entry; SessionId = entry.SessionId |}
-    | false, _ ->
+    match session, poll with
+    | (true, entry), (true, hb) ->
+        let age = min (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds (DateTime.UtcNow - hb).TotalSeconds
+        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isSessionAlive entry || isPollAlive hb; SessionId = entry.SessionId |}
+    | (true, entry), (false, _) ->
+        let age = (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds
+        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isSessionAlive entry; SessionId = entry.SessionId |}
+    | (false, _), (true, hb) ->
+        let age = (DateTime.UtcNow - hb).TotalSeconds
+        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isPollAlive hb; SessionId = None |}
+    | (false, _), (false, _) ->
         {| Registered = false; LastHeartbeatAge = None; IsAlive = false; SessionId = None |}
 
 let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
     worktreePaths
     |> List.choose (fun path ->
         let key = normalizePath path
-        match registry.TryGetValue(key) with
-        | true, entry ->
-            Some (path, { IsAlive = isAlive entry; SessionId = entry.SessionId })
-        | false, _ -> None)
+        let session = sessionRegistry.TryGetValue(key)
+        let poll = pollRegistry.TryGetValue(key)
+
+        match session, poll with
+        | (true, entry), (true, hb) ->
+            Some (path, { IsAlive = isSessionAlive entry || isPollAlive hb; SessionId = entry.SessionId })
+        | (true, entry), (false, _) ->
+            Some (path, { IsAlive = isSessionAlive entry; SessionId = entry.SessionId })
+        | (false, _), (true, hb) ->
+            Some (path, { IsAlive = isPollAlive hb; SessionId = None })
+        | (false, _), (false, _) -> None)
     |> Map.ofList

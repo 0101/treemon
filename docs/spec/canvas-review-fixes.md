@@ -60,11 +60,14 @@ All changes are localized refactors within the existing canvas pane feature. No 
 Agent-created canvas docs don't explicitly register with the bridge (the SKILL.md says "No registration needed"). The fix injects a heartbeat script into every served HTML doc. The script:
 1. Extracts the worktree path from the iframe URL
 2. POSTs to `/bridge/heartbeat` on the canvas doc server (same origin — no CORS)
-3. The heartbeat endpoint registers with `CanvasBridge` using `PollInjectUrl` sentinel
-4. `sendMessage` detects the sentinel and enqueues messages instead of HTTP POST
+3. The heartbeat endpoint calls `registerPoll` which updates `pollRegistry` (separate from `sessionRegistry`)
+4. `sendMessage` checks `sessionRegistry` first for HTTP push; falls back to queueing for poll drain
 5. `drainPending` returns queued messages in the heartbeat response
 
 This avoids a duplicate message queue (single source of truth in `CanvasBridge.messageQueue`) and avoids needing a separate inject endpoint. Client-side liveness also uses `HasActiveSession` as a fallback for immediate detection.
+
+### Split bridge registry (race fix)
+The single `registry` ConcurrentDictionary was replaced with two separate maps: `sessionRegistry` (for session-backed inject endpoints with `registerSession`) and `pollRegistry` (for iframe heartbeat timestamps with `registerPoll`). This prevents heartbeat polling from overwriting session registrations — the root cause of the "Session alive" misreporting for iframe-only worktrees.
 
 ## Key Files
 

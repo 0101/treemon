@@ -12,7 +12,7 @@ let private uniquePath prefix =
     $"/test/{prefix}/{id}"
 
 
-// ── isAlive ─────────────────────────────────────────────────────────
+// ── isAlive (via getStatus) ──────────────────────────────────────────
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -20,49 +20,21 @@ let private uniquePath prefix =
 type IsAliveTests() =
 
     [<Test>]
-    member _.``Returns true when heartbeat is recent (under 60s)``() =
-        let entry =
-            { InjectUrl = "http://localhost/inject"
-              SessionId = Some "s1"
-              LastHeartbeat = DateTime.UtcNow.AddSeconds(-30.0) }
-
-        Assert.That(isAlive entry, Is.True)
+    member _.``Session registered just now shows alive``() =
+        let path = uniquePath "alive-now"
+        registerSession path "http://localhost/inject" (Some "s1")
+        Assert.That((getStatus path).IsAlive, Is.True)
 
     [<Test>]
-    member _.``Returns true when heartbeat is just now``() =
-        let entry =
-            { InjectUrl = "http://localhost/inject"
-              SessionId = None
-              LastHeartbeat = DateTime.UtcNow }
-
-        Assert.That(isAlive entry, Is.True)
+    member _.``Poll registered just now shows alive``() =
+        let path = uniquePath "alive-poll"
+        registerPoll path
+        Assert.That((getStatus path).IsAlive, Is.True)
 
     [<Test>]
-    member _.``Returns false when heartbeat is exactly 60s ago``() =
-        let entry =
-            { InjectUrl = "http://localhost/inject"
-              SessionId = None
-              LastHeartbeat = DateTime.UtcNow.AddSeconds(-60.0) }
-
-        Assert.That(isAlive entry, Is.False)
-
-    [<Test>]
-    member _.``Returns false when heartbeat is over 60s ago``() =
-        let entry =
-            { InjectUrl = "http://localhost/inject"
-              SessionId = Some "old"
-              LastHeartbeat = DateTime.UtcNow.AddSeconds(-120.0) }
-
-        Assert.That(isAlive entry, Is.False)
-
-    [<Test>]
-    member _.``Returns false when heartbeat is very old``() =
-        let entry =
-            { InjectUrl = "http://localhost/inject"
-              SessionId = None
-              LastHeartbeat = DateTime.UtcNow.AddHours(-1.0) }
-
-        Assert.That(isAlive entry, Is.False)
+    member _.``Unregistered path shows not alive``() =
+        let path = uniquePath "alive-unreg"
+        Assert.That((getStatus path).IsAlive, Is.False)
 
 
 // ── register + getStatus (SessionId tracking) ───────────────────────
@@ -75,7 +47,7 @@ type RegisterAndStatusTests() =
     [<Test>]
     member _.``Register with sessionId makes getStatus show alive with sessionId``() =
         let path = uniquePath "reg-sid"
-        register path "http://localhost:1234/inject" (Some "session-abc")
+        registerSession path "http://localhost:1234/inject" (Some "session-abc")
 
         let status = getStatus path
         Assert.That(status.Registered, Is.True)
@@ -85,7 +57,7 @@ type RegisterAndStatusTests() =
     [<Test>]
     member _.``Register without sessionId shows None``() =
         let path = uniquePath "reg-nosid"
-        register path "http://localhost:1234/inject" None
+        registerSession path "http://localhost:1234/inject" None
 
         let status = getStatus path
         Assert.That(status.Registered, Is.True)
@@ -103,8 +75,8 @@ type RegisterAndStatusTests() =
     [<Test>]
     member _.``Re-registration overwrites previous entry``() =
         let path = uniquePath "re-reg"
-        register path "http://localhost:1111/inject" (Some "s1")
-        register path "http://localhost:2222/inject" (Some "s2")
+        registerSession path "http://localhost:1111/inject" (Some "s1")
+        registerSession path "http://localhost:2222/inject" (Some "s2")
 
         let status = getStatus path
         Assert.That(status.SessionId, Is.EqualTo(Some "s2"))
@@ -114,8 +86,8 @@ type RegisterAndStatusTests() =
         let path1 = uniquePath "live1"
         let path2 = uniquePath "live2"
         let path3 = uniquePath "live3"
-        register path1 "http://localhost/inject" (Some "s1")
-        register path2 "http://localhost/inject" None
+        registerSession path1 "http://localhost/inject" (Some "s1")
+        registerSession path2 "http://localhost/inject" None
 
         let result = getAllLiveness [ path1; path2; path3 ]
 
@@ -125,6 +97,26 @@ type RegisterAndStatusTests() =
         Assert.That(result |> Map.containsKey path2, Is.True)
         Assert.That(result[path2].SessionId, Is.EqualTo(None))
         Assert.That(result |> Map.containsKey path3, Is.False, "Unregistered path should not appear")
+
+    [<Test>]
+    member _.``Poll heartbeat does not overwrite session registration``() =
+        let path = uniquePath "no-overwrite"
+        registerSession path "http://localhost:1234/inject" (Some "session-123")
+        registerPoll path
+
+        let status = getStatus path
+        Assert.That(status.SessionId, Is.EqualTo(Some "session-123"), "Poll should not erase session ID")
+        Assert.That(status.IsAlive, Is.True)
+
+    [<Test>]
+    member _.``Poll-only registration shows alive without sessionId``() =
+        let path = uniquePath "poll-only"
+        registerPoll path
+
+        let status = getStatus path
+        Assert.That(status.Registered, Is.True)
+        Assert.That(status.IsAlive, Is.True)
+        Assert.That(status.SessionId, Is.EqualTo(None))
 
 
 // ── enqueue via sendMessage (no bridge registered) ──────────────────
@@ -188,7 +180,7 @@ type DrainQueueTests() =
         sendMessage req |> Async.RunSynchronously |> ignore
 
         // Register bridge — this triggers drainQueue (HTTP will fail silently)
-        register path "http://127.0.0.1:1/inject" None
+        registerSession path "http://127.0.0.1:1/inject" None
 
         // After drain, sending another message should go to the bridge (not queue)
         // Since the bridge URL is unreachable, it will return Error, not Queued
@@ -203,7 +195,7 @@ type DrainQueueTests() =
         let path = uniquePath "drain-empty"
 
         // Register without any queued messages — should not throw
-        register path "http://127.0.0.1:1/inject" (Some "s1")
+        registerSession path "http://127.0.0.1:1/inject" (Some "s1")
 
         let status = getStatus path
         Assert.That(status.Registered, Is.True)
@@ -217,9 +209,9 @@ type DrainQueueTests() =
         sendMessage req |> Async.RunSynchronously |> ignore
 
         // First register drains
-        register path "http://127.0.0.1:1/inject" None
+        registerSession path "http://127.0.0.1:1/inject" None
         // Second register — queue should already be empty
-        register path "http://127.0.0.1:2/inject" None
+        registerSession path "http://127.0.0.1:2/inject" None
 
         // If queue was properly drained, this just works without issues
         let status = getStatus path
