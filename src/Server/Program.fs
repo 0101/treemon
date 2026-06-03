@@ -162,6 +162,7 @@ let private bridgeStatusHandler : HttpHandler =
 module CanvasDocServer =
     open Microsoft.AspNetCore.Hosting
     open Microsoft.Extensions.DependencyInjection
+    open System.Text.Json
     let private canvasPort = 5002
 
     let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
@@ -177,6 +178,54 @@ module CanvasDocServer =
         let! paths = allKnownPaths agent
         return paths |> Set.contains path
     }
+
+    let private handleHeartbeat (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+        try
+            let! body = ctx.Request.ReadFromJsonAsync<JsonElement>()
+
+            match body.TryGetProperty("worktreePath") with
+            | true, prop when prop.ValueKind = JsonValueKind.String ->
+                let raw = prop.GetString()
+                if System.String.IsNullOrWhiteSpace raw then
+                    ctx.Response.StatusCode <- 400
+                    do! ctx.Response.WriteAsync("missing worktreePath")
+                else
+                    let worktreePath = raw |> Server.PathUtils.normalizePath
+                    let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
+
+                    if not isKnown then
+                        ctx.Response.StatusCode <- 404
+                        do! ctx.Response.WriteAsync("Unknown worktree")
+                    else
+                        CanvasBridge.register worktreePath CanvasBridge.PollInjectUrl None
+                        let messages = CanvasBridge.drainPending worktreePath
+                        ctx.Response.ContentType <- "application/json"
+                        do! ctx.Response.WriteAsJsonAsync(messages)
+            | _ ->
+                ctx.Response.StatusCode <- 400
+                do! ctx.Response.WriteAsync("missing worktreePath")
+        with ex ->
+            Log.log "CanvasBridge" $"Heartbeat error: {ex.Message}"
+            ctx.Response.StatusCode <- 400
+            do! ctx.Response.WriteAsync("malformed request")
+    }
+
+    let private bridgeScript =
+        [ "<script>(function(){"
+          "var p=decodeURIComponent(location.pathname.substring(1,location.pathname.lastIndexOf('/')));"
+          "var o=location.origin;"
+          "function hb(){fetch(o+'/bridge/heartbeat',{method:'POST',"
+          "headers:{'Content-Type':'application/json'},"
+          "body:JSON.stringify({worktreePath:p})})"
+          ".then(function(r){return r.json()})"
+          ".then(function(msgs){if(msgs&&msgs.length)msgs.forEach(function(m){"
+          "try{var d=typeof m==='string'?JSON.parse(m):m;"
+          "window.dispatchEvent(new CustomEvent('canvasBridgeMessage',{detail:d}))"
+          "}catch(e){}})})"
+          ".catch(function(){})}"
+          "hb();setInterval(hb,30000)"
+          "})()</script>" ]
+        |> String.concat ""
 
     let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
         let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -215,7 +264,7 @@ module CanvasDocServer =
                     let html = System.Text.Encoding.UTF8.GetString(rawBytes)
                     let baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}</style>"
                     let linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=h.split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
-                    let injection = baseStyle + linkInterceptor
+                    let injection = baseStyle + linkInterceptor + bridgeScript
                     let injected =
                         if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
                         then html.Replace("</head>", injection + "</head>", System.StringComparison.OrdinalIgnoreCase)
@@ -236,6 +285,7 @@ module CanvasDocServer =
                 .Configure(fun (app: IApplicationBuilder) ->
                     app.UseRouting() |> ignore
                     app.UseEndpoints(fun endpoints ->
+                        endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
                         endpoints.MapGet("/{**path}", RequestDelegate(handleCanvasRequest agent)) |> ignore) |> ignore)
                 .Build()
         Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"

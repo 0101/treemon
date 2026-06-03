@@ -90,6 +90,9 @@ let register (worktreePath: string) (injectUrl: string) (sessionId: string optio
     Log.log "CanvasBridge" $"Registered {key} -> {injectUrl} (registry size: {registry.Count})"
     drainQueue key entry
 
+/// Sentinel inject URL for iframe-based registrations (heartbeat polling, no HTTP push).
+let [<Literal>] PollInjectUrl = "poll://iframe"
+
 let sendMessage (request: CanvasMessageRequest) =
     async {
         let key = normalizePath (WorktreePath.value request.WorktreePath)
@@ -99,6 +102,10 @@ let sendMessage (request: CanvasMessageRequest) =
         | false, _ ->
             let registeredKeys = registry.Keys |> Seq.toList |> String.concat "; "
             Log.log "CanvasBridge" $"sendMessage: no bridge for key={key}, message queued. Registered keys: [{registeredKeys}]"
+            enqueue key request.Payload
+            return CanvasMessageResult.Queued
+        | true, entry when entry.InjectUrl = PollInjectUrl ->
+            Log.log "CanvasBridge" $"sendMessage: poll-based bridge for {Path.GetFileName(key)}, message queued for heartbeat drain"
             enqueue key request.Payload
             return CanvasMessageResult.Queued
         | true, entry ->
@@ -118,6 +125,17 @@ let sendMessage (request: CanvasMessageRequest) =
                 Log.log "CanvasBridge" $"sendMessage exception: {ex.Message}"
                 return CanvasMessageResult.Error ex.Message
     }
+
+/// Atomically drain pending messages for a worktree (used by heartbeat polling).
+let drainPending (worktreePath: string) : string list =
+    let key = normalizePath worktreePath
+    match messageQueue.TryRemove(key) with
+    | true, queued ->
+        let valid = cleanExpired queued
+        if not (List.isEmpty valid) then
+            Log.log "CanvasBridge" $"Drained {List.length valid} pending message(s) for {Path.GetFileName(key)} via poll"
+        valid |> List.map _.Payload
+    | false, _ -> []
 
 let isAlive (entry: BridgeEntry) =
     (DateTime.UtcNow - entry.LastHeartbeat).TotalSeconds < 60.0

@@ -54,6 +54,18 @@ All changes are localized refactors within the existing canvas pane feature. No 
 ### Spec update
 - Add canvas pane cross-reference to `docs/spec/worktree-monitor.md`
 
+## Decisions
+
+### Bridge registration for agent-created docs
+Agent-created canvas docs don't explicitly register with the bridge (the SKILL.md says "No registration needed"). The fix injects a heartbeat script into every served HTML doc. The script:
+1. Extracts the worktree path from the iframe URL
+2. POSTs to `/bridge/heartbeat` on the canvas doc server (same origin — no CORS)
+3. The heartbeat endpoint registers with `CanvasBridge` using `PollInjectUrl` sentinel
+4. `sendMessage` detects the sentinel and enqueues messages instead of HTTP POST
+5. `drainPending` returns queued messages in the heartbeat response
+
+This avoids a duplicate message queue (single source of truth in `CanvasBridge.messageQueue`) and avoids needing a separate inject endpoint. Client-side liveness also uses `HasActiveSession` as a fallback for immediate detection.
+
 ## Key Files
 
 - `src/Client/App.fs` — Model, update, canvas event helpers

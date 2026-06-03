@@ -8,6 +8,13 @@ open Browser
 let [<Literal>] private CanvasOrigin = "http://127.0.0.1:5002"
 let [<Literal>] private MaxPayloadBytes = 64_000
 
+let private isWorktreeAlive (bridgeLiveness: Map<string, BridgeLiveness>) (wt: WorktreeStatus) =
+    wt.HasActiveSession
+    || (bridgeLiveness
+        |> Map.tryFind (WorktreePath.value wt.Path)
+        |> Option.map _.IsAlive
+        |> Option.defaultValue false)
+
 let private livenessDot (isAlive: bool) =
     Html.span [
         prop.className (if isAlive then "canvas-liveness-dot alive" else "canvas-liveness-dot")
@@ -60,11 +67,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                         ]
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
                             let wtPath = WorktreePath.value wt.Path
-                            let isAlive =
-                                bridgeLiveness
-                                |> Map.tryFind wtPath
-                                |> Option.map _.IsAlive
-                                |> Option.defaultValue false
+                            let isAlive = isWorktreeAlive bridgeLiveness wt
                             Html.div [
                                 prop.className "canvas-overview-entry"
                                 prop.children [
@@ -188,11 +191,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         match focusedDoc with
         | Some (wt, doc) ->
             let wtPath = WorktreePath.value wt.Path
-            let isWtAlive =
-                bridgeLiveness
-                |> Map.tryFind wtPath
-                |> Option.map _.IsAlive
-                |> Option.defaultValue false
+            let isWtAlive = isWorktreeAlive bridgeLiveness wt
             let tabs =
                 if wt.CanvasDocs.Length > 1
                 then wt.CanvasDocs |> List.map (fun d ->
