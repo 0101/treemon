@@ -163,6 +163,13 @@ let getStatus (worktreePath: string) =
     | (false, _), (false, _) ->
         {| Registered = false; LastHeartbeatAge = None; IsAlive = false; SessionId = None |}
 
+let getSessionForWorktree (worktreePath: string) : string option =
+    let key = normalizePath worktreePath
+
+    match sessionRegistry.TryGetValue(key) with
+    | true, entry -> entry.SessionId
+    | false, _ -> None
+
 let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
     worktreePaths
     |> List.choose (fun path ->

@@ -21,13 +21,15 @@ module CanvasScanner =
     let scan (worktreePath: string) : CanvasDoc list =
         let dir = canvasDir worktreePath
         if Directory.Exists(dir) then
+            let owners = CanvasDocOwnership.getAll worktreePath
             Directory.GetFiles(dir, "*.html")
             |> Array.sort
             |> Array.map (fun filePath ->
-                { Filename = Path.GetFileName(filePath)
+                let filename = Path.GetFileName(filePath)
+                { Filename = filename
                   ContentHash = hashFile filePath
                   LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
-                  OwnerSessionId = None })
+                  OwnerSessionId = owners |> Map.tryFind filename })
             |> Array.toList
         else
             []
@@ -633,7 +635,12 @@ module CanvasWatchers =
             |> Set.toList
             |> List.choose (fun path ->
                 let repoId = repoIdByPath |> Map.find path
-                let post canvasDocs = agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
+                let post (canvasDocs: CanvasDoc list) =
+                    CanvasBridge.getSessionForWorktree path
+                    |> Option.iter (fun sessionId ->
+                        canvasDocs |> List.iter (fun doc ->
+                            CanvasDocOwnership.attribute path doc.Filename sessionId))
+                    agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                 CanvasScanner.tryCreateWatcher post path
                 |> Option.map (fun watcher ->
                     Log.log "CanvasWatcher" $"Created watcher for {Path.GetFileName(path)}"
