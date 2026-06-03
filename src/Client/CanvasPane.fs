@@ -8,11 +8,13 @@ open Browser
 let [<Literal>] private CanvasOrigin = "http://127.0.0.1:5002"
 let [<Literal>] private MaxPayloadBytes = 64_000
 
-let private isWorktreeAlive (bridgeLiveness: Map<string, BridgeLiveness>) (wt: WorktreeStatus) =
-    bridgeLiveness
-    |> Map.tryFind (WorktreePath.value wt.Path)
-    |> Option.map _.IsAlive
-    |> Option.defaultValue false
+let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
+    match doc.OwnerSessionId with
+    | None -> false
+    | Some ownerId ->
+        bridgeLiveness
+        |> Map.values
+        |> Seq.exists (fun bl -> bl.SessionId = Some ownerId && bl.IsAlive)
 
 let private livenessDot (isAlive: bool) =
     Html.span [
@@ -65,8 +67,6 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                             prop.text repoName
                         ]
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
-                            let wtPath = WorktreePath.value wt.Path
-                            let isAlive = isWorktreeAlive bridgeLiveness wt
                             Html.div [
                                 prop.className "canvas-overview-entry"
                                 prop.children [
@@ -74,7 +74,6 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                         prop.className "canvas-overview-branch"
                                         prop.onClick (fun _ -> onClickEntry scopedKey)
                                         prop.children [
-                                            livenessDot isAlive
                                             Html.text wt.Branch
                                         ]
                                     ]
@@ -87,7 +86,10 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                                     prop.onClick (fun e ->
                                                         e.stopPropagation ()
                                                         onClickDoc scopedKey doc.Filename)
-                                                    prop.text (doc.Filename.Replace(".html", ""))
+                                                    prop.children [
+                                                        livenessDot (isDocAlive bridgeLiveness doc)
+                                                        Html.text (doc.Filename.Replace(".html", ""))
+                                                    ]
                                                 ]
                                             )
                                         )
@@ -189,8 +191,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
-            let wtPath = WorktreePath.value wt.Path
-            let isWtAlive = isWorktreeAlive bridgeLiveness wt
+            let isFocusedDocAlive = isDocAlive bridgeLiveness doc
             let tabs =
                 if wt.CanvasDocs.Length > 1
                 then wt.CanvasDocs |> List.map (fun d ->
@@ -206,13 +207,13 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         prop.onClick (fun _ -> selectDoc d.Filename)
                         prop.title d.Filename
                         prop.children [
-                            livenessDot isWtAlive
+                            livenessDot (isDocAlive bridgeLiveness d)
                             Html.text (d.Filename.Replace(".html", ""))
                         ]
                     ])
                 else []
             React.fragment [
-                headerBar tabs (Some doc.Filename) (not isWtAlive)
+                headerBar tabs (Some doc.Filename) (not isFocusedDocAlive)
                 errorBanner
                 waitingBanner
                 Html.iframe [
