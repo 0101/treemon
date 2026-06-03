@@ -676,7 +676,42 @@ let worktreeApi
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
-          sendCanvasMessage = CanvasBridge.sendMessage
+          sendCanvasMessage = fun request ->
+              async {
+                  let! result = CanvasBridge.sendMessage request
+                  match result with
+                  | CanvasMessageResult.Queued ->
+                      let path = WorktreePath.value request.WorktreePath
+                      let owner = CanvasDocOwnership.getOwner path request.Filename
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let provider = resolveProvider state path
+                      match owner with
+                      | Some ownerSessionId ->
+                          Log.log "API" $"sendCanvasMessage: resuming owner session {ownerSessionId} for {request.Filename}"
+                          let inv = CodingToolCli.build provider (CodingToolCli.Resume (Some ownerSessionId))
+                          let! resumeResult = SessionManager.spawnSession sessionAgent request.WorktreePath inv.AsShellString
+                          match resumeResult with
+                          | Ok () ->
+                              Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
+                          | Error err ->
+                              Log.log "API" $"sendCanvasMessage: resume failed ({err}), launching new session for {request.Filename}"
+                              let prompt =
+                                  $"Continue working on canvas doc: {path}\\{request.Filename}\n"
+                                  + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+                              let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                              let! _ = SessionManager.spawnSession sessionAgent request.WorktreePath command.AsShellString
+                              ()
+                      | None ->
+                          Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, launching new session"
+                          let prompt =
+                              $"Continue working on canvas doc: {path}\\{request.Filename}\n"
+                              + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+                          let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                          let! _ = SessionManager.spawnSession sessionAgent request.WorktreePath command.AsShellString
+                          ()
+                  | _ -> ()
+                  return result
+              }
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)
