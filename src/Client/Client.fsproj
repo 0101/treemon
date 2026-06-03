@@ -13,6 +13,7 @@
     <Compile Include="ActionButtons.fs" />
     <Compile Include="ConfirmModal.fs" />
     <Compile Include="CanvasPane.fs" />
+    <Compile Include="CanvasAwareness.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 

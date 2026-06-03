@@ -6,6 +6,7 @@ open Shared
 open Shared.EventUtils
 open App
 open Navigation
+open CanvasAwareness
 
 let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeStatus =
     { Path = WorktreePath $"{repoId}/{branch}"
@@ -114,7 +115,7 @@ type UnviewedDocsByScopedKeyTests() =
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
                 LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
-        let result = unviewedDocsByScopedKey model
+        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "myrepo/feat", Is.True, "Should contain the scoped key")
         Assert.That(result["myrepo/feat"], Is.EqualTo([ "status.html" ]))
@@ -126,7 +127,7 @@ type UnviewedDocsByScopedKeyTests() =
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "report.html" "abc123" ] ] ]
                 LastViewedHashes = Map.empty }
 
-        let result = unviewedDocsByScopedKey model
+        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "myrepo/feat", Is.True)
         Assert.That(result["myrepo/feat"], Is.EqualTo([ "report.html" ]))
@@ -138,7 +139,7 @@ type UnviewedDocsByScopedKeyTests() =
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v1" ] ] ]
                 LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
-        let result = unviewedDocsByScopedKey model
+        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "myrepo/feat", Is.False,
             "Should not contain scoped key when all docs are viewed")
@@ -149,7 +150,7 @@ type UnviewedDocsByScopedKeyTests() =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [] ] ] }
 
-        let result = unviewedDocsByScopedKey model
+        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
 
         Assert.That(result, Is.Empty)
 
@@ -163,7 +164,7 @@ type UnviewedDocsByScopedKeyTests() =
                     makeDoc "c.html" "h3" ] ] ]
                 LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] }
 
-        let result = unviewedDocsByScopedKey model
+        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
 
         Assert.That(result["myrepo/feat"], Does.Contain("a.html"))
         Assert.That(result["myrepo/feat"], Does.Contain("c.html"))
@@ -179,7 +180,7 @@ type UnviewedDocsByScopedKeyTests() =
                     makeRepo "repo2" [ makeWorktree "repo2" "dev" [ makeDoc "y.html" "h2" ] ] ]
                 LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] }
 
-        let result = unviewedDocsByScopedKey model
+        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "repo1/main", Is.False, "repo1/main is fully viewed")
         Assert.That(result |> Map.containsKey "repo2/dev", Is.True, "repo2/dev has no viewed hashes")

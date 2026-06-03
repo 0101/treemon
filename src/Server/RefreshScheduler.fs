@@ -675,6 +675,8 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
     |> Map.iter (fun repoId _ ->
         agent.Post(UpdateWorktreeList(repoId, [])))
 
+    /// Mutable ref for the latest canvas file watchers, shared between the reconcile
+    /// callback and the main scheduler loop so watcher updates are visible across iterations.
     let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
         async {
             let! state = agent.PostAndAsyncReply(GetState)
