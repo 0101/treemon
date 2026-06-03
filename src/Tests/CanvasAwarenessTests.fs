@@ -7,8 +7,8 @@ open Shared.EventUtils
 open App
 open Navigation
 
-let private makeWorktree branch (canvasDocs: CanvasDoc list) : WorktreeStatus =
-    { Path = WorktreePath $"/repo/{branch}"
+let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeStatus =
+    { Path = WorktreePath $"{repoId}/{branch}"
       Branch = branch
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
@@ -110,7 +110,7 @@ type UnviewedDocsByScopedKeyTests() =
     member _.``Returns unviewed docs when hashes differ from last viewed``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "myrepo" [ makeWorktree "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
                 LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let result = unviewedDocsByScopedKey model
@@ -122,7 +122,7 @@ type UnviewedDocsByScopedKeyTests() =
     member _.``Returns unviewed docs when no entry exists in LastViewedHashes``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "myrepo" [ makeWorktree "feat" [ makeDoc "report.html" "abc123" ] ] ]
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "report.html" "abc123" ] ] ]
                 LastViewedHashes = Map.empty }
 
         let result = unviewedDocsByScopedKey model
@@ -134,7 +134,7 @@ type UnviewedDocsByScopedKeyTests() =
     member _.``Returns empty map when all docs have been viewed with matching hashes``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "myrepo" [ makeWorktree "feat" [ makeDoc "status.html" "hash-v1" ] ] ]
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v1" ] ] ]
                 LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let result = unviewedDocsByScopedKey model
@@ -146,7 +146,7 @@ type UnviewedDocsByScopedKeyTests() =
     member _.``Returns empty map when worktree has no canvas docs``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "myrepo" [ makeWorktree "feat" [] ] ] }
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [] ] ] }
 
         let result = unviewedDocsByScopedKey model
 
@@ -156,7 +156,7 @@ type UnviewedDocsByScopedKeyTests() =
     member _.``Returns multiple unviewed docs for same worktree``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "myrepo" [ makeWorktree "feat" [
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [
                     makeDoc "a.html" "h1"
                     makeDoc "b.html" "h2"
                     makeDoc "c.html" "h3" ] ] ]
@@ -174,8 +174,8 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [
-                    makeRepo "repo1" [ makeWorktree "main" [ makeDoc "x.html" "h1" ] ]
-                    makeRepo "repo2" [ makeWorktree "dev" [ makeDoc "y.html" "h2" ] ] ]
+                    makeRepo "repo1" [ makeWorktree "repo1" "main" [ makeDoc "x.html" "h1" ] ]
+                    makeRepo "repo2" [ makeWorktree "repo2" "dev" [ makeDoc "y.html" "h2" ] ] ]
                 LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] }
 
         let result = unviewedDocsByScopedKey model
@@ -302,7 +302,7 @@ type AutoDisplayIdleLogicTests() =
         let now = DateTimeOffset.UtcNow
         let repos = [
             makeRepo "r" [
-                makeWorktree "feat" [
+                makeWorktree "r" "feat" [
                     docWithTime "old.html" "h1" (now.AddMinutes(-10.0))
                     docWithTime "recent.html" "h2" now
                     docWithTime "middle.html" "h3" (now.AddMinutes(-5.0)) ] ] ]
@@ -315,7 +315,7 @@ type AutoDisplayIdleLogicTests() =
     [<Test>]
     member _.``Auto-display triggers when idle and doc hash changes``() =
         let now = DateTimeOffset.UtcNow
-        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "new.html" "h1" now ] ] ]
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docWithTime "new.html" "h1" now ] ] ]
         let model =
             { defaultModel with
                 Repos = repos
@@ -338,7 +338,7 @@ type AutoDisplayIdleLogicTests() =
     [<Test>]
     member _.``Auto-display triggers when idle and existing doc content changes``() =
         let now = DateTimeOffset.UtcNow
-        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "a.html" "h2" now ] ] ]
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docWithTime "a.html" "h2" now ] ] ]
         let previousHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
         let model =
             { defaultModel with
@@ -362,7 +362,7 @@ type AutoDisplayIdleLogicTests() =
     [<Test>]
     member _.``Auto-display does NOT trigger when user is active``() =
         let now = DateTimeOffset.UtcNow
-        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "new.html" "h1" now ] ] ]
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docWithTime "new.html" "h1" now ] ] ]
         let currentHashes = canvasHashesByScopedKey repos
         let jsNow = 120_000.0
         let model =
@@ -383,7 +383,7 @@ type AutoDisplayIdleLogicTests() =
     [<Test>]
     member _.``Auto-display does NOT trigger when hashes unchanged``() =
         let now = DateTimeOffset.UtcNow
-        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "a.html" "h1" now ] ] ]
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docWithTime "a.html" "h1" now ] ] ]
         let currentHashes = canvasHashesByScopedKey repos
         let model =
             { defaultModel with
@@ -413,7 +413,7 @@ type MarkDocViewedTests() =
     member _.``MarkDocViewed updates LastViewedHashes with current content hash``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "r" [ makeWorktree "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
                 LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "status.html")) model
@@ -428,7 +428,7 @@ type MarkDocViewedTests() =
     member _.``MarkDocViewed creates new entry when scoped key not in LastViewedHashes``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "r" [ makeWorktree "feat" [ makeDoc "new.html" "hash1" ] ] ]
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "new.html" "hash1" ] ] ]
                 LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "new.html")) model
@@ -444,7 +444,7 @@ type MarkDocViewedTests() =
     member _.``MarkDocViewed preserves other entries in same scoped key``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "r" [ makeWorktree "feat" [
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
                     makeDoc "a.html" "ha"
                     makeDoc "b.html" "hb" ] ] ]
                 LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] }
@@ -459,7 +459,7 @@ type MarkDocViewedTests() =
     member _.``MarkDocViewed does nothing for unknown scoped key``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "r" [ makeWorktree "feat" [ makeDoc "a.html" "h1" ] ] ]
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
                 LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("unknown/key", "a.html")) model
@@ -470,7 +470,7 @@ type MarkDocViewedTests() =
     member _.``MarkDocViewed does nothing for unknown filename``() =
         let model =
             { defaultModel with
-                Repos = [ makeRepo "r" [ makeWorktree "feat" [ makeDoc "a.html" "h1" ] ] ]
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
                 LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
