@@ -619,9 +619,12 @@ let update msg model =
     | LaunchCanvasSession scopedKey ->
         match findWorktree scopedKey model with
         | Some wt ->
+            let wtPath = WorktreePath.value wt.Path
             let prompt =
                 activeVisibleDoc model
-                |> Option.map (fun (_, filename) -> $"Continue working on canvas doc: {filename}")
+                |> Option.map (fun (_, filename) ->
+                    $"Continue working on canvas doc: {wtPath}\\{filename}\n"
+                    + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane.")
                 |> Option.defaultValue ""
             let action = CanvasSession prompt
             model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = wt.Path; Action = action } LaunchActionResult
