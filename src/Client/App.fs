@@ -47,7 +47,7 @@ type Model =
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 type Msg =
-    | DataLoaded of DashboardResponse
+    | DataLoaded of DashboardResponse * now: System.DateTimeOffset
     | DataFailed of exn
     | ToggleSort
     | ToggleCompact
@@ -82,6 +82,7 @@ type Msg =
     | SetCanvasPosition of CanvasPosition
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
+    | OpenCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | NavigateCanvasDoc of filename: string
@@ -99,7 +100,7 @@ let worktreeApi =
     |> Remoting.buildProxy<IWorktreeApi>
 
 let fetchWorktrees () =
-    Cmd.OfAsync.either worktreeApi.getWorktrees () DataLoaded DataFailed
+    Cmd.OfAsync.either worktreeApi.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
 
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
@@ -231,8 +232,7 @@ let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, st
 
 let canvasEventExpiryMs = 5.0 * 60.0 * 1000.0
 
-let detectCanvasEvents (previousHashes: Map<string, Map<string, string>>) (currentHashes: Map<string, Map<string, string>>) : Map<string, CanvasEvent list> =
-    let now = System.DateTimeOffset.Now
+let detectCanvasEvents (now: System.DateTimeOffset) (previousHashes: Map<string, Map<string, string>>) (currentHashes: Map<string, Map<string, string>>) : Map<string, CanvasEvent list> =
     currentHashes
     |> Map.toList
     |> List.choose (fun (scopedKey, currentDocs) ->
@@ -269,8 +269,8 @@ let expireCanvasEvents (now: System.DateTimeOffset) (events: Map<string, CanvasE
     |> Map.map (fun _ evts -> evts |> List.filter (fun e -> e.Timestamp > cutoff))
     |> Map.filter (fun _ evts -> not (List.isEmpty evts))
 
-let detectChangedCanvasDocs (previous: Map<string, Map<string, string>>) (current: Map<string, Map<string, string>>) : (string * string) list =
-    detectCanvasEvents previous current
+let detectChangedCanvasDocs (now: System.DateTimeOffset) (previous: Map<string, Map<string, string>>) (current: Map<string, Map<string, string>>) : (string * string) list =
+    detectCanvasEvents now previous current
     |> Map.toList
     |> List.collect (fun (scopedKey, events) ->
         events |> List.map (fun e -> scopedKey, e.Filename))
@@ -343,7 +343,7 @@ let computeActivityLevel (lastActivityTime: float) (now: float) =
 
 let update msg model =
     match msg with
-    | DataLoaded response ->
+    | DataLoaded (response, now) ->
         match model.AppVersion with
         | Some v when v <> response.AppVersion ->
             model, Cmd.ofEffect (fun _ -> Dom.window.location.reload ())
@@ -377,12 +377,12 @@ let update msg model =
             let canvasEvents =
                 if isFirstLoad then model.CanvasEvents
                 else
-                    let newEvents = detectCanvasEvents model.PreviousCanvasHashes currentCanvasHashes
+                    let newEvents = detectCanvasEvents now model.PreviousCanvasHashes currentCanvasHashes
                     mergeCanvasEvents model.CanvasEvents newEvents
-                    |> expireCanvasEvents System.DateTimeOffset.Now
+                    |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
-                else detectChangedCanvasDocs model.PreviousCanvasHashes currentCanvasHashes
+                else detectChangedCanvasDocs now model.PreviousCanvasHashes currentCanvasHashes
             let now = Fable.Core.JS.Constructors.Date.now ()
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
             let autoDisplayTarget =
@@ -741,6 +741,17 @@ let update msg model =
         { model with FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
         if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
         else Cmd.none
+
+    | OpenCanvasDoc (scopedKey, filename) ->
+        let openPane = not model.CanvasPaneOpen
+        { model with
+            FocusedElement = Some (Card scopedKey)
+            CanvasPaneOpen = true
+            ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename },
+        Cmd.batch [
+            if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
+            Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+        ]
 
     | ArchiveCanvasDoc (scopedKey, filename) ->
         match findWorktree scopedKey model with
@@ -1115,15 +1126,13 @@ let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (has
             prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
         ]
 
-let canvasEventEntry dispatch (canvasPaneOpen: bool) (scopedKey: string) (evt: CanvasEvent) =
+let canvasEventEntry dispatch (scopedKey: string) (evt: CanvasEvent) =
     let verb = if evt.IsNew then "published" else "updated"
     Html.div [
         prop.className "event-entry canvas-event"
         prop.onClick (fun e ->
             e.stopPropagation()
-            dispatch (SetFocus (Some (Card scopedKey)))
-            if not canvasPaneOpen then dispatch ToggleCanvasPane
-            dispatch (SelectCanvasDoc (scopedKey, evt.Filename)))
+            dispatch (OpenCanvasDoc (scopedKey, evt.Filename)))
         prop.children [
             Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
             Html.span [ prop.className "event-message"; prop.text $"{verb} " ]
@@ -1131,13 +1140,13 @@ let canvasEventEntry dispatch (canvasPaneOpen: bool) (scopedKey: string) (evt: C
         ]
     ]
 
-let canvasEventLog dispatch (canvasPaneOpen: bool) (scopedKey: string) (events: CanvasEvent list) =
+let canvasEventLog dispatch (scopedKey: string) (events: CanvasEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (canvasEventEntry dispatch canvasPaneOpen scopedKey))
+            prop.children (evts |> List.map (canvasEventEntry dispatch scopedKey))
         ]
 
 let knownCategories =
@@ -1602,7 +1611,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                         | None -> ()
 
                     eventLog dispatch cooldowns wt.Path wt.HasTestFailureLog branchEvents
-                    canvasEventLog dispatch canvasPaneOpen scopedKey canvasEvents
+                    canvasEventLog dispatch scopedKey canvasEvents
                 ]
             ]
         ]
@@ -2069,8 +2078,7 @@ let view model dispatch =
         dispatch (FocusOverviewCard scopedKey)
 
     let onOverviewDocClick scopedKey filename =
-        dispatch (FocusOverviewCard scopedKey)
-        dispatch (SelectCanvasDoc (scopedKey, filename))
+        dispatch (OpenCanvasDoc (scopedKey, filename))
 
     let archiveCanvasDoc filename =
         match model.FocusedElement with

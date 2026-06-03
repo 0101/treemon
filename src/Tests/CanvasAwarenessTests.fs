@@ -196,7 +196,7 @@ type DetectCanvasEventsTests() =
         let prev = Map.empty
         let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
 
-        let result = detectCanvasEvents prev curr
+        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
 
         Assert.That(result |> Map.containsKey "r/feat", Is.True)
         let events = result["r/feat"]
@@ -209,7 +209,7 @@ type DetectCanvasEventsTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h2" ] ]
 
-        let result = detectCanvasEvents prev curr
+        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
 
         let events = result["r/feat"]
         Assert.That(events.Length, Is.EqualTo(1))
@@ -220,7 +220,7 @@ type DetectCanvasEventsTests() =
     member _.``Returns empty map when no changes``() =
         let hashes = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
 
-        let result = detectCanvasEvents hashes hashes
+        let result = detectCanvasEvents DateTimeOffset.UtcNow hashes hashes
 
         Assert.That(result, Is.Empty, "No changes should produce no events")
 
@@ -229,7 +229,7 @@ type DetectCanvasEventsTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "existing.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "existing.html", "h2"; "new.html", "h3" ] ]
 
-        let result = detectCanvasEvents prev curr
+        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
 
         let events = result["r/feat"]
         Assert.That(events.Length, Is.EqualTo(2))
@@ -243,7 +243,7 @@ type DetectCanvasEventsTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1"; "kept.html", "h2" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "kept.html", "h2" ] ]
 
-        let result = detectCanvasEvents prev curr
+        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
 
         Assert.That(result, Is.Empty, "Removal of a doc without changes to remaining should produce no events")
 
@@ -254,7 +254,7 @@ type DetectCanvasEventsTests() =
             "r1/main", Map.ofList [ "a.html", "h1" ]
             "r2/dev", Map.ofList [ "b.html", "h2" ] ]
 
-        let result = detectCanvasEvents prev curr
+        let result = detectCanvasEvents DateTimeOffset.UtcNow prev curr
 
         Assert.That(result |> Map.containsKey "r1/main", Is.False, "r1/main unchanged")
         Assert.That(result |> Map.containsKey "r2/dev", Is.True, "r2/dev is new")
@@ -275,7 +275,7 @@ type AutoDisplayIdleLogicTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1"; "new.html", "h2" ] ]
 
-        let result = detectChangedCanvasDocs prev curr
+        let result = detectChangedCanvasDocs DateTimeOffset.UtcNow prev curr
 
         Assert.That(result, Does.Contain(("r/feat", "new.html")))
         Assert.That(result.Length, Is.EqualTo(1), "Only the new doc should be detected")
@@ -284,7 +284,7 @@ type AutoDisplayIdleLogicTests() =
     member _.``detectChangedCanvasDocs returns empty when no hashes changed``() =
         let hashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
 
-        let result = detectChangedCanvasDocs hashes hashes
+        let result = detectChangedCanvasDocs DateTimeOffset.UtcNow hashes hashes
 
         Assert.That(result, Is.Empty)
 
@@ -293,7 +293,7 @@ type AutoDisplayIdleLogicTests() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h2" ] ]
 
-        let result = detectChangedCanvasDocs prev curr
+        let result = detectChangedCanvasDocs DateTimeOffset.UtcNow prev curr
 
         Assert.That(result, Does.Contain(("r/feat", "a.html")), "Updated hash should be detected as changed")
 
@@ -324,7 +324,7 @@ type AutoDisplayIdleLogicTests() =
                 CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0 // 120s since epoch — well past 60s idle threshold
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
@@ -348,7 +348,7 @@ type AutoDisplayIdleLogicTests() =
                 CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
@@ -371,7 +371,7 @@ type AutoDisplayIdleLogicTests() =
                 PreviousCanvasHashes = Map.empty
                 LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
 
-        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
@@ -391,7 +391,7 @@ type AutoDisplayIdleLogicTests() =
                 PreviousCanvasHashes = currentHashes
                 LastActivityTime = 0.0 }
 
-        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
