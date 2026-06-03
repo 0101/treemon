@@ -47,10 +47,15 @@ const enqueueSend = (session, prompt) => {
     .catch((err) => log(`session.send FAILED: ${err?.message ?? err}`));
 };
 
-function readBody(req) {
-  return new Promise((resolve) => {
+function readBody(req, maxBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
     let body = "";
-    req.on("data", (chunk) => { body += chunk; });
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) { req.destroy(); reject(new Error("body too large")); return; }
+      body += chunk;
+    });
     req.on("end", () => resolve(body));
   });
 }
@@ -61,6 +66,9 @@ function isValidCanvasFilename(filename) {
 
 async function readCanvasFile(filename) {
   const filePath = resolve(CANVAS_DIR, filename);
+  if (!filePath.startsWith(CANVAS_DIR + "\\") && filePath !== CANVAS_DIR) {
+    throw Object.assign(new Error("path traversal blocked"), { code: "EACCES" });
+  }
   return readFile(filePath, "utf-8");
 }
 
@@ -83,11 +91,16 @@ function parseCanvasRoute(url) {
   return { filename: decodeURIComponent(match[1]), isHash: !!match[2] };
 }
 
-function startHttpServer(session) {
+function startHttpServer(session, state) {
   return new Promise((resolvePromise, reject) => {
     const server = createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/inject") {
-        const body = await readBody(req);
+        let body;
+        try { body = await readBody(req); } catch {
+          res.writeHead(413, { "Content-Type": "text/plain" });
+          res.end("Payload Too Large");
+          return;
+        }
         log(`/inject received: payload length=${body.length}`);
         enqueueSend(session, `[canvas] ${body}`);
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -95,7 +108,32 @@ function startHttpServer(session) {
         return;
       }
 
-      if (server.browserMode) {
+      if (state.browserMode) {
+        if (req.method === "POST" && req.url === "/_message") {
+          let body;
+          try { body = await readBody(req); } catch {
+            res.writeHead(413, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "payload too large" }));
+            return;
+          }
+          log(`/_message received: payload length=${body.length}`);
+          let parsed;
+          try { parsed = JSON.parse(body); } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "invalid JSON" }));
+            return;
+          }
+          if (typeof parsed?.action !== "string") {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "missing action" }));
+            return;
+          }
+          enqueueSend(session, `[canvas] ${JSON.stringify(parsed)}`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
         const canvasRoute = parseCanvasRoute(req.url);
         if (req.method === "GET" && canvasRoute) {
           if (!isValidCanvasFilename(canvasRoute.filename)) {
@@ -192,17 +230,42 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
   };
 }
 
-const session = await joinSession({});
-const sessionId = session.id ?? session.sessionId ?? undefined;
+function createCanvasHook(state) {
+  return async ({ toolName, toolArgs, toolResult }) => {
+    if (!state.browserMode) return {};
+
+    const isCreateOrEdit = toolName === "create" || toolName === "edit";
+    if (!isCreateOrEdit) return {};
+
+    const filePath = toolArgs?.path || toolArgs?.file_path || "";
+    const normalized = filePath.replace(/\\/g, "/");
+    if (!/\/.agents\/canvas\/[^/]+\.html$/.test(normalized) && !/^\.agents\/canvas\/[^/]+\.html$/.test(normalized)) return {};
+
+    if (toolResult?.resultType === "failure") return {};
+
+    const filename = normalized.split("/").pop();
+    const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
+
+    return {
+      additionalContext: `Canvas file served at: ${url}\nOpen this URL in a browser to view the canvas doc. The page auto-reloads on changes and postMessage interactions are forwarded back to this session.`,
+    };
+  };
+}
+
+const extensionState = { browserMode: false, port: 0 };
+const session = await joinSession({ onPostToolUse: createCanvasHook(extensionState) });
+const sessionId = session.id ?? session.sessionId;
 
 const worktreePath = process.cwd();
-const { server, port } = await startHttpServer(session);
+const { server, port } = await startHttpServer(session, extensionState);
+extensionState.port = port;
 const injectUrl = `http://127.0.0.1:${port}/inject`;
 const registered = await registerWithTreemon(worktreePath, injectUrl, sessionId);
 const browserMode = !registered;
+extensionState.browserMode = browserMode;
+Object.freeze(extensionState);
 
 if (browserMode) {
-  server.browserMode = true;
   log(`● canvas-bridge listening in BROWSER mode on port ${port}`);
 } else {
   log(`● canvas-bridge listening on ${injectUrl}`);
