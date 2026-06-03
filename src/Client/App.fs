@@ -85,6 +85,7 @@ type Msg =
     | FocusOverviewCard of scopedKey: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
+    | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
     | CanvasSendResult of CanvasMessageResult
     | DismissCanvasMessageError
@@ -797,6 +798,14 @@ let update msg model =
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
         model, Cmd.none
 
+    | NavigateCanvasDoc filename ->
+        match model.FocusedElement with
+        | Some (Card scopedKey) ->
+            model, Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
+        | _ ->
+            Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no focused card"
+            model, Cmd.none
+
     | CanvasMessageReceived payload ->
         match model.FocusedElement with
         | Some (Card scopedKey) ->
@@ -897,7 +906,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                 events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
 
     let canvasMessageListener (dispatch: Dispatch<Msg>) =
-        CanvasPane.messageListener (CanvasMessageReceived >> dispatch)
+        CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch)
 
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling

@@ -241,19 +241,24 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         prop.children [ content ]
     ]
 
-let messageListener (dispatch: string -> unit) =
+let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) =
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
             if me.origin = CanvasOrigin
                && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
             then
-                let payload = Fable.Core.JS.JSON.stringify me.data
                 let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
-                Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
-                if payload.Length <= MaxPayloadBytes
-                then dispatch payload
-                else Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
+                if action = "navigate-canvas-doc" then
+                    let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename"
+                    Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
+                    if filename <> null && filename <> "" then selectDoc filename
+                else
+                    let payload = Fable.Core.JS.JSON.stringify me.data
+                    Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
+                    if payload.Length <= MaxPayloadBytes
+                    then dispatch payload
+                    else Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
 
     Dom.window.addEventListener ("message", handler)
 
