@@ -329,7 +329,7 @@
     "AppVersion": "2026-02-16T22:50:00.000Z"
   },
   "SyncStatus": {
-    "TestProject/feature-active": [
+    "Q:/code/TestProject/feature-active": [
       {
         "Source": "sync",
         "Message": "Merge main",
@@ -345,7 +345,7 @@
         "Duration": null
       }
     ],
-    "TestProject/feature-recent": [
+    "Q:/code/TestProject/feature-recent": [
       {
         "Source": "sync",
         "Message": "Pull",
@@ -361,7 +361,7 @@
         "Duration": null
       }
     ],
-    "TestProject/feature-draft": [
+    "Q:/code/TestProject/feature-draft": [
       {
         "Source": "claude",
         "Message": "Setting up API route handlers",
@@ -379,7 +379,7 @@
         "Duration": null
       }
     ],
-    "TestProject/feature-unknown": [
+    "Q:/code/TestProject/feature-unknown": [
       {
         "Source": "sync",
         "Message": "Check clean",
