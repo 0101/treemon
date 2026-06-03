@@ -169,6 +169,39 @@ let findWorktree (scopedKey: string) (model: Model) =
         |> List.tryFind (fun r -> RepoId.value r.RepoId = repoId)
         |> Option.bind (fun r -> r.Worktrees |> List.tryFind (fun wt -> wt.Branch = branch))
 
+let activeVisibleDoc (model: Model) : (string * string) option =
+    match model.FocusedElement with
+    | Some (Card scopedKey) ->
+        findWorktree scopedKey model
+        |> Option.bind (fun wt ->
+            let doc =
+                model.ActiveCanvasDoc
+                |> Map.tryFind scopedKey
+                |> Option.bind (fun name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name))
+                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
+            doc |> Option.map (fun d -> scopedKey, d.Filename))
+    | _ -> None
+
+let markVisibleDocCmd (model: Model) : Cmd<Msg> =
+    activeVisibleDoc model
+    |> Option.map (fun (sk, fn) -> Cmd.ofMsg (MarkDocViewed (sk, fn)))
+    |> Option.defaultValue Cmd.none
+
+let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string, string>>) =
+    repos
+    |> List.fold (fun acc r ->
+        r.Worktrees
+        |> List.fold (fun acc2 wt ->
+            let scopedKey = $"{RepoId.value r.RepoId}/{wt.Branch}"
+            let existing = acc2 |> Map.tryFind scopedKey |> Option.defaultValue Map.empty
+            let withSeeded =
+                wt.CanvasDocs
+                |> List.fold (fun inner doc ->
+                    if inner |> Map.containsKey doc.Filename then inner
+                    else inner |> Map.add doc.Filename doc.ContentHash) existing
+            if withSeeded = existing then acc2
+            else acc2 |> Map.add scopedKey withSeeded) acc) hashes
+
 let unviewedDocsByScopedKey (model: Model) : Map<string, string list> =
     model.Repos
     |> List.collect (fun r ->
@@ -400,16 +433,28 @@ let update msg model =
                 PreviousCanvasHashes = currentCanvasHashes
                 CanvasEvents = canvasEvents
                 AutoDisplayedDocs = updatedAutoDisplayed }
-            |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
-            let allPaths =
-                repos
-                |> List.collect _.Worktrees
-                |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
-                |> List.map (fun wt -> WorktreePath.value wt.Path)
-            let livenessCmd =
-                if List.isEmpty allPaths then Cmd.none
-                else Cmd.OfAsync.perform worktreeApi.getBridgeLiveness allPaths BridgeLivenessLoaded
-            Cmd.batch [ autoDisplayCmd; livenessCmd ]
+            |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
+            |> (fun m ->
+                let seeded = seedLastViewedHashes m.Repos m.LastViewedHashes
+                if seeded = m.LastViewedHashes then m
+                else { m with LastViewedHashes = seeded })
+            |> (fun updatedModel ->
+                let allPaths =
+                    repos
+                    |> List.collect _.Worktrees
+                    |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
+                    |> List.map (fun wt -> WorktreePath.value wt.Path)
+                let livenessCmd =
+                    if List.isEmpty allPaths then Cmd.none
+                    else Cmd.OfAsync.perform worktreeApi.getBridgeLiveness allPaths BridgeLivenessLoaded
+                let markVisibleCmd =
+                    if updatedModel.CanvasPaneOpen then markVisibleDocCmd updatedModel
+                    else Cmd.none
+                let seedSaveCmd =
+                    if updatedModel.LastViewedHashes <> model.LastViewedHashes then
+                        Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedModel.LastViewedHashes (fun _ -> NoOp)
+                    else Cmd.none
+                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd ])
 
     | DataFailed _ ->
         { model with
@@ -701,7 +746,10 @@ let update msg model =
     | ToggleCanvasPane ->
         let newState = not model.CanvasPaneOpen
         { model with CanvasPaneOpen = newState },
-        Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen newState (fun _ -> NoOp)
+        Cmd.batch [
+            Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen newState (fun _ -> NoOp)
+            if newState then markVisibleDocCmd model else Cmd.none
+        ]
 
     | SetCanvasPosition position ->
         { model with CanvasPosition = position },
