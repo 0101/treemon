@@ -270,19 +270,10 @@ let expireCanvasEvents (events: Map<string, CanvasEvent list>) : Map<string, Can
     |> Map.filter (fun _ evts -> not (List.isEmpty evts))
 
 let detectChangedCanvasDocs (previous: Map<string, Map<string, string>>) (current: Map<string, Map<string, string>>) : (string * string) list =
-    current
+    detectCanvasEvents previous current
     |> Map.toList
-    |> List.collect (fun (scopedKey, hashes) ->
-        let prevHashes =
-            previous
-            |> Map.tryFind scopedKey
-            |> Option.defaultValue Map.empty
-        hashes
-        |> Map.toList
-        |> List.choose (fun (filename, hash) ->
-            match prevHashes |> Map.tryFind filename with
-            | Some prevHash when prevHash = hash -> None
-            | _ -> Some (scopedKey, filename)))
+    |> List.collect (fun (scopedKey, events) ->
+        events |> List.map (fun e -> scopedKey, e.Filename))
 
 let findMostRecentChangedDoc (repos: RepoModel list) (changedDocs: (string * string) list) =
     changedDocs
@@ -628,15 +619,10 @@ let update msg model =
     | LaunchCanvasSession scopedKey ->
         match findWorktree scopedKey model with
         | Some wt ->
-            let activeDoc =
-                model.ActiveCanvasDoc
-                |> Map.tryFind scopedKey
-                |> Option.bind (fun name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name))
-                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
             let prompt =
-                match activeDoc with
-                | Some doc -> $"Continue working on canvas doc: {doc.Filename}"
-                | None -> ""
+                activeVisibleDoc model
+                |> Option.map (fun (_, filename) -> $"Continue working on canvas doc: {filename}")
+                |> Option.defaultValue ""
             let action = CanvasSession prompt
             model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = wt.Path; Action = action } LaunchActionResult
         | None ->
@@ -1910,18 +1896,12 @@ let labelColor (pct: float) =
     else None
 
 let focusedWorktreeCanvasDoc (model: Model) =
-    match model.FocusedElement with
-    | Some (Card scopedKey) ->
+    activeVisibleDoc model
+    |> Option.bind (fun (scopedKey, filename) ->
         findWorktree scopedKey model
         |> Option.bind (fun wt ->
-            let activeFilename = model.ActiveCanvasDoc |> Map.tryFind scopedKey
-            let doc =
-                match activeFilename with
-                | Some name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name)
-                | None -> None
-                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
-            doc |> Option.map (fun d -> wt, d))
-    | _ -> None
+            wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename)
+            |> Option.map (fun d -> wt, d)))
 
 let viewMetricBar (pct: float) (label: string) =
     Html.div [
