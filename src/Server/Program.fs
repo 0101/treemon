@@ -214,10 +214,12 @@ module CanvasDocServer =
                     let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                     let html = System.Text.Encoding.UTF8.GetString(rawBytes)
                     let baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}</style>"
+                    let linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=h.split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
+                    let injection = baseStyle + linkInterceptor
                     let injected =
                         if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
-                        then html.Replace("</head>", baseStyle + "</head>")
-                        else baseStyle + html
+                        then html.Replace("</head>", injection + "</head>")
+                        else injection + html
                     ctx.Response.ContentType <- "text/html; charset=utf-8"
                     ctx.Response.Headers["Cache-Control"] <- "no-cache"
                     do! ctx.Response.WriteAsync(injected)

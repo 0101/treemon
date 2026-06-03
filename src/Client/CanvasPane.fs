@@ -220,7 +220,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 Html.iframe [
                     prop.className "canvas-iframe"
                     prop.src (iframeSrc wt doc)
-                    prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms")
+                    prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups")
                 ]
             ]
         | None ->
