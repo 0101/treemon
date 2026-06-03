@@ -236,7 +236,7 @@ let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, st
             else Some ($"{RepoId.value r.RepoId}/{wt.Branch}", hashes)))
     |> Map.ofList
 
-let canvasEventExpiryMs = 30.0 * 60.0 * 1000.0
+let canvasEventExpiryMs = 5.0 * 60.0 * 1000.0
 
 let detectCanvasEvents (previousHashes: Map<string, Map<string, string>>) (currentHashes: Map<string, Map<string, string>>) : Map<string, CanvasEvent list> =
     let now = System.DateTimeOffset.Now
@@ -263,7 +263,12 @@ let mergeCanvasEvents (existing: Map<string, CanvasEvent list>) (newEvents: Map<
     newEvents
     |> Map.fold (fun acc scopedKey evts ->
         let current = acc |> Map.tryFind scopedKey |> Option.defaultValue []
-        acc |> Map.add scopedKey (current @ evts)) existing
+        let merged = current @ evts
+        let deduped =
+            merged
+            |> List.groupBy _.Filename
+            |> List.map (fun (_, group) -> group |> List.maxBy _.Timestamp)
+        acc |> Map.add scopedKey deduped) existing
 
 let expireCanvasEvents (events: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
     let cutoff = System.DateTimeOffset.Now.AddMilliseconds(-canvasEventExpiryMs)
@@ -1603,16 +1608,17 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
             Html.div [
                 prop.className footerClass
                 prop.children [
-                    match wt.LastUserMessage with
-                    | Some (prompt, ts) ->
-                        Html.div [
-                            prop.className "user-prompt"
-                            prop.children [
-                                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                                Html.span [ prop.text prompt ]
+                    if List.isEmpty canvasEvents then
+                        match wt.LastUserMessage with
+                        | Some (prompt, ts) ->
+                            Html.div [
+                                prop.className "user-prompt"
+                                prop.children [
+                                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                                    Html.span [ prop.text prompt ]
+                                ]
                             ]
-                        ]
-                    | None -> ()
+                        | None -> ()
 
                     eventLog dispatch cooldowns wt.Path wt.HasTestFailureLog branchEvents
                     canvasEventLog dispatch canvasPaneOpen scopedKey canvasEvents

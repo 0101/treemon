@@ -134,7 +134,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                             Html.button [
                                 prop.className "canvas-launch-btn"
                                 prop.onClick (fun _ -> launchSession ())
-                                prop.title "Start a new session in this worktree"
+                                prop.title "Start a session to work on the selected canvas doc"
                                 prop.text "▶ Start session"
                             ]
                         match activeFilename with
