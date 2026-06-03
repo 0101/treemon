@@ -2097,8 +2097,17 @@ let view model dispatch =
         | Some (Card scopedKey) -> dispatch (LaunchCanvasSession scopedKey)
         | _ -> ()
 
+    let focusedUnviewedFilenames =
+        match model.FocusedElement with
+        | Some (Card scopedKey) ->
+            unviewedDocsByScopedKey model
+            |> Map.tryFind scopedKey
+            |> Option.defaultValue []
+            |> Set.ofList
+        | _ -> Set.empty
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageQueuedAt.IsSome model.BridgeLiveness (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasMessageError model.CanvasMessageQueuedAt.IsSome model.BridgeLiveness focusedUnviewedFilenames (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
 
     let children =
         match model.CanvasPosition with

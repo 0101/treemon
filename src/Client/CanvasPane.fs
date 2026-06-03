@@ -99,7 +99,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (bridgeLiveness: Map<string, BridgeLiveness>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -196,8 +196,15 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             let tabs =
                 if wt.CanvasDocs.Length > 1
                 then wt.CanvasDocs |> List.map (fun d ->
+                    let isActive = d.Filename = doc.Filename
+                    let isViewed = not (Set.contains d.Filename unviewedFilenames)
+                    let cls =
+                        [ "canvas-tab"
+                          if isActive then "active"
+                          if isViewed && not isActive then "canvas-tab-viewed" ]
+                        |> String.concat " "
                     Html.button [
-                        prop.className (if d.Filename = doc.Filename then "canvas-tab active" else "canvas-tab")
+                        prop.className cls
                         prop.onClick (fun _ -> selectDoc d.Filename)
                         prop.title d.Filename
                         prop.children [
