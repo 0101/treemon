@@ -187,7 +187,7 @@ let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string
     |> List.fold (fun acc r ->
         r.Worktrees
         |> List.fold (fun acc2 wt ->
-            let scopedKey = $"{RepoId.value r.RepoId}/{wt.Branch}"
+            let scopedKey = WorktreePath.value wt.Path
             let existing = acc2 |> Map.tryFind scopedKey |> Option.defaultValue Map.empty
             let withSeeded =
                 wt.CanvasDocs
@@ -202,7 +202,7 @@ let unviewedDocsByScopedKey (model: Model) : Map<string, string list> =
     |> List.collect (fun r ->
         r.Worktrees
         |> List.choose (fun wt ->
-            let scopedKey = $"{RepoId.value r.RepoId}/{wt.Branch}"
+            let scopedKey = WorktreePath.value wt.Path
             let viewedHashes =
                 model.LastViewedHashes
                 |> Map.tryFind scopedKey
@@ -228,7 +228,7 @@ let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, st
                 |> List.map (fun d -> d.Filename, d.ContentHash)
                 |> Map.ofList
             if Map.isEmpty hashes then None
-            else Some ($"{RepoId.value r.RepoId}/{wt.Branch}", hashes)))
+            else Some (WorktreePath.value wt.Path, hashes)))
     |> Map.ofList
 
 let canvasEventExpiryMs = 5.0 * 60.0 * 1000.0
@@ -293,7 +293,7 @@ let findMostRecentChangedDoc (repos: RepoModel list) (changedDocs: (string * str
         |> List.tryPick (fun r ->
             r.Worktrees
             |> List.tryPick (fun wt ->
-                if $"{RepoId.value r.RepoId}/{wt.Branch}" = scopedKey
+                if WorktreePath.value wt.Path = scopedKey
                 then wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename)
                      |> Option.map (fun doc -> scopedKey, filename, doc.LastModified)
                 else None)))
@@ -772,7 +772,7 @@ let update msg model =
                     Worktrees =
                         r.Worktrees
                         |> List.map (fun wt ->
-                            let key = $"{RepoId.value r.RepoId}/{wt.Branch}"
+                            let key = WorktreePath.value wt.Path
                             if key = scopedKey
                             then { wt with CanvasDocs = wt.CanvasDocs |> List.filter (fun d -> d.Filename <> filename) }
                             else wt) })
@@ -781,7 +781,7 @@ let update msg model =
             |> List.tryPick (fun r ->
                 r.Worktrees
                 |> List.tryPick (fun wt ->
-                    if $"{RepoId.value r.RepoId}/{wt.Branch}" = scopedKey && not (List.isEmpty wt.CanvasDocs)
+                    if WorktreePath.value wt.Path = scopedKey && not (List.isEmpty wt.CanvasDocs)
                     then Some wt.CanvasDocs
                     else None))
         let activeDoc =

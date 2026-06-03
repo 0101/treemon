@@ -32,7 +32,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
             repo.Worktrees
             |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
             |> List.map (fun wt ->
-                let scopedKey = $"{RepoId.value repo.RepoId}/{wt.Branch}"
+                let scopedKey = WorktreePath.value wt.Path
                 repo.Name, wt, scopedKey))
 
     let sorted =
