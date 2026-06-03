@@ -447,12 +447,12 @@ Two edges are imperative and handled the standard Elmish way (not in the VDOM di
 
 ## Phasing
 
-Phase 1 (MVP) is specified separately in `docs/spec/canvas-pane-mvp.md` and tracked as
-beads feature `tm-canvas48-4cn`. It validates the core end-to-end loop with one doc per
-worktree, no registry, no badges, iframe reload (not morph), and no liveness/queue.
-
 Completed phases:
 
+1. **MVP** ✅ (`tm-canvas48-4cn`): core end-to-end loop — agent writes HTML to
+   `.agents/canvas/`, Treemon detects + serves at `:5002`, iframe renders in dashboard,
+   user interaction reaches agent via postMessage → bridge → CLI session. One doc per
+   worktree, iframe reload on hash change, no badges.
 2. **UX polish + logging** ✅ (`tm-canvas48-441`): canvas position selector, persist canvas
    open/closed state, comprehensive lifecycle logging (CanvasScanner, CanvasWatcher, doc
    server, CanvasBridge). `C` key already worked — covered by existing E2E tests.
@@ -460,13 +460,19 @@ Completed phases:
    (single doc = no tab bar), `LastModified` on `CanvasDoc`, `CanvasDocs` list throughout
    pipeline. **Empty canvas overview** — all worktrees with docs grouped by repo, clickable
    to focus. 17 canvas E2E tests passing.
-3.5. **Toolbar consolidation + doc archive** ✅ (`tm-canvas48-l7t`, spec:
-   `docs/spec/canvas-toolbar-archive.md`): unified header bar (tabs + position buttons at
-   0.4 opacity), doc archive, inline doc names in overview, canvas authoring skill,
-   diagnostics logging. 22 canvas E2E tests passing.
-3.6. **Bridge resilience + UX polish** ✅ (`tm-canvas48-8ge`, spec:
-   `docs/spec/canvas-bridge-resilience.md`): extension auto-reconnect heartbeat (30s with
-   backoff), persistent error banner, bridge health endpoint, archive icon fix, scrollbar
-   CSS injection.
+3.5. **Toolbar consolidation + doc archive** ✅ (`tm-canvas48-l7t`): unified header bar
+   (tabs + position buttons at 0.4 opacity), doc archive to `.agents/canvas/archive/`,
+   inline doc names in overview, canvas authoring skill, diagnostics logging. 22 canvas
+   E2E tests passing.
+3.6. **Bridge resilience + UX polish** ✅ (`tm-canvas48-8ge`): extension auto-reconnect
+   heartbeat (30s with backoff), persistent error banner (replaces 2s flash), bridge health
+   endpoint (`GET /api/canvas/bridge-status`), archive icon fix, scrollbar CSS injection.
+4. **Canvas awareness + liveness** ✅ (`tm-canvas48-3ic`, spec:
+   `docs/spec/canvas-awareness-liveness.md`): unviewed doc tracking with
+   `LastViewedHashes` persistence, canvas header badge (unviewed count), auto-display when
+   idle (60s threshold), card console notifications for new/updated docs, per-doc liveness
+   indicator (sessionId + isAlive), message queue with drain-on-register (max 10, 5min
+   TTL), "Start session" button, 40 unit tests + 22 E2E. Bugfix follow-up:
+   `tm-canvas48-dst`.
 
 Roadmap for future phases is maintained in the canvas doc `.agents/canvas/roadmap.html`.
