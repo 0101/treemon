@@ -26,6 +26,9 @@ let private messageQueue = ConcurrentDictionary<string, QueuedMessage list>(Stri
 
 let private httpClient = new HttpClient()
 
+/// Sentinel inject URL for iframe-based registrations (heartbeat polling, no HTTP push).
+let [<Literal>] PollInjectUrl = "poll://iframe"
+
 let private maxQueueSize = 10
 let private queueTtl = TimeSpan.FromMinutes 5.0
 
@@ -51,6 +54,9 @@ let private enqueue key payload =
     |> ignore
 
 let private drainQueue (key: string) (entry: BridgeEntry) =
+    if entry.InjectUrl = PollInjectUrl then () // poll-based bridges drain via heartbeat (drainPending), not HTTP push
+    else
+
     match messageQueue.TryRemove(key) with
     | false, _ -> ()
     | true, queued ->
@@ -89,9 +95,6 @@ let register (worktreePath: string) (injectUrl: string) (sessionId: string optio
     registry[key] <- entry
     Log.log "CanvasBridge" $"Registered {key} -> {injectUrl} (registry size: {registry.Count})"
     drainQueue key entry
-
-/// Sentinel inject URL for iframe-based registrations (heartbeat polling, no HTTP push).
-let [<Literal>] PollInjectUrl = "poll://iframe"
 
 let sendMessage (request: CanvasMessageRequest) =
     async {
