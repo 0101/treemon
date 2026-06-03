@@ -250,9 +250,11 @@ let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) =
             then
                 let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                 if action = "navigate-canvas-doc" then
-                    let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename"
-                    Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
-                    if filename <> null && filename <> "" then selectDoc filename
+                    match Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename" |> Option.ofObj with
+                    | Some filename when filename <> "" ->
+                        Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
+                        selectDoc filename
+                    | _ -> ()
                 else
                     let payload = Fable.Core.JS.JSON.stringify me.data
                     Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
