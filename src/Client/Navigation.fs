@@ -8,6 +8,12 @@ type FocusTarget =
     | RepoHeader of RepoId
     | Card of path: string
 
+[<RequireQualifiedAccess>]
+type CanvasSendState =
+    | Idle
+    | Waiting of queuedAt: float
+    | Failed of message: string
+
 type RepoModel =
     { RepoId: RepoId
       Name: string

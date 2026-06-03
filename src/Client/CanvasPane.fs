@@ -99,7 +99,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (messageError: string option) (messageWaiting: bool) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -153,8 +153,8 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         ]
 
     let errorBanner =
-        match messageError with
-        | Some msg ->
+        match sendState with
+        | CanvasSendState.Failed msg ->
             Html.div [
                 prop.className "canvas-error-banner"
                 prop.children [
@@ -166,10 +166,11 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     ]
                 ]
             ]
-        | None -> Html.none
+        | _ -> Html.none
 
     let waitingBanner =
-        if messageWaiting then
+        match sendState with
+        | CanvasSendState.Waiting _ ->
             Html.div [
                 prop.className "canvas-waiting-banner"
                 prop.children [
@@ -181,8 +182,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     ]
                 ]
             ]
-        else
-            Html.none
+        | _ -> Html.none
 
     let content =
         match focusedDoc with

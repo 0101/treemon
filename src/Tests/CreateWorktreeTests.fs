@@ -39,8 +39,7 @@ let private defaultModel : Model =
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
-      CanvasMessageError = None
-      CanvasMessageQueuedAt = None
+      CanvasSendState = CanvasSendState.Idle
       BridgeLiveness = Map.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
