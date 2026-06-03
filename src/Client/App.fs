@@ -644,8 +644,8 @@ let update msg model =
                 match activeDoc with
                 | Some doc -> $"Continue working on canvas doc: {doc.Filename}"
                 | None -> ""
-            let request: LaunchRequest = { Path = wt.Path; Prompt = prompt }
-            model, Cmd.OfAsync.perform worktreeApi.launchSession request SessionResult
+            let action = CanvasSession prompt
+            model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = wt.Path; Action = action } LaunchActionResult
         | None ->
             model, Cmd.none
 

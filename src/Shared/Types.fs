@@ -117,6 +117,7 @@ type ActionKind =
     | CreatePr
     | FixTests
     | ConfigureTests
+    | CanvasSession of prompt: string
 
 type ActionRequest =
     { Path: WorktreePath
