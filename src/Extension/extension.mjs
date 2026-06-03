@@ -2,7 +2,7 @@ import { joinSession } from "@github/copilot-sdk/extension";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -66,7 +66,7 @@ function isValidCanvasFilename(filename) {
 
 async function readCanvasFile(filename) {
   const filePath = resolve(CANVAS_DIR, filename);
-  if (!filePath.startsWith(CANVAS_DIR + "\\") && filePath !== CANVAS_DIR) {
+  if (!filePath.startsWith(CANVAS_DIR + sep) && filePath !== CANVAS_DIR) {
     throw Object.assign(new Error("path traversal blocked"), { code: "EACCES" });
   }
   return readFile(filePath, "utf-8");
