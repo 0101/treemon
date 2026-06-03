@@ -64,7 +64,6 @@ let private defaultModel : Model =
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
       LastViewedHashes = Map.empty
-      AutoDisplayedDocs = Set.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasMessageError = None

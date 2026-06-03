@@ -67,7 +67,6 @@ let private defaultModel : Model =
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
       LastViewedHashes = Map.empty
-      AutoDisplayedDocs = Set.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasMessageError = None
@@ -273,34 +272,34 @@ type AutoDisplayIdleLogicTests() =
         { Filename = filename; ContentHash = hash; LastModified = time }
 
     [<Test>]
-    member _.``detectNewCanvasDocs finds new filenames not present in previous``() =
+    member _.``detectChangedCanvasDocs finds new filenames not present in previous``() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "old.html", "h1"; "new.html", "h2" ] ]
 
-        let result = detectNewCanvasDocs prev curr
+        let result = detectChangedCanvasDocs prev curr
 
         Assert.That(result, Does.Contain(("r/feat", "new.html")))
         Assert.That(result.Length, Is.EqualTo(1), "Only the new doc should be detected")
 
     [<Test>]
-    member _.``detectNewCanvasDocs returns empty when no new filenames``() =
+    member _.``detectChangedCanvasDocs returns empty when no hashes changed``() =
         let hashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
 
-        let result = detectNewCanvasDocs hashes hashes
+        let result = detectChangedCanvasDocs hashes hashes
 
         Assert.That(result, Is.Empty)
 
     [<Test>]
-    member _.``detectNewCanvasDocs ignores hash changes for existing filenames``() =
+    member _.``detectChangedCanvasDocs detects hash changes for existing filenames``() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h2" ] ]
 
-        let result = detectNewCanvasDocs prev curr
+        let result = detectChangedCanvasDocs prev curr
 
-        Assert.That(result, Is.Empty, "Updated hash for existing file is not a new doc")
+        Assert.That(result, Does.Contain(("r/feat", "a.html")), "Updated hash should be detected as changed")
 
     [<Test>]
-    member _.``findMostRecentNewDoc picks the most recently modified doc``() =
+    member _.``findMostRecentChangedDoc picks the most recently modified doc``() =
         let now = DateTimeOffset.UtcNow
         let repos = [
             makeRepo "r" [
@@ -309,13 +308,13 @@ type AutoDisplayIdleLogicTests() =
                     docWithTime "recent.html" "h2" now
                     docWithTime "middle.html" "h3" (now.AddMinutes(-5.0)) ] ] ]
 
-        let newDocs = [ ("r/feat", "old.html"); ("r/feat", "recent.html"); ("r/feat", "middle.html") ]
-        let result = findMostRecentNewDoc repos newDocs
+        let changedDocs = [ ("r/feat", "old.html"); ("r/feat", "recent.html"); ("r/feat", "middle.html") ]
+        let result = findMostRecentChangedDoc repos changedDocs
 
         Assert.That(result, Is.EqualTo(Some ("r/feat", "recent.html")))
 
     [<Test>]
-    member _.``Auto-display triggers when idle and new doc arrives``() =
+    member _.``Auto-display triggers when idle and doc hash changes``() =
         let now = DateTimeOffset.UtcNow
         let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "new.html" "h1" now ] ] ]
         let model =
@@ -323,22 +322,43 @@ type AutoDisplayIdleLogicTests() =
                 Repos = repos
                 PreviousCanvasHashes = Map.empty
                 LastActivityTime = 0.0
-                CanvasPaneOpen = false
-                AutoDisplayedDocs = Set.empty }
+                CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let newDocs =
-            detectNewCanvasDocs model.PreviousCanvasHashes currentHashes
-            |> List.filter (fun (sk, fn) -> not (Set.contains (sk, fn) model.AutoDisplayedDocs))
+        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0 // 120s since epoch — well past 60s idle threshold
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
-            if isIdle && not (List.isEmpty newDocs)
-            then findMostRecentNewDoc repos newDocs
+            if isIdle && not (List.isEmpty changedDocs)
+            then findMostRecentChangedDoc repos changedDocs
             else None
 
-        Assert.That(target, Is.Not.Null.And.Not.EqualTo(None), "Should auto-display when idle + new doc")
+        Assert.That(target, Is.Not.Null.And.Not.EqualTo(None), "Should auto-display when idle + hash changed")
         Assert.That(target, Is.EqualTo(Some ("r/feat", "new.html")))
+
+    [<Test>]
+    member _.``Auto-display triggers when idle and existing doc content changes``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "a.html" "h2" now ] ] ]
+        let previousHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
+        let model =
+            { defaultModel with
+                Repos = repos
+                PreviousCanvasHashes = previousHashes
+                LastActivityTime = 0.0
+                CanvasPaneOpen = false }
+
+        let currentHashes = canvasHashesByScopedKey repos
+        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
+        let jsNow = 120_000.0
+        let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
+        let target =
+            if isIdle && not (List.isEmpty changedDocs)
+            then findMostRecentChangedDoc repos changedDocs
+            else None
+
+        Assert.That(target, Is.Not.Null.And.Not.EqualTo(None), "Should auto-display when idle + existing doc content changed")
+        Assert.That(target, Is.EqualTo(Some ("r/feat", "a.html")))
 
     [<Test>]
     member _.``Auto-display does NOT trigger when user is active``() =
@@ -350,43 +370,37 @@ type AutoDisplayIdleLogicTests() =
             { defaultModel with
                 Repos = repos
                 PreviousCanvasHashes = Map.empty
-                LastActivityTime = jsNow - 10_000.0 // 10s ago, well within 60s threshold
-                AutoDisplayedDocs = Set.empty }
+                LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
 
-        let newDocs =
-            detectNewCanvasDocs model.PreviousCanvasHashes currentHashes
-            |> List.filter (fun (sk, fn) -> not (Set.contains (sk, fn) model.AutoDisplayedDocs))
+        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
-            if isIdle && not (List.isEmpty newDocs)
-            then findMostRecentNewDoc repos newDocs
+            if isIdle && not (List.isEmpty changedDocs)
+            then findMostRecentChangedDoc repos changedDocs
             else None
 
         Assert.That(target, Is.EqualTo(None), "Should NOT auto-display when user is active (within 60s)")
 
     [<Test>]
-    member _.``Auto-display does NOT trigger for already-auto-displayed doc``() =
+    member _.``Auto-display does NOT trigger when hashes unchanged``() =
         let now = DateTimeOffset.UtcNow
-        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "new.html" "h1" now ] ] ]
+        let repos = [ makeRepo "r" [ makeWorktree "feat" [ docWithTime "a.html" "h1" now ] ] ]
         let currentHashes = canvasHashesByScopedKey repos
         let model =
             { defaultModel with
                 Repos = repos
-                PreviousCanvasHashes = Map.empty
-                LastActivityTime = 0.0
-                AutoDisplayedDocs = Set.ofList [ ("r/feat", "new.html") ] }
+                PreviousCanvasHashes = currentHashes
+                LastActivityTime = 0.0 }
 
-        let newDocs =
-            detectNewCanvasDocs model.PreviousCanvasHashes currentHashes
-            |> List.filter (fun (sk, fn) -> not (Set.contains (sk, fn) model.AutoDisplayedDocs))
+        let changedDocs = detectChangedCanvasDocs model.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
-            if isIdle && not (List.isEmpty newDocs)
-            then findMostRecentNewDoc repos newDocs
+            if isIdle && not (List.isEmpty changedDocs)
+            then findMostRecentChangedDoc repos changedDocs
             else None
 
-        Assert.That(target, Is.EqualTo(None), "Should NOT auto-display doc already in AutoDisplayedDocs")
+        Assert.That(target, Is.EqualTo(None), "Should NOT auto-display when no hashes changed")
 
 
 // ── MarkDocViewed ────────────────────────────────────────────────────

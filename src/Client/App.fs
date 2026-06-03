@@ -41,7 +41,6 @@ type Model =
       CanvasPosition: CanvasPosition
       ActiveCanvasDoc: Map<string, string>
       LastViewedHashes: Map<string, Map<string, string>>
-      AutoDisplayedDocs: Set<string * string>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasMessageError: string option
@@ -138,7 +137,6 @@ let init () =
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
       LastViewedHashes = Map.empty
-      AutoDisplayedDocs = Set.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasMessageError = None
@@ -276,24 +274,23 @@ let expireCanvasEvents (events: Map<string, CanvasEvent list>) : Map<string, Can
     |> Map.map (fun _ evts -> evts |> List.filter (fun e -> e.Timestamp > cutoff))
     |> Map.filter (fun _ evts -> not (List.isEmpty evts))
 
-let detectNewCanvasDocs (previous: Map<string, Map<string, string>>) (current: Map<string, Map<string, string>>) : (string * string) list =
+let detectChangedCanvasDocs (previous: Map<string, Map<string, string>>) (current: Map<string, Map<string, string>>) : (string * string) list =
     current
     |> Map.toList
     |> List.collect (fun (scopedKey, hashes) ->
-        let prevFilenames =
+        let prevHashes =
             previous
             |> Map.tryFind scopedKey
             |> Option.defaultValue Map.empty
-            |> Map.keys
-            |> Set.ofSeq
         hashes
-        |> Map.keys
-        |> Seq.filter (fun f -> not (Set.contains f prevFilenames))
-        |> Seq.map (fun f -> scopedKey, f)
-        |> Seq.toList)
+        |> Map.toList
+        |> List.choose (fun (filename, hash) ->
+            match prevHashes |> Map.tryFind filename with
+            | Some prevHash when prevHash = hash -> None
+            | _ -> Some (scopedKey, filename)))
 
-let findMostRecentNewDoc (repos: RepoModel list) (newDocs: (string * string) list) =
-    newDocs
+let findMostRecentChangedDoc (repos: RepoModel list) (changedDocs: (string * string) list) =
+    changedDocs
     |> List.choose (fun (scopedKey, filename) ->
         repos
         |> List.tryPick (fun r ->
@@ -397,16 +394,14 @@ let update msg model =
                     let newEvents = detectCanvasEvents model.PreviousCanvasHashes currentCanvasHashes
                     mergeCanvasEvents model.CanvasEvents newEvents
                     |> expireCanvasEvents
-            let newDocs =
+            let changedDocs =
                 if isFirstLoad then []
-                else
-                    detectNewCanvasDocs model.PreviousCanvasHashes currentCanvasHashes
-                    |> List.filter (fun (sk, fn) -> not (Set.contains (sk, fn) model.AutoDisplayedDocs))
+                else detectChangedCanvasDocs model.PreviousCanvasHashes currentCanvasHashes
             let now = Fable.Core.JS.Constructors.Date.now ()
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
             let autoDisplayTarget =
-                if isIdle && not (List.isEmpty newDocs)
-                then findMostRecentNewDoc repos newDocs
+                if isIdle && not (List.isEmpty changedDocs)
+                then findMostRecentChangedDoc repos changedDocs
                 else None
             let autoDisplayCmd =
                 match autoDisplayTarget with
@@ -417,10 +412,6 @@ let update msg model =
                         Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
                     ]
                 | None -> Cmd.none
-            let updatedAutoDisplayed =
-                match autoDisplayTarget with
-                | Some entry -> model.AutoDisplayedDocs |> Set.add entry
-                | None -> model.AutoDisplayedDocs
             { model with
                 Repos = repos
                 IsLoading = false
@@ -436,8 +427,7 @@ let update msg model =
                 CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
                 CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition
                 PreviousCanvasHashes = currentCanvasHashes
-                CanvasEvents = canvasEvents
-                AutoDisplayedDocs = updatedAutoDisplayed }
+                CanvasEvents = canvasEvents }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 let seeded = seedLastViewedHashes m.Repos m.LastViewedHashes
