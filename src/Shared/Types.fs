@@ -15,6 +15,10 @@ type WorktreePath = WorktreePath of string
 module WorktreePath =
     let value (WorktreePath p) = p
 
+    let displayName (WorktreePath p) =
+        let i = max (p.LastIndexOf '/') (p.LastIndexOf '\\')
+        if i < 0 then p else p[i + 1..]
+
 type BranchName = BranchName of string
 
 module BranchName =
@@ -150,6 +154,9 @@ type WorktreeStatus =
       IsMainWorktree: bool
       IsArchived: bool
       CanvasDocs: CanvasDoc list }
+
+module WorktreeStatus =
+    let [<Literal>] DetachedBranchName = "(detached)"
 
 [<RequireQualifiedAccess>]
 type StepStatus =

@@ -105,7 +105,7 @@ let private assembleFromState
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
     { Path = PathUtils.toWorktreePath wt.Path
-      Branch = wt.Branch |> Option.defaultValue GitWorktree.DetachedBranchName
+      Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
@@ -533,22 +533,22 @@ let worktreeApi
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  let branchToScopedKey =
+                  let syncKeyToPath =
                       state.Repos
                       |> Map.toList
                       |> List.collect (fun (repoId, repo) ->
                           repo.WorktreeList
                           |> List.map (fun wt ->
                               let branch = wt.Branch |> Option.defaultValue (detachedBranchLabel wt.Path)
-                              let key = scopedBranchKey repoId branch
-                              key, wt.Path))
+                              let syncKey = scopedBranchKey repoId branch
+                              syncKey, wt.Path))
                       |> Map.ofList
 
                   let! syncEvents = syncAgent.PostAndAsyncReply(SyncEngine.GetAllEvents)
 
                   let allKeys =
                       [ yield! syncEvents |> Map.keys
-                        yield! branchToScopedKey |> Map.keys ]
+                        yield! syncKeyToPath |> Map.keys ]
                       |> List.distinct
 
                   let cachedLastMessages =
@@ -563,29 +563,31 @@ let worktreeApi
 
                   return
                       allKeys
-                      |> List.choose (fun key ->
+                      |> List.choose (fun syncKey ->
+                          let wtPath = syncKeyToPath |> Map.tryFind syncKey
+
                           let syncEvts =
                               syncEvents
-                              |> Map.tryFind key
+                              |> Map.tryFind syncKey
                               |> Option.defaultValue []
 
                           let claudeEvt =
-                              branchToScopedKey
-                              |> Map.tryFind key
-                              |> Option.bind (fun wtPath -> cachedLastMessages |> Map.tryFind wtPath)
+                              wtPath
+                              |> Option.bind (fun p -> cachedLastMessages |> Map.tryFind p)
 
                           let merged = (claudeEvt |> Option.toList) @ syncEvts
 
-                          match merged with
-                          | [] -> None
-                          | events ->
+                          match merged, wtPath with
+                          | [], _ -> None
+                          | events, Some path ->
                               let recent =
                                   events
                                   |> List.sortByDescending _.Timestamp
                                   |> List.truncate 2
                                   |> List.rev
 
-                              Some(key, recent))
+                              Some(path, recent)
+                          | _, None -> None)
                       |> Map.ofList
               }
           deleteWorktree = deleteWorktree agent rootPaths

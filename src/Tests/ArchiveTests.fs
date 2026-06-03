@@ -277,10 +277,10 @@ type NavigationArchiveTests() =
                 | Card key -> $"card:{key}")
 
         Assert.That(targetStrings, Does.Contain("header:TestRepo"))
-        Assert.That(targetStrings, Does.Contain("card:TestRepo/main"))
-        Assert.That(targetStrings, Does.Contain("card:TestRepo/feature-x"))
-        Assert.That(targetStrings, Does.Not.Contain("card:TestRepo/old-branch"))
-        Assert.That(targetStrings, Does.Not.Contain("card:TestRepo/stale-feature"))
+        Assert.That(targetStrings, Does.Contain("card:/repo/main"))
+        Assert.That(targetStrings, Does.Contain("card:/repo/feature-x"))
+        Assert.That(targetStrings, Does.Not.Contain("card:/repo/old-branch"))
+        Assert.That(targetStrings, Does.Not.Contain("card:/repo/stale-feature"))
 
     [<Test>]
     member _.``visibleFocusTargets with only archived worktrees shows only header``() =
@@ -304,7 +304,7 @@ type NavigationArchiveTests() =
         let sections = repoNavSections repos
 
         Assert.That(sections.Length, Is.EqualTo(1))
-        Assert.That(sections[0].Cards, Is.EqualTo([ Card "TestRepo/main" ]))
+        Assert.That(sections[0].Cards, Is.EqualTo([ Card "/repo/main" ]))
 
     [<Test>]
     member _.``visibleFocusTargets with collapsed repo containing archived worktrees shows only header``() =
@@ -335,7 +335,7 @@ type NavigationArchiveTests() =
             targets
             |> List.choose (function Card key -> Some key | _ -> None)
 
-        Assert.That(cardKeys, Is.EqualTo([ "Repo1/main"; "Repo2/develop" ]))
+        Assert.That(cardKeys, Is.EqualTo([ "/repo/main"; "/repo/develop" ]))
 
 
 [<TestFixture>]

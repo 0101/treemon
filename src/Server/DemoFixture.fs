@@ -56,6 +56,10 @@ let private withCardEvt branch cardEvt (fix: FixtureData) =
 
 let private azDoEvt = "C:\\code\\CloudPlatform"
 let private githubEvt = "C:\\code\\DataPipeline"
+let private retryKey = WorktreePath.value (azDoPath "feature-retry")
+let private configKey = WorktreePath.value (azDoPath "refactor-config")
+let private authKey = WorktreePath.value (azDoPath "feature-auth")
+let private streamKey = WorktreePath.value (githubPath "streaming")
 
 // --- PRs (retry-logic cycles, others static) ---
 
@@ -320,13 +324,13 @@ let private baseSchedulerEvents: CardEvent list =
 let private retryEvt msg secsAgo = evt "claude" msg secsAgo
 
 let private baseSyncStatus: Map<string, CardEvent list> =
-    [ $"{azDoEvt}/feature/retry-logic",
+    [ retryKey,
       [ retryEvt "Reading BlobStorageClient retry logic" 3 None None ]
-      $"{azDoEvt}/refactor/config-loading",
+      configKey,
       [ evt "claude" "Extracting config validation rules" 8 None None ]
-      $"{azDoEvt}/feature/auth-middleware",
+      authKey,
       [ evt "copilot" "All tests passing" 5 None None ]
-      $"{githubEvt}/feature/streaming-agg",
+      streamKey,
       [ evt "copilot" "Implementing tumbling window support" 5 None None ] ]
     |> Map.ofList
 
@@ -388,7 +392,7 @@ let private f2 =
 let private f3 =
     f2
     |> withAuth (fun wt -> { wt with CodingTool = Working })
-    |> withCardEvt $"{azDoEvt}/feature/auth-middleware"
+    |> withCardEvt authKey
         (evt "copilot" "Reading authorization middleware" 1 None None)
     |> withCpu 45.0 14800
 
@@ -396,14 +400,14 @@ let private f3 =
 let private f4 =
     f3
     |> withRetry (fun wt -> { wt with Pr = HasPr prRetryFailed })
-    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+    |> withCardEvt retryKey
         (retryEvt "CI build failed — analyzing test results" 1 None None)
     |> withCpu 58.0 15200
 
 // F5 (8-10s): Auth copilot progresses
 let private f5 =
     f4
-    |> withCardEvt $"{azDoEvt}/feature/auth-middleware"
+    |> withCardEvt authKey
         (evt "copilot" "Generating role-based access checks" 1 None None)
     |> withCpu 72.0 16100
 
@@ -414,7 +418,7 @@ let private f6 =
         { wt with
             LastCommitMessage = "Fix flaky retry test timing"
             Pr = HasPr prRetryRebuilding })
-    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+    |> withCardEvt retryKey
         (retryEvt "Pushed fix, waiting for CI" 1 None None)
     |> withCpu 84.0 17400
 
@@ -431,7 +435,7 @@ let private f7 =
 let private f8 =
     f7
     |> withAuth (fun wt -> { wt with CodingTool = Done })
-    |> withCardEvt $"{azDoEvt}/feature/auth-middleware"
+    |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800
 
@@ -439,7 +443,7 @@ let private f8 =
 let private f9 =
     f8
     |> withRetry (fun wt -> { wt with Pr = HasPr prRetrySucceeded })
-    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+    |> withCardEvt retryKey
         (retryEvt "All tests passing — task complete" 1 None None)
     |> withCpu 41.0 15200
 
@@ -457,7 +461,7 @@ let private f11 =
     f10
     |> withRetry (fun wt ->
         { wt with LastUserMessage = Some("add request deduplication", baseTimestamp.AddMinutes(-1.0)) })
-    |> withCardEvt $"{azDoEvt}/feature/retry-logic"
+    |> withCardEvt retryKey
         (retryEvt "Starting next task: request deduplication" 1 None None)
     |> withCpu 39.0 14400
 
