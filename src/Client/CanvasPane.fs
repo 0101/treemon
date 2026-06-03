@@ -9,11 +9,10 @@ let [<Literal>] private CanvasOrigin = "http://127.0.0.1:5002"
 let [<Literal>] private MaxPayloadBytes = 64_000
 
 let private isWorktreeAlive (bridgeLiveness: Map<string, BridgeLiveness>) (wt: WorktreeStatus) =
-    wt.HasActiveSession
-    || (bridgeLiveness
-        |> Map.tryFind (WorktreePath.value wt.Path)
-        |> Option.map _.IsAlive
-        |> Option.defaultValue false)
+    bridgeLiveness
+    |> Map.tryFind (WorktreePath.value wt.Path)
+    |> Option.map _.IsAlive
+    |> Option.defaultValue false
 
 let private livenessDot (isAlive: bool) =
     Html.span [

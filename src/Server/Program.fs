@@ -125,7 +125,7 @@ let private buildRemotingHandler (api: IWorktreeApi) =
 type CanvasRegisterRequest =
     { worktreePath: string
       injectUrl: string
-      sessionId: string option }
+      sessionId: string }
 
 let private canvasRegisterHandler : HttpHandler =
     fun next ctx -> task {
@@ -139,7 +139,7 @@ let private canvasRegisterHandler : HttpHandler =
                 Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
             else
-                CanvasBridge.registerSession body.worktreePath body.injectUrl body.sessionId
+                CanvasBridge.registerSession body.worktreePath body.injectUrl (Option.ofObj body.sessionId)
                 return! Successful.OK "registered" next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
