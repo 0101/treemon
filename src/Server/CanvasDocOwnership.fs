@@ -13,7 +13,7 @@ let private ownership = ConcurrentDictionary<string, Map<string, string>>(String
 
 let private filePath = Path.Combine("data", "canvas-owners.json")
 
-let private persist () =
+let private persistImpl () =
     async {
         try
             let dir = Path.GetDirectoryName(filePath)
@@ -43,6 +43,20 @@ let private persist () =
             Log.log "CanvasDocOwnership" $"Failed to persist: {ex.Message}"
     }
 
+// Serializes persist calls through a MailboxProcessor to avoid
+// concurrent writes racing on the shared temp file path.
+let private persistAgent =
+    MailboxProcessor.Start(fun inbox ->
+        let rec loop () =
+            async {
+                let! _msg = inbox.Receive()
+                do! persistImpl ()
+                return! loop ()
+            }
+        loop ())
+
+let private persist () = persistAgent.Post(())
+
 let attribute (worktreePath: string) (filename: string) (sessionId: string) =
     let key = normalizePath worktreePath
 
@@ -53,7 +67,7 @@ let attribute (worktreePath: string) (filename: string) (sessionId: string) =
     )
     |> ignore
 
-    persist () |> Async.Start
+    persist ()
 
 let getOwner (worktreePath: string) (filename: string) : string option =
     let key = normalizePath worktreePath

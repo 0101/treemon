@@ -635,11 +635,22 @@ module CanvasWatchers =
             |> Set.toList
             |> List.choose (fun path ->
                 let repoId = repoIdByPath |> Map.find path
+                // Track previous docs per-watcher to diff on each callback.
+                // ref cell is isolated per closure — not shared across watchers.
+                let previousDocs = ref (CanvasScanner.scan path)
                 let post (canvasDocs: CanvasDoc list) =
+                    let prev = previousDocs.Value
+                    let prevByName = prev |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
                     CanvasBridge.getSessionForWorktree path
                     |> Option.iter (fun sessionId ->
                         canvasDocs |> List.iter (fun doc ->
-                            CanvasDocOwnership.attribute path doc.Filename sessionId))
+                            let isNewOrChanged =
+                                match prevByName |> Map.tryFind doc.Filename with
+                                | None -> true
+                                | Some prevHash -> prevHash <> doc.ContentHash
+                            if isNewOrChanged then
+                                CanvasDocOwnership.attribute path doc.Filename sessionId))
+                    previousDocs.Value <- canvasDocs
                     agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                 CanvasScanner.tryCreateWatcher post path
                 |> Option.map (fun watcher ->
