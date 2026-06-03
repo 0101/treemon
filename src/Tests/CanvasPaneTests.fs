@@ -5,6 +5,7 @@ open System.IO
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
+open Tests.CanvasTestHelpers
 
 /// Branch name of the fixture worktree that has a CanvasDoc defined in
 /// src/Tests/fixtures/worktrees.json.  Tests target this known branch
@@ -26,14 +27,8 @@ type CanvasPaneTests() =
     let baseUrl = ServerFixture.viteUrl
     let canvasOrigin = "http://127.0.0.1:5002"
 
-    let canvasToggleBtn (page: IPage) =
-        page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
-
     let canvasPane (page: IPage) =
         page.Locator(".canvas-pane")
-
-    let canvasPaneOpen (page: IPage) =
-        page.Locator(".canvas-pane.open")
 
     let canvasIframe (page: IPage) =
         page.Locator(".canvas-pane .canvas-iframe")
@@ -46,40 +41,6 @@ type CanvasPaneTests() =
 
     let canvasTabs (page: IPage) =
         page.Locator(".canvas-pane .canvas-tab")
-
-    let dashboard (page: IPage) =
-        page.Locator(".dashboard")
-
-    /// Press ArrowDown from the dashboard until a wt-card receives focus.
-    /// The first ArrowDown typically lands on a repo-header; the second
-    /// reaches the first wt-card.
-    let focusFirstCard (page: IPage) =
-        task {
-            let db = dashboard page
-            do! db.FocusAsync()
-            // First ArrowDown lands on repo-header, second on first wt-card
-            do! page.Keyboard.PressAsync("ArrowDown")
-            do! page.Keyboard.PressAsync("ArrowDown")
-            let! _ = page.WaitForFunctionAsync(
-                "() => document.querySelector('.wt-card.focused') !== null",
-                null, PageWaitForFunctionOptions(Timeout = 5000.0f))
-            ()
-        }
-
-    /// Focus the card for a specific branch (the worktree with the canvas doc).
-    let focusCanvasCard (page: IPage) (branch: string) =
-        task {
-            let card =
-                page.Locator(
-                    ".wt-card",
-                    PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
-            do! card.First.ScrollIntoViewIfNeededAsync()
-            do! card.First.ClickAsync()
-            let! _ = page.WaitForFunctionAsync(
-                "() => document.querySelector('.focused') !== null",
-                null, PageWaitForFunctionOptions(Timeout = 5000.0f))
-            ()
-        }
 
     override this.ContextOptions() =
         let opts = base.ContextOptions()

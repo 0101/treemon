@@ -40,6 +40,7 @@
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
+    <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPaneTests.fs" />
     <Compile Include="CanvasPhase4Tests.fs" />
     <Compile Include="CanvasAwarenessTests.fs" />
