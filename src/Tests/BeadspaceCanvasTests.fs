@@ -298,17 +298,17 @@ type BeadspaceCanvasTests() =
     member this.``Data polling is configured with setInterval``() =
         task {
             // Verify that setInterval is set up for 30s polling by checking
-            // if the loadAndRender function exists and the interval is registered
+            // if the refreshData function exists and the interval is registered
             let! hasInterval = this.Page.EvaluateAsync<bool>(
                 "() => {
-                    // Check loadAndRender function exists
-                    if (typeof loadAndRender !== 'function') return false;
+                    // Check refreshData function exists
+                    if (typeof refreshData !== 'function') return false;
                     // Verify by patching fetch to track calls, then fast-forward a timer
                     return true;
                 }")
-            Assert.That(hasInterval, Is.True, "loadAndRender function should be defined for polling")
+            Assert.That(hasInterval, Is.True, "refreshData function should be defined for polling")
 
-            // Verify the polling mechanism works by calling loadAndRender and confirming fetch fires
+            // Verify the polling mechanism works by calling refreshData and confirming fetch fires
             let! fetchTriggered = this.Page.EvaluateAsync<bool>(
                 "() => new Promise(resolve => {
                     var origFetch = window.fetch;
@@ -317,13 +317,13 @@ type BeadspaceCanvasTests() =
                         if (url && url.indexOf('beads-data') !== -1) called = true;
                         return origFetch.apply(this, arguments);
                     };
-                    loadAndRender();
+                    refreshData();
                     setTimeout(function() {
                         window.fetch = origFetch;
                         resolve(called);
                     }, 1000);
                 })")
-            Assert.That(fetchTriggered, Is.True, "loadAndRender should fetch from beads-data endpoint")
+            Assert.That(fetchTriggered, Is.True, "refreshData should fetch from beads-data endpoint")
         }
 
     // ── Goal 5: PostMessage Refresh ──────────────────────────────────────
