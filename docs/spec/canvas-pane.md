@@ -54,13 +54,12 @@
 
 - Current shipped behavior uses a per-worktree bridge registry keyed by normalized worktree path.
 - Session registration for the same worktree is last-writer-wins.
-- The liveness dot shown in tabs and overview reflects bridge registration and heartbeat state only; it does not use `HasActiveSession`.
+- Each doc records its author `sessionId` via `CanvasDocOwnership.fs`.
+- The liveness dot shown in tabs and overview reflects the selected doc's `OwnerSessionId` against `BridgeLiveness`, so liveness is per-doc rather than per-worktree.
 - When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button.
 - `LaunchCanvasSession` uses the existing action-launch flow and includes the full absolute doc path plus canvas context in the prompt.
-- 🔮 Each doc records its author `sessionId`.
-- 🔮 Liveness becomes per-doc rather than per-worktree.
-- 🔮 Canvas messages route to the author session for the selected doc.
-- 🔮 If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
+- Canvas messages route to the author session for the selected doc.
+- If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
 
 ### Message Flow
 
@@ -93,6 +92,7 @@
 
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
 - Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
+- `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
 - The server injects scrollbar CSS, the canvas link interceptor, and the bridge heartbeat script into `</head>`.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
@@ -125,10 +125,13 @@
 | `src/Client/App.fs` | Elmish model and update logic for pane state, awareness, auto-display, routing, archive, and launch actions |
 | `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, liveness dot, iframe, banners, and message listener |
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
+| `src/Client/CanvasAwareness.fs` | Pure helpers for doc awareness: seeding viewed hashes, unviewed detection, canvas events, auto-display |
 | `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
 | `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
 | `src/Server/CanvasBridge.fs` | Session registry, poll registry, queueing, liveness, and bridge forwarding |
+| `src/Server/BeadspaceTemplate.fs` | Beadspace dashboard HTML template constant for auto-provisioning |
+| `src/Server/BeadspaceTemplate.html` | Source HTML for beadspace dashboard template |
 | `src/Server/Program.fs` | Canvas register endpoint, bridge status endpoint, doc server, HTML injection, heartbeat route |
 | `src/Server/PathUtils.fs` | Canvas path normalization and validation |
 | `src/Extension/extension.mjs` | Session bridge registration, `/inject` server, heartbeat, and reconnect backoff |
@@ -141,14 +144,14 @@
 - **Split bridge registry** — `sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting`, or `Failed`, avoiding illegal combinations of optional fields.
-- **🔮 Per-doc author routing** — the target model is per-doc ownership by `sessionId`, but current routing remains per-worktree until ownership is implemented.
+- **Per-doc author routing** — docs persist ownership by `sessionId`, canvas messages route to the selected doc's owner session, and liveness/resume operate per doc instead of per-worktree.
 
 ## Implementation Status
 
-- Shipped: Phase 1-4, multi-doc discovery, overview, toolbar positioning, archive, bridge resilience, awareness, liveness indicators, queueing, and review fixes.
-- 🔮 Per-doc author routing is not implemented yet. See `.agents/canvas-bridge-handover.md`.
+- Shipped: Phase 1-4, multi-doc discovery, overview, toolbar positioning, archive, bridge resilience, awareness, per-doc author routing, liveness indicators, queueing, auto-resume, and review fixes.
+- Shipped: Per-doc author routing is implemented via `CanvasDocOwnership.fs`.
 - 🔮 DOM morph and state persistence are not implemented yet.
-- 🔮 Bundled templates and wider canvas ecosystem work have not started.
+- Shipped: `BeadspaceTemplate` is the first bundled template; wider canvas ecosystem work is still ahead.
 
 ## Related Specs
 

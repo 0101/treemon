@@ -49,10 +49,10 @@ In the refresh scheduler, when scanning worktrees:
 
 ### Key Files
 
-| File | Change |
-|------|--------|
-| `src/Server/BeadsStatus.fs` | Add `getBeadsIssueList` function |
-| `src/Server/Program.fs` | Add `beads-data` route to CanvasDocServer |
-| `src/Server/BeadspaceTemplate.html` | Customized Beadspace template |
+| File | Purpose |
+|------|---------|
+| `src/Server/BeadsStatus.fs` | `getBeadsIssueList` (full issue JSON) and `getBeadsSummary` (status counts) |
+| `src/Server/Program.fs` | `beads-data` route on CanvasDocServer (port 5002) |
+| `src/Server/BeadspaceTemplate.html` | Customized Beadspace template source |
 | `src/Server/BeadspaceTemplate.fs` | String constant exposing the template HTML |
 | `src/Server/RefreshScheduler.fs` | Auto-provision logic on worktree scan |
