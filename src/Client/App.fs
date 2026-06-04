@@ -824,7 +824,7 @@ let cardClassName (wt: WorktreeStatus) =
     let session = if wt.HasActiveSession then " has-session" else ""
     if isMerged wt then $"wt-card ct-{ct} merged{session}" else $"wt-card ct-{ct}{session}"
 
-let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
+let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Blocked + b.Closed
 
 let segmentPct count total =
     match total with
@@ -838,6 +838,8 @@ let beadsCounts (className: string) (b: BeadsSummary) =
             Html.span [ prop.className "beads-open"; prop.text (string b.Open) ]
             Html.span [ prop.className "beads-sep"; prop.text "/" ]
             Html.span [ prop.className "beads-inprogress"; prop.text (string b.InProgress) ]
+            Html.span [ prop.className "beads-sep"; prop.text "/" ]
+            Html.span [ prop.className "beads-blocked"; prop.text (string b.Blocked) ]
             Html.span [ prop.className "beads-sep"; prop.text "/" ]
             Html.span [ prop.className "beads-closed"; prop.text (string b.Closed) ]
         ]
@@ -855,6 +857,10 @@ let beadsProgressBar (b: BeadsSummary) =
             Html.div [
                 prop.className "progress-segment seg-inprogress"
                 prop.style [ style.width (length.percent (segmentPct b.InProgress total)) ]
+            ]
+            Html.div [
+                prop.className "progress-segment seg-blocked"
+                prop.style [ style.width (length.percent (segmentPct b.Blocked total)) ]
             ]
             Html.div [
                 prop.className "progress-segment seg-closed"

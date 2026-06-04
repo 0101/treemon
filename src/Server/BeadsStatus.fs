@@ -29,6 +29,7 @@ let private parseCountResponse (json: string) =
 
         { Open = findCount "open"
           InProgress = findCount "in_progress"
+          Blocked = findCount "blocked"
           Closed = findCount "closed" }
     with ex ->
         Log.log "Beads" $"Failed to parse bd JSON: {ex.Message}, raw input: {json}"

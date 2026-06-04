@@ -28,10 +28,11 @@ module BranchName =
 type BeadsSummary =
     { Open: int
       InProgress: int
+      Blocked: int
       Closed: int }
 
 module BeadsSummary =
-    let zero = { Open = 0; InProgress = 0; Closed = 0 }
+    let zero = { Open = 0; InProgress = 0; Blocked = 0; Closed = 0 }
 
 type CodingToolStatus =
     | Working

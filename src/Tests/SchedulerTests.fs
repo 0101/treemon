@@ -247,7 +247,7 @@ type StateAgentTests() =
 
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
 
-            let beads : Shared.BeadsSummary = { Open = 1; InProgress = 2; Closed = 3 }
+            let beads : Shared.BeadsSummary = { Open = 1; InProgress = 2; Blocked = 0; Closed = 3 }
             agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads))
             do! waitForAgent agent
 
@@ -334,7 +334,7 @@ type StateAgentTests() =
             agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
-            let beads : Shared.BeadsSummary = { Open = 1; InProgress = 0; Closed = 0 }
+            let beads : Shared.BeadsSummary = { Open = 1; InProgress = 0; Blocked = 0; Closed = 0 }
             agent.Post(UpdateBeads(testRepoId, "/repo/unknown", beads))
 
             let! state = agent.PostAndAsyncReply(GetState)

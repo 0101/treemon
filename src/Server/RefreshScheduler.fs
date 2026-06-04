@@ -454,7 +454,7 @@ let private executeTask
             agent.Post(UpdateBeads(repoId, path, beads))
 
             let beadsHtml = Path.Combine(path, ".agents", "canvas", "beads.html")
-            let hasIssues = beads.Open + beads.InProgress + beads.Closed > 0
+            let hasIssues = beads.Open + beads.InProgress + beads.Blocked + beads.Closed > 0
 
             if hasIssues && not (File.Exists(beadsHtml)) then
                 let dir = Path.GetDirectoryName(beadsHtml)
