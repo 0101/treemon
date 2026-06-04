@@ -1,19 +1,19 @@
 module Server.CanvasDocOwnership
 
-open System
-open System.Collections.Concurrent
 open System.IO
 open System.Text.Json
 
 let private normalizePath = Server.PathUtils.normalizePath
 
-// Mutable: ConcurrentDictionary used for thread-safe ownership tracking;
-// simple read/write access pattern doesn't warrant MailboxProcessor overhead.
-let private ownership = ConcurrentDictionary<string, Map<string, string>>(StringComparer.OrdinalIgnoreCase)
-
 let private filePath = Path.Combine("data", "canvas-owners.json")
 
-let private persistImpl () =
+type private Msg =
+    | Attribute of key: string * filename: string * sessionId: string
+    | GetOwner of key: string * filename: string * AsyncReplyChannel<string option>
+    | GetAll of key: string * AsyncReplyChannel<Map<string, string>>
+    | Load of state: Map<string, Map<string, string>>
+
+let private persistImpl (state: Map<string, Map<string, string>>) =
     async {
         try
             let dir = Path.GetDirectoryName(filePath)
@@ -24,11 +24,11 @@ let private persistImpl () =
             use writer = new Utf8JsonWriter(stream, options)
             writer.WriteStartObject()
 
-            ownership
-            |> Seq.iter (fun kvp ->
-                writer.WritePropertyName(kvp.Key)
+            state
+            |> Map.iter (fun worktreeKey docs ->
+                writer.WritePropertyName(worktreeKey)
                 writer.WriteStartObject()
-                kvp.Value |> Map.iter (fun filename sessionId ->
+                docs |> Map.iter (fun filename sessionId ->
                     writer.WriteString(filename, sessionId))
                 writer.WriteEndObject())
 
@@ -43,45 +43,55 @@ let private persistImpl () =
             Log.log "CanvasDocOwnership" $"Failed to persist: {ex.Message}"
     }
 
-// Serializes persist calls through a MailboxProcessor to avoid
-// concurrent writes racing on the shared temp file path.
-let private persistAgent =
+let private agent =
     MailboxProcessor.Start(fun inbox ->
-        let rec loop () =
+        let rec loop (state: Map<string, Map<string, string>>) =
             async {
-                let! _msg = inbox.Receive()
-                do! persistImpl ()
-                return! loop ()
-            }
-        loop ())
+                let! msg = inbox.Receive()
 
-let private persist () = persistAgent.Post(())
+                match msg with
+                | Attribute(key, filename, sessionId) ->
+                    let docs =
+                        state
+                        |> Map.tryFind key
+                        |> Option.defaultValue Map.empty
+                        |> Map.add filename sessionId
+
+                    let state' = state |> Map.add key docs
+                    do! persistImpl state'
+                    return! loop state'
+
+                | GetOwner(key, filename, reply) ->
+                    state
+                    |> Map.tryFind key
+                    |> Option.bind (Map.tryFind filename)
+                    |> reply.Reply
+
+                    return! loop state
+
+                | GetAll(key, reply) ->
+                    state
+                    |> Map.tryFind key
+                    |> Option.defaultValue Map.empty
+                    |> reply.Reply
+
+                    return! loop state
+
+                | Load loaded ->
+                    Log.log "CanvasDocOwnership" $"Loaded ownership for {Map.count loaded} worktree(s)"
+                    return! loop loaded
+            }
+
+        loop Map.empty)
 
 let attribute (worktreePath: string) (filename: string) (sessionId: string) =
-    let key = normalizePath worktreePath
+    agent.Post(Attribute(normalizePath worktreePath, filename, sessionId))
 
-    ownership.AddOrUpdate(
-        key,
-        Map.ofList [ filename, sessionId ],
-        fun _ existing -> existing |> Map.add filename sessionId
-    )
-    |> ignore
+let getOwner (worktreePath: string) (filename: string) =
+    agent.PostAndAsyncReply(fun reply -> GetOwner(normalizePath worktreePath, filename, reply))
 
-    persist ()
-
-let getOwner (worktreePath: string) (filename: string) : string option =
-    let key = normalizePath worktreePath
-
-    match ownership.TryGetValue(key) with
-    | true, docs -> docs |> Map.tryFind filename
-    | false, _ -> None
-
-let getAll (worktreePath: string) : Map<string, string> =
-    let key = normalizePath worktreePath
-
-    match ownership.TryGetValue(key) with
-    | true, docs -> docs
-    | false, _ -> Map.empty
+let getAll (worktreePath: string) =
+    agent.PostAndAsyncReply(fun reply -> GetAll(normalizePath worktreePath, reply))
 
 let load () =
     try
@@ -89,16 +99,18 @@ let load () =
             let json = File.ReadAllText(filePath)
             use doc = JsonDocument.Parse(json)
 
-            doc.RootElement.EnumerateObject()
-            |> Seq.iter (fun worktreeProp ->
-                let docs =
-                    worktreeProp.Value.EnumerateObject()
-                    |> Seq.fold (fun acc prop ->
-                        acc |> Map.add (prop.Name) (prop.Value.GetString())
-                    ) Map.empty
+            let state =
+                doc.RootElement.EnumerateObject()
+                |> Seq.fold (fun acc worktreeProp ->
+                    let docs =
+                        worktreeProp.Value.EnumerateObject()
+                        |> Seq.fold (fun acc prop ->
+                            acc |> Map.add (prop.Name) (prop.Value.GetString())
+                        ) Map.empty
 
-                ownership[normalizePath worktreeProp.Name] <- docs)
+                    acc |> Map.add (normalizePath worktreeProp.Name) docs
+                ) Map.empty
 
-            Log.log "CanvasDocOwnership" $"Loaded ownership for {ownership.Count} worktree(s)"
+            agent.Post(Load state)
     with ex ->
         Log.log "CanvasDocOwnership" $"Failed to load: {ex.Message}"

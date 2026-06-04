@@ -14,21 +14,25 @@ let private hashFile (filePath: string) =
     |> Array.map _.ToString("x2")
     |> String.Concat
 
-let scan (worktreePath: string) : CanvasDoc list =
-    let dir = canvasDir worktreePath
-    if Directory.Exists(dir) then
-        let owners = CanvasDocOwnership.getAll worktreePath
-        Directory.GetFiles(dir, "*.html")
-        |> Array.sort
-        |> Array.map (fun filePath ->
-            let filename = Path.GetFileName(filePath)
-            { Filename = filename
-              ContentHash = hashFile filePath
-              LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
-              OwnerSessionId = owners |> Map.tryFind filename })
-        |> Array.toList
-    else
-        []
+let scan (worktreePath: string) =
+    async {
+        let dir = canvasDir worktreePath
+        if Directory.Exists(dir) then
+            let! owners = CanvasDocOwnership.getAll worktreePath
+
+            return
+                Directory.GetFiles(dir, "*.html")
+                |> Array.sort
+                |> Array.map (fun filePath ->
+                    let filename = Path.GetFileName(filePath)
+                    { Filename = filename
+                      ContentHash = hashFile filePath
+                      LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
+                      OwnerSessionId = owners |> Map.tryFind filename })
+                |> Array.toList
+        else
+            return []
+    }
 
 let tryCreateWatcher (post: CanvasDoc list -> unit) (worktreePath: string) : FileSystemWatcher option =
     let dir = canvasDir worktreePath
@@ -37,8 +41,13 @@ let tryCreateWatcher (post: CanvasDoc list -> unit) (worktreePath: string) : Fil
         let watcher = new FileSystemWatcher(dir, "*.html")
         let handleEvent (eventType: string) (e: FileSystemEventArgs) =
             Log.log "CanvasWatcher" $"{eventType}: {e.Name} in {branch}"
-            try scan worktreePath |> post
-            with _ -> ()
+            async {
+                try
+                    let! docs = scan worktreePath
+                    post docs
+                with _ -> ()
+            }
+            |> Async.Start
         watcher.Changed.Add(handleEvent "Changed")
         watcher.Created.Add(handleEvent "Created")
         watcher.Deleted.Add(handleEvent "Deleted")

@@ -381,7 +381,7 @@ let private executeTask
             let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
 
-            let canvasDocs = CanvasScanner.scan path
+            let! canvasDocs = CanvasScanner.scan path
             let branch = Path.GetFileName(path)
             let previous = repo.CanvasData |> Map.tryFind path |> Option.defaultValue []
             let prevNames = previous |> List.map _.Filename |> Set.ofList
@@ -562,61 +562,70 @@ module CanvasWatchers =
         (agent: MailboxProcessor<StateMsg>)
         (repos: Map<RepoId, PerRepoState>)
         (current: Map<string, FileSystemWatcher>)
-        : Map<string, FileSystemWatcher> =
-        let allPaths =
-            repos
-            |> Map.toSeq
-            |> Seq.collect (fun (_, repo) -> repo.KnownPaths)
-            |> Set.ofSeq
+        =
+        async {
+            let allPaths =
+                repos
+                |> Map.toSeq
+                |> Seq.collect (fun (_, repo) -> repo.KnownPaths)
+                |> Set.ofSeq
 
-        let removed =
-            current
-            |> Map.filter (fun path _ -> not (Set.contains path allPaths))
+            let removed =
+                current
+                |> Map.filter (fun path _ -> not (Set.contains path allPaths))
 
-        removed |> Map.iter (fun path watcher ->
-            try watcher.Dispose()
-            with _ -> ()
-            Log.log "CanvasWatcher" $"Disposed watcher for {Path.GetFileName(path)}")
+            removed |> Map.iter (fun path watcher ->
+                try watcher.Dispose()
+                with _ -> ()
+                Log.log "CanvasWatcher" $"Disposed watcher for {Path.GetFileName(path)}")
 
-        let surviving = current |> Map.filter (fun path _ -> Set.contains path allPaths)
+            let surviving = current |> Map.filter (fun path _ -> Set.contains path allPaths)
 
-        let repoIdByPath =
-            repos
-            |> Map.toSeq
-            |> Seq.collect (fun (repoId, repo) -> repo.KnownPaths |> Seq.map (fun p -> p, repoId))
-            |> Map.ofSeq
+            let repoIdByPath =
+                repos
+                |> Map.toSeq
+                |> Seq.collect (fun (repoId, repo) -> repo.KnownPaths |> Seq.map (fun p -> p, repoId))
+                |> Map.ofSeq
 
-        let newPaths = Set.difference allPaths (current |> Map.keys |> Set.ofSeq)
+            let newPaths = Set.difference allPaths (current |> Map.keys |> Set.ofSeq)
 
-        let added =
-            newPaths
-            |> Set.toList
-            |> List.choose (fun path ->
-                let repoId = repoIdByPath |> Map.find path
-                // Track previous docs per-watcher to diff on each callback.
-                // ref cell is isolated per closure — not shared across watchers.
-                let previousDocs = ref (CanvasScanner.scan path)
-                let post (canvasDocs: CanvasDoc list) =
-                    let prev = previousDocs.Value
-                    let prevByName = prev |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
-                    CanvasBridge.getSessionForWorktree path
-                    |> Option.iter (fun sessionId ->
-                        canvasDocs |> List.iter (fun doc ->
-                            let isNewOrChanged =
-                                match prevByName |> Map.tryFind doc.Filename with
-                                | None -> true
-                                | Some prevHash -> prevHash <> doc.ContentHash
-                            if isNewOrChanged then
-                                CanvasDocOwnership.attribute path doc.Filename sessionId))
-                    previousDocs.Value <- canvasDocs
-                    agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
-                CanvasScanner.tryCreateWatcher post path
-                |> Option.map (fun watcher ->
-                    Log.log "CanvasWatcher" $"Created watcher for {Path.GetFileName(path)}"
-                    path, watcher))
-            |> Map.ofList
+            let! added =
+                newPaths
+                |> Set.toList
+                |> List.map (fun path ->
+                    async {
+                        let repoId = repoIdByPath |> Map.find path
+                        // Track previous docs per-watcher to diff on each callback.
+                        // ref cell is isolated per closure — not shared across watchers.
+                        let! initialDocs = CanvasScanner.scan path
+                        let previousDocs = ref initialDocs
+                        let post (canvasDocs: CanvasDoc list) =
+                            let prev = previousDocs.Value
+                            let prevByName = prev |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
+                            CanvasBridge.getSessionForWorktree path
+                            |> Option.iter (fun sessionId ->
+                                canvasDocs |> List.iter (fun doc ->
+                                    let isNewOrChanged =
+                                        match prevByName |> Map.tryFind doc.Filename with
+                                        | None -> true
+                                        | Some prevHash -> prevHash <> doc.ContentHash
+                                    if isNewOrChanged then
+                                        CanvasDocOwnership.attribute path doc.Filename sessionId))
+                            previousDocs.Value <- canvasDocs
+                            agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
+                        return
+                            CanvasScanner.tryCreateWatcher post path
+                            |> Option.map (fun watcher ->
+                                Log.log "CanvasWatcher" $"Created watcher for {Path.GetFileName(path)}"
+                                path, watcher)
+                    })
+                |> Async.Sequential
 
-        Map.fold (fun acc k v -> Map.add k v acc) surviving added
+            let added =
+                added |> Array.toList |> List.choose id |> Map.ofList
+
+            return Map.fold (fun acc k v -> Map.add k v acc) surviving added
+        }
 
     let disposeAll (watchers: Map<string, FileSystemWatcher>) =
         watchers |> Map.iter (fun _ watcher ->
@@ -643,7 +652,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 if Map.isEmpty state.Repos then initialRepos
                 else state.Repos
 
-            let watchers = CanvasWatchers.reconcile agent repos watchers
+            let! watchers = CanvasWatchers.reconcile agent repos watchers
             latestWatchers.Value <- watchers
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
@@ -684,7 +693,8 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
         async {
             let! lastRuns = runInitialBurst agent rootPaths
             let! state = agent.PostAndAsyncReply(GetState)
-            let latestWatchers = ref (CanvasWatchers.reconcile agent state.Repos Map.empty)
+            let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
+            let latestWatchers = ref initialWatchers
             try
                 return! loop latestWatchers lastRuns latestWatchers.Value
             finally

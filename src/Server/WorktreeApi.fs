@@ -688,7 +688,7 @@ let worktreeApi
                       let guardKey = path
                       if canvasSpawnInFlight.TryAdd(guardKey, true) then
                           try
-                              let owner = CanvasDocOwnership.getOwner path request.Filename
+                              let! owner = CanvasDocOwnership.getOwner path request.Filename
                               let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                               let provider = resolveProvider state path
                               let launchNewSession () =
