@@ -6,13 +6,15 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
 
 ## Expected Behavior
 
-- Any worktree with `.beads/beads.db` gets a `beads.html` canvas page auto-provisioned
+- Any worktree with `.beads/beads.db` **and at least one beads issue** gets a `beads.html` canvas page auto-provisioned. Worktrees with an empty database (zero issues) do not get a dashboard.
+- If a previously-provisioned `beads.html` exists but the database now has zero issues, the dashboard is removed (file deleted) so it doesn't show an empty page.
 - The page renders a **dashboard view** (status donut, priority/label/type charts, completion %, active issues, triage suggestions) and a **sortable/filterable issues table**
 - Clicking an issue row expands a **detail panel** showing: full description, all labels, priority badge, type badge, dependency count, dependent count, age
 - Data refreshes every 30 seconds by polling a same-origin JSON endpoint on port 5002
+- Data refresh is **incremental** — only changed elements update in-place. Scroll position, expanded detail panels, active nav tab, filter/sort selections, and search input are preserved across polls.
 - Theme matches Catppuccin Mocha (canvas pane dark theme)
 - No external dependencies (CDN, fonts, frameworks) — fully self-contained HTML
-- A postMessage `{ action: 'refresh-beads' }` triggers immediate data reload
+- A postMessage `{ action: 'refresh-beads' }` triggers immediate data reload (also incremental)
 
 ## Technical Approach
 
@@ -42,10 +44,22 @@ Add to `CanvasDocServer` (port 5002):
 ### Auto-Provisioning
 
 In the refresh scheduler, when scanning worktrees:
-- If `.beads/beads.db` exists AND `.agents/canvas/beads.html` doesn't exist → write the template
+- If `.beads/beads.db` exists AND has at least one issue AND `.agents/canvas/beads.html` doesn't exist → write the template
+- If `.beads/beads.db` has zero issues AND `.agents/canvas/beads.html` exists → delete `beads.html`
 - Template is stored as a string constant in `BeadspaceTemplate.fs` module in the Server project
 - Creates `.agents/canvas/` directory if needed
-- Leaves existing `beads.html` alone (user may have customized)
+- Leaves existing `beads.html` alone (user may have customized) unless removing due to zero issues
+
+### Incremental Data Refresh
+
+The template's `loadAndRender()` must distinguish initial render from subsequent polls:
+- **Initial render**: full DOM build (dashboard + issues view + event binding)
+- **Subsequent polls**: update only what changed:
+  - Dashboard stat numbers update via `textContent` on existing elements
+  - Issues table replaces only `<tbody>`, not the entire table or container
+  - Scroll position saved/restored around table body replacement
+  - Active nav tab, filter chip state, and search input preserved from `tableState`
+  - Expanded detail panel re-expanded if `tableState.expandedId` is still present in new data
 
 ### Key Files
 
