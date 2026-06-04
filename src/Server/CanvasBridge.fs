@@ -61,9 +61,8 @@ let private drainQueue (key: string) (entry: SessionEntry) =
         if not (List.isEmpty valid) then
             Log.log "CanvasBridge" $"Draining {List.length valid} queued message(s) for {key}"
 
-            valid
-            |> List.iter (fun msg ->
-                async {
+            async {
+                for msg in valid do
                     try
                         use content = new StringContent(msg.Payload, Encoding.UTF8, "application/json")
                         let! response = httpClient.PostAsync(entry.InjectUrl, content) |> Async.AwaitTask
@@ -76,8 +75,8 @@ let private drainQueue (key: string) (entry: SessionEntry) =
                             Log.log "CanvasBridge" $"Drain forward failed for {key}: {int response.StatusCode} {body}"
                     with ex ->
                         Log.log "CanvasBridge" $"Drain forward error for {key}: {ex.Message}"
-                }
-                |> Async.Start)
+            }
+            |> Async.Start
 
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
     let key = normalizePath worktreePath
@@ -112,8 +111,7 @@ let sendMessage (request: CanvasMessageRequest) =
             match sessionRegistry.TryGetValue(key) with
             | true, entry when isSessionAlive entry -> Some entry
             | true, entry ->
-                Log.log "CanvasBridge" $"sendMessage: stale session for {Path.GetFileName(key)} (age={(DateTime.UtcNow - entry.RegisteredAt).TotalSeconds:F0}s), evicting"
-                sessionRegistry.TryRemove(key) |> ignore
+                Log.log "CanvasBridge" $"sendMessage: stale session for {Path.GetFileName(key)} (age={(DateTime.UtcNow - entry.RegisteredAt).TotalSeconds:F0}s), ignoring"
                 None
             | false, _ -> None
 
@@ -154,22 +152,28 @@ let drainPending (worktreePath: string) : string list =
         valid |> List.map _.Payload
     | false, _ -> []
 
+let private computeLiveness (session: (bool * SessionEntry)) (poll: (bool * DateTime)) =
+    match session, poll with
+    | (true, entry), (true, hb) ->
+        let age = min (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds (DateTime.UtcNow - hb).TotalSeconds
+        Some (age, { IsAlive = isSessionAlive entry || isPollAlive hb; SessionId = entry.SessionId })
+    | (true, entry), (false, _) ->
+        let age = (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds
+        Some (age, { IsAlive = isSessionAlive entry; SessionId = entry.SessionId })
+    | (false, _), (true, hb) ->
+        let age = (DateTime.UtcNow - hb).TotalSeconds
+        Some (age, { IsAlive = isPollAlive hb; SessionId = None })
+    | (false, _), (false, _) -> None
+
 let getStatus (worktreePath: string) =
     let key = normalizePath worktreePath
     let session = sessionRegistry.TryGetValue(key)
     let poll = pollRegistry.TryGetValue(key)
 
-    match session, poll with
-    | (true, entry), (true, hb) ->
-        let age = min (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds (DateTime.UtcNow - hb).TotalSeconds
-        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isSessionAlive entry || isPollAlive hb; SessionId = entry.SessionId |}
-    | (true, entry), (false, _) ->
-        let age = (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds
-        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isSessionAlive entry; SessionId = entry.SessionId |}
-    | (false, _), (true, hb) ->
-        let age = (DateTime.UtcNow - hb).TotalSeconds
-        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = isPollAlive hb; SessionId = None |}
-    | (false, _), (false, _) ->
+    match computeLiveness session poll with
+    | Some (age, liveness) ->
+        {| Registered = true; LastHeartbeatAge = Some age; IsAlive = liveness.IsAlive; SessionId = liveness.SessionId |}
+    | None ->
         {| Registered = false; LastHeartbeatAge = None; IsAlive = false; SessionId = None |}
 
 let getSessionForWorktree (worktreePath: string) : string option =
@@ -185,13 +189,5 @@ let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
         let key = normalizePath path
         let session = sessionRegistry.TryGetValue(key)
         let poll = pollRegistry.TryGetValue(key)
-
-        match session, poll with
-        | (true, entry), (true, hb) ->
-            Some (path, { IsAlive = isSessionAlive entry || isPollAlive hb; SessionId = entry.SessionId })
-        | (true, entry), (false, _) ->
-            Some (path, { IsAlive = isSessionAlive entry; SessionId = entry.SessionId })
-        | (false, _), (true, hb) ->
-            Some (path, { IsAlive = isPollAlive hb; SessionId = None })
-        | (false, _), (false, _) -> None)
+        computeLiveness session poll |> Option.map (fun (_, liveness) -> path, liveness))
     |> Map.ofList
