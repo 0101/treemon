@@ -1195,41 +1195,19 @@ function createDetailRow(issue, colSpan) {
     var badges = document.createElement('div');
     badges.className = 'detail-badges';
 
-    var priBadge = document.createElement('span');
-    priBadge.className = 'detail-badge priority';
-    priBadge.textContent = pLabel(issue.priority);
-    badges.appendChild(priBadge);
-
-    var typeBadge = document.createElement('span');
-    typeBadge.className = 'detail-badge type';
-    typeBadge.textContent = issue.issue_type || 'task';
-    badges.appendChild(typeBadge);
-
-    if (issue.dependency_count > 0) {
-        var depBadge = document.createElement('span');
-        depBadge.className = 'detail-badge deps';
-        depBadge.textContent = issue.dependency_count + ' dependencies';
-        badges.appendChild(depBadge);
+    function addBadge(container, className, text) {
+        var el = document.createElement('span');
+        el.className = 'detail-badge ' + className;
+        el.textContent = text;
+        container.appendChild(el);
     }
 
-    if (issue.dependent_count > 0) {
-        var dntBadge = document.createElement('span');
-        dntBadge.className = 'detail-badge deps';
-        dntBadge.textContent = issue.dependent_count + ' dependents';
-        badges.appendChild(dntBadge);
-    }
-
-    var ageBadge = document.createElement('span');
-    ageBadge.className = 'detail-badge deps';
-    ageBadge.textContent = 'Created ' + ageLabel(issue.created_at) + ' ago';
-    badges.appendChild(ageBadge);
-
-    if (issue.updated_at) {
-        var updBadge = document.createElement('span');
-        updBadge.className = 'detail-badge deps';
-        updBadge.textContent = 'Updated ' + ageLabel(issue.updated_at) + ' ago';
-        badges.appendChild(updBadge);
-    }
+    addBadge(badges, 'priority', pLabel(issue.priority));
+    addBadge(badges, 'type', issue.issue_type || 'task');
+    if (issue.dependency_count > 0) addBadge(badges, 'deps', issue.dependency_count + ' dependencies');
+    if (issue.dependent_count > 0) addBadge(badges, 'deps', issue.dependent_count + ' dependents');
+    addBadge(badges, 'deps', 'Created ' + ageLabel(issue.created_at) + ' ago');
+    if (issue.updated_at) addBadge(badges, 'deps', 'Updated ' + ageLabel(issue.updated_at) + ' ago');
 
     content.appendChild(badges);
 
