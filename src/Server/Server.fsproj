@@ -37,6 +37,7 @@
     <Compile Include="SyncEngine.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
+    <Compile Include="CanvasDocServer.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
