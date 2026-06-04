@@ -1116,12 +1116,12 @@ function renderDashboard(issues) {
 
     return '<div id="view-dashboard" class="view active">' +
         '<div class="stats-row">' +
-        '<div class="stat-card accent"><div class="stat-value">' + total + '</div><div class="stat-label">Total</div></div>' +
-        '<div class="stat-card open"><div class="stat-value">' + open.length + '</div><div class="stat-label">Open</div></div>' +
-        '<div class="stat-card wip"><div class="stat-value">' + wip.length + '</div><div class="stat-label">In Progress</div></div>' +
-        '<div class="stat-card blocked"><div class="stat-value">' + blocked.length + '</div><div class="stat-label">Blocked</div></div>' +
-        '<div class="stat-card closed"><div class="stat-value">' + closed.length + '</div><div class="stat-label">Closed</div></div>' +
-        '<div class="stat-card completion"><div class="stat-value">' + completionPct + '%</div><div class="stat-label">Completion</div></div>' +
+        '<div class="stat-card accent"><div class="stat-value" data-stat="total">' + total + '</div><div class="stat-label">Total</div></div>' +
+        '<div class="stat-card open"><div class="stat-value" data-stat="open">' + open.length + '</div><div class="stat-label">Open</div></div>' +
+        '<div class="stat-card wip"><div class="stat-value" data-stat="wip">' + wip.length + '</div><div class="stat-label">In Progress</div></div>' +
+        '<div class="stat-card blocked"><div class="stat-value" data-stat="blocked">' + blocked.length + '</div><div class="stat-label">Blocked</div></div>' +
+        '<div class="stat-card closed"><div class="stat-value" data-stat="closed">' + closed.length + '</div><div class="stat-label">Closed</div></div>' +
+        '<div class="stat-card completion"><div class="stat-value" data-stat="completion">' + completionPct + '%</div><div class="stat-label">Completion</div></div>' +
         '</div>' +
         '<div class="dashboard-grid"><div class="main-column">' +
         '<div class="panel" style="margin-bottom:1rem"><div class="panel-header"><span class="panel-title">Triage Suggestions</span><span class="panel-count">' + suggestions.length + '</span></div><div class="panel-body">' + suggestionsHtml + '</div></div>' +
@@ -1149,14 +1149,22 @@ var tableState = {
 };
 
 function renderIssuesView() {
+    var filters = [
+        { value: 'all', label: 'All' },
+        { value: 'open', label: 'Open' },
+        { value: 'in_progress', label: 'WIP' },
+        { value: 'blocked', label: 'Blocked' },
+        { value: 'closed', label: 'Closed' }
+    ];
+    var chipsHtml = filters.map(function(f) {
+        var cls = f.value === tableState.filter ? 'filter-chip active' : 'filter-chip';
+        return '<button class="' + cls + '" data-filter="' + f.value + '">' + f.label + '</button>';
+    }).join('');
     return '<div id="view-issues" class="view">' +
         '<div class="search-bar">' +
-        '<input type="text" class="search-input" id="search" placeholder="Search issues..." autocomplete="off">' +
-        '<button class="filter-chip" data-filter="all">All</button>' +
-        '<button class="filter-chip active" data-filter="open">Open</button>' +
-        '<button class="filter-chip" data-filter="in_progress">WIP</button>' +
-        '<button class="filter-chip" data-filter="blocked">Blocked</button>' +
-        '<button class="filter-chip" data-filter="closed">Closed</button>' +
+        '<input type="text" class="search-input" id="search" placeholder="Search issues..." autocomplete="off"' +
+        (tableState.query ? ' value="' + esc(tableState.query) + '"' : '') + '>' +
+        chipsHtml +
         '</div>' +
         '<table class="issues-table"><thead><tr>' +
         '<th data-sort="id">ID</th>' +
@@ -1408,38 +1416,99 @@ document.title = pageName;
 
 // ─── Data fetching and rendering ─────────────────────────────────────────────
 var currentIssues = [];
+var initialized = false;
 
-function loadAndRender() {
+// ─── Update dashboard stats in-place (no DOM rebuild) ────────────────────────
+function updateDashboard(issues) {
+    var s = computeStats(issues);
+
+    // Update stat card values via data-stat attributes
+    var statMap = {
+        total: String(s.total),
+        open: String(s.open.length),
+        wip: String(s.wip.length),
+        blocked: String(s.blocked.length),
+        closed: String(s.closed.length),
+        completion: s.completionPct + '%'
+    };
+    Object.keys(statMap).forEach(function(key) {
+        var el = document.querySelector('[data-stat="' + key + '"]');
+        if (el) el.textContent = statMap[key];
+    });
+
+    // Rebuild dashboard panels (triage, active, charts change shape too much for textContent)
+    var dashView = document.getElementById('view-dashboard');
+    if (dashView) {
+        var wasActive = dashView.classList.contains('active');
+        var newDash = document.createElement('div');
+        newDash.innerHTML = renderDashboard(issues);
+        var newDashView = newDash.firstChild;
+        if (wasActive) newDashView.classList.add('active');
+        dashView.parentNode.replaceChild(newDashView, dashView);
+    }
+}
+
+// ─── Initial render: full DOM build + event binding (called once) ────────────
+function initialRender(issues) {
+    currentIssues = issues;
+    tableState.issues = issues;
+    document.getElementById('topbar-meta').textContent = issues.length + ' issues';
+
+    var app = document.getElementById('app');
+    app.textContent = '';
+    app.insertAdjacentHTML('beforeend', renderDashboard(issues));
+    app.insertAdjacentHTML('beforeend', renderIssuesView());
+
+    // Bind navigation
+    document.querySelectorAll('.nav-tab').forEach(function(tab) {
+        tab.addEventListener('click', function() {
+            document.querySelectorAll('.nav-tab').forEach(function(t) { t.classList.remove('active'); });
+            document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
+            tab.classList.add('active');
+            document.getElementById('view-' + tab.dataset.view).classList.add('active');
+        });
+    });
+
+    // Bind issues table events and render
+    bindIssuesEvents();
+    renderIssuesTable();
+    initialized = true;
+}
+
+// ─── Incremental refresh: update data without destroying UI state ────────────
+function refreshData() {
     fetch(dataUrl)
         .then(function(r) {
             if (!r.ok) throw new Error('Failed to load beads data (HTTP ' + r.status + ')');
             return r.json();
         })
         .then(function(issues) {
+            if (!initialized) {
+                initialRender(issues);
+                return;
+            }
+
+            // Update data
             currentIssues = issues;
             tableState.issues = issues;
             document.getElementById('topbar-meta').textContent = issues.length + ' issues';
 
-            var app = document.getElementById('app');
-            app.textContent = '';
-            app.insertAdjacentHTML('beforeend', renderDashboard(issues));
-            app.insertAdjacentHTML('beforeend', renderIssuesView());
+            // Incremental dashboard update
+            updateDashboard(issues);
 
-            // Bind navigation
-            document.querySelectorAll('.nav-tab').forEach(function(tab) {
-                tab.addEventListener('click', function() {
-                    document.querySelectorAll('.nav-tab').forEach(function(t) { t.classList.remove('active'); });
-                    document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
-                    tab.classList.add('active');
-                    document.getElementById('view-' + tab.dataset.view).classList.add('active');
-                });
-            });
+            // Save scroll position of the issues table container
+            var tbody = document.getElementById('issues-tbody');
+            var scrollContainer = tbody ? tbody.closest('.view') || tbody.parentElement : null;
+            var savedScroll = scrollContainer ? scrollContainer.scrollTop : 0;
 
-            // Bind issues table events and render
-            bindIssuesEvents();
+            // Re-render only the tbody (preserves search, filter chips, sort, thead)
             renderIssuesTable();
+
+            // Restore scroll position
+            if (scrollContainer) scrollContainer.scrollTop = savedScroll;
         })
         .catch(function(err) {
+            if (initialized) return; // Don't destroy UI on transient fetch errors after init
             var app = document.getElementById('app');
             app.textContent = '';
             var errDiv = document.createElement('div');
@@ -1461,15 +1530,15 @@ function loadAndRender() {
 }
 
 // Initial load
-loadAndRender();
+refreshData();
 
 // Poll every 30 seconds
-setInterval(loadAndRender, 30000);
+setInterval(refreshData, 30000);
 
 // ─── PostMessage listener for immediate refresh ──────────────────────────────
 window.addEventListener('message', function(event) {
     if (event.data && event.data.action === 'refresh-beads') {
-        loadAndRender();
+        refreshData();
     }
 });
 </script>
