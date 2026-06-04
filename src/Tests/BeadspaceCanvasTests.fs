@@ -350,3 +350,56 @@ type BeadspaceCanvasTests() =
                 })")
             Assert.That(reloaded, Is.True, "postMessage with 'refresh-beads' action should trigger data reload")
         }
+
+    // ── Goal 6: State Preservation Across Refresh ────────────────────────
+
+    [<Test>]
+    member this.``UI state is preserved across data refresh``() =
+        task {
+            // 1. Navigate to Issues view
+            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
+            do! issuesTab.ClickAsync()
+            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // 2. Set status filter to 'All'
+            let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
+            do! allChip.ClickAsync()
+            do! this.Page.Locator(".issue-table-row").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // 3. Type in search box
+            let searchInput = this.Page.Locator("#search")
+            do! searchInput.FillAsync("auth")
+            // Wait for search filtering to take effect
+            do! this.Page.WaitForTimeoutAsync(300.0f)
+
+            // 4. Expand a detail panel by clicking a row
+            let firstRow = this.Page.Locator(".issue-table-row").First
+            let! _expandedRowId = firstRow.GetAttributeAsync("data-id")
+            do! firstRow.ClickAsync()
+            let detailPanel = this.Page.Locator(".detail-panel.expanded")
+            do! detailPanel.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // 5. Trigger refreshData() — this is the incremental refresh
+            let! _ = this.Page.EvaluateAsync<bool>(
+                "() => new Promise(resolve => {
+                    refreshData();
+                    setTimeout(() => resolve(true), 2000);
+                })")
+
+            // 6. Assert filter chip 'All' is still active
+            let activeChip = this.Page.Locator(".filter-chip.active")
+            let! activeChipText = activeChip.TextContentAsync()
+            Assert.That(activeChipText, Does.Contain("All"), "Active filter chip should still be 'All' after refresh")
+
+            // Assert search text is intact
+            let! searchValue = searchInput.InputValueAsync()
+            Assert.That(searchValue, Is.EqualTo("auth"), "Search input should preserve text across refresh")
+
+            // Assert detail panel is still expanded
+            let! expandedCount = this.Page.Locator(".detail-panel.expanded").CountAsync()
+            Assert.That(expandedCount, Is.EqualTo(1), "Detail panel should remain expanded after refresh")
+
+            // Assert nav tab is still on Issues view
+            let! issuesViewActive = this.Page.Locator("#view-issues.active").CountAsync()
+            Assert.That(issuesViewActive, Is.EqualTo(1), "Issues view should still be active after refresh")
+        }
