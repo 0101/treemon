@@ -1,6 +1,7 @@
 module Server.WorktreeApi
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open System.Text.RegularExpressions
 open Shared
@@ -8,6 +9,8 @@ open Shared.EventUtils
 open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
+
+let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
@@ -682,33 +685,40 @@ let worktreeApi
                   match result with
                   | CanvasMessageResult.Queued ->
                       let path = WorktreePath.value request.WorktreePath
-                      let owner = CanvasDocOwnership.getOwner path request.Filename
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
-                      let launchNewSession () =
-                          async {
-                              let docPath = Path.Combine(path, request.Filename)
-                              let prompt =
-                                  $"Continue working on canvas doc: {docPath}\n"
-                                  + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
-                              let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-                              let! _ = SessionManager.spawnSession sessionAgent request.WorktreePath command.AsShellString
-                              ()
-                          }
-                      match owner with
-                      | Some ownerSessionId ->
-                          Log.log "API" $"sendCanvasMessage: resuming owner session {ownerSessionId} for {request.Filename}"
-                          let inv = CodingToolCli.build provider (CodingToolCli.Resume (Some ownerSessionId))
-                          let! resumeResult = SessionManager.spawnSession sessionAgent request.WorktreePath inv.AsShellString
-                          match resumeResult with
-                          | Ok () ->
-                              Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
-                          | Error err ->
-                              Log.log "API" $"sendCanvasMessage: resume failed ({err}), launching new session for {request.Filename}"
-                              do! launchNewSession ()
-                      | None ->
-                          Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, launching new session"
-                          do! launchNewSession ()
+                      let guardKey = path
+                      if canvasSpawnInFlight.TryAdd(guardKey, true) then
+                          try
+                              let owner = CanvasDocOwnership.getOwner path request.Filename
+                              let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                              let provider = resolveProvider state path
+                              let launchNewSession () =
+                                  async {
+                                      let docPath = Path.Combine(path, ".agents", "canvas", request.Filename)
+                                      let prompt =
+                                          $"Continue working on canvas doc: {docPath}\n"
+                                          + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+                                      let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                                      let! _ = SessionManager.spawnSession sessionAgent request.WorktreePath command.AsShellString
+                                      ()
+                                  }
+                              match owner with
+                              | Some ownerSessionId ->
+                                  Log.log "API" $"sendCanvasMessage: resuming owner session {ownerSessionId} for {request.Filename}"
+                                  let inv = CodingToolCli.build provider (CodingToolCli.Resume (Some ownerSessionId))
+                                  let! resumeResult = SessionManager.spawnSession sessionAgent request.WorktreePath inv.AsShellString
+                                  match resumeResult with
+                                  | Ok () ->
+                                      Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
+                                  | Error err ->
+                                      Log.log "API" $"sendCanvasMessage: resume failed ({err}), launching new session for {request.Filename}"
+                                      do! launchNewSession ()
+                              | None ->
+                                  Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, launching new session"
+                                  do! launchNewSession ()
+                          finally
+                              canvasSpawnInFlight.TryRemove(guardKey) |> ignore
+                      else
+                          Log.log "API" $"sendCanvasMessage: resume/spawn already in flight for {path}, skipping"
                   | _ -> ()
                   return result
               }
