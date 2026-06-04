@@ -688,16 +688,16 @@ let update msg model =
             model, Cmd.none
 
     | CanvasMessageReceived payload ->
-        match activeVisibleDoc model with
-        | Some (scopedKey, filename) ->
-            match findWorktree scopedKey model with
-            | Some wt ->
-                Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
-                model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
-            | None ->
-                Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
-                model, Cmd.none
-        | None ->
+        let visibleDoc = activeVisibleDoc model
+        let worktree = visibleDoc |> Option.bind (fun (sk, _) -> findWorktree sk model)
+        match visibleDoc, worktree with
+        | Some (scopedKey, filename), Some wt ->
+            Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
+            model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
+        | Some (scopedKey, _), None ->
+            Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
+            model, Cmd.none
+        | None, _ ->
             Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
             model, Cmd.none
 
@@ -716,24 +716,24 @@ let update msg model =
         { model with CanvasSendState = CanvasSendState.Idle }, Cmd.none
 
     | MarkDocViewed (scopedKey, filename) ->
-        match findWorktree scopedKey model with
-        | Some wt ->
-            let currentHash =
+        let worktree = findWorktree scopedKey model
+        let currentHash =
+            worktree
+            |> Option.bind (fun wt ->
                 wt.CanvasDocs
                 |> List.tryFind (fun d -> d.Filename = filename)
-                |> Option.map _.ContentHash
-            match currentHash with
-            | Some hash ->
-                let innerMap =
-                    model.LastViewedHashes
-                    |> Map.tryFind scopedKey
-                    |> Option.defaultValue Map.empty
-                    |> Map.add filename hash
-                let updatedHashes = model.LastViewedHashes |> Map.add scopedKey innerMap
-                { model with LastViewedHashes = updatedHashes },
-                Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
-            | None -> model, Cmd.none
-        | None -> model, Cmd.none
+                |> Option.map _.ContentHash)
+        match worktree, currentHash with
+        | Some _, Some hash ->
+            let innerMap =
+                model.LastViewedHashes
+                |> Map.tryFind scopedKey
+                |> Option.defaultValue Map.empty
+                |> Map.add filename hash
+            let updatedHashes = model.LastViewedHashes |> Map.add scopedKey innerMap
+            { model with LastViewedHashes = updatedHashes },
+            Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
+        | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
         { model with LastViewedHashes = hashes }, Cmd.none
