@@ -100,8 +100,18 @@
 
 ### 🔮 DOM Morph and State Persistence
 
+Two levels of state preservation are needed:
+
+**Level 1 — In-page data refresh (beadspace and similar polling docs):**
+- Docs that poll their own data endpoint (e.g., beadspace polls `beads-data` every 30s) must update the DOM incrementally instead of full teardown-and-rebuild.
+- Today, `BeadspaceTemplate.html` does `app.textContent = ''` + `insertAdjacentHTML` on every poll, destroying scroll position, expanded panels, and visual filter state.
+- Fix: refactor template render to update stat numbers in-place, replace only `<tbody>`, and preserve scroll/nav/filter state across polls.
+- This is per-template work — each polling doc must handle its own incremental updates.
+
+**Level 2 — Canvas-wide iframe morph (general case):**
 - On `contentHash` change, an open doc morphs in place instead of reloading the iframe.
 - Scroll position, focused elements, and in-progress inputs stay intact across updates.
+- Implementation: inject a morph library (e.g., idiomorph) via the existing `Program.fs` `</head>` injection point.
 - This is not implemented today; the current system reloads the iframe by changing the `?v={contentHash}` URL.
 
 ### Link Handling
