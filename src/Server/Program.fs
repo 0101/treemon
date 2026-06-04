@@ -241,7 +241,19 @@ module CanvasDocServer =
 
             let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
 
-            if not (filename.EndsWith(".html")) then
+            if filename = "beads-data" then
+                if not isKnown then
+                    ctx.Response.StatusCode <- 404
+                    do! ctx.Response.WriteAsync("Unknown worktree")
+                    Log.log "Canvas" $"Doc request 404: unknown worktree — {worktreePath}"
+                else
+                    let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
+                    let! json = BeadsStatus.getBeadsIssueList dbPath |> Async.StartAsTask
+                    ctx.Response.ContentType <- "application/json"
+                    ctx.Response.Headers["Cache-Control"] <- "no-cache"
+                    do! ctx.Response.WriteAsync(json)
+                    Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/beads-data"
+            elif not (filename.EndsWith(".html")) then
                 ctx.Response.StatusCode <- 400
                 do! ctx.Response.WriteAsync("Only .html files are served")
                 Log.log "Canvas" $"Doc request 400: non-html file — {filename}"

@@ -1,0 +1,1488 @@
+module Server.BeadspaceTemplate
+
+[<Literal>]
+let html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beadspace</title>
+<style>
+:root {
+    --bg-deep: #1e1e2e;
+    --bg-surface: #181825;
+    --bg-elevated: #313244;
+    --bg-hover: #45475a;
+    --border: #45475a;
+    --border-bright: #585b70;
+    --text-primary: #cdd6f4;
+    --text-secondary: #bac2de;
+    --text-muted: #6c7086;
+    --accent: #cba6f7;
+    --accent-bright: #b4befe;
+    --accent-dim: rgba(203, 166, 247, 0.15);
+    --status-open: #71717a;
+    --status-wip: #f59e0b;
+    --status-blocked: #ef4444;
+    --status-closed: #22c55e;
+    --p1: #ef4444;
+    --p2: #f97316;
+    --p3: #3b82f6;
+    --type-bug: #ef4444;
+    --type-feature: #8b5cf6;
+    --type-task: #3b82f6;
+    --type-chore: #71717a;
+    --type-epic: #f59e0b;
+    --severity-alert: #ef4444;
+    --severity-warning: #f59e0b;
+    --severity-info: #cba6f7;
+    --bg-topbar: rgba(30, 30, 46, 0.85);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    line-height: 1.5;
+    min-height: 100vh;
+}
+
+/* Navigation */
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    border-bottom: 1px solid var(--border);
+    padding: 0 2rem;
+    display: flex;
+    align-items: center;
+    height: 56px;
+    gap: 2rem;
+    backdrop-filter: blur(12px);
+    background: var(--bg-topbar);
+}
+
+.topbar-brand {
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.topbar-brand .brand-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+}
+
+.nav-tabs {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.nav-tab {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    padding: 0.5rem 0.875rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.nav-tab:hover {
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+}
+
+.nav-tab.active {
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+}
+
+.topbar-meta {
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* Views */
+.view { display: none; padding: 1.5rem 2rem 3rem; }
+.view.active { display: block; }
+
+/* Stats Row */
+.stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.stat-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+}
+
+.stat-value {
+    font-weight: 700;
+    font-size: 1.75rem;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-top: 0.25rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.stat-card.accent .stat-value { color: var(--accent-bright); }
+.stat-card.open .stat-value { color: var(--status-open); }
+.stat-card.wip .stat-value { color: var(--status-wip); }
+.stat-card.blocked .stat-value { color: var(--status-blocked); }
+.stat-card.closed .stat-value { color: var(--status-closed); }
+.stat-card.completion .stat-value { color: var(--accent-bright); }
+
+/* Dashboard Grid */
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 1.5rem;
+}
+
+@media (max-width: 960px) {
+    .dashboard-grid { grid-template-columns: 1fr; }
+}
+
+.panel {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.panel-header {
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.panel-title {
+    font-weight: 600;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+}
+
+.panel-count {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-elevated);
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+}
+
+.panel-body { padding: 0.5rem 0; }
+.panel-body.padded { padding: 1rem 1.25rem; }
+
+/* Issue Rows */
+.issue-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+}
+
+.issue-row:last-child { border-bottom: none; }
+.issue-row:hover { background: var(--bg-hover); }
+
+.issue-priority {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.125rem 0.375rem;
+    border-radius: 4px;
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+}
+
+.issue-priority.p1 { background: rgba(239, 68, 68, 0.15); color: var(--p1); }
+.issue-priority.p2 { background: rgba(249, 115, 22, 0.15); color: var(--p2); }
+.issue-priority.p3 { background: rgba(59, 130, 246, 0.15); color: var(--p3); }
+
+.issue-main { flex: 1; min-width: 0; }
+
+.issue-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.issue-id {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.issue-title {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.issue-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.issue-type {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.0625rem 0.375rem;
+    border-radius: 3px;
+}
+
+.issue-type.type-bug { background: rgba(239, 68, 68, 0.12); color: var(--type-bug); }
+.issue-type.type-feature { background: rgba(139, 92, 246, 0.12); color: var(--type-feature); }
+.issue-type.type-task { background: rgba(59, 130, 246, 0.1); color: var(--type-task); }
+.issue-type.type-chore { background: rgba(113, 113, 122, 0.12); color: var(--type-chore); }
+.issue-type.type-epic { background: rgba(245, 158, 11, 0.12); color: var(--type-epic); }
+
+.tag {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    background: var(--bg-elevated);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 3px;
+}
+
+.issue-age {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+}
+
+.issue-desc {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.issue-status {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+}
+
+.issue-status.status-open {
+    background: rgba(113, 113, 122, 0.15);
+    color: var(--status-open);
+}
+
+.issue-status.status-in_progress {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--status-wip);
+}
+
+.issue-status.status-blocked {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--status-blocked);
+}
+
+.issue-status.status-closed {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--status-closed);
+}
+
+/* Triage Suggestions */
+.suggestion-item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0.625rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.8125rem;
+}
+
+.suggestion-item:last-child { border-bottom: none; }
+.suggestion-item.alert { border-left: 3px solid var(--severity-alert); }
+.suggestion-item.warning { border-left: 3px solid var(--severity-warning); }
+.suggestion-item.info { border-left: 3px solid var(--severity-info); }
+
+.suggestion-id {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.suggestion-reason {
+    font-weight: 500;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.suggestion-title {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Charts (pure CSS) */
+.bar-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.bar-label {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-secondary);
+    width: 80px;
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.bar-track {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-elevated);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.p1-fill { background: var(--p1); }
+.p2-fill { background: var(--p2); }
+.p3-fill { background: var(--p3); }
+.accent-fill { background: var(--accent); }
+
+.bar-count {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    width: 28px;
+    flex-shrink: 0;
+}
+
+/* Donut Chart */
+.donut-container {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+}
+
+.donut {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    position: relative;
+    flex-shrink: 0;
+}
+
+.donut::after {
+    content: '';
+    position: absolute;
+    inset: 16px;
+    background: var(--bg-surface);
+    border-radius: 50%;
+}
+
+.donut-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+.donut-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.donut-legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* Type Distribution */
+.type-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.type-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.type-dot.type-bug { background: var(--type-bug); }
+.type-dot.type-feature { background: var(--type-feature); }
+.type-dot.type-task { background: var(--type-task); }
+.type-dot.type-chore { background: var(--type-chore); }
+.type-dot.type-epic { background: var(--type-epic); }
+
+.type-name {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    flex: 1;
+}
+
+.type-count {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* Empty State */
+.empty-state {
+    padding: 2rem;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+}
+
+/* Sidebar */
+.sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Issues Table View */
+.search-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    align-items: center;
+}
+
+.search-input {
+    flex: 1;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.625rem 1rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.875rem;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--text-muted); }
+
+.filter-chip {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+.filter-chip:hover { border-color: var(--border-bright); color: var(--text-primary); }
+.filter-chip.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
+
+.issues-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.issues-table th {
+    text-align: left;
+    padding: 0.625rem 0.75rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elevated);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.issues-table th:hover { color: var(--text-secondary); }
+
+.issues-table td {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8125rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+.issues-table tr:last-child td { border-bottom: none; }
+.issues-table tr.issue-table-row { cursor: pointer; }
+.issues-table tr.issue-table-row:hover td { background: var(--bg-hover); }
+
+.issues-table .col-id {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.issues-table .col-title {
+    font-weight: 500;
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.status-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 0.375rem;
+}
+
+.status-dot.open { background: var(--status-open); }
+.status-dot.in_progress { background: var(--status-wip); }
+.status-dot.blocked { background: var(--status-blocked); }
+.status-dot.closed { background: var(--status-closed); }
+
+/* Detail Panel */
+.detail-panel {
+    display: none;
+}
+
+.detail-panel td {
+    padding: 0 !important;
+    background: var(--bg-deep) !important;
+}
+
+.detail-panel.expanded {
+    display: table-row;
+}
+
+.detail-content {
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.detail-description {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 0.75rem;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.detail-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.detail-badge {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.125rem 0.5rem;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.detail-badge.priority { background: rgba(203, 166, 247, 0.15); color: var(--accent); }
+.detail-badge.type { background: rgba(180, 190, 254, 0.15); color: var(--accent-bright); }
+.detail-badge.deps { background: var(--bg-elevated); color: var(--text-secondary); }
+
+.detail-labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-bottom: 0.75rem;
+}
+
+.detail-label-pill {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.125rem 0.5rem;
+    border-radius: 10px;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+.detail-meta {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* Loading state */
+.loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.loading-spinner {
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.loading-text {
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+}
+
+.error-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+    flex-direction: column;
+    gap: 1rem;
+    color: var(--severity-alert);
+}
+
+.error-state code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-surface);
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+
+/* Footer */
+.footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 2rem;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+.footer a {
+    color: var(--text-secondary);
+    text-decoration: none;
+}
+.footer a:hover { color: var(--accent-bright); }
+
+/* Transitions */
+.view { animation: fadeIn 0.2s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ─── Mobile Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+    .topbar {
+        padding: 0 0.75rem;
+        gap: 0.75rem;
+        height: 48px;
+    }
+
+    .topbar-brand { font-size: 0.9rem; }
+
+    .nav-tabs {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        flex-shrink: 1;
+        min-width: 0;
+    }
+    .nav-tabs::-webkit-scrollbar { display: none; }
+
+    .nav-tab {
+        font-size: 0.75rem;
+        padding: 0.375rem 0.625rem;
+        white-space: nowrap;
+    }
+
+    .topbar-meta { display: none; }
+
+    .view { padding: 1rem 0.75rem 2rem; }
+
+    .stats-row {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .stats-row .stat-card:last-child {
+        grid-column: 1 / -1;
+    }
+    .stat-card { padding: 0.75rem 1rem; }
+    .stat-value { font-size: 1.5rem; }
+
+    .panel-header { padding: 0.75rem 1rem; }
+    .panel-body.padded { padding: 0.75rem 1rem; }
+
+    .issue-row {
+        padding: 0.75rem 1rem;
+        gap: 0.5rem;
+    }
+
+    .issue-title-row {
+        flex-direction: column;
+        gap: 0.125rem;
+    }
+
+    .issue-title {
+        white-space: normal;
+        font-size: 0.8125rem;
+        line-height: 1.4;
+    }
+
+    .issue-desc { display: none; }
+
+    .issue-meta { gap: 0.375rem; }
+
+    .suggestion-item {
+        flex-wrap: wrap;
+        gap: 0.375rem;
+        padding: 0.625rem 1rem;
+        font-size: 0.75rem;
+    }
+    .suggestion-title {
+        flex-basis: 100%;
+        white-space: normal;
+    }
+
+    .search-bar {
+        flex-wrap: wrap;
+        gap: 0.375rem;
+    }
+    .search-input {
+        width: 100%;
+        flex: 1 0 100%;
+        font-size: 1rem;
+    }
+    .filter-chip {
+        flex: 1;
+        text-align: center;
+        min-width: 0;
+        padding: 0.5rem 0.5rem;
+    }
+
+    .issues-table thead { display: none; }
+
+    .issues-table,
+    .issues-table tbody,
+    .issues-table tr,
+    .issues-table td { display: block; }
+
+    .issues-table {
+        border: none;
+        background: none;
+    }
+
+    .issues-table tr {
+        background: var(--bg-surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        margin-bottom: 0.5rem;
+        padding: 0.75rem 1rem;
+    }
+
+    .issues-table td {
+        border-bottom: none;
+        padding: 0.125rem 0;
+    }
+
+    .issues-table tr:hover td { background: none; }
+
+    .issues-table .col-id {
+        font-size: 0.625rem;
+        margin-bottom: 0.125rem;
+    }
+
+    .issues-table .col-title {
+        white-space: normal;
+        max-width: none;
+        font-size: 0.875rem;
+        font-weight: 500;
+        margin-bottom: 0.25rem;
+    }
+
+    .donut-container { gap: 1rem; }
+    .donut { width: 64px; height: 64px; }
+    .donut::after { inset: 12px; }
+
+    .bar-label { width: 60px; font-size: 0.625rem; }
+
+    .footer { padding: 1rem 0.75rem; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+    <div class="topbar-brand">
+        <span class="brand-dot"></span>
+        <span id="topbar-title"></span>
+    </div>
+    <div class="nav-tabs">
+        <button class="nav-tab active" data-view="dashboard">Dashboard</button>
+        <button class="nav-tab" data-view="issues">All Issues</button>
+    </div>
+    <div class="topbar-meta" id="topbar-meta"></div>
+</div>
+
+<div id="app">
+    <div class="loading">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading issues...</div>
+    </div>
+</div>
+
+<script>
+// ─── Data Loading ────────────────────────────────────────────────────────────
+// Fetches beads data from same-origin endpoint and renders the dashboard.
+// All user-facing text is rendered via textContent (safe) or the esc() helper.
+
+function esc(str) {
+    var el = document.createElement('span');
+    el.textContent = str || '';
+    return el.innerHTML;
+}
+
+function daysAgo(dateStr) {
+    if (!dateStr) return 0;
+    var diff = Date.now() - new Date(dateStr).getTime();
+    return Math.max(0, Math.floor(diff / 86400000));
+}
+
+function defaultPriority(p) { return p != null ? p : 2; }
+
+function pLabel(p) { return 'P' + defaultPriority(p); }
+
+function statusLabel(status) {
+    if (status === 'in_progress') return 'In Progress';
+    return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function ageLabel(dateStr) {
+    var age = daysAgo(dateStr);
+    return age > 0 ? age + 'd' : 'today';
+}
+
+// ─── Data URL from pathname ──────────────────────────────────────────────────
+var dataUrl = (function() {
+    var path = window.location.pathname;
+    var lastSlash = path.lastIndexOf('/');
+    var base = lastSlash >= 0 ? path.substring(0, lastSlash + 1) : '/';
+    return base + 'beads-data';
+})();
+
+// ─── Triage Engine ───────────────────────────────────────────────────────────
+function triageSuggestions(issues) {
+    var suggestions = [];
+    issues.forEach(function(issue) {
+        if (issue.status === 'closed') return;
+        var age = daysAgo(issue.created_at);
+        var p = defaultPriority(issue.priority);
+        var labels = issue.labels || [];
+        var hasDesc = !!issue.description;
+
+        if (issue.issue_type === 'bug' && p >= 3) {
+            suggestions.push({ id: issue.id, title: issue.title,
+                reason: 'Bug at ' + pLabel(p) + ' — consider promoting', severity: 'warning' });
+        }
+        if (p <= 1 && age > 3) {
+            suggestions.push({ id: issue.id, title: issue.title,
+                reason: pLabel(p) + ' open for ' + age + 'd — needs attention', severity: 'alert' });
+        }
+        if (labels.indexOf('plan-worthy') !== -1 && !hasDesc) {
+            suggestions.push({ id: issue.id, title: issue.title,
+                reason: 'plan-worthy but no description', severity: 'info' });
+        }
+        if (issue.status === 'blocked') {
+            suggestions.push({ id: issue.id, title: issue.title,
+                reason: 'Blocked — needs unblocking', severity: 'alert' });
+        }
+        if (age > 7 && p < 3) {
+            suggestions.push({ id: issue.id, title: issue.title,
+                reason: 'Open ' + age + 'd at ' + pLabel(p) + ' — stale?', severity: 'info' });
+        }
+    });
+
+    // Dedupe by ID, keep highest severity
+    var rank = { alert: 0, warning: 1, info: 2 };
+    var seen = {};
+    suggestions.forEach(function(s) {
+        if (!seen[s.id] || rank[s.severity] < rank[seen[s.id].severity]) seen[s.id] = s;
+    });
+    return Object.values(seen).sort(function(a, b) { return rank[a.severity] - rank[b.severity]; });
+}
+
+// ─── Dashboard Stats ─────────────────────────────────────────────────────────
+function computeStats(issues) {
+    var open = issues.filter(function(i) { return i.status === 'open'; });
+    var wip = issues.filter(function(i) { return i.status === 'in_progress'; });
+    var blocked = issues.filter(function(i) { return i.status === 'blocked'; });
+    var closed = issues.filter(function(i) { return i.status === 'closed'; });
+    var total = issues.length;
+
+    // Priority counts (1-3)
+    var priCounts = { 1: 0, 2: 0, 3: 0 };
+    issues.forEach(function(i) { var p = defaultPriority(i.priority); if (priCounts[p] !== undefined) priCounts[p]++; });
+
+    // Label counts
+    var labelMap = {};
+    issues.forEach(function(i) { (i.labels || []).forEach(function(l) { labelMap[l] = (labelMap[l] || 0) + 1; }); });
+    var labels = Object.keys(labelMap).sort(function(a, b) { return labelMap[b] - labelMap[a]; });
+
+    // Type counts
+    var typeMap = {};
+    issues.forEach(function(i) { var t = i.issue_type || 'task'; typeMap[t] = (typeMap[t] || 0) + 1; });
+
+    // Active issues sorted by priority then age
+    var active = open.concat(wip).concat(blocked).sort(function(a, b) {
+        var pa = defaultPriority(a.priority);
+        var pb = defaultPriority(b.priority);
+        if (pa !== pb) return pa - pb;
+        return daysAgo(b.created_at) - daysAgo(a.created_at);
+    });
+
+    // Donut gradient (4 statuses)
+    var totalDonut = open.length + wip.length + blocked.length + closed.length;
+    var openEnd = totalDonut > 0 ? (open.length / totalDonut * 100) : 0;
+    var wipEnd = openEnd + (totalDonut > 0 ? (wip.length / totalDonut * 100) : 0);
+    var blockedEnd = wipEnd + (totalDonut > 0 ? (blocked.length / totalDonut * 100) : 0);
+    var donutGrad = 'conic-gradient(var(--status-open) 0% ' + openEnd.toFixed(1) + '%, var(--status-wip) ' + openEnd.toFixed(1) + '% ' + wipEnd.toFixed(1) + '%, var(--status-blocked) ' + wipEnd.toFixed(1) + '% ' + blockedEnd.toFixed(1) + '%, var(--status-closed) ' + blockedEnd.toFixed(1) + '% 100%)';
+
+    var maxPri = Math.max(priCounts[1], priCounts[2], priCounts[3]) || 1;
+
+    return {
+        open: open, wip: wip, blocked: blocked, closed: closed, total: total,
+        completionPct: total > 0 ? Math.round(closed.length / total * 100) : 0,
+        priCounts: priCounts, maxPri: maxPri,
+        labelMap: labelMap, labels: labels, maxLabel: labels.length > 0 ? labelMap[labels[0]] : 1,
+        typeMap: typeMap,
+        active: active, donutGrad: donutGrad,
+        suggestions: triageSuggestions(issues)
+    };
+}
+
+// ─── Render Dashboard ────────────────────────────────────────────────────────
+function renderDashboard(issues) {
+    var s = computeStats(issues);
+    var open = s.open, wip = s.wip, blocked = s.blocked, closed = s.closed, total = s.total;
+    var completionPct = s.completionPct, active = s.active, suggestions = s.suggestions;
+    var priCounts = s.priCounts, maxPri = s.maxPri;
+    var labelMap = s.labelMap, labels = s.labels, maxLabel = s.maxLabel;
+    var typeMap = s.typeMap, donutGrad = s.donutGrad;
+
+    // Build suggestions HTML
+    var suggestionsHtml = '';
+    if (suggestions.length > 0) {
+        suggestions.forEach(function(s) {
+            suggestionsHtml += '<div class="suggestion-item ' + esc(s.severity) + '">' +
+                '<span class="suggestion-id">' + esc(String(s.id)) + '</span>' +
+                '<span class="suggestion-reason">' + esc(s.reason) + '</span>' +
+                '<span class="suggestion-title">' + esc((s.title || '').substring(0, 60)) + '</span></div>';
+        });
+    } else {
+        suggestionsHtml = '<div class="empty-state">No triage suggestions — looking clean</div>';
+    }
+
+    // Build active issues HTML
+    var activeHtml = '';
+    if (active.length > 0) {
+        active.forEach(function(issue) {
+            var p = defaultPriority(issue.priority);
+            var ageStr = ageLabel(issue.created_at);
+            var statusDisplay = statusLabel(issue.status);
+            var tagsHtml = (issue.labels || []).map(function(l) { return '<span class="tag">' + esc(l) + '</span>'; }).join('');
+            var itype = issue.issue_type || 'task';
+            var descPreview = esc((issue.description || '').substring(0, 120));
+
+            activeHtml += '<div class="issue-row">' +
+                '<div class="issue-priority p' + p + '">' + pLabel(p) + '</div>' +
+                '<div class="issue-main">' +
+                '<div class="issue-title-row"><span class="issue-id">' + esc(String(issue.id)) + '</span>' +
+                '<span class="issue-title">' + esc(issue.title) + '</span></div>' +
+                '<div class="issue-meta"><span class="issue-type type-' + esc(itype) + '">' + esc(itype) + '</span>' +
+                tagsHtml +
+                '<span class="issue-age">' + ageStr + ' old</span>' +
+                '</div>' +
+                (descPreview ? '<div class="issue-desc">' + descPreview + '</div>' : '') +
+                '</div>' +
+                '<div class="issue-status status-' + esc(issue.status) + '">' + esc(statusDisplay) + '</div></div>';
+        });
+    } else {
+        activeHtml = '<div class="empty-state">No open issues — inbox zero achieved</div>';
+    }
+
+    // Priority bars (1-3)
+    var priBarsHtml = '';
+    [1, 2, 3].forEach(function(pi) {
+        var pct = (priCounts[pi] / maxPri * 100).toFixed(0);
+        priBarsHtml += '<div class="bar-row"><span class="bar-label">P' + pi + '</span>' +
+            '<div class="bar-track"><div class="bar-fill p' + pi + '-fill" style="width:' + pct + '%"></div></div>' +
+            '<span class="bar-count">' + priCounts[pi] + '</span></div>';
+    });
+
+    // Label bars
+    var labelBarsHtml = '';
+    labels.forEach(function(l) {
+        var pct = (labelMap[l] / maxLabel * 100).toFixed(0);
+        labelBarsHtml += '<div class="bar-row"><span class="bar-label">' + esc(l) + '</span>' +
+            '<div class="bar-track"><div class="bar-fill accent-fill" style="width:' + pct + '%"></div></div>' +
+            '<span class="bar-count">' + labelMap[l] + '</span></div>';
+    });
+
+    // Type items
+    var typeHtml = '';
+    Object.keys(typeMap).sort(function(a, b) { return typeMap[b] - typeMap[a]; }).forEach(function(t) {
+        typeHtml += '<div class="type-row"><span class="type-dot type-' + esc(t) + '"></span>' +
+            '<span class="type-name">' + esc(t) + '</span>' +
+            '<span class="type-count">' + typeMap[t] + '</span></div>';
+    });
+
+    return '<div id="view-dashboard" class="view active">' +
+        '<div class="stats-row">' +
+        '<div class="stat-card accent"><div class="stat-value">' + total + '</div><div class="stat-label">Total</div></div>' +
+        '<div class="stat-card open"><div class="stat-value">' + open.length + '</div><div class="stat-label">Open</div></div>' +
+        '<div class="stat-card wip"><div class="stat-value">' + wip.length + '</div><div class="stat-label">In Progress</div></div>' +
+        '<div class="stat-card blocked"><div class="stat-value">' + blocked.length + '</div><div class="stat-label">Blocked</div></div>' +
+        '<div class="stat-card closed"><div class="stat-value">' + closed.length + '</div><div class="stat-label">Closed</div></div>' +
+        '<div class="stat-card completion"><div class="stat-value">' + completionPct + '%</div><div class="stat-label">Completion</div></div>' +
+        '</div>' +
+        '<div class="dashboard-grid"><div class="main-column">' +
+        '<div class="panel" style="margin-bottom:1rem"><div class="panel-header"><span class="panel-title">Triage Suggestions</span><span class="panel-count">' + suggestions.length + '</span></div><div class="panel-body">' + suggestionsHtml + '</div></div>' +
+        '<div class="panel"><div class="panel-header"><span class="panel-title">Active Issues</span><span class="panel-count">' + active.length + '</span></div><div class="panel-body">' + activeHtml + '</div></div>' +
+        '</div><div class="sidebar">' +
+        '<div class="panel"><div class="panel-header"><span class="panel-title">Status</span></div><div class="panel-body padded"><div class="donut-container"><div class="donut" style="background:' + donutGrad + '"></div><div class="donut-legend">' +
+        '<div class="donut-legend-item"><div class="donut-legend-dot" style="background:var(--status-open)"></div>Open (' + open.length + ')</div>' +
+        '<div class="donut-legend-item"><div class="donut-legend-dot" style="background:var(--status-wip)"></div>In Progress (' + wip.length + ')</div>' +
+        '<div class="donut-legend-item"><div class="donut-legend-dot" style="background:var(--status-blocked)"></div>Blocked (' + blocked.length + ')</div>' +
+        '<div class="donut-legend-item"><div class="donut-legend-dot" style="background:var(--status-closed)"></div>Closed (' + closed.length + ')</div>' +
+        '</div></div></div></div>' +
+        '<div class="panel"><div class="panel-header"><span class="panel-title">Priority</span></div><div class="panel-body padded">' + priBarsHtml + '</div></div>' +
+        '<div class="panel"><div class="panel-header"><span class="panel-title">Labels</span></div><div class="panel-body padded">' + labelBarsHtml + '</div></div>' +
+        '<div class="panel"><div class="panel-header"><span class="panel-title">Types</span></div><div class="panel-body padded">' + typeHtml + '</div></div>' +
+        '</div></div></div>';
+}
+
+// ─── Issues Table (DOM-based rendering) ──────────────────────────────────────
+var tableState = {
+    issues: [],
+    sort: { field: 'priority', dir: 1 },
+    filter: 'open',
+    query: '',
+    expandedId: null
+};
+
+function renderIssuesView() {
+    return '<div id="view-issues" class="view">' +
+        '<div class="search-bar">' +
+        '<input type="text" class="search-input" id="search" placeholder="Search issues..." autocomplete="off">' +
+        '<button class="filter-chip" data-filter="all">All</button>' +
+        '<button class="filter-chip active" data-filter="open">Open</button>' +
+        '<button class="filter-chip" data-filter="in_progress">WIP</button>' +
+        '<button class="filter-chip" data-filter="blocked">Blocked</button>' +
+        '<button class="filter-chip" data-filter="closed">Closed</button>' +
+        '</div>' +
+        '<table class="issues-table"><thead><tr>' +
+        '<th data-sort="id">ID</th>' +
+        '<th data-sort="priority">Priority</th>' +
+        '<th data-sort="title">Title</th>' +
+        '<th data-sort="status">Status</th>' +
+        '<th data-sort="type">Type</th>' +
+        '<th data-sort="labels">Labels</th>' +
+        '<th data-sort="age">Age</th>' +
+        '</tr></thead><tbody id="issues-tbody"></tbody></table></div>';
+}
+
+function createDetailRow(issue, colSpan) {
+    var tr = document.createElement('tr');
+    tr.className = 'detail-panel expanded';
+    tr.dataset.detailFor = issue.id;
+
+    var td = document.createElement('td');
+    td.colSpan = colSpan;
+
+    var content = document.createElement('div');
+    content.className = 'detail-content';
+
+    // Badges row
+    var badges = document.createElement('div');
+    badges.className = 'detail-badges';
+
+    var priBadge = document.createElement('span');
+    priBadge.className = 'detail-badge priority';
+    priBadge.textContent = pLabel(issue.priority);
+    badges.appendChild(priBadge);
+
+    var typeBadge = document.createElement('span');
+    typeBadge.className = 'detail-badge type';
+    typeBadge.textContent = issue.issue_type || 'task';
+    badges.appendChild(typeBadge);
+
+    if (issue.dependency_count > 0) {
+        var depBadge = document.createElement('span');
+        depBadge.className = 'detail-badge deps';
+        depBadge.textContent = issue.dependency_count + ' dependencies';
+        badges.appendChild(depBadge);
+    }
+
+    if (issue.dependent_count > 0) {
+        var dntBadge = document.createElement('span');
+        dntBadge.className = 'detail-badge deps';
+        dntBadge.textContent = issue.dependent_count + ' dependents';
+        badges.appendChild(dntBadge);
+    }
+
+    var ageBadge = document.createElement('span');
+    ageBadge.className = 'detail-badge deps';
+    ageBadge.textContent = 'Created ' + ageLabel(issue.created_at) + ' ago';
+    badges.appendChild(ageBadge);
+
+    if (issue.updated_at) {
+        var updBadge = document.createElement('span');
+        updBadge.className = 'detail-badge deps';
+        updBadge.textContent = 'Updated ' + ageLabel(issue.updated_at) + ' ago';
+        badges.appendChild(updBadge);
+    }
+
+    content.appendChild(badges);
+
+    // Labels
+    var issueLabels = issue.labels || [];
+    if (issueLabels.length > 0) {
+        var labelsDiv = document.createElement('div');
+        labelsDiv.className = 'detail-labels';
+        issueLabels.forEach(function(l) {
+            var pill = document.createElement('span');
+            pill.className = 'detail-label-pill';
+            pill.textContent = l;
+            labelsDiv.appendChild(pill);
+        });
+        content.appendChild(labelsDiv);
+    }
+
+    // Description
+    if (issue.description) {
+        var desc = document.createElement('div');
+        desc.className = 'detail-description';
+        desc.textContent = issue.description;
+        content.appendChild(desc);
+    } else {
+        var noDesc = document.createElement('div');
+        noDesc.className = 'detail-description';
+        noDesc.style.fontStyle = 'italic';
+        noDesc.textContent = 'No description';
+        content.appendChild(noDesc);
+    }
+
+    td.appendChild(content);
+    tr.appendChild(td);
+    return tr;
+}
+
+function renderIssuesTable() {
+    var filtered = tableState.issues.filter(function(i) {
+        if (tableState.filter !== 'all' && i.status !== tableState.filter) return false;
+        if (tableState.query) {
+            var q = tableState.query.toLowerCase();
+            return (i.title || '').toLowerCase().indexOf(q) !== -1 ||
+                   String(i.id).toLowerCase().indexOf(q) !== -1 ||
+                   (i.labels || []).some(function(l) { return l.toLowerCase().indexOf(q) !== -1; });
+        }
+        return true;
+    });
+
+    filtered.sort(function(a, b) {
+        var va, vb;
+        switch (tableState.sort.field) {
+            case 'priority': va = defaultPriority(a.priority); vb = defaultPriority(b.priority); break;
+            case 'age': va = daysAgo(a.created_at); vb = daysAgo(b.created_at); break;
+            case 'status': va = a.status; vb = b.status; break;
+            case 'type': va = a.issue_type || ''; vb = b.issue_type || ''; break;
+            case 'title': va = a.title || ''; vb = b.title || ''; break;
+            case 'id': va = String(a.id); vb = String(b.id); break;
+            default: va = defaultPriority(a.priority); vb = defaultPriority(b.priority);
+        }
+        if (typeof va === 'string') return va.localeCompare(vb) * tableState.sort.dir;
+        return (va - vb) * tableState.sort.dir;
+    });
+
+    var tbody = document.getElementById('issues-tbody');
+    if (!tbody) return;
+    while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+
+    var colSpan = 7;
+
+    filtered.forEach(function(i) {
+        var ageStr = ageLabel(i.created_at);
+        var p = defaultPriority(i.priority);
+        var sl = statusLabel(i.status);
+        var tr = document.createElement('tr');
+        tr.className = 'issue-table-row';
+        tr.dataset.issueId = i.id;
+
+        var tdId = document.createElement('td');
+        tdId.className = 'col-id';
+        tdId.textContent = i.id;
+        tr.appendChild(tdId);
+
+        var tdPri = document.createElement('td');
+        var priSpan = document.createElement('span');
+        priSpan.className = 'issue-priority p' + p;
+        priSpan.textContent = 'P' + p;
+        tdPri.appendChild(priSpan);
+        tr.appendChild(tdPri);
+
+        var tdTitle = document.createElement('td');
+        tdTitle.className = 'col-title';
+        tdTitle.textContent = i.title;
+        tr.appendChild(tdTitle);
+
+        var tdStatus = document.createElement('td');
+        var statusDot = document.createElement('span');
+        statusDot.className = 'status-dot ' + i.status;
+        tdStatus.appendChild(statusDot);
+        tdStatus.appendChild(document.createTextNode(sl));
+        tr.appendChild(tdStatus);
+
+        var tdType = document.createElement('td');
+        var typeSpan = document.createElement('span');
+        typeSpan.className = 'issue-type type-' + (i.issue_type || 'task');
+        typeSpan.textContent = i.issue_type || 'task';
+        tdType.appendChild(typeSpan);
+        tr.appendChild(tdType);
+
+        var tdLabels = document.createElement('td');
+        (i.labels || []).forEach(function(l) {
+            var tagSpan = document.createElement('span');
+            tagSpan.className = 'tag';
+            tagSpan.textContent = l;
+            tdLabels.appendChild(tagSpan);
+            tdLabels.appendChild(document.createTextNode(' '));
+        });
+        tr.appendChild(tdLabels);
+
+        var tdAge = document.createElement('td');
+        tdAge.style.fontFamily = "'Consolas', 'Courier New', monospace";
+        tdAge.style.fontSize = '0.6875rem';
+        tdAge.style.color = 'var(--text-muted)';
+        tdAge.textContent = ageStr;
+        tr.appendChild(tdAge);
+
+        // Click handler for detail panel
+        tr.addEventListener('click', function() {
+            var existingDetail = tbody.querySelector('[data-detail-for="' + CSS.escape(i.id) + '"]');
+            if (existingDetail) {
+                existingDetail.remove();
+                tableState.expandedId = null;
+            } else {
+                // Collapse any other expanded detail
+                var prev = tbody.querySelector('.detail-panel');
+                if (prev) prev.remove();
+                var detailRow = createDetailRow(i, colSpan);
+                tr.parentNode.insertBefore(detailRow, tr.nextSibling);
+                tableState.expandedId = i.id;
+            }
+        });
+
+        tbody.appendChild(tr);
+
+        // Re-expand if this was the previously expanded issue
+        if (tableState.expandedId === i.id) {
+            var detailRow = createDetailRow(i, colSpan);
+            tbody.appendChild(detailRow);
+        }
+    });
+}
+
+function bindIssuesEvents() {
+    document.querySelectorAll('.issues-table th[data-sort]').forEach(function(th) {
+        th.addEventListener('click', function() {
+            var field = th.dataset.sort;
+            if (tableState.sort.field === field) { tableState.sort.dir *= -1; }
+            else { tableState.sort = { field: field, dir: 1 }; }
+            renderIssuesTable();
+        });
+    });
+
+    document.querySelectorAll('.filter-chip').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+            document.querySelectorAll('.filter-chip').forEach(function(c) { c.classList.remove('active'); });
+            chip.classList.add('active');
+            tableState.filter = chip.dataset.filter;
+            renderIssuesTable();
+        });
+    });
+
+    var searchEl = document.getElementById('search');
+    if (searchEl) {
+        searchEl.addEventListener('input', function(e) {
+            tableState.query = e.target.value;
+            renderIssuesTable();
+        });
+    }
+}
+
+// ─── Page title from URL path ────────────────────────────────────────────────
+var pageName = (function() {
+    var seg = window.location.pathname.split('/').filter(Boolean)[0];
+    return seg ? decodeURIComponent(seg) : 'Beadspace';
+})();
+document.getElementById('topbar-title').textContent = pageName;
+document.title = pageName;
+
+// ─── Data fetching and rendering ─────────────────────────────────────────────
+var currentIssues = [];
+
+function loadAndRender() {
+    fetch(dataUrl)
+        .then(function(r) {
+            if (!r.ok) throw new Error('Failed to load beads data (HTTP ' + r.status + ')');
+            return r.json();
+        })
+        .then(function(issues) {
+            currentIssues = issues;
+            tableState.issues = issues;
+            document.getElementById('topbar-meta').textContent = issues.length + ' issues';
+
+            var app = document.getElementById('app');
+            app.textContent = '';
+            app.insertAdjacentHTML('beforeend', renderDashboard(issues));
+            app.insertAdjacentHTML('beforeend', renderIssuesView());
+
+            // Bind navigation
+            document.querySelectorAll('.nav-tab').forEach(function(tab) {
+                tab.addEventListener('click', function() {
+                    document.querySelectorAll('.nav-tab').forEach(function(t) { t.classList.remove('active'); });
+                    document.querySelectorAll('.view').forEach(function(v) { v.classList.remove('active'); });
+                    tab.classList.add('active');
+                    document.getElementById('view-' + tab.dataset.view).classList.add('active');
+                });
+            });
+
+            // Bind issues table events and render
+            bindIssuesEvents();
+            renderIssuesTable();
+        })
+        .catch(function(err) {
+            var app = document.getElementById('app');
+            app.textContent = '';
+            var errDiv = document.createElement('div');
+            errDiv.className = 'error-state';
+            var msg = document.createElement('div');
+            msg.textContent = 'Could not load issues';
+            errDiv.appendChild(msg);
+            var code = document.createElement('code');
+            code.textContent = err.message;
+            errDiv.appendChild(code);
+            var hint = document.createElement('div');
+            hint.style.color = 'var(--text-muted)';
+            hint.style.fontSize = '0.75rem';
+            hint.style.marginTop = '0.5rem';
+            hint.textContent = 'Waiting for beads data endpoint at ' + dataUrl;
+            errDiv.appendChild(hint);
+            app.appendChild(errDiv);
+        });
+}
+
+// Initial load
+loadAndRender();
+
+// Poll every 30 seconds
+setInterval(loadAndRender, 30000);
+
+// ─── PostMessage listener for immediate refresh ──────────────────────────────
+window.addEventListener('message', function(event) {
+    if (event.data && event.data.action === 'refresh-beads') {
+        loadAndRender();
+    }
+});
+</script>
+
+<footer class="footer">
+    Powered by <a href="https://github.com/steveyegge/beads">Beads</a>
+    &middot;
+    Dashboard by <a href="https://github.com/cameronsjo/beadspace">Beadspace</a>
+</footer>
+
+</body>
+</html>
+"""
