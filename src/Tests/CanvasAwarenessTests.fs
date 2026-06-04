@@ -194,7 +194,7 @@ type UnviewedDocsByScopedKeyTests() =
 type DetectCanvasEventsTests() =
 
     [<Test>]
-    member _.``Detects new doc as IsNew=true``() =
+    member _.``Detects new doc as NewDoc``() =
         let prev = Map.empty
         let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
 
@@ -204,10 +204,10 @@ type DetectCanvasEventsTests() =
         let events = result["r/feat"]
         Assert.That(events.Length, Is.EqualTo(1))
         Assert.That(events[0].Filename, Is.EqualTo("report.html"))
-        Assert.That(events[0].IsNew, Is.True)
+        Assert.That(events[0].Kind, Is.EqualTo(NewDoc))
 
     [<Test>]
-    member _.``Detects updated contentHash as IsNew=false``() =
+    member _.``Detects updated contentHash as UpdatedDoc``() =
         let prev = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
         let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h2" ] ]
 
@@ -216,7 +216,7 @@ type DetectCanvasEventsTests() =
         let events = result["r/feat"]
         Assert.That(events.Length, Is.EqualTo(1))
         Assert.That(events[0].Filename, Is.EqualTo("report.html"))
-        Assert.That(events[0].IsNew, Is.False, "Updated doc should have IsNew=false")
+        Assert.That(events[0].Kind, Is.EqualTo(UpdatedDoc), "Updated doc should have Kind=UpdatedDoc")
 
     [<Test>]
     member _.``Returns empty map when no changes``() =
@@ -237,8 +237,8 @@ type DetectCanvasEventsTests() =
         Assert.That(events.Length, Is.EqualTo(2))
         let newDoc = events |> List.find (fun e -> e.Filename = "new.html")
         let updatedDoc = events |> List.find (fun e -> e.Filename = "existing.html")
-        Assert.That(newDoc.IsNew, Is.True)
-        Assert.That(updatedDoc.IsNew, Is.False)
+        Assert.That(newDoc.Kind, Is.EqualTo(NewDoc))
+        Assert.That(updatedDoc.Kind, Is.EqualTo(UpdatedDoc))
 
     [<Test>]
     member _.``Ignores removed docs``() =

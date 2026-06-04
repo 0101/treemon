@@ -3,10 +3,12 @@ module CanvasAwareness
 open Shared
 open Navigation
 
+type CanvasEventKind = NewDoc | UpdatedDoc
+
 type CanvasEvent =
     { Filename: string
       Timestamp: System.DateTimeOffset
-      IsNew: bool }
+      Kind: CanvasEventKind }
 
 let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string, string>>) =
     repos
@@ -72,8 +74,8 @@ let detectCanvasEvents (now: System.DateTimeOffset) (previousHashes: Map<string,
             |> Map.toList
             |> List.choose (fun (filename, hash) ->
                 match prevDocs |> Map.tryFind filename with
-                | None -> Some { Filename = filename; Timestamp = now; IsNew = true }
-                | Some prevHash when prevHash <> hash -> Some { Filename = filename; Timestamp = now; IsNew = false }
+                | None -> Some { Filename = filename; Timestamp = now; Kind = NewDoc }
+                | Some prevHash when prevHash <> hash -> Some { Filename = filename; Timestamp = now; Kind = UpdatedDoc }
                 | _ -> None)
         if List.isEmpty events then None
         else Some (scopedKey, events))

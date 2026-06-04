@@ -1021,7 +1021,7 @@ let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (has
         ]
 
 let canvasEventEntry dispatch (scopedKey: string) (evt: CanvasEvent) =
-    let verb = if evt.IsNew then "published" else "updated"
+    let verb = match evt.Kind with NewDoc -> "published" | UpdatedDoc -> "updated"
     Html.div [
         prop.className "event-entry canvas-event"
         prop.onClick (fun e ->
