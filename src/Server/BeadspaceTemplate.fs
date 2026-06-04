@@ -1446,6 +1446,7 @@ function updateDashboard(issues) {
         var newDash = document.createElement('div');
         newDash.innerHTML = renderDashboard(issues);
         var newDashView = newDash.firstChild;
+        newDashView.classList.remove('active');
         if (wasActive) newDashView.classList.add('active');
         dashView.parentNode.replaceChild(newDashView, dashView);
     }
