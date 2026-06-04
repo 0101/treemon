@@ -453,17 +453,8 @@ let private executeTask
             let! beads = BeadsStatus.getBeadsSummary path
             agent.Post(UpdateBeads(repoId, path, beads))
 
-            let beadsHtml = Path.Combine(path, ".agents", "canvas", "beads.html")
-            let hasIssues = beads.Open + beads.InProgress + beads.Blocked + beads.Closed > 0
-
-            if hasIssues && not (File.Exists(beadsHtml)) then
-                let dir = Path.GetDirectoryName(beadsHtml)
-                Directory.CreateDirectory(dir) |> ignore
-                File.WriteAllText(beadsHtml, BeadspaceTemplate.html)
-                Log.log "BeadspaceProvisioner" $"Wrote beads.html for {Path.GetFileName(path)}"
-            elif not hasIssues && File.Exists(beadsHtml) then
-                File.Delete(beadsHtml)
-                Log.log "BeadspaceProvisioner" $"Removed beads.html for {Path.GetFileName(path)} (no issues)"
+            BeadspaceProvisioner.provisionDashboard path beads
+            |> Option.iter (Log.log "BeadspaceProvisioner")
 
         | RefreshCodingTool(repoId, path) ->
             let result = CodingToolStatus.getRefreshData path
