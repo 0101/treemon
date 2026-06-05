@@ -159,9 +159,10 @@ Two levels of state preservation are needed:
 ## Implementation Status
 
 - Shipped: Phase 1-4, multi-doc discovery, overview, toolbar positioning, archive, bridge resilience, awareness, per-doc author routing, liveness indicators, queueing, auto-resume, and review fixes.
-- Shipped: Per-doc author routing is implemented via `CanvasDocOwnership.fs`.
-- 🔮 DOM morph and state persistence are not implemented yet.
-- Shipped: `BeadspaceTemplate` is the first bundled template; wider canvas ecosystem work is still ahead.
+- Shipped: Per-doc author routing is implemented via `CanvasDocOwnership.fs` (refactored to MailboxProcessor).
+- Shipped: Beadspace canvas dashboard — template customization, same-origin `beads-data` endpoint, auto-provisioning, incremental DOM refresh, empty-DB suppression, E2E verification (17 unit + E2E tests).
+- Shipped: Code quality refactors — `CanvasScanner` extracted from `RefreshScheduler`, `CanvasDocServer` extracted from `Program.fs`, `CanvasEventKind` DU replacing bool, tuple pattern matching in `App.fs`.
+- 🔮 DOM morph (Level 2 — canvas-wide iframe morph via idiomorph) is not implemented yet. Level 1 (in-page incremental refresh) is shipped for beadspace.
 
 ## Related Specs
 
