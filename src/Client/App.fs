@@ -89,6 +89,8 @@ type Msg =
     | LoadLastViewedHashes of Map<string, Map<string, string>>
     | BridgeLivenessLoaded of Map<string, BridgeLiveness>
     | LaunchCanvasSession of scopedKey: string
+    | MorphActiveDoc
+    | MorphComplete
     | NoOp
 
 let worktreeApi =
@@ -325,7 +327,18 @@ let update msg model =
                     if updatedModel.LastViewedHashes <> model.LastViewedHashes then
                         Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedModel.LastViewedHashes (fun _ -> NoOp)
                     else Cmd.none
-                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd ])
+                let morphCmd =
+                    if not isFirstLoad && updatedModel.CanvasPaneOpen then
+                        match activeVisibleDoc updatedModel with
+                        | Some (scopedKey, filename) ->
+                            let oldHash = model.PreviousCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
+                            let newHash = currentCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
+                            match oldHash, newHash with
+                            | Some o, Some n when o <> n -> Cmd.ofMsg MorphActiveDoc
+                            | _ -> Cmd.none
+                        | None -> Cmd.none
+                    else Cmd.none
+                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd ])
 
     | DataFailed _ ->
         { model with
@@ -742,6 +755,16 @@ let update msg model =
     | BridgeLivenessLoaded liveness ->
         { model with BridgeLiveness = liveness }, Cmd.none
 
+    | MorphActiveDoc ->
+        model,
+        Cmd.ofEffect (fun _ ->
+            let iframe = Dom.document.querySelector ".canvas-iframe"
+            if not (isNull iframe) then
+                Fable.Core.JsInterop.emitJsExpr iframe "$0.contentWindow.postMessage({action:'content-updated'},'http://127.0.0.1:5002')")
+
+    | MorphComplete ->
+        model, markVisibleDocCmd model
+
     | NoOp -> model, Cmd.none
 
 let appSubscriptions (model: Model) : Sub<Msg> =
@@ -787,7 +810,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                 events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
 
     let canvasMessageListener (dispatch: Dispatch<Msg>) =
-        CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch)
+        CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch) (fun () -> dispatch MorphComplete)
 
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling

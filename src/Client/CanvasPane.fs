@@ -25,7 +25,7 @@ let private livenessDot (isAlive: bool) =
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
-    $"{CanvasOrigin}/{encodedPath}/{encodedFilename}?v={doc.ContentHash}"
+    $"{CanvasOrigin}/{encodedPath}/{encodedFilename}"
 
 let private latestDocModified (wt: WorktreeStatus) =
     wt.CanvasDocs
@@ -217,6 +217,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 errorBanner
                 waitingBanner
                 Html.iframe [
+                    prop.key (WorktreePath.value wt.Path + "/" + doc.Filename)
                     prop.className "canvas-iframe"
                     prop.src (iframeSrc wt doc)
                     prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups")
@@ -240,7 +241,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         prop.children [ content ]
     ]
 
-let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) =
+let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMorphComplete: unit -> unit) =
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -254,6 +255,9 @@ let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) =
                         Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
                         selectDoc filename
                     | _ -> ()
+                elif action = "morph-complete" then
+                    Fable.Core.JS.console.log "[canvas] morph-complete received"
+                    onMorphComplete ()
                 else
                     let payload = Fable.Core.JS.JSON.stringify me.data
                     Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
