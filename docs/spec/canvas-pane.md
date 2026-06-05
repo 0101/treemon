@@ -18,7 +18,7 @@
 - `RefreshScheduler.CanvasScanner` scans those files and computes `ContentHash` from file bytes.
 - `CanvasWatchers` keeps one `FileSystemWatcher` per worktree `.agents/canvas/` directory and posts `UpdateCanvasDoc` into the scheduler mailbox when files change.
 - The canvas doc server serves each file at `http://127.0.0.1:5002/{encodedWorktreePath}/{filename}`.
-- The client renders the selected doc in an iframe whose URL includes the current `contentHash`.
+- The client renders the selected doc in an iframe with a stable URL (no cache-buster query param). Content updates are delivered via morph signaling (see DOM Morph and State Persistence, Level 3).
 - Disk files are the source of truth, so docs keep rendering after Treemon, session, or computer restart.
 
 ### Pane UI
@@ -171,7 +171,8 @@ Three layers of state preservation:
 - Shipped: Per-doc author routing is implemented via `CanvasDocOwnership.fs` (refactored to MailboxProcessor).
 - Shipped: Beadspace canvas dashboard — template customization, same-origin `beads-data` endpoint, auto-provisioning, incremental DOM refresh, empty-DB suppression, E2E verification (17 unit + E2E tests).
 - Shipped: Code quality refactors — `CanvasScanner` extracted from `RefreshScheduler`, `CanvasDocServer` extracted from `Program.fs`, `CanvasEventKind` DU replacing bool, tuple pattern matching in `App.fs`.
-- 🔮 DOM morph and state persistence (Levels 2-4) are not implemented yet. Level 1 (in-page incremental refresh) is shipped for beadspace.
+- Shipped: Level 2 auto-display guard — suppresses focus-steal when canvas pane is open and showing a doc, preventing iframe unmount and JS state loss.
+- 🔮 DOM morph and state persistence (Levels 3-4) are not implemented yet. Level 1 (in-page incremental refresh) is shipped for beadspace.
 
 ## Related Specs
 

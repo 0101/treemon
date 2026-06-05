@@ -276,15 +276,16 @@ let update msg model =
                 if isIdle && not (List.isEmpty changedDocs)
                 then findMostRecentChangedDoc repos changedDocs
                 else None
+            let canvasShowingDoc = model.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
             let autoDisplayCmd =
                 match autoDisplayTarget with
-                | Some (scopedKey, filename) ->
+                | Some (scopedKey, filename) when not canvasShowingDoc ->
                     Cmd.batch [
                         if not model.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
                         Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
                         Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
                     ]
-                | None -> Cmd.none
+                | _ -> Cmd.none
             { model with
                 Repos = repos
                 IsLoading = false
