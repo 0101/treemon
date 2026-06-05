@@ -98,21 +98,30 @@
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
 
-### 🔮 DOM Morph and State Persistence
+### DOM Morph and State Persistence
 
-Two levels of state preservation are needed:
+Three layers of state preservation:
 
-**Level 1 — In-page data refresh (beadspace and similar polling docs):**
-- Docs that poll their own data endpoint (e.g., beadspace polls `beads-data` every 30s) must update the DOM incrementally instead of full teardown-and-rebuild.
-- Today, `BeadspaceTemplate.html` does `app.textContent = ''` + `insertAdjacentHTML` on every poll, destroying scroll position, expanded panels, and visual filter state.
-- Fix: refactor template render to update stat numbers in-place, replace only `<tbody>`, and preserve scroll/nav/filter state across polls.
-- This is per-template work — each polling doc must handle its own incremental updates.
+**Level 1 — In-page data refresh (shipped):**
+- Per-template incremental DOM updates. Beadspace template shipped with stat-in-place, tbody-only table refresh, and scroll/nav/filter/panel preservation.
 
-**Level 2 — Canvas-wide iframe morph (general case):**
-- On `contentHash` change, an open doc morphs in place instead of reloading the iframe.
+**Level 2 — Auto-display guard:**
+- When the canvas pane is open and showing a doc, the auto-display idle trigger (60s idle + changed doc) must not steal focus to a different worktree.
+- Auto-display may still fire when the pane is closed or showing the overview.
+- Without this guard, the iframe unmounts when focus switches, destroying all JS state. On switch-back the iframe remounts fresh, resetting nav tabs (e.g., beadspace "All Issues" jumps to "Dashboard").
+
+**Level 3 — Canvas-wide iframe morph (general case):**
+- On `contentHash` change, the open doc morphs in place instead of reloading the iframe.
 - Scroll position, focused elements, and in-progress inputs stay intact across updates.
-- Implementation: inject a morph library (e.g., idiomorph) via the existing `Program.fs` `</head>` injection point.
-- This is not implemented today; the current system reloads the iframe by changing the `?v={contentHash}` URL.
+- Implementation: inject idiomorph (~5KB, MIT) plus a morph controller via the existing `CanvasDocServer.fs` `</head>` injection point.
+- The morph controller listens for a `content-updated` postMessage from the parent. On receive, it fetches its own URL (same-origin on `:5002`, bypassing cache), extracts `<body>`, and calls `Idiomorph.morph(document.body, newBody)`.
+- The Elmish client stabilizes the iframe `src` (removes `?v={contentHash}` cache-buster) and sends `content-updated` via postMessage when the hash changes, instead of changing the iframe `src`.
+- The doc server already sets `Cache-Control: no-cache`, so removing the cache-buster query param is safe.
+
+**Level 4 — Tab switch persistence:**
+- When switching between canvas doc tabs in the same worktree, keep the previous iframe mounted but hidden (`display: none`) instead of unmounting it.
+- On switch back, unhide the existing iframe — all JS state, scroll, and form inputs are intact.
+- Limit to a reasonable cap (e.g., 3 live iframes) to avoid memory bloat; evict least-recently-used beyond the cap.
 
 ### Link Handling
 
@@ -162,7 +171,7 @@ Two levels of state preservation are needed:
 - Shipped: Per-doc author routing is implemented via `CanvasDocOwnership.fs` (refactored to MailboxProcessor).
 - Shipped: Beadspace canvas dashboard — template customization, same-origin `beads-data` endpoint, auto-provisioning, incremental DOM refresh, empty-DB suppression, E2E verification (17 unit + E2E tests).
 - Shipped: Code quality refactors — `CanvasScanner` extracted from `RefreshScheduler`, `CanvasDocServer` extracted from `Program.fs`, `CanvasEventKind` DU replacing bool, tuple pattern matching in `App.fs`.
-- 🔮 DOM morph (Level 2 — canvas-wide iframe morph via idiomorph) is not implemented yet. Level 1 (in-page incremental refresh) is shipped for beadspace.
+- 🔮 DOM morph and state persistence (Levels 2-4) are not implemented yet. Level 1 (in-page incremental refresh) is shipped for beadspace.
 
 ## Related Specs
 
