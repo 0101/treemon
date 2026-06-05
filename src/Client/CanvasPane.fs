@@ -5,7 +5,7 @@ open Navigation
 open Feliz
 open Browser
 
-let [<Literal>] private CanvasOrigin = "http://127.0.0.1:5002"
+let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
 let [<Literal>] private MaxPayloadBytes = 64_000
 
 let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =

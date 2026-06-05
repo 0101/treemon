@@ -789,9 +789,10 @@ let update msg model =
     | MorphActiveDoc ->
         model,
         Cmd.ofEffect (fun _ ->
-            let iframe = Dom.document.querySelector ".canvas-iframe-active"
-            if not (isNull iframe) then
-                Fable.Core.JsInterop.emitJsExpr iframe "$0.contentWindow.postMessage({action:'content-updated'},'http://127.0.0.1:5002')")
+            Dom.document.querySelector ".canvas-iframe-active"
+            |> Option.ofObj
+            |> Option.iter (fun iframe ->
+                Fable.Core.JsInterop.emitJsExpr (iframe, CanvasPane.CanvasOrigin) "$0.contentWindow.postMessage({action:'content-updated'},$1)"))
 
     | MorphComplete ->
         model, markVisibleDocCmd model
