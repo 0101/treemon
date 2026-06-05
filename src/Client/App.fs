@@ -36,6 +36,7 @@ type Model =
       CanvasPaneOpen: bool
       CanvasPosition: CanvasPosition
       ActiveCanvasDoc: Map<string, string>
+      VisitedCanvasDocs: Map<string, string list>
       LastViewedHashes: Map<string, Map<string, string>>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
@@ -135,6 +136,7 @@ let init () =
       CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
+      VisitedCanvasDocs = Map.empty
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
@@ -160,6 +162,15 @@ let findWorktree (scopedKey: string) (model: Model) =
     model.Repos
     |> List.tryPick (fun r ->
         r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+
+let [<Literal>] private MaxLiveIframes = 3
+
+/// Move filename to front of visited list (LRU order, most recent first), capped at MaxLiveIframes.
+let private touchVisitedDoc (scopedKey: string) (filename: string) (visited: Map<string, string list>) =
+    let current = visited |> Map.tryFind scopedKey |> Option.defaultValue []
+    let updated = filename :: (current |> List.filter (fun f -> f <> filename))
+    let capped = if updated.Length > MaxLiveIframes then updated |> List.take MaxLiveIframes else updated
+    visited |> Map.add scopedKey capped
 
 let activeVisibleDoc (model: Model) : (string * string) option =
     match model.FocusedElement with
@@ -636,8 +647,19 @@ let update msg model =
         Cmd.OfAsync.attempt worktreeApi.saveCanvasPosition position (fun _ -> NoOp)
 
     | SelectCanvasDoc (scopedKey, filename) ->
-        { model with ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename },
-        Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+        let wasAlreadyVisited =
+            model.VisitedCanvasDocs
+            |> Map.tryFind scopedKey
+            |> Option.defaultValue []
+            |> List.contains filename
+        { model with
+            ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename
+            VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
+        Cmd.batch [
+            Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+            // When switching to a previously hidden iframe, morph it in case content changed while hidden
+            if wasAlreadyVisited then Cmd.ofMsg MorphActiveDoc
+        ]
 
     | FocusOverviewCard scopedKey ->
         let openPane = not model.CanvasPaneOpen
@@ -650,7 +672,8 @@ let update msg model =
         { model with
             FocusedElement = Some (Card scopedKey)
             CanvasPaneOpen = true
-            ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename },
+            ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename
+            VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
             Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
@@ -687,7 +710,15 @@ let update msg model =
             match remainingDocs with
             | Some (first :: _) -> model.ActiveCanvasDoc |> Map.add scopedKey first.Filename
             | _ -> model.ActiveCanvasDoc |> Map.remove scopedKey
-        { model with Repos = repos; ActiveCanvasDoc = activeDoc }, Cmd.none
+        let visitedDocs =
+            let current = model.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
+            let filtered = current |> List.filter (fun f -> f <> filename)
+            match remainingDocs with
+            | Some (first :: _) -> touchVisitedDoc scopedKey first.Filename (model.VisitedCanvasDocs |> Map.add scopedKey filtered)
+            | _ ->
+                if List.isEmpty filtered then model.VisitedCanvasDocs |> Map.remove scopedKey
+                else model.VisitedCanvasDocs |> Map.add scopedKey filtered
+        { model with Repos = repos; ActiveCanvasDoc = activeDoc; VisitedCanvasDocs = visitedDocs }, Cmd.none
 
     | ArchiveCanvasDocResult (_, _, Error msg) ->
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
@@ -758,7 +789,7 @@ let update msg model =
     | MorphActiveDoc ->
         model,
         Cmd.ofEffect (fun _ ->
-            let iframe = Dom.document.querySelector ".canvas-iframe"
+            let iframe = Dom.document.querySelector ".canvas-iframe-active"
             if not (isNull iframe) then
                 Fable.Core.JsInterop.emitJsExpr iframe "$0.contentWindow.postMessage({action:'content-updated'},'http://127.0.0.1:5002')")
 
@@ -2017,8 +2048,14 @@ let view model dispatch =
             |> Set.ofList
         | _ -> Set.empty
 
+    let focusedVisitedDocs =
+        match model.FocusedElement with
+        | Some (Card scopedKey) ->
+            model.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
+        | _ -> []
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasSendState model.BridgeLiveness focusedUnviewedFilenames (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasSendState model.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
 
     let children =
         match model.CanvasPosition with

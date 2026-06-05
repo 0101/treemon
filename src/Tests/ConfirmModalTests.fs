@@ -63,6 +63,7 @@ let private defaultModel : Model =
       CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
       ActiveCanvasDoc = Map.empty
+      VisitedCanvasDocs = Map.empty
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty

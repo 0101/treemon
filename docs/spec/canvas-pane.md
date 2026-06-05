@@ -164,6 +164,7 @@ Three layers of state preservation:
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting`, or `Failed`, avoiding illegal combinations of optional fields.
 - **Per-doc author routing** — docs persist ownership by `sessionId`, canvas messages route to the selected doc's owner session, and liveness/resume operate per doc instead of per-worktree.
+- **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date.
 
 ## Implementation Status
 
@@ -172,7 +173,9 @@ Three layers of state preservation:
 - Shipped: Beadspace canvas dashboard — template customization, same-origin `beads-data` endpoint, auto-provisioning, incremental DOM refresh, empty-DB suppression, E2E verification (17 unit + E2E tests).
 - Shipped: Code quality refactors — `CanvasScanner` extracted from `RefreshScheduler`, `CanvasDocServer` extracted from `Program.fs`, `CanvasEventKind` DU replacing bool, tuple pattern matching in `App.fs`.
 - Shipped: Level 2 auto-display guard — suppresses focus-steal when canvas pane is open and showing a doc, preventing iframe unmount and JS state loss.
-- 🔮 DOM morph and state persistence (Levels 3-4) are not implemented yet. Level 1 (in-page incremental refresh) is shipped for beadspace.
+- Shipped: Level 3 iframe morph — idiomorph-based DOM morphing on content hash change, morph controller injected via `</head>` injection point.
+- Shipped: Level 4 tab switch persistence — hidden iframes kept mounted across tab switches, LRU eviction at 3 iframes, lazy morph on tab switch.
+- 🔮 Levels 1-4 of DOM morph and state persistence are shipped. Level 1 (in-page incremental refresh) for beadspace, Level 2 (auto-display guard), Level 3 (canvas-wide iframe morph), Level 4 (tab switch persistence).
 
 ## Related Specs
 

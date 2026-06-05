@@ -103,7 +103,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
@@ -212,16 +212,31 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         ]
                     ])
                 else []
+            // Render iframes for all visited docs; active is visible, others are hidden.
+            // Ensure the active doc is always included even if not yet in visitedDocs.
+            let docsToRender =
+                if visitedDocs |> List.contains doc.Filename then visitedDocs
+                else doc.Filename :: visitedDocs
+            let iframes =
+                docsToRender
+                |> List.choose (fun filename ->
+                    wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename)
+                    |> Option.map (fun d -> d, filename = doc.Filename))
+                |> List.map (fun (d, isActive) ->
+                    Html.iframe [
+                        prop.key (WorktreePath.value wt.Path + "/" + d.Filename)
+                        prop.className (if isActive then "canvas-iframe canvas-iframe-active" else "canvas-iframe")
+                        prop.src (iframeSrc wt d)
+                        prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups")
+                        prop.style [
+                            if not isActive then style.display.none
+                        ]
+                    ])
             React.fragment [
                 headerBar tabs (Some doc.Filename) (not isFocusedDocAlive)
                 errorBanner
                 waitingBanner
-                Html.iframe [
-                    prop.key (WorktreePath.value wt.Path + "/" + doc.Filename)
-                    prop.className "canvas-iframe"
-                    prop.src (iframeSrc wt doc)
-                    prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups")
-                ]
+                yield! iframes
             ]
         | None ->
             React.fragment [
