@@ -1398,6 +1398,7 @@ document.title = pageName;
 // ─── Data fetching and rendering ─────────────────────────────────────────────
 var currentIssues = [];
 var initialized = false;
+var lastDataJson = null;
 
 // ─── Update dashboard stats in-place (no DOM rebuild) ────────────────────────
 function updateDashboard(issues) {
@@ -1462,9 +1463,14 @@ function refreshData() {
     fetch(dataUrl)
         .then(function(r) {
             if (!r.ok) throw new Error('Failed to load beads data (HTTP ' + r.status + ')');
-            return r.json();
+            return r.text();
         })
-        .then(function(issues) {
+        .then(function(text) {
+            // Skip re-render when the payload is unchanged: avoids needless DOM rebuilds
+            // (and any UI-state churn) on the periodic poll. State only refreshes on real changes.
+            if (initialized && text === lastDataJson) return;
+            lastDataJson = text;
+            var issues = JSON.parse(text);
             if (!initialized) {
                 initialRender(issues);
                 return;
