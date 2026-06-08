@@ -3,19 +3,27 @@ module Server.BeadspaceProvisioner
 open System.IO
 open Shared
 
-/// Provision or remove beads.html based on whether the worktree has any beads issues.
-/// Returns a description of the action taken, or None if no action was needed.
+/// Keep beads.html in sync with the current BeadspaceTemplate when the worktree has
+/// issues, and remove it when it has none. Writing only happens when the on-disk content
+/// differs from the template, so template fixes reach existing worktrees on the next refresh.
+/// Returns a description of the action taken, or None if nothing changed.
 let provisionDashboard (worktreePath: string) (summary: BeadsSummary) =
     let beadsHtml = Path.Combine(worktreePath, ".agents", "canvas", "beads.html")
     let hasIssues = summary.Open + summary.InProgress + summary.Blocked + summary.Closed > 0
+    let name = Path.GetFileName(worktreePath)
 
-    if hasIssues && not (File.Exists(beadsHtml)) then
-        let dir = Path.GetDirectoryName(beadsHtml)
-        Directory.CreateDirectory(dir) |> ignore
-        File.WriteAllText(beadsHtml, BeadspaceTemplate.html)
-        Some $"Wrote beads.html for {Path.GetFileName(worktreePath)}"
-    elif not hasIssues && File.Exists(beadsHtml) then
+    if hasIssues then
+        let existing = if File.Exists(beadsHtml) then Some(File.ReadAllText(beadsHtml)) else None
+        if existing = Some BeadspaceTemplate.html then
+            None
+        else
+            Directory.CreateDirectory(Path.GetDirectoryName(beadsHtml)) |> ignore
+            File.WriteAllText(beadsHtml, BeadspaceTemplate.html)
+            match existing with
+            | None -> Some $"Wrote beads.html for {name}"
+            | Some _ -> Some $"Updated beads.html for {name} (template changed)"
+    elif File.Exists(beadsHtml) then
         File.Delete(beadsHtml)
-        Some $"Removed beads.html for {Path.GetFileName(worktreePath)} (no issues)"
+        Some $"Removed beads.html for {name} (no issues)"
     else
         None

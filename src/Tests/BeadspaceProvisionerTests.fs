@@ -51,16 +51,28 @@ type ProvisionTests() =
         Assert.That(Directory.Exists(canvasDir), Is.True, ".agents/canvas/ should be created")
 
     [<Test>]
-    member _.``Does not overwrite existing beads.html``() =
+    member _.``Does not rewrite when content already matches template``() =
         let htmlPath = beadsHtmlPath tempDir
         let canvasDir = Path.GetDirectoryName(htmlPath)
         Directory.CreateDirectory(canvasDir) |> ignore
-        File.WriteAllText(htmlPath, "<!-- customized -->")
+        File.WriteAllText(htmlPath, Server.BeadspaceTemplate.html)
 
         let result = provisionDashboard tempDir summaryWithIssues
 
-        Assert.That(result, Is.EqualTo(None), "Should not overwrite existing file")
-        Assert.That(File.ReadAllText(htmlPath), Is.EqualTo("<!-- customized -->"))
+        Assert.That(result, Is.EqualTo(None), "Should not rewrite when already current")
+        Assert.That(File.ReadAllText(htmlPath), Is.EqualTo(Server.BeadspaceTemplate.html))
+
+    [<Test>]
+    member _.``Rewrites stale beads.html when content differs from template``() =
+        let htmlPath = beadsHtmlPath tempDir
+        let canvasDir = Path.GetDirectoryName(htmlPath)
+        Directory.CreateDirectory(canvasDir) |> ignore
+        File.WriteAllText(htmlPath, "<!-- stale template -->")
+
+        let result = provisionDashboard tempDir summaryWithIssues
+
+        Assert.That(result.IsSome, Is.True, "Should rewrite a stale dashboard")
+        Assert.That(File.ReadAllText(htmlPath), Is.EqualTo(Server.BeadspaceTemplate.html))
 
 
 // ── Removal (delete beads.html when zero issues) ────────────────────
@@ -99,11 +111,11 @@ type RemovalTests() =
         Assert.That(result, Is.EqualTo(None), "Should take no action")
 
     [<Test>]
-    member _.``No-op when only closed issues and file exists``() =
+    member _.``Keeps beads.html when only closed issues exist``() =
         let htmlPath = beadsHtmlPath tempDir
         let canvasDir = Path.GetDirectoryName(htmlPath)
         Directory.CreateDirectory(canvasDir) |> ignore
-        File.WriteAllText(htmlPath, "<html>existing</html>")
+        File.WriteAllText(htmlPath, Server.BeadspaceTemplate.html)
 
         let closedOnly = { Open = 0; InProgress = 0; Blocked = 0; Closed = 5 }
         let result = provisionDashboard tempDir closedOnly
