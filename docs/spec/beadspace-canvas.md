@@ -44,11 +44,11 @@ Add to `CanvasDocServer` (port 5002):
 ### Auto-Provisioning
 
 In the refresh scheduler, when scanning worktrees:
-- If `.beads/beads.db` exists AND has at least one issue AND `.agents/canvas/beads.html` doesn't exist → write the template
+- If `.beads/beads.db` exists AND has at least one issue → ensure `.agents/canvas/beads.html` matches the current template: write it when absent, and rewrite it when the on-disk content differs from `BeadspaceTemplate.html` (so template fixes reach existing worktrees on the next refresh after a deploy)
 - If `.beads/beads.db` has zero issues AND `.agents/canvas/beads.html` exists → delete `beads.html`
 - Template is stored as a string constant in `BeadspaceTemplate.fs` module in the Server project
 - Creates `.agents/canvas/` directory if needed
-- Leaves existing `beads.html` alone (user may have customized) unless removing due to zero issues
+- `beads.html` is a generated view kept in sync with the template — it is not meant to be user-customized
 
 ### Incremental Data Refresh
 
