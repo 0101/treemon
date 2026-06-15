@@ -7,7 +7,7 @@ open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 
 /// Mock beads data — covers all statuses, types, priorities, labels, and dependencies
-/// to exercise every rendering path in the dashboard and detail panel.
+/// to exercise every rendering path in the issues table and detail panel.
 let private mockBeadsJson = """[
   {"id":"test-1","title":"Add authentication","description":"Implement JWT-based auth for API endpoints","status":"open","priority":1,"issue_type":"feature","labels":["auth","security"],"created_at":"2026-05-01T10:00:00Z","updated_at":"2026-06-01T10:00:00Z","dependency_count":0,"dependent_count":2},
   {"id":"test-2","title":"Fix login redirect","description":"Login page redirects to wrong URL after auth","status":"in_progress","priority":2,"issue_type":"bug","labels":["auth"],"created_at":"2026-05-15T10:00:00Z","updated_at":"2026-06-02T10:00:00Z","dependency_count":1,"dependent_count":0},
@@ -17,7 +17,7 @@ let private mockBeadsJson = """[
   {"id":"test-6","title":"Epic: v2 release","description":"Track all v2 milestones","status":"in_progress","priority":1,"issue_type":"epic","labels":["v2","milestone"],"created_at":"2026-01-15T10:00:00Z","updated_at":"2026-06-03T10:00:00Z","dependency_count":0,"dependent_count":3}
 ]"""
 
-/// E2E tests for the Beadspace canvas dashboard.
+/// E2E tests for the Beadspace canvas issues table.
 /// Uses Playwright route interception to serve the beads.html template and mock data,
 /// so tests are self-contained and don't depend on known worktree paths.
 [<TestFixture>]
@@ -55,95 +55,8 @@ type BeadspaceCanvasTests() =
                     Body = mockBeadsJson)))
 
             let! _ = this.Page.GotoAsync(beadsPageUrl, PageGotoOptions(WaitUntil = WaitUntilState.NetworkIdle))
-            // Wait for data to load — the loading spinner disappears and stat cards appear
-            do! this.Page.Locator(".stat-card").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
-        }
-
-    // ── Goal 1: Dashboard Renders ────────────────────────────────────────
-
-    [<Test>]
-    member this.``Dashboard renders status donut chart``() =
-        task {
-            let donut = this.Page.Locator(".donut")
-            let! count = donut.CountAsync()
-            Assert.That(count, Is.GreaterThan(0), "Status donut chart should render")
-
-            let legend = this.Page.Locator(".donut-legend-item")
-            let! legendCount = legend.CountAsync()
-            Assert.That(legendCount, Is.EqualTo(4), "Donut legend should have 4 status items (Open, In Progress, Blocked, Closed)")
-        }
-
-    [<Test>]
-    member this.``Dashboard renders stat cards with counts``() =
-        task {
-            let statCards = this.Page.Locator(".stat-card")
-            let! count = statCards.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(6), "Should render stat cards (Total, Open, In Progress, Blocked, Closed, Completion)")
-
-            // Verify completion percentage card exists
-            let completionCard = this.Page.Locator(".stat-card.completion .stat-value")
-            let! text = completionCard.TextContentAsync()
-            Assert.That(text, Does.Contain("%"), "Completion stat card should show a percentage")
-        }
-
-    [<Test>]
-    member this.``Dashboard renders priority bar chart``() =
-        task {
-            let priorityPanel = this.Page.Locator(".panel-title", PageLocatorOptions(HasText = "Priority"))
-            let! count = priorityPanel.CountAsync()
-            Assert.That(count, Is.GreaterThan(0), "Priority panel should render")
-
-            let barRows = this.Page.Locator(".bar-row")
-            let! barCount = barRows.CountAsync()
-            Assert.That(barCount, Is.GreaterThan(0), "Priority bar chart should have bar rows")
-        }
-
-    [<Test>]
-    member this.``Dashboard renders label chart``() =
-        task {
-            let labelPanel = this.Page.Locator(".panel-title", PageLocatorOptions(HasText = "Labels"))
-            let! count = labelPanel.CountAsync()
-            Assert.That(count, Is.GreaterThan(0), "Labels panel should render")
-        }
-
-    [<Test>]
-    member this.``Dashboard renders type chart``() =
-        task {
-            let typePanel = this.Page.Locator(".panel-title", PageLocatorOptions(HasText = "Types"))
-            let! count = typePanel.CountAsync()
-            Assert.That(count, Is.GreaterThan(0), "Types panel should render")
-
-            let typeRows = this.Page.Locator(".type-row")
-            let! rowCount = typeRows.CountAsync()
-            Assert.That(rowCount, Is.GreaterThan(0), "Type chart should have type rows")
-        }
-
-    [<Test>]
-    member this.``Dashboard renders active issues section``() =
-        task {
-            let activePanel = this.Page.Locator(".panel-title", PageLocatorOptions(HasText = "Active Issues"))
-            let! count = activePanel.CountAsync()
-            Assert.That(count, Is.GreaterThan(0), "Active Issues panel should render")
-
-            let issueRows = this.Page.Locator("#view-dashboard .issue-row")
-            let! rowCount = issueRows.CountAsync()
-            Assert.That(rowCount, Is.GreaterThan(0), "Active issues section should render issue rows")
-        }
-
-    [<Test>]
-    member this.``Dashboard renders triage suggestions section``() =
-        task {
-            let triagePanel = this.Page.Locator(".panel-title", PageLocatorOptions(HasText = "Triage Suggestions"))
-            let! count = triagePanel.CountAsync()
-            Assert.That(count, Is.GreaterThan(0), "Triage Suggestions panel should render")
-        }
-
-    [<Test>]
-    member this.``Topbar shows issue count``() =
-        task {
-            let meta = this.Page.Locator("#topbar-meta")
-            let! text = meta.TextContentAsync()
-            Assert.That(text, Does.Contain("issues"), "Topbar should show issue count")
+            // Wait for data to load — the loading spinner disappears and the issues table appears
+            do! this.Page.Locator(".issues-table").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
         }
 
     // ── Goal 2: Issues Table ─────────────────────────────────────────────
@@ -151,11 +64,6 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Issues table renders rows from beads-data endpoint``() =
         task {
-            // Switch to issues view
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
             let rows = this.Page.Locator(".issue-table-row")
             let! rowCount = rows.CountAsync()
             Assert.That(rowCount, Is.GreaterThan(0), "Issues table should render rows from beads data")
@@ -164,10 +72,6 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Issues table has sortable column headers``() =
         task {
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
             let sortableHeaders = this.Page.Locator(".issues-table th[data-sort]")
             let! headerCount = sortableHeaders.CountAsync()
             Assert.That(headerCount, Is.EqualTo(7), "Issues table should have 7 sortable columns (ID, Priority, Title, Status, Type, Labels, Age)")
@@ -187,10 +91,6 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Issues table is filterable by status``() =
         task {
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
             // Default filter is 'open' — get the count
             let! openCount = this.Page.Locator(".issue-table-row").CountAsync()
 
@@ -212,11 +112,6 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Clicking issue row expands detail panel``() =
         task {
-            // Switch to issues view with all issues visible
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
             let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
             do! allChip.ClickAsync()
 
@@ -234,10 +129,6 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Detail panel shows description and badges``() =
         task {
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
             let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
             do! allChip.ClickAsync()
 
@@ -271,10 +162,6 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Clicking expanded row collapses detail panel``() =
         task {
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
             let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
             do! allChip.ClickAsync()
 
@@ -356,37 +243,32 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``UI state is preserved across data refresh``() =
         task {
-            // 1. Navigate to Issues view
-            let issuesTab = this.Page.Locator(".nav-tab", PageLocatorOptions(HasText = "All Issues"))
-            do! issuesTab.ClickAsync()
-            do! this.Page.Locator("#view-issues.active").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-
-            // 2. Set status filter to 'All'
+            // 1. Set status filter to 'All'
             let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
             do! allChip.ClickAsync()
             do! this.Page.Locator(".issue-table-row").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // 3. Type in search box
+            // 2. Type in search box
             let searchInput = this.Page.Locator("#search")
             do! searchInput.FillAsync("auth")
             // Wait for search filtering to take effect
             do! this.Page.WaitForTimeoutAsync(300.0f)
 
-            // 4. Expand a detail panel by clicking a row
+            // 3. Expand a detail panel by clicking a row
             let firstRow = this.Page.Locator(".issue-table-row").First
             let! _expandedRowId = firstRow.GetAttributeAsync("data-id")
             do! firstRow.ClickAsync()
             let detailPanel = this.Page.Locator(".detail-panel.expanded")
             do! detailPanel.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // 5. Trigger refreshData() — this is the incremental refresh
+            // 4. Trigger refreshData() — this is the incremental refresh
             let! _ = this.Page.EvaluateAsync<bool>(
                 "() => new Promise(resolve => {
                     refreshData();
                     setTimeout(() => resolve(true), 2000);
                 })")
 
-            // 6. Assert filter chip 'All' is still active
+            // 5. Assert filter chip 'All' is still active
             let activeChip = this.Page.Locator(".filter-chip.active")
             let! activeChipText = activeChip.TextContentAsync()
             Assert.That(activeChipText, Does.Contain("All"), "Active filter chip should still be 'All' after refresh")
@@ -399,7 +281,7 @@ type BeadspaceCanvasTests() =
             let! expandedCount = this.Page.Locator(".detail-panel.expanded").CountAsync()
             Assert.That(expandedCount, Is.EqualTo(1), "Detail panel should remain expanded after refresh")
 
-            // Assert nav tab is still on Issues view
-            let! issuesViewActive = this.Page.Locator("#view-issues.active").CountAsync()
-            Assert.That(issuesViewActive, Is.EqualTo(1), "Issues view should still be active after refresh")
+            // Assert the issues table is still rendered after refresh
+            let! tableCount = this.Page.Locator(".issues-table").CountAsync()
+            Assert.That(tableCount, Is.EqualTo(1), "Issues table should still be rendered after refresh")
         }
