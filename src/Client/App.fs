@@ -185,6 +185,16 @@ let activeVisibleDoc (model: Model) : (string * string) option =
             doc |> Option.map (fun d -> scopedKey, d.Filename))
     | _ -> None
 
+/// Look up a canvas doc's kind by scoped key + filename. Used to gate session-document
+/// machinery (morph signaling, idle auto-display focus-steal) to AgentDoc only: a SystemView
+/// (e.g. the beads dashboard) drives its own refresh and must neither be morphed (a morph stomps
+/// the live, JS-rendered dashboard back to the empty template shell) nor steal focus on change.
+let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string) : CanvasDocKind option =
+    repos
+    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+    |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
+    |> Option.map (fun d -> d.Kind)
+
 let markVisibleDocCmd (model: Model) : Cmd<Msg> =
     activeVisibleDoc model
     |> Option.map (fun (sk, fn) -> Cmd.ofMsg (MarkDocViewed (sk, fn)))
@@ -286,8 +296,14 @@ let update msg model =
             let now = Fable.Core.JS.Constructors.Date.now ()
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
             let autoDisplayTarget =
-                if isIdle && not (List.isEmpty changedDocs)
-                then findMostRecentChangedDoc repos changedDocs
+                // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
+                // dashboard) is server-generated and self-refreshing, so its data churn must not
+                // hijack focus; filter it out of the candidates before picking the most recent.
+                let agentChangedDocs =
+                    changedDocs
+                    |> List.filter (fun (scopedKey, filename) -> canvasDocKind repos scopedKey filename = Some AgentDoc)
+                if isIdle && not (List.isEmpty agentChangedDocs)
+                then findMostRecentChangedDoc repos agentChangedDocs
                 else None
             let canvasShowingDoc = model.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
             let autoDisplayCmd =
@@ -341,13 +357,13 @@ let update msg model =
                 let morphCmd =
                     if not isFirstLoad && updatedModel.CanvasPaneOpen then
                         match activeVisibleDoc updatedModel with
-                        | Some (scopedKey, filename) ->
+                        | Some (scopedKey, filename) when canvasDocKind updatedModel.Repos scopedKey filename = Some AgentDoc ->
                             let oldHash = model.PreviousCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
                             let newHash = currentCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
                             match oldHash, newHash with
                             | Some o, Some n when o <> n -> Cmd.ofMsg MorphActiveDoc
                             | _ -> Cmd.none
-                        | None -> Cmd.none
+                        | _ -> Cmd.none
                     else Cmd.none
                 updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd ])
 
@@ -657,8 +673,10 @@ let update msg model =
             VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
         Cmd.batch [
             Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
-            // When switching to a previously hidden iframe, morph it in case content changed while hidden
-            if wasAlreadyVisited then Cmd.ofMsg MorphActiveDoc
+            // When switching to a previously hidden iframe, morph it in case content changed while
+            // hidden — but only for AgentDocs. A SystemView (beads dashboard) self-refreshes and is
+            // served without a morph controller, so a morph signal is meaningless for it.
+            if wasAlreadyVisited && canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
         ]
 
     | FocusOverviewCard scopedKey ->

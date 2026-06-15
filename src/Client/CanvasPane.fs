@@ -22,6 +22,13 @@ let private livenessDot (isAlive: bool) =
         prop.title (if isAlive then "Session alive" else "No active session")
     ]
 
+/// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
+/// server-generated and has no owner session, so liveness is meaningless and the dot is omitted.
+let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
+    match doc.Kind with
+    | AgentDoc -> livenessDot (isDocAlive bridgeLiveness doc)
+    | SystemView -> Html.none
+
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
@@ -87,7 +94,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                                         e.stopPropagation ()
                                                         onClickDoc scopedKey doc.Filename)
                                                     prop.children [
-                                                        livenessDot (isDocAlive bridgeLiveness doc)
+                                                        livenessDotFor bridgeLiveness doc
                                                         Html.text (doc.Filename.Replace(".html", ""))
                                                     ]
                                                 ]
@@ -207,7 +214,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         prop.onClick (fun _ -> selectDoc d.Filename)
                         prop.title d.Filename
                         prop.children [
-                            livenessDot (isDocAlive bridgeLiveness d)
+                            livenessDotFor bridgeLiveness d
                             Html.text (d.Filename.Replace(".html", ""))
                         ]
                     ])
@@ -233,7 +240,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         ]
                     ])
             React.fragment [
-                headerBar tabs (Some doc.Filename) (not isFocusedDocAlive)
+                headerBar tabs (Some doc.Filename) (doc.Kind = AgentDoc && not isFocusedDocAlive)
                 errorBanner
                 waitingBanner
                 yield! iframes

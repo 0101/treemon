@@ -14,6 +14,12 @@ open Tests.CanvasTestHelpers
 let [<Literal>] private FixtureCanvasBranch = "feature-active"
 let [<Literal>] private FixtureMultiDocBranch = "feature-multidoc"
 
+/// Branch of the fixture worktree (treemon/multirepo) that holds a mix of doc kinds:
+/// beads.html (SystemView, listed first so it is the default-active doc) plus dashboard.html
+/// and status.html (AgentDoc). Used to assert that session-document affordances (liveness dot,
+/// Start-session button) are gated to AgentDoc only.
+let [<Literal>] private FixtureSystemViewBranch = "multirepo"
+
 /// E2E tests for the canvas pane feature.
 /// Prerequisites:
 ///   - Server running on :5001 with canvas doc server on :5002
@@ -595,4 +601,77 @@ type CanvasPaneTests() =
             let archiveBtn = this.Page.Locator(".canvas-tab-bar .canvas-archive-btn")
             let! archiveCount = archiveBtn.CountAsync()
             Assert.That(archiveCount, Is.EqualTo(0), "Archive button should not appear when no doc is active")
+        }
+
+    // ── SystemView gating (liveness + Start-session) ────────────────────
+    // The multirepo fixture worktree mixes one SystemView (beads.html) with two AgentDocs
+    // (dashboard.html, status.html). Session-document affordances must apply to AgentDocs only.
+
+    [<Test>]
+    member this.``SystemView tab shows no liveness dot but AgentDoc tabs do``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Only the two AgentDoc tabs (dashboard, status) carry a liveness dot; the SystemView
+            // (beads) tab carries none — so 3 doc tabs yield exactly 2 liveness dots.
+            let allTabDots = this.Page.Locator(".canvas-pane .canvas-tab .canvas-liveness-dot")
+            let! dotCount = allTabDots.CountAsync()
+            Assert.That(dotCount, Is.EqualTo(2), "Only the 2 AgentDoc tabs should render a liveness dot; the SystemView (beads) tab should not")
+
+            // The beads (SystemView) tab specifically must have no liveness dot.
+            let beadsTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "beads"))
+            let! beadsDots = beadsTab.Locator(".canvas-liveness-dot").CountAsync()
+            Assert.That(beadsDots, Is.EqualTo(0), "SystemView (beads) tab should not render a liveness dot")
+
+            // An AgentDoc tab (dashboard) must keep its liveness dot.
+            let dashboardTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
+            let! dashDots = dashboardTab.Locator(".canvas-liveness-dot").CountAsync()
+            Assert.That(dashDots, Is.EqualTo(1), "AgentDoc (dashboard) tab should still render a liveness dot")
+        }
+
+    [<Test>]
+    member this.``SystemView active doc shows no Start session button but AgentDoc does``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // beads.html (SystemView) is the default-active doc → no Start-session button, even
+            // though it has no live owner session.
+            let launchBtn = this.Page.Locator(".canvas-pane .canvas-launch-btn")
+            let! launchWhenSystemView = launchBtn.CountAsync()
+            Assert.That(launchWhenSystemView, Is.EqualTo(0), "SystemView (beads) active doc should not show the Start session button")
+
+            // Switching to an AgentDoc with no live session restores the Start-session button.
+            let dashboardTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
+            do! dashboardTab.ClickAsync()
+            do! launchBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! launchWhenAgentDoc = launchBtn.CountAsync()
+            Assert.That(launchWhenAgentDoc, Is.EqualTo(1), "AgentDoc (dashboard) active doc with no live session should show the Start session button")
+        }
+
+    [<Test>]
+    member this.``Overview omits liveness dot for SystemView doc but keeps it for AgentDoc``() =
+        task {
+            // Focus a worktree with no canvas docs to trigger the overview, which lists every
+            // worktree's docs (including the multirepo SystemView + AgentDocs).
+            do! focusCanvasCard this.Page "feature-recent"
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (this.Page.Locator(".canvas-overview")).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // The beads (SystemView) overview entry must have no liveness dot.
+            let beadsDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "beads"))
+            do! beadsDoc.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! beadsDots = beadsDoc.Locator(".canvas-liveness-dot").CountAsync()
+            Assert.That(beadsDots, Is.EqualTo(0), "SystemView (beads) overview entry should not render a liveness dot")
+
+            // An AgentDoc overview entry (dashboard) must keep its liveness dot.
+            let dashboardDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "dashboard"))
+            let! dashDots = dashboardDoc.Locator(".canvas-liveness-dot").CountAsync()
+            Assert.That(dashDots, Is.EqualTo(1), "AgentDoc (dashboard) overview entry should still render a liveness dot")
         }
