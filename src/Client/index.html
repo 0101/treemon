@@ -561,6 +561,24 @@
         .canvas-tab:hover { background: #45475a; border-color: #585b70; }
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
         .canvas-tab-viewed { opacity: 0.5; }
+        .canvas-system-tab {
+            display: flex; align-items: center; gap: 5px;
+            flex-shrink: 0; margin-right: 6px;
+            background: #2b2440; border: 1px solid #45406a; border-radius: 4px;
+            padding: 2px 8px; font-size: 0.8em; cursor: pointer; color: #cba6f7;
+            font-family: inherit; transition: background 0.15s, border-color 0.15s;
+            line-height: 1.4; white-space: nowrap;
+        }
+        .canvas-system-tab:hover { background: #353050; border-color: #cba6f7; }
+        .canvas-system-tab.active { background: #322a4a; border-color: #cba6f7; color: #cba6f7; }
+        .canvas-system-tab-glyph {
+            font-size: 0.7em; font-weight: 700; letter-spacing: 0.06em; opacity: 0.85;
+        }
+        .canvas-system-tab-count {
+            background: #cba6f7; color: #1e1e2e; border-radius: 8px;
+            padding: 0 6px; min-width: 16px; text-align: center;
+            font-size: 0.85em; font-weight: 600;
+        }
         .canvas-overview {
             padding: 16px;
             overflow-y: auto;

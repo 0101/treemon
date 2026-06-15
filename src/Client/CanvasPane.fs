@@ -29,6 +29,31 @@ let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: C
     | AgentDoc -> livenessDot (isDocAlive bridgeLiveness doc)
     | SystemView -> Html.none
 
+/// Total beads issues for a worktree (Open + InProgress + Blocked + Closed). This is the label of
+/// the SystemView entry, replacing the beads dashboard's former top-bar "N issues" meta.
+let private beadsTotal (b: BeadsSummary) =
+    b.Open + b.InProgress + b.Blocked + b.Closed
+
+/// Render the SystemView (e.g. the beads dashboard) entry for the tab strip. It is deliberately NOT
+/// a normal agent-doc tab: it uses a distinct CSS class, carries no liveness dot, and labels itself
+/// with the worktree's beads issue count shown as a badge next to a "BD" glyph.
+let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
+    Html.button [
+        prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
+        prop.onClick (fun _ -> selectDoc doc.Filename)
+        prop.title "Beads issues"
+        prop.children [
+            Html.span [
+                prop.className "canvas-system-tab-glyph"
+                prop.text "BD"
+            ]
+            Html.span [
+                prop.className "canvas-system-tab-count"
+                prop.text (string (beadsTotal wt.Beads))
+            ]
+        ]
+    ]
+
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
@@ -130,7 +155,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         ]
 
-    let headerBar (tabs: Fable.React.ReactElement list) (activeFilename: string option) (showLaunchBtn: bool) =
+    let headerBar (tabs: Fable.React.ReactElement list) (activeDoc: CanvasDoc option) (showLaunchBtn: bool) =
         Html.div [
             prop.className "canvas-tab-bar"
             prop.children [
@@ -148,15 +173,15 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                                 prop.title "Start a session to work on the selected canvas doc"
                                 prop.text "▶ Start session"
                             ]
-                        match activeFilename with
-                        | Some filename ->
+                        match activeDoc with
+                        | Some d when d.Kind = AgentDoc ->
                             Html.button [
                                 prop.className "canvas-archive-btn"
-                                prop.onClick (fun _ -> archiveDoc filename)
+                                prop.onClick (fun _ -> archiveDoc d.Filename)
                                 prop.title "Archive this doc"
                                 prop.children [ ArchiveViews.archiveIcon ]
                             ]
-                        | None -> ()
+                        | _ -> ()
                         positionButtons
                     ]
                 ]
@@ -199,25 +224,36 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         match focusedDoc with
         | Some (wt, doc) ->
             let isFocusedDocAlive = isDocAlive bridgeLiveness doc
+            // The SystemView (beads) entry gets a distinct affordance pinned to the far left of the
+            // strip; AgentDocs keep the normal tab treatment. The strip also renders for a lone
+            // SystemView so its beads-count badge stays visible, while a lone AgentDoc still shows
+            // no tabs (its iframe fills the pane).
+            let hasSystemView = wt.CanvasDocs |> List.exists (fun d -> d.Kind = SystemView)
+            let agentTab (d: CanvasDoc) =
+                let isActive = d.Filename = doc.Filename
+                let isViewed = not (Set.contains d.Filename unviewedFilenames)
+                let cls =
+                    [ "canvas-tab"
+                      if isActive then "active"
+                      if isViewed && not isActive then "canvas-tab-viewed" ]
+                    |> String.concat " "
+                Html.button [
+                    prop.className cls
+                    prop.onClick (fun _ -> selectDoc d.Filename)
+                    prop.title d.Filename
+                    prop.children [
+                        livenessDotFor bridgeLiveness d
+                        Html.text (d.Filename.Replace(".html", ""))
+                    ]
+                ]
             let tabs =
-                if wt.CanvasDocs.Length > 1
-                then wt.CanvasDocs |> List.map (fun d ->
-                    let isActive = d.Filename = doc.Filename
-                    let isViewed = not (Set.contains d.Filename unviewedFilenames)
-                    let cls =
-                        [ "canvas-tab"
-                          if isActive then "active"
-                          if isViewed && not isActive then "canvas-tab-viewed" ]
-                        |> String.concat " "
-                    Html.button [
-                        prop.className cls
-                        prop.onClick (fun _ -> selectDoc d.Filename)
-                        prop.title d.Filename
-                        prop.children [
-                            livenessDotFor bridgeLiveness d
-                            Html.text (d.Filename.Replace(".html", ""))
-                        ]
-                    ])
+                if wt.CanvasDocs.Length > 1 || hasSystemView then
+                    wt.CanvasDocs
+                    |> List.sortBy (fun d -> match d.Kind with SystemView -> 0 | AgentDoc -> 1)
+                    |> List.map (fun d ->
+                        match d.Kind with
+                        | SystemView -> systemViewTab wt (d.Filename = doc.Filename) selectDoc d
+                        | AgentDoc -> agentTab d)
                 else []
             // Render iframes for all visited docs; active is visible, others are hidden.
             // Ensure the active doc is always included even if not yet in visitedDocs.
@@ -240,7 +276,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         ]
                     ])
             React.fragment [
-                headerBar tabs (Some doc.Filename) (doc.Kind = AgentDoc && not isFocusedDocAlive)
+                headerBar tabs (Some doc) (doc.Kind = AgentDoc && not isFocusedDocAlive)
                 errorBanner
                 waitingBanner
                 yield! iframes

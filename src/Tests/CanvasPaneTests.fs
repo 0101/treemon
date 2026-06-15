@@ -615,16 +615,17 @@ type CanvasPaneTests() =
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // Only the two AgentDoc tabs (dashboard, status) carry a liveness dot; the SystemView
-            // (beads) tab carries none — so 3 doc tabs yield exactly 2 liveness dots.
+            // The two AgentDoc tabs (dashboard, status) each carry a liveness dot; the SystemView
+            // (beads) is a distinct .canvas-system-tab entry that carries none — so the 2 normal
+            // doc tabs yield exactly 2 liveness dots.
             let allTabDots = this.Page.Locator(".canvas-pane .canvas-tab .canvas-liveness-dot")
             let! dotCount = allTabDots.CountAsync()
-            Assert.That(dotCount, Is.EqualTo(2), "Only the 2 AgentDoc tabs should render a liveness dot; the SystemView (beads) tab should not")
+            Assert.That(dotCount, Is.EqualTo(2), "Only the 2 AgentDoc tabs should render a liveness dot; the SystemView (beads) entry should not")
 
-            // The beads (SystemView) tab specifically must have no liveness dot.
-            let beadsTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "beads"))
+            // The beads (SystemView) entry specifically must have no liveness dot.
+            let beadsTab = this.Page.Locator(".canvas-pane .canvas-system-tab")
             let! beadsDots = beadsTab.Locator(".canvas-liveness-dot").CountAsync()
-            Assert.That(beadsDots, Is.EqualTo(0), "SystemView (beads) tab should not render a liveness dot")
+            Assert.That(beadsDots, Is.EqualTo(0), "SystemView (beads) entry should not render a liveness dot")
 
             // An AgentDoc tab (dashboard) must keep its liveness dot.
             let dashboardTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
@@ -674,4 +675,73 @@ type CanvasPaneTests() =
             let dashboardDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "dashboard"))
             let! dashDots = dashboardDoc.Locator(".canvas-liveness-dot").CountAsync()
             Assert.That(dashDots, Is.EqualTo(1), "AgentDoc (dashboard) overview entry should still render a liveness dot")
+        }
+
+    // ── SystemView distinct affordance + archive gating (tm-canvas48-86v) ──
+    // The SystemView (beads) renders as a differently-styled entry pinned to the far left of the
+    // tab strip, labelled with the worktree's beads issue count; the archive button is hidden while
+    // it is active. The multirepo fixture worktree mixes the beads SystemView (Beads total = 2)
+    // with the dashboard/status AgentDocs.
+
+    [<Test>]
+    member this.``SystemView renders as a distinct leftmost entry, not a normal tab``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // Exactly one SystemView (beads) entry, rendered with its distinct class.
+            let systemTab = this.Page.Locator(".canvas-pane .canvas-system-tab")
+            do! systemTab.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! sysCount = systemTab.CountAsync()
+            Assert.That(sysCount, Is.EqualTo(1), "multirepo should render exactly one SystemView (beads) entry")
+
+            // It is NOT a normal agent-doc tab, and carries no liveness dot.
+            let! overlap = this.Page.Locator(".canvas-pane .canvas-system-tab.canvas-tab").CountAsync()
+            Assert.That(overlap, Is.EqualTo(0), "SystemView entry must not also be a normal .canvas-tab")
+            let! sysDots = systemTab.Locator(".canvas-liveness-dot").CountAsync()
+            Assert.That(sysDots, Is.EqualTo(0), "SystemView entry must not render a liveness dot")
+
+            // It sits leftmost in the tab strip (before any agent-doc tab).
+            let firstEntry = this.Page.Locator(".canvas-pane .canvas-tab-group > *").First
+            let! firstClass = firstEntry.GetAttributeAsync("class")
+            Assert.That(firstClass, Does.Contain("canvas-system-tab"), "SystemView entry should be pinned to the far left of the tab strip")
+        }
+
+    [<Test>]
+    member this.``SystemView entry displays the beads issue count from the worktree``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // multirepo wt.Beads = Open 1 + InProgress 1 + Blocked 0 + Closed 0 = 2.
+            let countBadge = this.Page.Locator(".canvas-pane .canvas-system-tab .canvas-system-tab-count")
+            do! countBadge.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! countText = countBadge.TextContentAsync()
+            Assert.That(countText.Trim(), Is.EqualTo("2"), "SystemView badge should show the worktree's total beads issue count (Open+InProgress+Blocked+Closed)")
+        }
+
+    [<Test>]
+    member this.``Archive button is hidden while a SystemView is active but available for an AgentDoc``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // beads.html (SystemView) is the default-active doc → archive button hidden
+            // (it is server-regenerated, not user-owned).
+            let archiveBtn = this.Page.Locator(".canvas-pane .canvas-archive-btn")
+            let! archiveWhenSystemView = archiveBtn.CountAsync()
+            Assert.That(archiveWhenSystemView, Is.EqualTo(0), "Archive button should be hidden while a SystemView (beads) is the active doc")
+
+            // Switching to an AgentDoc restores the archive button.
+            let dashboardTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
+            do! dashboardTab.ClickAsync()
+            do! archiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! archiveWhenAgentDoc = archiveBtn.CountAsync()
+            Assert.That(archiveWhenAgentDoc, Is.EqualTo(1), "Archive button should be available while an AgentDoc (dashboard) is the active doc")
         }
