@@ -569,7 +569,10 @@ type DashboardTests() =
     [<TestCase("delete-btn", "", "Remove worktree (Del)")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
-            let btn = this.Page.Locator($".wt-card .{btnClass}").First
+            // Target a card with a known active-session state (.has-session, set by App.fs
+            // cardClassName when HasActiveSession=true) rather than the first card overall, so
+            // fixture additions that reorder cards by activity cannot flip the asserted title.
+            let btn = this.Page.Locator($".wt-card.has-session .{btnClass}").First
             do! Assertions.Expect(btn).ToBeVisibleAsync()
 
             let! text = btn.TextContentAsync()
