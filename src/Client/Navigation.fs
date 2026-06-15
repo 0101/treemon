@@ -242,3 +242,13 @@ let adjustFocusForVisibility (repos: RepoModel list) (focusedElement: FocusTarge
             match targets with
             | [] -> None
             | _ -> Some targets.Head
+
+/// Expand the repo that owns the worktree at the given scoped key so its card becomes a visible
+/// focus target. Focusing a card inside a collapsed repo would otherwise get reset to the first
+/// dashboard item by adjustFocusForVisibility on the next refresh — closing the canvas pane.
+/// Returns the updated repos and whether a collapsed owner was expanded.
+let expandRepoOwning (scopedKey: string) (repos: RepoModel list) =
+    let owns (r: RepoModel) = r.Worktrees |> List.exists (fun wt -> WorktreePath.value wt.Path = scopedKey)
+    let expanded = repos |> List.exists (fun r -> r.IsCollapsed && owns r)
+    let updated = repos |> List.map (fun r -> if r.IsCollapsed && owns r then { r with IsCollapsed = false } else r)
+    updated, expanded

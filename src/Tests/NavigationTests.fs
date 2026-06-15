@@ -144,3 +144,41 @@ type ScrollHintTests() =
         let focused = Some (NavHelpers.cardTarget "repo" "c")
         let result = navigateSpatial "ArrowDown" 1 repos focused
         Assert.That(NavHelpers.scrollHint result, Is.EqualTo(ScrollToTop))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ExpandRepoOwningTests() =
+
+    let collapse (repo: RepoModel) = { repo with IsCollapsed = true }
+
+    [<Test>]
+    member _.``expands the collapsed repo that owns the worktree``() =
+        let repos = [ collapse (NavHelpers.makeRepo "r1" [ "a" ]) ]
+        let updated, expanded = expandRepoOwning "/repo/a" repos
+        Assert.That(expanded, Is.True)
+        Assert.That(updated[0].IsCollapsed, Is.False)
+
+    [<Test>]
+    member _.``leaves an already-expanded owner unchanged and reports no expansion``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a" ] ]
+        let updated, expanded = expandRepoOwning "/repo/a" repos
+        Assert.That(expanded, Is.False)
+        Assert.That(updated, Is.EqualTo(repos))
+
+    [<Test>]
+    member _.``only expands the owning repo, leaving other collapsed repos collapsed``() =
+        let repos =
+            [ collapse (NavHelpers.makeRepo "r1" [ "a" ])
+              collapse (NavHelpers.makeRepo "r2" [ "b" ]) ]
+        let updated, expanded = expandRepoOwning "/repo/a" repos
+        Assert.That(expanded, Is.True)
+        Assert.That(updated[0].IsCollapsed, Is.False)
+        Assert.That(updated[1].IsCollapsed, Is.True)
+
+    [<Test>]
+    member _.``unknown scoped key changes nothing``() =
+        let repos = [ collapse (NavHelpers.makeRepo "r1" [ "a" ]) ]
+        let updated, expanded = expandRepoOwning "/repo/missing" repos
+        Assert.That(expanded, Is.False)
+        Assert.That(updated, Is.EqualTo(repos))

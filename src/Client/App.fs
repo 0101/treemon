@@ -205,6 +205,10 @@ let markVisibleDocCmd (model: Model) : Cmd<Msg> =
     |> Option.map (fun (sk, fn) -> Cmd.ofMsg (MarkDocViewed (sk, fn)))
     |> Option.defaultValue Cmd.none
 
+let saveCollapsedReposCmd (repos: RepoModel list) : Cmd<Msg> =
+    let collapsedRepos = repos |> List.filter _.IsCollapsed |> List.map _.RepoId
+    Cmd.OfAsync.attempt worktreeApi.Value.saveCollapsedRepos collapsedRepos (fun _ -> NoOp)
+
 let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     let pathStr = WorktreePath.value path
     repos
@@ -311,6 +315,10 @@ let update msg model =
                 then findMostRecentChangedDoc repos agentChangedDocs
                 else None
             let canvasShowingDoc = model.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
+            let repos, autoExpanded =
+                match autoDisplayTarget with
+                | Some (scopedKey, _) when not canvasShowingDoc -> expandRepoOwning scopedKey repos
+                | _ -> repos, false
             let autoDisplayCmd =
                 match autoDisplayTarget with
                 | Some (scopedKey, filename) when not canvasShowingDoc ->
@@ -370,7 +378,9 @@ let update msg model =
                             | _ -> Cmd.none
                         | _ -> Cmd.none
                     else Cmd.none
-                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd ])
+                let autoExpandSaveCmd =
+                    if autoExpanded then saveCollapsedReposCmd updatedModel.Repos else Cmd.none
+                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd; autoExpandSaveCmd ])
 
     | DataFailed _ ->
         { model with
@@ -405,12 +415,8 @@ let update msg model =
         let focusAdjusted =
             if isCollapsing then adjustFocusAfterCollapse repoId updatedModel.Repos updatedModel.FocusedElement
             else updatedModel.FocusedElement
-        let collapsedRepos =
-            updatedModel.Repos
-            |> List.filter _.IsCollapsed
-            |> List.map _.RepoId
         { updatedModel with FocusedElement = focusAdjusted },
-        Cmd.OfAsync.attempt worktreeApi.Value.saveCollapsedRepos collapsedRepos (fun _ -> NoOp)
+        saveCollapsedReposCmd updatedModel.Repos
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
@@ -686,19 +692,25 @@ let update msg model =
 
     | FocusOverviewCard scopedKey ->
         let openPane = not model.CanvasPaneOpen
-        { model with FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
-        if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
-        else Cmd.none
+        let repos, expanded = expandRepoOwning scopedKey model.Repos
+        { model with Repos = repos; FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
+        Cmd.batch [
+            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            if expanded then saveCollapsedReposCmd repos
+        ]
 
     | OpenCanvasDoc (scopedKey, filename) ->
         let openPane = not model.CanvasPaneOpen
+        let repos, expanded = expandRepoOwning scopedKey model.Repos
         { model with
+            Repos = repos
             FocusedElement = Some (Card scopedKey)
             CanvasPaneOpen = true
             ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename
             VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            if expanded then saveCollapsedReposCmd repos
             Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
         ]
 
