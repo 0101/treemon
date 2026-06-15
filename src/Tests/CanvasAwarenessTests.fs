@@ -41,7 +41,8 @@ let private makeDoc filename hash =
     { Filename = filename
       ContentHash = hash
       LastModified = DateTimeOffset.UtcNow
-      OwnerSessionId = None }
+      OwnerSessionId = None
+      Kind = AgentDoc }
 
 let private defaultModel : Model =
     { Repos = []
@@ -271,7 +272,7 @@ type DetectCanvasEventsTests() =
 type AutoDisplayIdleLogicTests() =
 
     let docWithTime filename hash (time: DateTimeOffset) =
-        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None }
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = AgentDoc }
 
     [<Test>]
     member _.``detectChangedCanvasDocs finds new filenames not present in previous``() =

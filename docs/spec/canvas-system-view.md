@@ -92,12 +92,12 @@ This makes the misfit states impossible to construct, instead of relying on `Non
 - **Unchanged-payload skip (shipped):** the dashboard's 30s poll skips re-render when `/beads-data` is byte-identical to the prior fetch.
 - **Separate, don't gut:** agent-authored interactive docs are a real use case, so the session-document layer stays — beads is carved out of it.
 
-## Open Questions
+## Open Questions (resolved during planning)
 
-1. Should `SystemView` be inferred from filename, an injected `<meta>` marker, or set explicitly at provision time? (Lean: explicit at provision time, typed field.)
-2. UI: dedicated header button vs. a differently-styled entry in the existing tab strip?
-3. Are there other current/planned system views beyond beads (e.g. a CI/build view)? If so, the kind should be generic from day one.
-4. Should `SystemView` support archive at all? (Probably not — it is regenerated.)
+1. **Discriminator → filename-based classifier.** `CanvasScanner.scan` sees generic `.html` files and cannot know provisioning origin, so a single shared classifier (`beads.html` → `SystemView`, everything else `AgentDoc`) sets the typed `Kind` field, which is then serialized to the client. Kept generic for future views.
+2. **UI → differently-styled entry, not a header button.** The `SystemView` renders as a distinct entry pinned to the far left of the tab strip, marked with a "BD"/task glyph, with no liveness dot and a distinct CSS class (not a normal agent-doc tab).
+3. **Other system views → generic from day one.** The classifier returns `CanvasDocKind` and is the single place to register future system views (e.g. a CI/build view).
+4. **Archive → no.** The archive button is hidden for `SystemView` (it is server-regenerated, not user-owned). A `SystemView` entry only appears when `beads.html` exists, which provisioning already guarantees only when the beads DB has ≥1 item.
 
 ## Related Specs
 

@@ -1,5 +1,6 @@
 module Tests.SerializationTests
 
+open System
 open NUnit.Framework
 open Newtonsoft.Json
 open Shared
@@ -78,3 +79,63 @@ type WrapperTypeSerializationTests() =
         let result = roundTrip original
         Assert.That(result.BranchName, Is.EqualTo(original.BranchName))
         Assert.That(result.BaseBranch, Is.EqualTo(original.BaseBranch))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasDocKindSerializationTests() =
+
+    let makeDoc kind : CanvasDoc =
+        { Filename = "doc.html"
+          ContentHash = "hash-001"
+          LastModified = DateTimeOffset(2026, 2, 22, 13, 0, 0, TimeSpan.Zero)
+          OwnerSessionId = Some "session-1"
+          Kind = kind }
+
+    [<Test>]
+    member _.``CanvasDoc with AgentDoc survives JSON round-trip``() =
+        let original = makeDoc AgentDoc
+        let result = roundTrip original
+        Assert.That(result, Is.EqualTo(original))
+        Assert.That(result.Kind, Is.EqualTo(AgentDoc))
+
+    [<Test>]
+    member _.``CanvasDoc with SystemView survives JSON round-trip``() =
+        let original = makeDoc SystemView
+        let result = roundTrip original
+        Assert.That(result, Is.EqualTo(original))
+        Assert.That(result.Kind, Is.EqualTo(SystemView))
+
+    // The demo/test fixture (src/Tests/fixtures/worktrees.json) is hand-written and deserialized by
+    // Newtonsoft, where nullary DU cases appear as bare JSON strings (cf. "CodingTool": "Working").
+    // These guard that exact shape so the fixture and the Fable.Remoting client agree on the wire format.
+    [<Test>]
+    member _.``CanvasDocKind serializes as a bare JSON string``() =
+        let json = JsonConvert.SerializeObject(SystemView, converter)
+        Assert.That(json, Is.EqualTo("\"SystemView\""))
+
+    [<Test>]
+    member _.``CanvasDoc Kind deserializes from a bare JSON string (fixture shape)``() =
+        let json =
+            """{"Filename":"beads.html","ContentHash":"h","LastModified":"2026-02-22T13:00:00+00:00","OwnerSessionId":null,"Kind":"SystemView"}"""
+        let result = JsonConvert.DeserializeObject<CanvasDoc>(json, converter)
+        Assert.That(result.Kind, Is.EqualTo(SystemView))
+        Assert.That(result.Filename, Is.EqualTo("beads.html"))
+
+    // End-to-end guard: the real fixture file must parse through the production load path with both
+    // kinds present, so downstream tasks have a SystemView (beads.html) doc to assert against.
+    [<Test>]
+    member _.``Real fixture file parses with both AgentDoc and SystemView docs``() =
+        let fixturePath =
+            System.IO.Path.Combine(__SOURCE_DIRECTORY__, "fixtures", "worktrees.json")
+        match Server.WorktreeApi.loadFixtures fixturePath with
+        | Error msg -> Assert.Fail($"Fixture failed to load: {msg}")
+        | Ok data ->
+            let allDocs =
+                data.Worktrees.Repos
+                |> List.collect (fun r -> r.Worktrees)
+                |> List.collect (fun wt -> wt.CanvasDocs)
+            Assert.That(allDocs |> List.exists (fun d -> d.Kind = SystemView && d.Filename = "beads.html"),
+                        Is.True, "Fixture should contain a beads.html SystemView doc")
+            Assert.That(allDocs |> List.exists (fun d -> d.Kind = AgentDoc),
+                        Is.True, "Fixture should contain at least one AgentDoc")

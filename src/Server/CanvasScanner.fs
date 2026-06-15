@@ -28,7 +28,8 @@ let scan (worktreePath: string) =
                     { Filename = filename
                       ContentHash = hashFile filePath
                       LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
-                      OwnerSessionId = owners |> Map.tryFind filename })
+                      OwnerSessionId = owners |> Map.tryFind filename
+                      Kind = CanvasDocKind.classify filename })
                 |> Array.toList
         else
             return []
