@@ -44,6 +44,13 @@ let private makeDoc filename hash =
       OwnerSessionId = None
       Kind = AgentDoc }
 
+let private makeSystemDoc filename hash =
+    { Filename = filename
+      ContentHash = hash
+      LastModified = DateTimeOffset.UtcNow
+      OwnerSessionId = None
+      Kind = SystemView }
+
 let private defaultModel : Model =
     { Repos = []
       IsLoading = false
@@ -480,3 +487,149 @@ type MarkDocViewedTests() =
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
 
         Assert.That(updated.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown filename")
+
+
+// ── SystemView exclusion from contentHash awareness ──────────────────
+// A SystemView doc (the beads dashboard) has a stable file hash while its data changes, so it
+// must never participate in contentHash-based awareness. Beads "newness" is surfaced on the
+// worktree card via BeadsSummary instead. These tests prove a SystemView doc never contributes
+// to unviewed counts, canvas events, seeded hashes, or idle auto-display.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SystemViewAwarenessTests() =
+
+    let docWithTime filename hash (time: DateTimeOffset) kind =
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = kind }
+
+    // unviewedDocsByScopedKey
+
+    [<Test>]
+    member _.``unviewedDocsByScopedKey ignores a never-viewed SystemView doc``() =
+        let repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeSystemDoc "beads.html" "h1" ] ] ]
+
+        let result = unviewedDocsByScopedKey repos Map.empty
+
+        Assert.That(result, Is.Empty, "A SystemView doc must never count as unviewed even with no viewed hash")
+
+    [<Test>]
+    member _.``unviewedDocsByScopedKey ignores a SystemView doc whose hash changed``() =
+        let repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeSystemDoc "beads.html" "h2" ] ] ]
+        let lastViewed = Map.ofList [ "myrepo/feat", Map.ofList [ "beads.html", "h1" ] ]
+
+        let result = unviewedDocsByScopedKey repos lastViewed
+
+        Assert.That(result, Is.Empty, "A SystemView doc must never count as unviewed even when its hash changed")
+
+    [<Test>]
+    member _.``unviewedDocsByScopedKey returns only the AgentDoc when mixed with a SystemView doc``() =
+        let repos =
+            [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [
+                makeDoc "status.html" "a1"
+                makeSystemDoc "beads.html" "b1" ] ] ]
+
+        let result = unviewedDocsByScopedKey repos Map.empty
+
+        Assert.That(result["myrepo/feat"], Is.EqualTo([ "status.html" ]),
+            "Only the AgentDoc should be unviewed; the SystemView doc is excluded")
+
+    // canvasHashesByScopedKey + detectCanvasEvents
+
+    [<Test>]
+    member _.``canvasHashesByScopedKey excludes SystemView docs``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "status.html" "a1"
+                makeSystemDoc "beads.html" "b1" ] ] ]
+
+        let hashes = canvasHashesByScopedKey repos
+
+        Assert.That(hashes["r/feat"] |> Map.containsKey "status.html", Is.True)
+        Assert.That(hashes["r/feat"] |> Map.containsKey "beads.html", Is.False,
+            "SystemView doc must not appear in the canvas hash map")
+
+    [<Test>]
+    member _.``canvasHashesByScopedKey drops a worktree whose only doc is a SystemView``() =
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeSystemDoc "beads.html" "b1" ] ] ]
+
+        let hashes = canvasHashesByScopedKey repos
+
+        Assert.That(hashes |> Map.containsKey "r/feat", Is.False,
+            "A worktree with only a SystemView doc contributes no hashes")
+
+    [<Test>]
+    member _.``detectCanvasEvents produces no event for a changed SystemView doc``() =
+        // currentHashes is built the production way (via canvasHashesByScopedKey), so the SystemView
+        // doc never enters the hash maps that detectCanvasEvents compares.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeSystemDoc "beads.html" "b2" ] ] ]
+        let previousHashes = Map.ofList [ "r/feat", Map.ofList [ "beads.html", "b1" ] ]
+        let currentHashes = canvasHashesByScopedKey repos
+
+        let result = detectCanvasEvents DateTimeOffset.UtcNow previousHashes currentHashes
+
+        Assert.That(result, Is.Empty, "A SystemView hash change must not produce a canvas event")
+
+    [<Test>]
+    member _.``detectCanvasEvents reports only the AgentDoc when mixed with a SystemView doc``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "status.html" "a1"
+                makeSystemDoc "beads.html" "b1" ] ] ]
+        let currentHashes = canvasHashesByScopedKey repos
+
+        let result = detectCanvasEvents DateTimeOffset.UtcNow Map.empty currentHashes
+
+        let events = result["r/feat"]
+        Assert.That(events.Length, Is.EqualTo(1))
+        Assert.That(events[0].Filename, Is.EqualTo("status.html"),
+            "Only the AgentDoc should yield a NewDoc event")
+
+    // seedLastViewedHashes
+
+    [<Test>]
+    member _.``seedLastViewedHashes does not seed a SystemView doc``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "status.html" "a1"
+                makeSystemDoc "beads.html" "b1" ] ] ]
+
+        let seeded = seedLastViewedHashes repos Map.empty
+
+        Assert.That(seeded["r/feat"] |> Map.containsKey "status.html", Is.True)
+        Assert.That(seeded["r/feat"] |> Map.containsKey "beads.html", Is.False,
+            "SystemView doc must not be seeded into LastViewedHashes")
+
+    [<Test>]
+    member _.``seedLastViewedHashes seeds nothing for a worktree with only a SystemView doc``() =
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeSystemDoc "beads.html" "b1" ] ] ]
+
+        let seeded = seedLastViewedHashes repos Map.empty
+
+        Assert.That(seeded |> Map.containsKey "r/feat", Is.False,
+            "A worktree whose only doc is a SystemView seeds no hashes")
+
+    // findMostRecentChangedDoc
+
+    [<Test>]
+    member _.``findMostRecentChangedDoc ignores a SystemView doc``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docWithTime "beads.html" "b1" now SystemView ] ] ]
+
+        let result = findMostRecentChangedDoc repos [ ("r/feat", "beads.html") ]
+
+        Assert.That(result, Is.EqualTo(None),
+            "A SystemView doc must never be selected as the auto-display target")
+
+    [<Test>]
+    member _.``findMostRecentChangedDoc picks the AgentDoc over a more recent SystemView doc``() =
+        let now = DateTimeOffset.UtcNow
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                docWithTime "status.html" "a1" (now.AddMinutes(-5.0)) AgentDoc
+                docWithTime "beads.html" "b1" now SystemView ] ] ]
+
+        let result = findMostRecentChangedDoc repos [ ("r/feat", "status.html"); ("r/feat", "beads.html") ]
+
+        Assert.That(result, Is.EqualTo(Some ("r/feat", "status.html")),
+            "Even though the SystemView doc is more recent, only the AgentDoc is eligible")
