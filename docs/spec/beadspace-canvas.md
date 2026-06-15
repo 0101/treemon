@@ -2,16 +2,16 @@
 
 ## Goals
 
-Add a beads issue dashboard to the canvas pane by integrating Beadspace (`cameronsjo/beadspace`) — a single-file vanilla HTML/CSS/JS dashboard. The dashboard shows per-worktree beads stats, a filterable issues table, triage suggestions, and a click-to-expand detail panel for viewing descriptions and labels.
+Add a beads issue dashboard to the canvas pane by integrating Beadspace (`cameronsjo/beadspace`) — a single-file vanilla HTML/CSS/JS dashboard. The dashboard shows a per-worktree sortable/filterable issues table with a click-to-expand detail panel for viewing descriptions, labels, and dependency counts.
 
 ## Expected Behavior
 
 - Any worktree with `.beads/beads.db` **and at least one beads issue** gets a `beads.html` canvas page auto-provisioned. Worktrees with an empty database (zero issues) do not get a dashboard.
 - If a previously-provisioned `beads.html` exists but the database now has zero issues, the dashboard is removed (file deleted) so it doesn't show an empty page.
-- The page renders a **dashboard view** (status donut, priority/label/type charts, completion %, active issues, triage suggestions) and a **sortable/filterable issues table**
+- The page renders a single **sortable/filterable issues table** (the "All Issues" view), always visible. There is no separate dashboard view (no status donut, priority/label/type charts, completion %, active-issues or triage panels) and no top navigation bar — these were removed in `tm-canvas48-dsh`.
 - Clicking an issue row expands a **detail panel** showing: full description, all labels, priority badge, type badge, dependency count, dependent count, age
 - Data refreshes every 30 seconds by polling a same-origin JSON endpoint on port 5002
-- Data refresh is **incremental** — only changed elements update in-place. Scroll position, expanded detail panels, active nav tab, filter/sort selections, and search input are preserved across polls.
+- Data refresh is **incremental** — only the issues table body re-renders. Scroll position, expanded detail panels, filter/sort selections, and search input are preserved across polls.
 - Theme matches Catppuccin Mocha (canvas pane dark theme)
 - No external dependencies (CDN, fonts, frameworks) — fully self-contained HTML
 - A postMessage `{ action: 'refresh-beads' }` triggers immediate data reload (also incremental)
@@ -33,6 +33,7 @@ See `docs/spec/canvas-system-view.md` for the full design and task history, and 
 ### Beadspace Template Customization
 
 Fork `cameronsjo/beadspace:index.html` (40KB, MIT, vanilla JS) and apply:
+- **Strip the dashboard view and top navigation bar** (`tm-canvas48-dsh`) — the upstream template's second "Dashboard" view (stat cards, status donut, priority/label/type charts, completion %, active-issues and triage panels) and the nav bar that toggled between views are removed. Only the "All Issues" table view remains, always visible via `.view { display: block }` (no nav/`.active` toggle).
 - **Remove Google Fonts** — 3 `<link>` tags; system font fallbacks already defined
 - **Delete light theme** media query — canvas pane is always dark
 - **Remap CSS variables** to Catppuccin Mocha:
@@ -64,14 +65,13 @@ In the refresh scheduler, when scanning worktrees:
 
 ### Incremental Data Refresh
 
-The template's `loadAndRender()` must distinguish initial render from subsequent polls:
-- **Initial render**: full DOM build (dashboard + issues view + event binding)
-- **Subsequent polls**: update only what changed:
-  - Dashboard stat numbers update via `textContent` on existing elements
-  - Issues table replaces only `<tbody>`, not the entire table or container
-  - Scroll position saved/restored around table body replacement
-  - Active nav tab, filter chip state, and search input preserved from `tableState`
-  - Expanded detail panel re-expanded if `tableState.expandedId` is still present in new data
+The template distinguishes the initial render from subsequent polls:
+- **Initial render** (`initialRender`): full DOM build — the issues view (search bar, filter chips, sortable table head, empty `<tbody>`) plus event binding
+- **Subsequent polls** (`refreshData`): skip entirely when the `/beads-data` payload is byte-identical to the previous fetch; otherwise update only what changed:
+  - Issues table replaces only `<tbody>` (via `renderIssuesTable`), not the entire table or container — the search bar, filter chips, and table head DOM are left intact
+  - Scroll position of the `.view` container saved/restored around the `<tbody>` replacement
+  - Filter chip state, sort selection, and search input preserved (driven by `tableState`)
+  - Expanded detail panel re-expanded if `tableState.expandedId` is still present in the new data
 
 ### Key Files
 
