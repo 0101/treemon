@@ -16,6 +16,18 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
 - No external dependencies (CDN, fonts, frameworks) — fully self-contained HTML
 - A postMessage `{ action: 'refresh-beads' }` triggers immediate data reload (also incremental)
 
+## Canvas Doc Kind: SystemView
+
+`beads.html` is classified as a **`SystemView`**, not an `AgentDoc` (`CanvasDocKind.classify "beads.html" → SystemView`, in `src/Shared/Types.fs`). It is server-generated and data-driven with no owner session, so it deliberately opts out of the agent-doc machinery the canvas pane applies to authored docs:
+
+- **No liveness dot and no `▶ Start session` button** — there is no author session to be alive or to launch.
+- **No message bridge** — `CanvasDocServer.buildInjection` omits the bridge heartbeat script for a `SystemView` (it injects only the scrollbar CSS and link interceptor). The dashboard has no session to route postMessage payloads to.
+- **No DOM morph** — the idiomorph runtime and morph controller are also omitted. A morph would stomp the live, JS-rendered table back down to the empty template shell; the dashboard instead refreshes itself via its 30s `/beads-data` poll and the `refresh-beads` postMessage.
+- **Excluded from content-hash awareness** — `CanvasAwareness.awarenessDocs` filters `SystemView` docs out, so the beads file never contributes to unviewed badges, card notifications, seeded viewed-hashes, or idle auto-display. The file hash is stable while the data changes; beads "newness" is surfaced on the worktree card as `BeadsSummary` instead.
+- **Distinct tab affordance, no archive** — it renders as a far-left `.canvas-system-tab` entry (a "BD" glyph + total-issue-count badge) rather than a normal doc tab, and the archive button is hidden (the file is regenerated from the template, not user-owned).
+
+See `docs/spec/canvas-system-view.md` for the full design and task history, and `docs/spec/canvas-pane.md` for the generic pane behavior the two kinds share.
+
 ## Technical Approach
 
 ### Beadspace Template Customization
@@ -70,3 +82,8 @@ The template's `loadAndRender()` must distinguish initial render from subsequent
 | `src/Server/BeadspaceTemplate.html` | Customized Beadspace template source |
 | `src/Server/BeadspaceTemplate.fs` | String constant exposing the template HTML |
 | `src/Server/RefreshScheduler.fs` | Auto-provision logic on worktree scan |
+
+## Related Specs
+
+- `docs/spec/canvas-pane.md` — generic canvas pane architecture and the `AgentDoc` vs `SystemView` behavior matrix
+- `docs/spec/canvas-system-view.md` — why and how the beads dashboard is separated from agent-doc machinery via `CanvasDocKind`

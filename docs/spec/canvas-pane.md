@@ -12,6 +12,29 @@
 
 ## Expected Behavior
 
+### Canvas Doc Kinds
+
+Every `CanvasDoc` carries a `Kind` (`src/Shared/Types.fs`), set when `CanvasScanner` scans the file via `CanvasDocKind.classify filename`:
+
+- **`AgentDoc`** — authored and owned by a coding session; interactive and file-driven. This is the default for any `.html` an agent writes to `.agents/canvas/`.
+- **`SystemView`** — server-generated, data-driven, with no owner session. Currently only the beads dashboard (`beads.html`; see `docs/spec/beadspace-canvas.md`). `classify` is the single place to register future generated views (e.g. a CI/build view).
+
+The session-document machinery exists for an interactive document authored and owned by a live session. A `SystemView` is none of those, so the behaviors below are gated on `Kind` — making misfit states (a permanently "dead" liveness dot, a meaningless Start-session, a morph that stomps a self-rendering dashboard) unrepresentable rather than emergent from `OwnerSessionId = None`:
+
+| Behavior | `AgentDoc` | `SystemView` |
+|---|---|---|
+| Iframe, docking/position, pane real-estate | yes | yes |
+| Link interception + scrollbar styling | yes | yes |
+| Tab-strip entry | normal tab | distinct far-left `.canvas-system-tab` (BD glyph + issue count), no liveness dot |
+| Liveness dot | yes | no |
+| `▶ Start session` button | yes | no |
+| Message bridge (heartbeat + session routing) | yes | no |
+| DOM morph (idiomorph runtime + controller + signal) | yes | no |
+| Content-hash awareness (unviewed badge, auto-display, card notification) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
+| Archive button | yes | no (server-regenerated, not user-owned) |
+
+A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` every 30s and refreshes in place, so it needs neither morph nor the bridge heartbeat. See `docs/spec/canvas-system-view.md` for the full rationale and task history.
+
 ### Doc Lifecycle
 
 - Agents create or update `.html` files in `.agents/canvas/`.
@@ -27,10 +50,10 @@
 - Open or closed state persists in global config.
 - Position selector supports left, right, top, and bottom docking, and the selected position persists.
 - The pane is scoped to the focused worktree. If that worktree has docs, the pane shows its active doc.
-- Worktrees with multiple docs show tab buttons. A single doc skips the tab bar.
+- Worktrees with multiple docs show tab buttons. A single `AgentDoc` skips the tab bar; a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible.
 - Selecting a tab marks that doc viewed.
 - Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
-- The archive button moves the active doc to `.agents/canvas/archive/`.
+- The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
 
 ### Canvas Overview
 
@@ -48,6 +71,7 @@
 - When the pane is open, selecting a doc or showing the active visible doc marks it viewed.
 - If any doc changes while the user has been idle for at least 60 seconds, Treemon opens the pane, focuses the changed worktree, and selects the most recently modified changed doc.
 - Worktree cards show yellow canvas notifications for new or updated docs. Notifications expire after 5 minutes, deduplicate by filename, replace `LastUserMessage` while present, and click through to the relevant worktree or doc.
+- `SystemView` docs are excluded from content-hash awareness at the source (the `awarenessDocs` filter in `CanvasAwareness.fs`): they never contribute to unviewed counts, card notifications, seeded viewed-hashes, or the idle auto-display target. The beads file hash is stable while its data changes, so it would never signal real newness — and it would morph-signal spuriously on a template/deploy edit. Beads "newness" is surfaced on the worktree card as `BeadsSummary` instead.
 - Viewed tabs dim to 0.5 opacity so unviewed docs stand out.
 
 ### Liveness and Session Routing
@@ -55,8 +79,8 @@
 - Current shipped behavior uses a per-worktree bridge registry keyed by normalized worktree path.
 - Session registration for the same worktree is last-writer-wins.
 - Each doc records its author `sessionId` via `CanvasDocOwnership.fs`.
-- The liveness dot shown in tabs and overview reflects the selected doc's `OwnerSessionId` against `BridgeLiveness`, so liveness is per-doc rather than per-worktree.
-- When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button.
+- The liveness dot shown in tabs and overview reflects the selected doc's `OwnerSessionId` against `BridgeLiveness`, so liveness is per-doc rather than per-worktree. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
+- When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button — only when the active doc is an `AgentDoc` (starting a session for a server-generated `SystemView` is meaningless).
 - `LaunchCanvasSession` uses the existing action-launch flow and includes the full absolute doc path plus canvas context in the prompt.
 - Canvas messages route to the author session for the selected doc.
 - If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
@@ -93,7 +117,7 @@
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
 - Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
-- The server injects scrollbar CSS, the canvas link interceptor, and the bridge heartbeat script into `</head>`.
+- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds receive scrollbar CSS and the canvas link interceptor; an `AgentDoc` additionally receives the bridge heartbeat script, the idiomorph runtime, and the morph controller, whereas a `SystemView` receives none of those three.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
@@ -111,7 +135,7 @@ Three layers of state preservation:
 - Without this guard, the iframe unmounts when focus switches, destroying all JS state. On switch-back the iframe remounts fresh, resetting nav tabs (e.g., beadspace "All Issues" jumps to "Dashboard").
 
 **Level 3 — Canvas-wide iframe morph (general case):**
-- On `contentHash` change, the open doc morphs in place instead of reloading the iframe.
+- On `contentHash` change, the open doc morphs in place instead of reloading the iframe. This applies to `AgentDoc` docs only — a `SystemView` is served without the idiomorph runtime or morph controller and is never sent a morph signal, because it self-refreshes from its own data endpoint (see Canvas Doc Kinds).
 - Scroll position, focused elements, and in-progress inputs stay intact across updates.
 - Implementation: inject idiomorph (~5KB, MIT) plus a morph controller via the existing `CanvasDocServer.fs` `</head>` injection point.
 - The morph controller listens for a `content-updated` postMessage from the parent. On receive, it fetches its own URL (same-origin on `:5002`, bypassing cache), extracts `<body>`, and calls `Idiomorph.morph(document.body, newBody)`.
@@ -140,7 +164,7 @@ Three layers of state preservation:
 
 | File | Purpose |
 |---|---|
-| `src/Shared/Types.fs` | Shared canvas domain types, API methods, bridge liveness, send results, pane position |
+| `src/Shared/Types.fs` | Shared canvas domain types (incl. `CanvasDocKind` + `CanvasDocKind.classify`), API methods, bridge liveness, send results, pane position |
 | `src/Client/App.fs` | Elmish model and update logic for pane state, awareness, auto-display, routing, archive, and launch actions |
 | `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, liveness dot, iframe, banners, and message listener |
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
@@ -164,6 +188,7 @@ Three layers of state preservation:
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting`, or `Failed`, avoiding illegal combinations of optional fields.
 - **Per-doc author routing** — docs persist ownership by `sessionId`, canvas messages route to the selected doc's owner session, and liveness/resume operate per doc instead of per-worktree.
+- **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates the session-document machinery. A `SystemView` (currently only the beads dashboard) opts out of liveness, Start-session, the message bridge, morph, content-hash awareness, and archiving, and gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab. This makes the misfit states unrepresentable rather than emergent from `OwnerSessionId = None`. See `docs/spec/canvas-system-view.md`.
 - **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date.
 
 ## Implementation Status
@@ -175,9 +200,11 @@ Three layers of state preservation:
 - Shipped: Level 2 auto-display guard — suppresses focus-steal when canvas pane is open and showing a doc, preventing iframe unmount and JS state loss.
 - Shipped: Level 3 iframe morph — idiomorph-based DOM morphing on content hash change, morph controller injected via `</head>` injection point.
 - Shipped: Level 4 tab switch persistence — hidden iframes kept mounted across tab switches, LRU eviction at 3 iframes, lazy morph on tab switch.
+- Shipped: Canvas doc kinds (`tm-canvas48-0su`) — `CanvasDocKind` (`AgentDoc | SystemView`) separates the beads dashboard from agent-doc machinery (liveness, Start-session, bridge, morph, awareness, archive all gated on `AgentDoc`; distinct `.canvas-system-tab` for `SystemView`). See `docs/spec/canvas-system-view.md`.
 - 🔮 Levels 1-4 of DOM morph and state persistence are shipped. Level 1 (in-page incremental refresh) for beadspace, Level 2 (auto-display guard), Level 3 (canvas-wide iframe morph), Level 4 (tab switch persistence).
 
 ## Related Specs
 
 - `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
 - `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
+- `docs/spec/canvas-system-view.md` — separating system views (e.g. beads) from agent docs via `CanvasDocKind`
