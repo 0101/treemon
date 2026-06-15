@@ -127,7 +127,24 @@ type CanvasRegisterRequest =
       injectUrl: string
       sessionId: string option }
 
-let private canvasRegisterHandler : HttpHandler =
+let private isWorktreeMonitored
+    (schedulerAgent: MailboxProcessor<RefreshScheduler.StateMsg> option)
+    (worktreePath: string)
+    : Async<bool> =
+    async {
+        match schedulerAgent with
+        | None -> return false
+        | Some agent ->
+            let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+            let target = PathUtils.normalizePath worktreePath
+
+            return
+                state.Repos
+                |> Map.exists (fun _ repo ->
+                    repo.KnownPaths |> Set.exists (fun p -> PathUtils.normalizePath p = target))
+    }
+
+let private canvasRegisterHandler (isMonitored: string -> Async<bool>) : HttpHandler =
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
@@ -140,7 +157,8 @@ let private canvasRegisterHandler : HttpHandler =
                 return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
             else
                 CanvasBridge.registerSession body.worktreePath body.injectUrl body.sessionId
-                return! Successful.OK "registered" next ctx
+                let! monitored = isMonitored body.worktreePath |> Async.StartAsTask
+                return! Successful.ok (json {| registered = true; monitored = monitored |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
@@ -351,7 +369,7 @@ let main args =
 
     let combinedRouter =
         choose [
-            route "/api/canvas/register" >=> POST >=> canvasRegisterHandler
+            route "/api/canvas/register" >=> POST >=> canvasRegisterHandler (isWorktreeMonitored schedulerAgent)
             route "/api/canvas/bridge-status" >=> GET >=> bridgeStatusHandler
             remotingApi
         ]

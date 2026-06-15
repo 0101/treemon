@@ -7,7 +7,7 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 ## Expected Behavior
 
 1. **Treemon mode (unchanged)**: Extension registers with Treemon, heartbeats; canvas docs display in the Treemon canvas pane as today.
-2. **Browser fallback mode**: When Treemon registration fails at startup, the extension:
+2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
    - After the agent writes a canvas file, injects `additionalContext` via `onPostToolUse` with the serving URL.
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
@@ -18,7 +18,19 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 
 ### Treemon Detection
 
-At startup, `registerWithTreemon()` already returns `false` on failure. Use this to set a `browserMode` flag. In browser fallback mode, skip heartbeats and enable the additional HTTP endpoints + `onPostToolUse` hook. In Treemon mode, behavior is unchanged — the existing `/inject` endpoint and heartbeat remain active.
+At startup the extension POSTs to `/api/canvas/register`. Treemon's response now includes
+whether the worktree is actually monitored: `{ registered: true, monitored: bool }`. The
+extension enters **browser fallback mode** when registration is unreachable/fails **or**
+`monitored === false`. For backward compatibility with older Treemon servers that return a
+non-JSON body, a successful (200) response with no `monitored` field is treated as monitored
+(Treemon mode). In Treemon mode, behavior is unchanged — the existing `/inject` endpoint and
+heartbeat remain active.
+
+`monitored` is computed server-side (`canvasRegisterHandler`) by checking whether the
+normalized `worktreePath` matches any worktree the scheduler currently tracks
+(`PerRepoState.KnownPaths`). This closes the gap where Treemon is running but not monitoring
+the agent's directory — registration alone returns 200 regardless of monitoring, so HTTP
+success is not sufficient to conclude the canvas pane will display the docs.
 
 ### HTTP Endpoints (browser mode only)
 
@@ -60,7 +72,7 @@ if (window.parent === window) {
 
 ### `onPostToolUse` Hook
 
-Registered via `joinSession({ onPostToolUse })`. Detects file creates/edits targeting `.agents/canvas/*.html` and returns `additionalContext` with the serving URL + instructions for the agent.
+Registered via `joinSession({ hooks: { onPostToolUse } })` (hooks must be nested under the `hooks` key per the SDK `SessionHooks` contract). Detects file creates/edits targeting `.agents/canvas/*.html` and returns `additionalContext` with the serving URL + instructions for the agent.
 
 ### Path Security
 
@@ -75,5 +87,6 @@ Registered via `joinSession({ onPostToolUse })`. Detects file creates/edits targ
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — all changes here (~120 → ~250-300 lines)
+- `src/Extension/extension.mjs` — mode detection, HTTP serving, hook, message endpoint
+- `src/Server/Program.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isWorktreeMonitored` checks `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

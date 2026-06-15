@@ -185,13 +185,20 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
     });
     if (!res.ok) {
       log(`registration failed: ${res.status} ${res.statusText}`);
-      return false;
+      return { reachable: false, monitored: false };
     }
-    log(`registered ${worktreePath} → ${injectUrl}`);
-    return true;
+    let monitored = true;
+    try {
+      const data = await res.json();
+      if (typeof data?.monitored === "boolean") monitored = data.monitored;
+    } catch {
+      // older Treemon returns a non-JSON body — assume monitored to preserve prior behavior
+    }
+    log(`registered ${worktreePath} → ${injectUrl} (monitored=${monitored})`);
+    return { reachable: true, monitored };
   } catch (err) {
     log(`could not reach Treemon: ${err.message}`);
-    return false;
+    return { reachable: false, monitored: false };
   }
 }
 
@@ -205,8 +212,8 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
   };
 
   const tick = async () => {
-    const ok = await registerWithTreemon(worktreePath, injectUrl, sessionId);
-    if (ok) {
+    const { reachable } = await registerWithTreemon(worktreePath, injectUrl, sessionId);
+    if (reachable) {
       if (wasDisconnected) {
         log("Bridge reconnected to Treemon");
         wasDisconnected = false;
@@ -261,12 +268,13 @@ const { server, port } = await startHttpServer(session, extensionState);
 extensionState.port = port;
 const injectUrl = `http://127.0.0.1:${port}/inject`;
 const registered = await registerWithTreemon(worktreePath, injectUrl, sessionId);
-const browserMode = !registered;
+const browserMode = !registered.reachable || !registered.monitored;
 extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 if (browserMode) {
-  log(`● canvas-bridge listening in BROWSER mode on port ${port}`);
+  const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";
+  log(`● canvas-bridge listening in BROWSER mode on port ${port} (${reason})`);
 } else {
   log(`● canvas-bridge listening on ${injectUrl}`);
 }
