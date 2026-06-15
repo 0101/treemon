@@ -190,13 +190,17 @@ type DashboardTests() =
             let! inprogressCount = inprogressSpan.CountAsync()
             Assert.That(inprogressCount, Is.EqualTo(1))
 
+            let blockedSpan = beadsCounts.First.Locator(".beads-blocked")
+            let! blockedCount = blockedSpan.CountAsync()
+            Assert.That(blockedCount, Is.EqualTo(1))
+
             let closedSpan = beadsCounts.First.Locator(".beads-closed")
             let! closedCount = closedSpan.CountAsync()
             Assert.That(closedCount, Is.EqualTo(1))
 
             let sepSpans = beadsCounts.First.Locator(".beads-sep")
             let! sepCount = sepSpans.CountAsync()
-            Assert.That(sepCount, Is.EqualTo(2))
+            Assert.That(sepCount, Is.EqualTo(3))
         }
 
     [<Test>]
