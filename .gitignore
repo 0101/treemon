@@ -22,6 +22,7 @@ src/Client/output/
 
 # Production deployment
 wwwroot/
+.publish/
 .treemon.pid
 .treemon.config
 
