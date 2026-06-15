@@ -43,6 +43,12 @@ Canvas docs can send messages back to the agent session via `postMessage`. Treem
 window.parent.postMessage({ action: 'my-action', payload: 'data' }, '*');
 ```
 
+### Don't block the conversation when the doc collects the answer
+
+If the canvas doc itself gathers the user's input — choices, a form, buttons, a comment box — **do not** also call `ask_user` (or any other blocking prompt). The doc's `postMessage` reply *is* the channel for the answer. Calling `ask_user` at the same time pops a separate blocking modal, freezes the session, and prevents the user from responding through the doc you just built.
+
+Instead: write the doc, briefly tell the user it's ready for their input, then **end your turn and leave the conversation open**. The user's selection arrives as a normal message via `postMessage`, and you continue from there. Only use `ask_user` when there is no canvas doc collecting the response.
+
 ## Updating
 
 Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically.
