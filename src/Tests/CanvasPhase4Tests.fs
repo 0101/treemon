@@ -134,8 +134,10 @@ type CanvasPhase4Tests() =
             let overview = this.Page.Locator(".canvas-overview")
             do! overview.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // Overview entries should contain liveness dots
-            let overviewDots = this.Page.Locator(".canvas-overview-branch .canvas-liveness-dot")
+            // Each overview doc entry (an AgentDoc) renders a liveness dot. The dot lives under
+            // .canvas-overview-doc (CanvasPane.fs renders livenessDotFor inside that span); a
+            // SystemView doc (e.g. beads.html) renders no dot, so this counts AgentDoc entries.
+            let overviewDots = this.Page.Locator(".canvas-overview-doc .canvas-liveness-dot")
             let! dotCount = overviewDots.CountAsync()
             Assert.That(dotCount, Is.GreaterThanOrEqualTo(3), "Overview entries should each have a liveness dot")
         }
