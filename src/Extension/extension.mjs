@@ -237,6 +237,13 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
   };
 }
 
+function parseToolArgs(toolArgs) {
+  if (typeof toolArgs === "string") {
+    try { return JSON.parse(toolArgs); } catch { return {}; }
+  }
+  return toolArgs ?? {};
+}
+
 function createCanvasHook(state) {
   return async ({ toolName, toolArgs, toolResult }) => {
     if (!state.browserMode) return {};
@@ -244,14 +251,16 @@ function createCanvasHook(state) {
     const isCreateOrEdit = toolName === "create" || toolName === "edit";
     if (!isCreateOrEdit) return {};
 
-    const filePath = toolArgs?.path || toolArgs?.file_path || "";
+    const args = parseToolArgs(toolArgs);
+    const filePath = args?.path || args?.file_path || "";
     const normalized = filePath.replace(/\\/g, "/");
-    if (!/\/.agents\/canvas\/[^/]+\.html$/.test(normalized) && !/^\.agents\/canvas\/[^/]+\.html$/.test(normalized)) return {};
+    if (!/\/\.agents\/canvas\/[^/]+\.html$/.test(normalized) && !/^\.agents\/canvas\/[^/]+\.html$/.test(normalized)) return {};
 
     if (toolResult?.resultType === "failure") return {};
 
     const filename = normalized.split("/").pop();
     const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
+    log(`onPostToolUse: injecting canvas URL for ${filename} → ${url}`);
 
     return {
       additionalContext: `Canvas file served at: ${url}\nOpen this URL in a browser to view the canvas doc. The page auto-reloads on changes and postMessage interactions are forwarded back to this session.`,
