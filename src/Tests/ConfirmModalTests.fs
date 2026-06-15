@@ -70,14 +70,16 @@ let private defaultModel : Model =
       CanvasSendState = CanvasSendState.Idle
       BridgeLiveness = Map.empty }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
-/// Fable.Remoting.Client proxy initialization fails in .NET by catching the
-/// TypeInitializationException (the model is computed before the Cmd).
+/// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
+/// build failure (TypeInitializationException for eager static init, or
+/// ArgumentException when the lazy proxy in App.fs is forced during Cmd
+/// construction). The model is computed before the Cmd, so we re-derive it.
 let private tryUpdateModel msg model =
     try
         let m, _ = update msg model
         m
     with
-    | :? TypeInitializationException ->
+    | :? TypeInitializationException | :? ArgumentException ->
         match msg with
         | ConfirmMsg confirmMsg ->
             let confirmModal, action = ConfirmModal.update confirmMsg

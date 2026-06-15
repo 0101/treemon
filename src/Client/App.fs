@@ -94,15 +94,20 @@ type Msg =
     | MorphComplete
     | NoOp
 
-let worktreeApi =
-    Remoting.createApi ()
-    |> Remoting.buildProxy<IWorktreeApi>
+// Deferred so that merely loading the App module does not run buildProxy.
+// buildProxy uses reflection that throws under the .NET test host; building it
+// lazily means it runs only on first remoting call (in the Fable/JS client),
+// while tests that reference App's pure helpers no longer trip the static ctor.
+// Lazy caches the built proxy, so all call sites still share one instance.
+let worktreeApi : Lazy<IWorktreeApi> =
+    lazy (Remoting.createApi ()
+          |> Remoting.buildProxy<IWorktreeApi>)
 
 let fetchWorktrees () =
-    Cmd.OfAsync.either worktreeApi.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
+    Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
@@ -142,7 +147,7 @@ let init () =
       CanvasEvents = Map.empty
       CanvasSendState = CanvasSendState.Idle
       BridgeLiveness = Map.empty },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.loadLastViewedHashes () LoadLastViewedHashes ]
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let rng = System.Random()
 
@@ -346,13 +351,13 @@ let update msg model =
                     |> List.map (fun wt -> WorktreePath.value wt.Path)
                 let livenessCmd =
                     if List.isEmpty allPaths then Cmd.none
-                    else Cmd.OfAsync.perform worktreeApi.getBridgeLiveness allPaths BridgeLivenessLoaded
+                    else Cmd.OfAsync.perform worktreeApi.Value.getBridgeLiveness allPaths BridgeLivenessLoaded
                 let markVisibleCmd =
                     if updatedModel.CanvasPaneOpen then markVisibleDocCmd updatedModel
                     else Cmd.none
                 let seedSaveCmd =
                     if updatedModel.LastViewedHashes <> model.LastViewedHashes then
-                        Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedModel.LastViewedHashes (fun _ -> NoOp)
+                        Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.LastViewedHashes (fun _ -> NoOp)
                     else Cmd.none
                 let morphCmd =
                     if not isFirstLoad && updatedModel.CanvasPaneOpen then
@@ -405,12 +410,12 @@ let update msg model =
             |> List.filter _.IsCollapsed
             |> List.map _.RepoId
         { updatedModel with FocusedElement = focusAdjusted },
-        Cmd.OfAsync.attempt worktreeApi.saveCollapsedRepos collapsedRepos (fun _ -> NoOp)
+        Cmd.OfAsync.attempt worktreeApi.Value.saveCollapsedRepos collapsedRepos (fun _ -> NoOp)
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEditor path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | Tick now ->
         let newLevel = computeActivityLevel model.LastActivityTime now
@@ -418,7 +423,7 @@ let update msg model =
 
         let reportCmd =
             if newLevel <> model.ActivityLevel then
-                Cmd.OfAsync.attempt worktreeApi.reportActivity newLevel (fun _ -> NoOp)
+                Cmd.OfAsync.attempt worktreeApi.Value.reportActivity newLevel (fun _ -> NoOp)
             else
                 Cmd.none
 
@@ -443,7 +448,7 @@ let update msg model =
             if not wasActive then
                 Cmd.batch [
                     Cmd.ofMsg (Tick now)
-                    Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp)
+                    Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
                 ]
             else
                 Cmd.none
@@ -466,7 +471,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync path (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.perform worktreeApi.Value.startSync path (fun r -> SyncStarted (key, r))
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -481,7 +486,7 @@ let update msg model =
         { model with BranchEvents = events }, Cmd.none
 
     | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.attempt worktreeApi.Value.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -512,15 +517,15 @@ let update msg model =
                 |> Option.iter (fun el -> el?focus()))
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
-            Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+            Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
         | ConfirmModal.DeleteAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
                 | Ok () -> SessionKilledForDelete path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
                 | Ok () -> SessionKilledForArchive path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -532,19 +537,19 @@ let update msg model =
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+        Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
 
     | SessionKilledForArchive path ->
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
 
     | FocusSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+        model, Cmd.OfAsync.perform worktreeApi.Value.focusSession path SessionResult
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
+        model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.resumeSession path SessionResult
+        model, Cmd.OfAsync.perform worktreeApi.Value.resumeSession path SessionResult
 
     | LaunchCanvasSession scopedKey ->
         match findWorktree scopedKey model with
@@ -557,7 +562,7 @@ let update msg model =
                     + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane.")
                 |> Option.defaultValue ""
             let action = CanvasSession prompt
-            model, Cmd.OfAsync.perform worktreeApi.launchAction { Path = wt.Path; Action = action } LaunchActionResult
+            model, Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = wt.Path; Action = action } LaunchActionResult
         | None ->
             model, Cmd.none
 
@@ -573,7 +578,7 @@ let update msg model =
                     Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
             { model with ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Action = action } LaunchActionResult
+                Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = path; Action = action } LaunchActionResult
                 clearAfter
             ]
 
@@ -587,12 +592,12 @@ let update msg model =
         { model with FocusedElement = target }, Cmd.none
 
     | ArchiveMsg archiveMsg ->
-        let result, archiveCmd = ArchiveViews.update (lazy worktreeApi) archiveMsg
+        let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         model, Cmd.batch [ Cmd.map ArchiveMsg archiveCmd; refreshCmd ]
 
     | ModalMsg modalMsg ->
-        let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
+        let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
         let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
@@ -654,13 +659,13 @@ let update msg model =
         let newState = not model.CanvasPaneOpen
         { model with CanvasPaneOpen = newState },
         Cmd.batch [
-            Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen newState (fun _ -> NoOp)
+            Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen newState (fun _ -> NoOp)
             if newState then markVisibleDocCmd model else Cmd.none
         ]
 
     | SetCanvasPosition position ->
         { model with CanvasPosition = position },
-        Cmd.OfAsync.attempt worktreeApi.saveCanvasPosition position (fun _ -> NoOp)
+        Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPosition position (fun _ -> NoOp)
 
     | SelectCanvasDoc (scopedKey, filename) ->
         let wasAlreadyVisited =
@@ -682,7 +687,7 @@ let update msg model =
     | FocusOverviewCard scopedKey ->
         let openPane = not model.CanvasPaneOpen
         { model with FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
-        if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
+        if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
         else Cmd.none
 
     | OpenCanvasDoc (scopedKey, filename) ->
@@ -693,7 +698,7 @@ let update msg model =
             ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename
             VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
         Cmd.batch [
-            if openPane then Cmd.OfAsync.attempt worktreeApi.saveCanvasPaneOpen true (fun _ -> NoOp)
+            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
             Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
         ]
 
@@ -701,7 +706,7 @@ let update msg model =
         match findWorktree scopedKey model with
         | Some wt ->
             let request: ArchiveCanvasDocRequest = { WorktreePath = wt.Path; Filename = filename }
-            model, Cmd.OfAsync.either worktreeApi.archiveCanvasDoc request (fun r -> ArchiveCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ArchiveCanvasDocResult (scopedKey, filename, r))
+            model, Cmd.OfAsync.either worktreeApi.Value.archiveCanvasDoc request (fun r -> ArchiveCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ArchiveCanvasDocResult (scopedKey, filename, r))
         | None -> model, Cmd.none
 
     | ArchiveCanvasDocResult (scopedKey, filename, Ok _) ->
@@ -756,7 +761,7 @@ let update msg model =
         match visibleDoc, worktree with
         | Some (scopedKey, filename), Some wt ->
             Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
-            model, Cmd.OfAsync.either worktreeApi.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
+            model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
         | Some (scopedKey, _), None ->
             Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
             model, Cmd.none
@@ -795,7 +800,7 @@ let update msg model =
                 |> Map.add filename hash
             let updatedHashes = model.LastViewedHashes |> Map.add scopedKey innerMap
             { model with LastViewedHashes = updatedHashes },
-            Cmd.OfAsync.attempt worktreeApi.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
+            Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
@@ -1296,7 +1301,7 @@ let terminalButton dispatch (wt: WorktreeStatus) =
         prop.text ">"
     ]
 
-let editorIcon =
+let editorIcon () =
     Svg.svg [
         svg.className "btn-icon"
         svg.viewBox (0, 0, 16, 16)
@@ -1314,7 +1319,7 @@ let editorButton dispatch editorName (wt: WorktreeStatus) =
         prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
-        prop.children [ editorIcon ]
+        prop.children [ editorIcon () ]
     ]
 
 let newTabButton dispatch (wt: WorktreeStatus) =
@@ -1326,7 +1331,7 @@ let newTabButton dispatch (wt: WorktreeStatus) =
         prop.text "+"
     ]
 
-let resumeIcon =
+let resumeIcon () =
     Svg.svg [
         svg.className "btn-icon"
         svg.viewBox (0, 0, 48, 48)
@@ -1343,10 +1348,10 @@ let resumeButton dispatch (wt: WorktreeStatus) =
         prop.title "Resume last session (R)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); dispatch (ResumeSession wt.Path))
-        prop.children [ resumeIcon ]
+        prop.children [ resumeIcon () ]
     ]
 
-let binIcon =
+let binIcon () =
     Svg.svg [
         svg.className "btn-icon"
         svg.viewBox (0, 0, 24, 24)
@@ -1374,7 +1379,7 @@ let deleteButton dispatch scopedKey (wt: WorktreeStatus) =
         prop.onClick (fun e ->
             e.stopPropagation()
             dispatch (ConfirmDeleteWorktree scopedKey))
-        prop.children [ binIcon ]
+        prop.children [ binIcon () ]
     ]
 
 let archiveButton dispatch scopedKey (wt: WorktreeStatus) =
@@ -1386,7 +1391,7 @@ let archiveButton dispatch scopedKey (wt: WorktreeStatus) =
         prop.children [ ArchiveViews.archiveIcon ]
     ]
 
-let conflictIcon =
+let conflictIcon () =
     Svg.svg [
         svg.className "conflict-icon"
         svg.viewBox (0, 0, 1920, 1920)
@@ -1429,7 +1434,7 @@ let prBadgeContent dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) 
                 prop.target "_blank"
                 prop.children [
                     Html.text $"PR #{pr.Id}"
-                    if pr.HasConflicts then conflictIcon
+                    if pr.HasConflicts then conflictIcon ()
                 ]
             ]
             match pr.Comments with
@@ -1691,7 +1696,7 @@ let viewEyeOpen (pupilColor: string) (activity: ActivityLevel) (dx: float, dy: f
         ]
     ]
 
-let viewEyeRolledBack =
+let viewEyeRolledBack () =
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
@@ -1749,7 +1754,7 @@ let viewEyeRolledBack =
         ]
     ]
 
-let viewEyeClosed =
+let viewEyeClosed () =
     Svg.svg [
         svg.className "eye-logo eye-closed"
         svg.viewBox (-2, -2, 44, 24)
@@ -1935,11 +1940,11 @@ let viewAppHeader model dispatch =
             Html.div [
                 prop.className "header-center"
                 prop.children [
-                    if model.HasError then viewEyeRolledBack
+                    if model.HasError then viewEyeRolledBack ()
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
                         viewEyeOpen pupilColor model.ActivityLevel model.EyeDirection
-                    else viewEyeClosed
+                    else viewEyeClosed ()
                 ]
             ]
             Html.div [
@@ -2091,9 +2096,17 @@ let view model dispatch =
         ]
     ]
 
+// Elmish/React entry point. Guarded for Fable only: under the .NET test host
+// this top-level expression runs the whole app at module load (init()'s
+// JS Date.now + a React DOM mount), which throws inside App's static
+// constructor and takes down every test that merely references App's pure
+// helpers. Fable always defines FABLE_COMPILER, so the browser build is
+// byte-for-byte unchanged; only the unit-test (.NET) load path is affected.
+#if FABLE_COMPILER
 open Elmish.React
 
 Program.mkProgram init update view
 |> Program.withSubscription appSubscriptions
 |> Program.withReactSynchronous "app"
 |> Program.run
+#endif

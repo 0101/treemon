@@ -44,16 +44,18 @@ let private defaultModel : Model =
       BridgeLiveness = Map.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
-/// Fable.Remoting.Client proxy initialization fails in .NET by catching the
-/// TypeInitializationException. In that scenario the model was already computed
-/// (F# evaluates the left side of the tuple first) but the Cmd construction fails.
-/// We re-derive the expected model from the CreateModal state that would have been set.
+/// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
+/// build failure. Depending on how the proxy is built this surfaces either as a
+/// TypeInitializationException (eager static init) or an ArgumentException (the lazy
+/// proxy in App.fs forced during Cmd construction). In that scenario the model was
+/// already computed (F# evaluates the left side of the tuple first) but the Cmd
+/// construction fails. We re-derive the expected model from the CreateModal state.
 let private tryUpdateModel msg model =
     try
         let m, _ = update msg model
         m
     with
-    | :? TypeInitializationException ->
+    | :? TypeInitializationException | :? ArgumentException ->
         match msg with
         | ModalMsg (Modal.OpenCreateWorktree repoId) ->
             { model with CreateModal = Modal.LoadingBranches repoId }
