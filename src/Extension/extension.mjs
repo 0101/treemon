@@ -253,7 +253,7 @@ function createCanvasHook(state) {
 }
 
 const extensionState = { browserMode: false, port: 0 };
-const session = await joinSession({ onPostToolUse: createCanvasHook(extensionState) });
+const session = await joinSession({ hooks: { onPostToolUse: createCanvasHook(extensionState) } });
 const sessionId = session.id ?? session.sessionId;
 
 const worktreePath = process.cwd();
