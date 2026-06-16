@@ -33,15 +33,7 @@ type Model =
       ActionCooldowns: Set<WorktreePath>
       LastActivityTime: float
       ActivityLevel: ActivityLevel
-      CanvasPaneOpen: bool
-      CanvasPosition: CanvasPosition
-      ActiveCanvasDoc: Map<string, string>
-      VisitedCanvasDocs: Map<string, string list>
-      LastViewedHashes: Map<string, Map<string, string>>
-      PreviousCanvasHashes: Map<string, Map<string, string>>
-      CanvasEvents: Map<string, CanvasEvent list>
-      CanvasSendState: CanvasSendState
-      BridgeLiveness: Map<string, BridgeLiveness> }
+      Canvas: CanvasState.CanvasState }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -138,15 +130,7 @@ let init () =
       ActionCooldowns = Set.empty
       LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
       ActivityLevel = ActivityLevel.Active
-      CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right
-      ActiveCanvasDoc = Map.empty
-      VisitedCanvasDocs = Map.empty
-      LastViewedHashes = Map.empty
-      PreviousCanvasHashes = Map.empty
-      CanvasEvents = Map.empty
-      CanvasSendState = CanvasSendState.Idle
-      BridgeLiveness = Map.empty },
+      Canvas = CanvasState.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let rng = System.Random()
@@ -168,37 +152,8 @@ let findWorktree (scopedKey: string) (model: Model) =
     |> List.tryPick (fun r ->
         r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
 
-let [<Literal>] private MaxLiveIframes = 3
-
-/// Move filename to front of visited list (LRU order, most recent first), capped at MaxLiveIframes.
-let private touchVisitedDoc (scopedKey: string) (filename: string) (visited: Map<string, string list>) =
-    let current = visited |> Map.tryFind scopedKey |> Option.defaultValue []
-    let updated = filename :: (current |> List.filter (fun f -> f <> filename))
-    let capped = if updated.Length > MaxLiveIframes then updated |> List.take MaxLiveIframes else updated
-    visited |> Map.add scopedKey capped
-
 let activeVisibleDoc (model: Model) : (string * string) option =
-    match model.FocusedElement with
-    | Some (Card scopedKey) ->
-        findWorktree scopedKey model
-        |> Option.bind (fun wt ->
-            let doc =
-                model.ActiveCanvasDoc
-                |> Map.tryFind scopedKey
-                |> Option.bind (fun name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name))
-                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
-            doc |> Option.map (fun d -> scopedKey, d.Filename))
-    | _ -> None
-
-/// Look up a canvas doc's kind by scoped key + filename. Used to gate session-document
-/// machinery (morph signaling, idle auto-display focus-steal) to AgentDoc only: a SystemView
-/// (e.g. the beads dashboard) drives its own refresh and must neither be morphed (a morph stomps
-/// the live, JS-rendered dashboard back to the empty template shell) nor steal focus on change.
-let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string) : CanvasDocKind option =
-    repos
-    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
-    |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
-    |> Option.map _.Kind
+    CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
 
 /// True when `filename` names a real CanvasDoc of the worktree `scopedKey`. Gates in-doc link
 /// navigation (NavigateCanvasDoc), whose filename arrives via an untrusted in-iframe postMessage:
@@ -211,9 +166,7 @@ let isKnownCanvasDoc (model: Model) (scopedKey: string) (filename: string) : boo
     |> Option.defaultValue false
 
 let markVisibleDocCmd (model: Model) : Cmd<Msg> =
-    activeVisibleDoc model
-    |> Option.map (fun (sk, fn) -> Cmd.ofMsg (MarkDocViewed (sk, fn)))
-    |> Option.defaultValue Cmd.none
+    CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
 
 let saveCollapsedReposCmd (repos: RepoModel list) : Cmd<Msg> =
     let collapsedRepos = repos |> List.filter _.IsCollapsed |> List.map _.RepoId
@@ -304,14 +257,14 @@ let update msg model =
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let canvasEvents =
-                if isFirstLoad then model.CanvasEvents
+                if isFirstLoad then model.Canvas.CanvasEvents
                 else
-                    let newEvents = detectCanvasEvents now model.PreviousCanvasHashes currentCanvasHashes
-                    mergeCanvasEvents model.CanvasEvents newEvents
+                    let newEvents = detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    mergeCanvasEvents model.Canvas.CanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
-                else detectChangedCanvasDocs now model.PreviousCanvasHashes currentCanvasHashes
+                else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
             let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
@@ -319,7 +272,7 @@ let update msg model =
             // hijack focus; filter it out of the candidates before picking the most recent.
             let agentChangedDocs =
                 changedDocs
-                |> List.filter (fun (scopedKey, filename) -> canvasDocKind repos scopedKey filename = Some AgentDoc)
+                |> List.filter (fun (scopedKey, filename) -> CanvasState.canvasDocKind repos scopedKey filename = Some AgentDoc)
             let autoDisplayTarget =
                 if isIdle && not (List.isEmpty agentChangedDocs)
                 then findMostRecentChangedDoc repos agentChangedDocs
@@ -331,10 +284,10 @@ let update msg model =
             // SystemView self-refresh is excluded so it cannot spuriously clear the banner. This
             // is the success edge the wall-clock timer used to (wrongly) report as a failure.
             let canvasSendState =
-                match model.CanvasSendState with
+                match model.Canvas.CanvasSendState with
                 | CanvasSendState.Waiting _ when not (List.isEmpty agentChangedDocs) -> CanvasSendState.Idle
                 | other -> other
-            let canvasShowingDoc = model.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
+            let canvasShowingDoc = model.Canvas.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
             let repos, autoExpanded =
                 match autoDisplayTarget with
                 | Some (scopedKey, _) when not canvasShowingDoc -> expandRepoOwning scopedKey repos
@@ -343,7 +296,7 @@ let update msg model =
                 match autoDisplayTarget with
                 | Some (scopedKey, filename) when not canvasShowingDoc ->
                     Cmd.batch [
-                        if not model.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
+                        if not model.Canvas.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
                         Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
                         Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
                     ]
@@ -360,17 +313,19 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
-                CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
-                CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition
-                PreviousCanvasHashes = currentCanvasHashes
-                CanvasEvents = canvasEvents
-                CanvasSendState = canvasSendState }
+                Canvas =
+                    { model.Canvas with
+                        CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
+                        CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
+                        PreviousCanvasHashes = currentCanvasHashes
+                        CanvasEvents = canvasEvents
+                        CanvasSendState = canvasSendState } }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 if isFirstLoad then
-                    let seeded = seedLastViewedHashes m.Repos m.LastViewedHashes
-                    if seeded = m.LastViewedHashes then m
-                    else { m with LastViewedHashes = seeded }
+                    let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
+                    if seeded = m.Canvas.LastViewedHashes then m
+                    else { m with Canvas = { m.Canvas with LastViewedHashes = seeded } }
                 else m)
             |> (fun updatedModel ->
                 let allPaths =
@@ -382,17 +337,17 @@ let update msg model =
                     if List.isEmpty allPaths then Cmd.none
                     else Cmd.OfAsync.perform worktreeApi.Value.getBridgeLiveness allPaths BridgeLivenessLoaded
                 let markVisibleCmd =
-                    if updatedModel.CanvasPaneOpen then markVisibleDocCmd updatedModel
+                    if updatedModel.Canvas.CanvasPaneOpen then markVisibleDocCmd updatedModel
                     else Cmd.none
                 let seedSaveCmd =
-                    if updatedModel.LastViewedHashes <> model.LastViewedHashes then
-                        Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.LastViewedHashes (fun _ -> NoOp)
+                    if updatedModel.Canvas.LastViewedHashes <> model.Canvas.LastViewedHashes then
+                        Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.Canvas.LastViewedHashes (fun _ -> NoOp)
                     else Cmd.none
                 let morphCmd =
-                    if not isFirstLoad && updatedModel.CanvasPaneOpen then
+                    if not isFirstLoad && updatedModel.Canvas.CanvasPaneOpen then
                         match activeVisibleDoc updatedModel with
-                        | Some (scopedKey, filename) when canvasDocKind updatedModel.Repos scopedKey filename = Some AgentDoc ->
-                            let oldHash = model.PreviousCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
+                        | Some (scopedKey, filename) when CanvasState.canvasDocKind updatedModel.Repos scopedKey filename = Some AgentDoc ->
+                            let oldHash = model.Canvas.PreviousCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
                             let newHash = currentCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
                             match oldHash, newHash with
                             | Some o, Some n when o <> n -> Cmd.ofMsg MorphActiveDoc
@@ -446,7 +401,7 @@ let update msg model =
 
     | Tick now ->
         let newLevel = computeActivityLevel model.LastActivityTime now
-        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.CanvasEvents
+        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
 
         let reportCmd =
             if newLevel <> model.ActivityLevel then
@@ -458,7 +413,7 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        { model with ActivityLevel = newLevel; CanvasEvents = expiredEvents },
+        { model with ActivityLevel = newLevel; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
     | UserActivity now ->
@@ -674,52 +629,56 @@ let update msg model =
                 | None -> model, Cmd.none
 
     | ToggleCanvasPane ->
-        let newState = not model.CanvasPaneOpen
-        { model with CanvasPaneOpen = newState },
+        let newState = not model.Canvas.CanvasPaneOpen
+        { model with Canvas = { model.Canvas with CanvasPaneOpen = newState } },
         Cmd.batch [
             Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen newState (fun _ -> NoOp)
             if newState then markVisibleDocCmd model else Cmd.none
         ]
 
     | SetCanvasPosition position ->
-        { model with CanvasPosition = position },
+        { model with Canvas = { model.Canvas with CanvasPosition = position } },
         Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPosition position (fun _ -> NoOp)
 
     | SelectCanvasDoc (scopedKey, filename) ->
         let wasAlreadyVisited =
-            model.VisitedCanvasDocs
+            model.Canvas.VisitedCanvasDocs
             |> Map.tryFind scopedKey
             |> Option.defaultValue []
             |> List.contains filename
         { model with
-            ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename
-            VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
+            Canvas =
+                { model.Canvas with
+                    ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+                    VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
         Cmd.batch [
             Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
             // When switching to a previously hidden iframe, morph it in case content changed while
             // hidden — but only for AgentDocs. A SystemView (beads dashboard) self-refreshes and is
             // served without a morph controller, so a morph signal is meaningless for it.
-            if wasAlreadyVisited && canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
+            if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
         ]
 
     | FocusOverviewCard scopedKey ->
-        let openPane = not model.CanvasPaneOpen
+        let openPane = not model.Canvas.CanvasPaneOpen
         let repos, expanded = expandRepoOwning scopedKey model.Repos
-        { model with Repos = repos; FocusedElement = Some (Card scopedKey); CanvasPaneOpen = true },
+        { model with Repos = repos; FocusedElement = Some (Card scopedKey); Canvas = { model.Canvas with CanvasPaneOpen = true } },
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
             if expanded then saveCollapsedReposCmd repos
         ]
 
     | OpenCanvasDoc (scopedKey, filename) ->
-        let openPane = not model.CanvasPaneOpen
+        let openPane = not model.Canvas.CanvasPaneOpen
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         { model with
             Repos = repos
             FocusedElement = Some (Card scopedKey)
-            CanvasPaneOpen = true
-            ActiveCanvasDoc = model.ActiveCanvasDoc |> Map.add scopedKey filename
-            VisitedCanvasDocs = touchVisitedDoc scopedKey filename model.VisitedCanvasDocs },
+            Canvas =
+                { model.Canvas with
+                    CanvasPaneOpen = true
+                    ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+                    VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
             if expanded then saveCollapsedReposCmd repos
@@ -755,17 +714,17 @@ let update msg model =
                     else None))
         let activeDoc =
             match remainingDocs with
-            | Some (first :: _) -> model.ActiveCanvasDoc |> Map.add scopedKey first.Filename
-            | _ -> model.ActiveCanvasDoc |> Map.remove scopedKey
+            | Some (first :: _) -> model.Canvas.ActiveCanvasDoc |> Map.add scopedKey first.Filename
+            | _ -> model.Canvas.ActiveCanvasDoc |> Map.remove scopedKey
         let visitedDocs =
-            let current = model.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
+            let current = model.Canvas.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
             let filtered = current |> List.filter (fun f -> f <> filename)
             match remainingDocs with
-            | Some (first :: _) -> touchVisitedDoc scopedKey first.Filename (model.VisitedCanvasDocs |> Map.add scopedKey filtered)
+            | Some (first :: _) -> CanvasState.touchVisitedDoc scopedKey first.Filename (model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered)
             | _ ->
-                if List.isEmpty filtered then model.VisitedCanvasDocs |> Map.remove scopedKey
-                else model.VisitedCanvasDocs |> Map.add scopedKey filtered
-        { model with Repos = repos; ActiveCanvasDoc = activeDoc; VisitedCanvasDocs = visitedDocs }, Cmd.none
+                if List.isEmpty filtered then model.Canvas.VisitedCanvasDocs |> Map.remove scopedKey
+                else model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered
+        { model with Repos = repos; Canvas = { model.Canvas with ActiveCanvasDoc = activeDoc; VisitedCanvasDocs = visitedDocs } }, Cmd.none
 
     | ArchiveCanvasDocResult (_, _, Error msg) ->
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
@@ -805,15 +764,15 @@ let update msg model =
         match result with
         | CanvasMessageResult.Error msg ->
             Fable.Core.JS.console.error ("Canvas message error:", msg)
-            { model with CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
+            { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Failed msg } }, Cmd.none
         | CanvasMessageResult.Ok ->
-            { model with CanvasSendState = CanvasSendState.Idle }, Cmd.none
+            { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
         | CanvasMessageResult.Queued ->
             Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-            { model with CanvasSendState = CanvasSendState.Waiting now }, Cmd.none
+            { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Waiting now } }, Cmd.none
 
     | DismissCanvasMessageError ->
-        { model with CanvasSendState = CanvasSendState.Idle }, Cmd.none
+        { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
 
     | MarkDocViewed (scopedKey, filename) ->
         let worktree = findWorktree scopedKey model
@@ -826,20 +785,20 @@ let update msg model =
         match worktree, currentHash with
         | Some _, Some hash ->
             let innerMap =
-                model.LastViewedHashes
+                model.Canvas.LastViewedHashes
                 |> Map.tryFind scopedKey
                 |> Option.defaultValue Map.empty
                 |> Map.add filename hash
-            let updatedHashes = model.LastViewedHashes |> Map.add scopedKey innerMap
-            { model with LastViewedHashes = updatedHashes },
+            let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
+            { model with Canvas = { model.Canvas with LastViewedHashes = updatedHashes } },
             Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
-        { model with LastViewedHashes = hashes }, Cmd.none
+        { model with Canvas = { model.Canvas with LastViewedHashes = hashes } }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->
-        { model with BridgeLiveness = liveness }, Cmd.none
+        { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none
 
     | MorphActiveDoc ->
         model,
@@ -2002,13 +1961,13 @@ let viewAppHeader model dispatch =
                                 prop.text "Compact"
                             ]
                             Html.button [
-                                prop.className (if model.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
+                                prop.className (if model.Canvas.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
                                 prop.onClick (fun _ -> dispatch ToggleCanvasPane)
                                 prop.title "Toggle canvas pane (C)"
                                 prop.children [
                                     Html.text "Canvas"
-                                    let unviewedCount = unviewedDocsByScopedKey model.Repos model.LastViewedHashes |> Map.values |> Seq.sumBy List.length
+                                    let unviewedCount = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes |> Map.values |> Seq.sumBy List.length
                                     if unviewedCount > 0 then
                                         Html.span [
                                             prop.className "canvas-badge"
@@ -2025,19 +1984,19 @@ let viewAppHeader model dispatch =
 
 let view model dispatch =
     let canvasPositionClass =
-        match model.CanvasPosition with
+        match model.Canvas.CanvasPosition with
         | CanvasPosition.Left -> "canvas-left"
         | CanvasPosition.Right -> "canvas-right"
         | CanvasPosition.Top -> "canvas-top"
         | CanvasPosition.Bottom -> "canvas-bottom"
 
     let dashboardClass =
-        match model.CanvasPaneOpen with
+        match model.Canvas.CanvasPaneOpen with
         | true -> $"dashboard canvas-open {canvasPositionClass}"
         | false -> "dashboard"
 
     let layoutClass =
-        match model.CanvasPaneOpen with
+        match model.Canvas.CanvasPaneOpen with
         | true -> $"app-layout canvas-open {canvasPositionClass}"
         | false -> "app-layout"
 
@@ -2064,7 +2023,7 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns model.CanvasEvents model.CanvasPaneOpen))
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns model.Canvas.CanvasEvents model.Canvas.CanvasPaneOpen))
                     ]
 
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
@@ -2098,7 +2057,7 @@ let view model dispatch =
     let focusedUnviewedFilenames =
         match model.FocusedElement with
         | Some (Card scopedKey) ->
-            unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+            unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
             |> Map.tryFind scopedKey
             |> Option.defaultValue []
             |> Set.ofList
@@ -2107,7 +2066,7 @@ let view model dispatch =
     let focusedVisitedDocs =
         match model.FocusedElement with
         | Some (Card scopedKey) ->
-            model.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
+            model.Canvas.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
         | _ -> []
 
     let canvasCallbacks: CanvasPane.CanvasPaneCallbacks =
@@ -2120,10 +2079,10 @@ let view model dispatch =
           LaunchSession = launchCanvasSession }
 
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasSendState model.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+        CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
 
     let children =
-        match model.CanvasPosition with
+        match model.Canvas.CanvasPosition with
         | CanvasPosition.Left
         | CanvasPosition.Top -> [ canvasEl; dashboardEl ]
         | CanvasPosition.Right

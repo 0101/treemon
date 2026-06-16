@@ -51,6 +51,21 @@ Fixes are grouped into small, independently reviewable tasks (see beads feature)
 
 A focused-review pass over the cleanup diff acts as the quality gate before the work is considered done.
 
+### Decision: `CanvasState` extraction shape (Finding 5, safe part)
+
+The canvas Model-field group is extracted as a **nested record** `Canvas: CanvasState.CanvasState`
+on `App.Model` (not as a flattened set of fields moved wholesale, and not helpers-only). Rationale:
+this mirrors the existing `CreateModal: CreateWorktreeModal.ModalState` / `ConfirmModal` nesting
+precedent, is the literal reading of "Model-field group", and is fully compiler-verifiable. The four
+pure helpers (`touchVisitedDoc`, `canvasDocKind`, `activeVisibleDoc`, `markVisibleDocCmd`) plus the
+`MaxLiveIframes` literal move into `src/Client/CanvasState.fs` (compiled before `App.fs`); the helpers
+are refactored to pure slice-based signatures (`repos`/`focused`/`activeCanvasDoc` rather than the whole
+`Model`), and `markVisibleDocCmd` is parameterized over the message constructor so the module needs no
+concrete `Msg` type. Thin `App.fs` wrappers (`activeVisibleDoc model`, `markVisibleDocCmd model`) are
+deliberately retained to keep `update` call sites unchanged. This is field-path nesting only — **not**
+the larger `Cmd.map` sub-component split (no sub-`Msg`/sub-`update`; `update` stays one function), which
+is explicitly out of scope for this task. Net effect: zero behaviour change (verified by the full suite).
+
 ## Verification
 
 The cleanup is done when a single `verify`-labelled task confirms — falsifiably, each check with an

@@ -6,6 +6,7 @@ open Shared
 open Shared.EventUtils
 open App
 open Navigation
+open CanvasState
 open CanvasAwareness
 
 let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeStatus =
@@ -73,15 +74,7 @@ let private defaultModel : Model =
       ActionCooldowns = Set.empty
       LastActivityTime = 0.0
       ActivityLevel = ActivityLevel.Active
-      CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right
-      ActiveCanvasDoc = Map.empty
-      VisitedCanvasDocs = Map.empty
-      LastViewedHashes = Map.empty
-      PreviousCanvasHashes = Map.empty
-      CanvasEvents = Map.empty
-      CanvasSendState = CanvasSendState.Idle
-      BridgeLiveness = Map.empty }
+      Canvas = CanvasState.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a
@@ -105,11 +98,11 @@ let private tryUpdateModel msg model =
                 match currentHash with
                 | Some hash ->
                     let innerMap =
-                        model.LastViewedHashes
+                        model.Canvas.LastViewedHashes
                         |> Map.tryFind scopedKey
                         |> Option.defaultValue Map.empty
                         |> Map.add filename hash
-                    { model with LastViewedHashes = model.LastViewedHashes |> Map.add scopedKey innerMap }
+                    { model with Canvas = { model.Canvas with LastViewedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap } }
                 | None -> model
             | None -> model
         | _ -> reraise ()
@@ -127,9 +120,9 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
-                LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
 
-        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+        let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "myrepo/feat", Is.True, "Should contain the scoped key")
         Assert.That(result["myrepo/feat"], Is.EqualTo([ "status.html" ]))
@@ -139,9 +132,9 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "report.html" "abc123" ] ] ]
-                LastViewedHashes = Map.empty }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
 
-        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+        let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "myrepo/feat", Is.True)
         Assert.That(result["myrepo/feat"], Is.EqualTo([ "report.html" ]))
@@ -151,9 +144,9 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v1" ] ] ]
-                LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
 
-        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+        let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "myrepo/feat", Is.False,
             "Should not contain scoped key when all docs are viewed")
@@ -164,7 +157,7 @@ type UnviewedDocsByScopedKeyTests() =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [] ] ] }
 
-        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+        let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
         Assert.That(result, Is.Empty)
 
@@ -176,9 +169,9 @@ type UnviewedDocsByScopedKeyTests() =
                     makeDoc "a.html" "h1"
                     makeDoc "b.html" "h2"
                     makeDoc "c.html" "h3" ] ] ]
-                LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] } }
 
-        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+        let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
         Assert.That(result["myrepo/feat"], Does.Contain("a.html"))
         Assert.That(result["myrepo/feat"], Does.Contain("c.html"))
@@ -192,9 +185,9 @@ type UnviewedDocsByScopedKeyTests() =
                 Repos = [
                     makeRepo "repo1" [ makeWorktree "repo1" "main" [ makeDoc "x.html" "h1" ] ]
                     makeRepo "repo2" [ makeWorktree "repo2" "dev" [ makeDoc "y.html" "h2" ] ] ]
-                LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] } }
 
-        let result = unviewedDocsByScopedKey model.Repos model.LastViewedHashes
+        let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
         Assert.That(result |> Map.containsKey "repo1/main", Is.False, "repo1/main is fully viewed")
         Assert.That(result |> Map.containsKey "repo2/dev", Is.True, "repo2/dev has no viewed hashes")
@@ -335,12 +328,11 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                PreviousCanvasHashes = Map.empty
                 LastActivityTime = 0.0
-                CanvasPaneOpen = false }
+                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty; CanvasPaneOpen = false } }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0 // 120s since epoch — well past 60s idle threshold
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
@@ -359,12 +351,11 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                PreviousCanvasHashes = previousHashes
                 LastActivityTime = 0.0
-                CanvasPaneOpen = false }
+                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = previousHashes; CanvasPaneOpen = false } }
 
         let currentHashes = canvasHashesByScopedKey repos
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
@@ -384,10 +375,10 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                PreviousCanvasHashes = Map.empty
-                LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
+                LastActivityTime = jsNow - 10_000.0 // 10s ago, well within 60s threshold
+                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty } }
 
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
@@ -404,10 +395,10 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                PreviousCanvasHashes = currentHashes
-                LastActivityTime = 0.0 }
+                LastActivityTime = 0.0
+                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = currentHashes } }
 
-        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.PreviousCanvasHashes currentHashes
+        let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
         let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
         let target =
@@ -430,12 +421,12 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
-                LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "status.html")) model
 
         let viewedHash =
-            updated.LastViewedHashes
+            updated.Canvas.LastViewedHashes
             |> Map.find "r/feat"
             |> Map.find "status.html"
         Assert.That(viewedHash, Is.EqualTo("hash-v2"), "Should update to current content hash")
@@ -445,13 +436,13 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "new.html" "hash1" ] ] ]
-                LastViewedHashes = Map.empty }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "new.html")) model
 
-        Assert.That(updated.LastViewedHashes |> Map.containsKey "r/feat", Is.True)
+        Assert.That(updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True)
         let viewedHash =
-            updated.LastViewedHashes
+            updated.Canvas.LastViewedHashes
             |> Map.find "r/feat"
             |> Map.find "new.html"
         Assert.That(viewedHash, Is.EqualTo("hash1"))
@@ -463,11 +454,11 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
                     makeDoc "a.html" "ha"
                     makeDoc "b.html" "hb" ] ] ]
-                LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] } }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "b.html")) model
 
-        let inner = updated.LastViewedHashes |> Map.find "r/feat"
+        let inner = updated.Canvas.LastViewedHashes |> Map.find "r/feat"
         Assert.That(inner |> Map.find "a.html", Is.EqualTo("old-ha"), "Existing entry should be preserved")
         Assert.That(inner |> Map.find "b.html", Is.EqualTo("hb"), "New entry should be added")
 
@@ -476,22 +467,22 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-                LastViewedHashes = Map.empty }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
 
         let updated = tryUpdateModel (MarkDocViewed ("unknown/key", "a.html")) model
 
-        Assert.That(updated.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown scoped key")
+        Assert.That(updated.Canvas.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown scoped key")
 
     [<Test>]
     member _.``MarkDocViewed does nothing for unknown filename``() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-                LastViewedHashes = Map.empty }
+                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
 
-        Assert.That(updated.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown filename")
+        Assert.That(updated.Canvas.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown filename")
 
 
 // ── SystemView exclusion from contentHash awareness ──────────────────

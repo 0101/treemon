@@ -6,6 +6,7 @@ open Shared
 open Shared.EventUtils
 open App
 open Navigation
+open CanvasState
 
 let private testPath = WorktreePath "/repo/feature-branch"
 
@@ -60,15 +61,7 @@ let private defaultModel : Model =
       ActionCooldowns = Set.empty
       LastActivityTime = 0.0
       ActivityLevel = ActivityLevel.Active
-      CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right
-      ActiveCanvasDoc = Map.empty
-      VisitedCanvasDocs = Map.empty
-      LastViewedHashes = Map.empty
-      PreviousCanvasHashes = Map.empty
-      CanvasEvents = Map.empty
-      CanvasSendState = CanvasSendState.Idle
-      BridgeLiveness = Map.empty }
+      Canvas = CanvasState.empty }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
 /// build failure (TypeInitializationException for eager static init, or
