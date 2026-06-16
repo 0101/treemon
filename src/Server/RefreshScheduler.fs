@@ -600,6 +600,10 @@ module CanvasWatchers =
                         let! initialDocs = CanvasScanner.scan path
                         let previousDocs = ref initialDocs
                         let post (canvasDocs: CanvasDoc list) =
+                            // Unsynchronized read-compute-write of previousDocs: handleEvent does Async.Start,
+                            // so two rapid FS events for this path can race the baseline. Tolerated, not locked —
+                            // attribution is idempotent (worst case over-attribution, never loss) and a stale
+                            // baseline self-heals on the next watcher event / periodic RefreshGit.
                             let prev = previousDocs.Value
                             let prevByName = prev |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
                             CanvasBridge.getSessionForWorktree path
