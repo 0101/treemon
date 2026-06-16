@@ -26,7 +26,7 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
 - **Excluded from content-hash awareness** — `CanvasAwareness.awarenessDocs` filters `SystemView` docs out, so the beads file never contributes to unviewed badges, card notifications, seeded viewed-hashes, or idle auto-display. The file hash is stable while the data changes; beads "newness" is surfaced on the worktree card as `BeadsSummary` instead.
 - **Distinct tab affordance, no archive** — it renders as a far-left `.canvas-system-tab` entry (a "BD" glyph + total-issue-count badge) rather than a normal doc tab, and the archive button is hidden (the file is regenerated from the template, not user-owned).
 
-See `docs/spec/canvas-system-view.md` for the full design and task history, and `docs/spec/canvas-pane.md` for the generic pane behavior the two kinds share.
+See `docs/spec/canvas-pane.md` for the generic pane behavior and the full `AgentDoc` vs `SystemView` rationale the two kinds share.
 
 ## Technical Approach
 
@@ -86,4 +86,3 @@ The template distinguishes the initial render from subsequent polls:
 ## Related Specs
 
 - `docs/spec/canvas-pane.md` — generic canvas pane architecture and the `AgentDoc` vs `SystemView` behavior matrix
-- `docs/spec/canvas-system-view.md` — why and how the beads dashboard is separated from agent-doc machinery via `CanvasDocKind`
