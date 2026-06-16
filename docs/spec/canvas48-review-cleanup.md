@@ -66,6 +66,17 @@ deliberately retained to keep `update` call sites unchanged. This is field-path 
 the larger `Cmd.map` sub-component split (no sub-`Msg`/sub-`update`; `update` stays one function), which
 is explicitly out of scope for this task. Net effect: zero behaviour change (verified by the full suite).
 
+### Decision: canvas doc path uses forward slashes (Findings C-01, C-05)
+
+The illustrative `{worktree}\.agents\canvas\{filename}` notation in *Expected Behavior* / *Verification*
+is Windows-style shorthand for "the path contains the `.agents` and `canvas` segments" — it does **not**
+mandate backslashes. `CanvasPrompt.continueWorking` (the single source of truth, in `src/Shared/Types.fs`)
+builds the path with **forward slashes** (`{worktree}/.agents/canvas/{filename}`), which resolve correctly
+on Windows, Linux and macOS. `System.IO.Path.Combine` is deliberately **not** used because `src/Shared` is
+Fable-compiled to JS and cannot reference `System.IO`. The previously separate `docPath` helper was
+single-use and has been inlined into `continueWorking`. The launch-path verify check (`.agents`/`canvas`
+segments present) is satisfied by the forward-slash form.
+
 ## Verification
 
 The cleanup is done when a single `verify`-labelled task confirms — falsifiably, each check with an

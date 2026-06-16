@@ -122,14 +122,12 @@ type CanvasDoc =
 /// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
 module CanvasPrompt =
 
-    /// On-disk path of a canvas doc within a worktree. Mirrors the server's
-    /// Path.Combine(worktreePath, ".agents", "canvas", filename) on Windows.
-    let docPath (worktreePath: string) (filename: string) =
-        $"{worktreePath}\\.agents\\canvas\\{filename}"
-
     /// Prompt handed to the coding tool to (re)start work on an existing canvas doc.
     let continueWorking (worktreePath: string) (filename: string) =
-        $"Continue working on canvas doc: {docPath worktreePath filename}\n"
+        // On-disk path of the canvas doc within the worktree. Forward slashes are used
+        // deliberately: they work on Windows, Linux and macOS, and src/Shared is
+        // Fable-compiled to JS so System.IO.Path.Combine is not available here.
+        $"Continue working on canvas doc: {worktreePath}/.agents/canvas/{filename}\n"
         + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
 
 type CanvasMessageRequest =
