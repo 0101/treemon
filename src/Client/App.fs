@@ -304,16 +304,26 @@ let update msg model =
                 else detectChangedCanvasDocs now model.PreviousCanvasHashes currentCanvasHashes
             let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
+            // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
+            // dashboard) is server-generated and self-refreshing, so its data churn must not
+            // hijack focus; filter it out of the candidates before picking the most recent.
+            let agentChangedDocs =
+                changedDocs
+                |> List.filter (fun (scopedKey, filename) -> canvasDocKind repos scopedKey filename = Some AgentDoc)
             let autoDisplayTarget =
-                // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
-                // dashboard) is server-generated and self-refreshing, so its data churn must not
-                // hijack focus; filter it out of the candidates before picking the most recent.
-                let agentChangedDocs =
-                    changedDocs
-                    |> List.filter (fun (scopedKey, filename) -> canvasDocKind repos scopedKey filename = Some AgentDoc)
                 if isIdle && not (List.isEmpty agentChangedDocs)
                 then findMostRecentChangedDoc repos agentChangedDocs
                 else None
+            // Delivery signal for a queued canvas message: a queued message is genuinely
+            // delivered to the server-side queue and drained when a session registers, so it must
+            // never be reported as a failure. We clear Waiting -> Idle once an agent-authored doc
+            // changes content, which is what a resumed/launched session does in response.
+            // SystemView self-refresh is excluded so it cannot spuriously clear the banner. This
+            // is the success edge the wall-clock timer used to (wrongly) report as a failure.
+            let canvasSendState =
+                match model.CanvasSendState with
+                | CanvasSendState.Waiting _ when not (List.isEmpty agentChangedDocs) -> CanvasSendState.Idle
+                | other -> other
             let canvasShowingDoc = model.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
             let repos, autoExpanded =
                 match autoDisplayTarget with
@@ -343,7 +353,8 @@ let update msg model =
                 CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.CanvasPaneOpen
                 CanvasPosition = if isFirstLoad then response.CanvasPosition else model.CanvasPosition
                 PreviousCanvasHashes = currentCanvasHashes
-                CanvasEvents = canvasEvents }
+                CanvasEvents = canvasEvents
+                CanvasSendState = canvasSendState }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 if isFirstLoad then
@@ -433,17 +444,10 @@ let update msg model =
             else
                 Cmd.none
 
-        let messageQueueExpired =
-            match model.CanvasSendState with
-            | CanvasSendState.Waiting queuedAt -> now - queuedAt > 300_000.0
-            | _ -> false
-
-        let model =
-            if messageQueueExpired then
-                { model with CanvasSendState = CanvasSendState.Failed "Message expired \u2014 no session responded" }
-            else
-                model
-
+        // A queued canvas message is honestly pending, not failed: it is delivered to the
+        // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
+        // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
+        // Idle in DataLoaded; absent that, it persists until the user dismisses it.
         { model with ActivityLevel = newLevel; CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
