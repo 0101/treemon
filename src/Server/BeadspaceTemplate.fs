@@ -180,6 +180,10 @@ body {
     white-space: nowrap;
 }
 
+.issues-table .col-status {
+    white-space: nowrap;
+}
+
 .status-dot {
     display: inline-block;
     width: 6px;
@@ -611,6 +615,7 @@ function renderIssuesTable() {
         tr.appendChild(tdTitle);
 
         var tdStatus = document.createElement('td');
+        tdStatus.className = 'col-status';
         var statusDot = document.createElement('span');
         statusDot.className = 'status-dot ' + i.status;
         tdStatus.appendChild(statusDot);
