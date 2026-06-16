@@ -15,6 +15,7 @@ $PidFile = Join-Path $ScriptDir ".treemon.pid"
 $ConfigFile = Join-Path $ScriptDir ".treemon.config"
 $LogDir = Join-Path $ScriptDir "logs"
 $LogFile = Join-Path $LogDir "treemon-prod.log"
+$PublishDir = Join-Path $ScriptDir ".publish"
 $WwwRoot = Join-Path $ScriptDir "wwwroot"
 $DefaultPort = 5000
 if ($env:TREEMON_PORT) {
@@ -149,11 +150,16 @@ function Start-ProductionServer([string[]]$Roots) {
 
     Save-Config $Roots
 
+    Write-Host "Publishing server..." -ForegroundColor Cyan
+    dotnet publish -c Release -o $PublishDir src/Server/Server.fsproj
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+
+    $serverExe = Join-Path $PublishDir "Treemon.exe"
     $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
-    $process = Start-Process -FilePath "dotnet" `
-        -ArgumentList "run -c Release --project `"$(Join-Path $ScriptDir "src/Server")`" -- $rootArgs --port $DefaultPort" `
+    $process = Start-Process -FilePath $serverExe `
+        -ArgumentList "$rootArgs --port $DefaultPort" `
         -WorkingDirectory $ScriptDir `
         -RedirectStandardOutput $LogFile `
         -RedirectStandardError (Join-Path $LogDir "treemon-prod-stderr.log") `
