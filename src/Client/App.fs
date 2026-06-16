@@ -84,7 +84,7 @@ type Msg =
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
-    | CanvasSendResult of CanvasMessageResult
+    | CanvasSendResult of CanvasMessageResult * now: float
     | DismissCanvasMessageError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>
@@ -302,7 +302,7 @@ let update msg model =
             let changedDocs =
                 if isFirstLoad then []
                 else detectChangedCanvasDocs now model.PreviousCanvasHashes currentCanvasHashes
-            let now = Fable.Core.JS.Constructors.Date.now ()
+            let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
             let autoDisplayTarget =
                 // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
@@ -771,7 +771,7 @@ let update msg model =
         match visibleDoc, worktree with
         | Some (scopedKey, filename), Some wt ->
             Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
-            model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } CanvasSendResult (_.Message >> CanvasMessageResult.Error >> CanvasSendResult)
+            model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } (fun r -> CanvasSendResult(r, Fable.Core.JS.Constructors.Date.now ())) (fun e -> CanvasSendResult(CanvasMessageResult.Error e.Message, Fable.Core.JS.Constructors.Date.now ()))
         | Some (scopedKey, _), None ->
             Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
             model, Cmd.none
@@ -779,7 +779,7 @@ let update msg model =
             Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
             model, Cmd.none
 
-    | CanvasSendResult result ->
+    | CanvasSendResult (result, now) ->
         match result with
         | CanvasMessageResult.Error msg ->
             Fable.Core.JS.console.error ("Canvas message error:", msg)
@@ -788,7 +788,7 @@ let update msg model =
             { model with CanvasSendState = CanvasSendState.Idle }, Cmd.none
         | CanvasMessageResult.Queued ->
             Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-            { model with CanvasSendState = CanvasSendState.Waiting (Fable.Core.JS.Constructors.Date.now ()) }, Cmd.none
+            { model with CanvasSendState = CanvasSendState.Waiting now }, Cmd.none
 
     | DismissCanvasMessageError ->
         { model with CanvasSendState = CanvasSendState.Idle }, Cmd.none
