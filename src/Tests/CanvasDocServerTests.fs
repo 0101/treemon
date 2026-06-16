@@ -38,6 +38,17 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(baseStyleMarker), "Both kinds keep the scrollbar base style")
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
 
+    // ── Finding 11: query/hash-safe in-doc navigation ────────────────────────
+    // A link like status.html?tab=errors must post the bare "status.html" a CanvasDoc.Filename can
+    // match. The filename is taken from a.pathname (which excludes ?query/#hash), not the raw href.
+    [<Test>]
+    member _.``link interceptor derives the filename from a.pathname so ?query/#hash are stripped``() =
+        let injection = buildInjection SystemView
+        Assert.That(injection, Does.Contain("(a.pathname||h).split('/').pop()"),
+                    "The clicked filename must come from a.pathname (no ?query/#hash), not the raw href")
+        Assert.That(injection, Does.Not.Contain("var f=h.split('/').pop()"),
+                    "The naive raw-href split keeps ?query/#hash and silently mis-tabs (Finding 11)")
+
     // ── AgentDoc: full injection (unchanged behaviour) ────────────────────────
 
     [<Test>]

@@ -638,3 +638,73 @@ type SystemViewAwarenessTests() =
 
         Assert.That(result, Is.EqualTo(Some ("r/feat", "status.html")),
             "Even though the SystemView doc is more recent, only the AgentDoc is eligible")
+
+
+// ── NavigateCanvasDoc defense-in-depth (Finding 11) ──────────────────
+// In-doc link clicks arrive as an untrusted postMessage carrying only a filename. It is committed
+// to ActiveCanvasDoc only when isKnownCanvasDoc confirms it names a real CanvasDoc of the focused
+// worktree; an unknown filename (e.g. one still carrying a ?query/#hash the interceptor failed to
+// strip) is dropped rather than silently mis-tabbed onto the first doc.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type NavigateCanvasDocTests() =
+
+    // Run the Elmish effects and collect the messages they dispatch. Used only on the accept path,
+    // whose Cmd is Cmd.ofMsg — it forces neither the (lazy) Remoting proxy nor Fable.Core.JS.
+    let dispatchedMsgs cmd : Msg list =
+        let captured = ResizeArray<Msg>()
+        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
+        List.ofSeq captured
+
+    [<Test>]
+    member _.``a known doc filename switches to that tab``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1"; makeDoc "plan.html" "h2" ] ] ]
+                FocusedElement = Some (Card "myrepo/feat") }
+
+        let _, cmd = update (NavigateCanvasDoc "plan.html") model
+
+        match dispatchedMsgs cmd with
+        | [ SelectCanvasDoc (scopedKey, filename) ] ->
+            Assert.That(scopedKey, Is.EqualTo("myrepo/feat"))
+            Assert.That(filename, Is.EqualTo("plan.html"))
+        | other -> Assert.Fail($"expected a single SelectCanvasDoc, got {other}")
+
+    // The accept/drop decision is the pure isKnownCanvasDoc predicate (the drop branch itself calls
+    // Fable.Core.JS.console.warn, dummy code that throws under .NET, so it can't run through update
+    // here). These assert the gate that decides whether a navigation is committed or dropped.
+
+    [<Test>]
+    member _.``isKnownCanvasDoc accepts a real doc of the focused worktree``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1"; makeDoc "plan.html" "h2" ] ] ] }
+        Assert.That(isKnownCanvasDoc model "myrepo/feat" "plan.html", Is.True,
+            "A filename that matches a CanvasDoc.Filename must be accepted")
+
+    [<Test>]
+    member _.``isKnownCanvasDoc rejects a filename still carrying a ?query suffix``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1" ] ] ] }
+        Assert.That(isKnownCanvasDoc model "myrepo/feat" "status.html?tab=errors", Is.False,
+            "A suffixed name matches no bare CanvasDoc.Filename and must be dropped (Finding 11)")
+
+    [<Test>]
+    member _.``isKnownCanvasDoc rejects a filename naming no doc of the worktree``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1" ] ] ] }
+        Assert.That(isKnownCanvasDoc model "myrepo/feat" "other.html", Is.False,
+            "A filename that names no CanvasDoc of the worktree must be dropped")
+
+    [<Test>]
+    member _.``isKnownCanvasDoc rejects when the scoped key resolves to no worktree``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1" ] ] ] }
+        Assert.That(isKnownCanvasDoc model "myrepo/ghost" "status.html", Is.False,
+            "No worktree for the scoped key means nothing is known, so the navigation is dropped")

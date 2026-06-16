@@ -200,6 +200,16 @@ let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string)
     |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
     |> Option.map (fun d -> d.Kind)
 
+/// True when `filename` names a real CanvasDoc of the worktree `scopedKey`. Gates in-doc link
+/// navigation (NavigateCanvasDoc), whose filename arrives via an untrusted in-iframe postMessage:
+/// only a filename that matches a known doc may be committed to ActiveCanvasDoc, otherwise
+/// activeVisibleDoc would silently fall back to the first doc (wrong tab) — e.g. a filename still
+/// carrying a ?query/#hash suffix that no bare CanvasDoc.Filename can match.
+let isKnownCanvasDoc (model: Model) (scopedKey: string) (filename: string) : bool =
+    findWorktree scopedKey model
+    |> Option.map (fun wt -> wt.CanvasDocs |> List.exists (fun d -> d.Filename = filename))
+    |> Option.defaultValue false
+
 let markVisibleDocCmd (model: Model) : Cmd<Msg> =
     activeVisibleDoc model
     |> Option.map (fun (sk, fn) -> Cmd.ofMsg (MarkDocViewed (sk, fn)))
@@ -764,7 +774,15 @@ let update msg model =
     | NavigateCanvasDoc filename ->
         match model.FocusedElement with
         | Some (Card scopedKey) ->
-            model, Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
+            // Defense-in-depth: filename arrives via an in-iframe postMessage (untrusted, '*' origin).
+            // Only switch tabs when it names a real CanvasDoc of the focused worktree — committing an
+            // unknown filename (e.g. one still carrying a ?query/#hash) to ActiveCanvasDoc would
+            // silently fall back to the first doc (see activeVisibleDoc), landing on the wrong tab.
+            if isKnownCanvasDoc model scopedKey filename then
+                model, Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
+            else
+                Fable.Core.JS.console.warn ($"[canvas] navigate-canvas-doc DROPPED: unknown doc '{filename}'")
+                model, Cmd.none
         | _ ->
             Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no focused card"
             model, Cmd.none
