@@ -4,6 +4,15 @@ Quality cleanup of the canvas feature on branch `canvas48`, driven by the focuse
 report at `.agents/focused-review/20260616-092556/review.md`. This spec captures the durable
 invariants the cleanup enforces; per-finding detail lives in that report and in the beads tasks.
 
+> **Retiring this spec (tm-canvas48-fr4):** The durable invariants and decisions here have been
+> migrated into `docs/spec/canvas-pane.md` — loopback-only `/api/canvas/register` (Bridge Protocol),
+> link-interceptor query/hash stripping (Link Handling), the pure-`update`/no-wall-clock invariant
+> (Technical Approach), the canvas-session launch path (Liveness and Session Routing), and the
+> `CanvasState` nested-record extraction + cross-platform doc-path decisions (Decisions). This
+> branch-specific `-cleanup` file is intentionally **retained for now** because the still-open
+> canvas48 fix tasks and the `verify` task (`tm-canvas48-9kv`) reference it. Delete it once the
+> feature is verified and closed; nothing in the source tree links to it (only the beads DB does).
+
 ## Goals
 
 - Canvas code is correct, simple, and reasoned-about — illegal states and silent footguns are

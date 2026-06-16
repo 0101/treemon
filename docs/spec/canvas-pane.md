@@ -87,7 +87,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - Each doc records its author `sessionId` via `CanvasDocOwnership.fs`.
 - The liveness dot shown in tabs and overview reflects the selected doc's `OwnerSessionId` against `BridgeLiveness`, so liveness is per-doc rather than per-worktree. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
 - When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button — only when the active doc is an `AgentDoc` (starting a session for a server-generated `SystemView` is meaningless).
-- `LaunchCanvasSession` uses the existing action-launch flow and includes the full absolute doc path plus canvas context in the prompt.
+- `LaunchCanvasSession` uses the existing action-launch flow and includes the full on-disk doc path (`{worktree}/.agents/canvas/{filename}`) plus canvas context in the prompt, so the agent is pointed at the real file the doc server serves. That path is built once by `CanvasPrompt.continueWorking` in `src/Shared/Types.fs` — the single source of truth shared by the client launch and server auto-spawn flows.
 - Canvas messages route to the author session for the selected doc.
 - If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
 
@@ -112,6 +112,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 
 - The session bridge is the extension process started inside a coding session.
 - It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, and `sessionId`.
+- Registration is loopback-only: `/api/canvas/register` accepts an `injectUrl` only when it is an absolute `http(s)` URL whose host is a loopback IP (`IPAddress.IsLoopback`) or the literal `localhost` (rejected `400` otherwise), and only for a known worktree (`isKnownWorktree`, mirroring the heartbeat and doc routes; unknown worktree → `404`). The route is wired with the scheduler agent, so demo mode (no agent) omits it entirely.
 - After startup it re-registers every 30 seconds as a heartbeat.
 - Failed extension heartbeats back off exponentially up to 120 seconds, then reset after reconnect.
 - Served docs receive an injected heartbeat script that posts to `/bridge/heartbeat` every 30 seconds.
@@ -156,6 +157,7 @@ Three layers of state preservation:
 ### Link Handling
 
 - Relative `.html` links and same-origin canvas doc links are intercepted and converted into `navigate-canvas-doc` messages for tab switching.
+- The interceptor resolves a same-origin `.html` link to a bare filename even when the href carries a `?query` or `#hash` suffix, so `status.html?tab=errors` and `status.html#top` both navigate to the `status.html` tab.
 - External links open in the system browser.
 
 ## Technical Approach
@@ -165,13 +167,15 @@ Three layers of state preservation:
 - `Program.fs` hosts the main app/API on port 5000 and the canvas doc server on port 5002. `CanvasBridge` owns live registration, queueing, forwarding, and liveness.
 - Security relies on separate origin plus `postMessage`: docs cannot call privileged app endpoints directly, and the parent validates sender origin before forwarding anything.
 - Canvas awareness helpers stay pure: `detectCanvasEvents` and `expireCanvasEvents` take `now` as an argument instead of capturing the clock internally.
+- The Elmish `update` reads no wall-clock; time enters only via message payloads (e.g. a `Tick` carrying `now`), keeping `update` a pure function of `(model, msg)`.
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
 | `src/Shared/Types.fs` | Shared canvas domain types (incl. `CanvasDocKind` + `CanvasDocKind.classify`), API methods, bridge liveness, send results, pane position |
-| `src/Client/App.fs` | Elmish model and update logic for pane state, awareness, auto-display, routing, archive, and launch actions |
+| `src/Client/App.fs` | Elmish model root and update logic for awareness, auto-display, routing, archive, and launch actions (the canvas model slice lives in `CanvasState.fs`) |
+| `src/Client/CanvasState.fs` | Canvas pane model slice — the `CanvasState` record (compiled before `App.fs`, nested as `Model.Canvas`) plus pure helpers `touchVisitedDoc`, `canvasDocKind`, `activeVisibleDoc`, `markVisibleDocCmd`, and the `MaxLiveIframes` cap |
 | `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, liveness dot, iframe, banners, and message listener |
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
 | `src/Client/CanvasAwareness.fs` | Pure helpers for doc awareness: seeding viewed hashes, unviewed detection, canvas events, auto-display |
@@ -196,6 +200,8 @@ Three layers of state preservation:
 - **Per-doc author routing** — docs persist ownership by `sessionId`, canvas messages route to the selected doc's owner session, and liveness/resume operate per doc instead of per-worktree.
 - **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates the session-document machinery. A `SystemView` (currently only the beads dashboard) opts out of liveness, Start-session, the message bridge, morph, content-hash awareness, and archiving, and gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab. This makes the misfit states unrepresentable rather than emergent from `OwnerSessionId = None`.
 - **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date.
+- **Canvas model slice as a nested record** — the canvas Model-field group is extracted as a nested record `Canvas: CanvasState.CanvasState` on `App.Model` (mirroring the existing `CreateModal`/`ConfirmModal` nesting precedent). The four pure helpers (`touchVisitedDoc`, `canvasDocKind`, `activeVisibleDoc`, `markVisibleDocCmd`) plus the `MaxLiveIframes` literal live in `src/Client/CanvasState.fs` (compiled before `App.fs`); they take pure slices (`repos`/`focused`/`activeCanvasDoc`) rather than the whole `Model`, and `markVisibleDocCmd` is parameterized over the message constructor so the module needs no concrete `Msg` type. Thin `App.fs` wrappers keep `update` call sites unchanged. This is field-path nesting only — **not** the larger `Cmd.map` sub-component split (no sub-`Msg`/sub-`update`; `update` stays one function), which is out of scope.
+- **Cross-platform canvas doc path** — `CanvasPrompt.continueWorking` (`src/Shared/Types.fs`) builds the canvas-session launch path with forward slashes (`{worktree}/.agents/canvas/{filename}`), which resolve correctly on Windows, Linux, and macOS. `System.IO.Path.Combine` is deliberately not used because `src/Shared` is Fable-compiled to JavaScript and cannot reference `System.IO`.
 
 ## Implementation Status
 
