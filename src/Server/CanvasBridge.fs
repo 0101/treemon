@@ -61,8 +61,9 @@ let private drainQueue (key: string) (entry: SessionEntry) =
         if not (List.isEmpty valid) then
             Log.log "CanvasBridge" $"Draining {List.length valid} queued message(s) for {key}"
 
-            async {
-                for msg in valid do
+            valid
+            |> List.map (fun msg ->
+                async {
                     try
                         use content = new StringContent(msg.Payload, Encoding.UTF8, "application/json")
                         let! response = httpClient.PostAsync(entry.InjectUrl, content) |> Async.AwaitTask
@@ -75,7 +76,9 @@ let private drainQueue (key: string) (entry: SessionEntry) =
                             Log.log "CanvasBridge" $"Drain forward failed for {key}: {int response.StatusCode} {body}"
                     with ex ->
                         Log.log "CanvasBridge" $"Drain forward error for {key}: {ex.Message}"
-            }
+                })
+            |> Async.Sequential
+            |> Async.Ignore
             |> Async.Start
 
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
