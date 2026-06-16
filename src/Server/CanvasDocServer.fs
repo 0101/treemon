@@ -15,10 +15,6 @@ type CanvasRegisterRequest =
       injectUrl: string
       sessionId: string }
 
-// ── Shared guards ─────────────────────────────────────────────────────────────
-// The canvas routes (register / heartbeat / doc) only act on worktrees the scheduler already
-// tracks, and only forward to loopback inject targets.
-
 let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
     let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
     return
