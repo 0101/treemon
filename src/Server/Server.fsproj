@@ -45,6 +45,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Single source of truth for the Beadspace dashboard HTML. Embedded so the
+         runtime (BeadspaceTemplate.fs) reads the same definition the E2E tests load
+         from disk; the two cannot drift. -->
+    <EmbeddedResource Include="BeadspaceTemplate.html">
+      <LogicalName>BeadspaceTemplate.html</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 

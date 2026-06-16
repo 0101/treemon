@@ -59,7 +59,7 @@ Add to `CanvasDocServer` (port 5002):
 In the refresh scheduler, when scanning worktrees:
 - If `.beads/beads.db` exists AND has at least one issue → ensure `.agents/canvas/beads.html` matches the current template: write it when absent, and rewrite it when the on-disk content differs from `BeadspaceTemplate.html` (so template fixes reach existing worktrees on the next refresh after a deploy)
 - If `.beads/beads.db` has zero issues AND `.agents/canvas/beads.html` exists → delete `beads.html`
-- Template is stored as a string constant in `BeadspaceTemplate.fs` module in the Server project
+- Template is the `BeadspaceTemplate.html` file, embedded into the Server assembly as a resource and read once at startup by the `BeadspaceTemplate.fs` module (exposed as the `BeadspaceTemplate.html` value) — one definition shared by the runtime and the E2E tests
 - Creates `.agents/canvas/` directory if needed
 - `beads.html` is a generated view kept in sync with the template — it is not meant to be user-customized
 
@@ -79,8 +79,8 @@ The template distinguishes the initial render from subsequent polls:
 |------|---------|
 | `src/Server/BeadsStatus.fs` | `getBeadsIssueList` (full issue JSON) and `getBeadsSummary` (status counts) |
 | `src/Server/Program.fs` | `beads-data` route on CanvasDocServer (port 5002) |
-| `src/Server/BeadspaceTemplate.html` | Customized Beadspace template source |
-| `src/Server/BeadspaceTemplate.fs` | String constant exposing the template HTML |
+| `src/Server/BeadspaceTemplate.html` | Beadspace template — single source of truth (embedded resource; also read from disk by the E2E tests) |
+| `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup, exposing it as the `html` value |
 | `src/Server/RefreshScheduler.fs` | Auto-provision logic on worktree scan |
 
 ## Related Specs

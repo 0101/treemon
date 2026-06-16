@@ -173,8 +173,8 @@ Three layers of state preservation:
 | `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
 | `src/Server/CanvasBridge.fs` | Session registry, poll registry, queueing, liveness, and bridge forwarding |
-| `src/Server/BeadspaceTemplate.fs` | Beadspace dashboard HTML template constant for auto-provisioning |
-| `src/Server/BeadspaceTemplate.html` | Source HTML for beadspace dashboard template |
+| `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup for auto-provisioning |
+| `src/Server/BeadspaceTemplate.html` | Beadspace dashboard HTML — single source of truth (embedded into the Server assembly) |
 | `src/Server/Program.fs` | Canvas register endpoint, bridge status endpoint, doc server, HTML injection, heartbeat route |
 | `src/Server/PathUtils.fs` | Canvas path normalization and validation |
 | `src/Extension/extension.mjs` | Session bridge registration, `/inject` server, heartbeat, and reconnect backoff |
