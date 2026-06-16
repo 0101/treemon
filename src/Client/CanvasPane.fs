@@ -135,7 +135,26 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (setPosition: CanvasPosition -> unit) (selectDoc: string -> unit) (onOverviewClick: string -> unit) (onOverviewDocClick: string -> string -> unit) (archiveDoc: string -> unit) (dismissError: unit -> unit) (launchSession: unit -> unit) =
+/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the seven
+/// handlers are passed by name: three share the type `string -> unit`, so positional passing let a
+/// silent argument transposition compile and surface only at runtime.
+type CanvasPaneCallbacks =
+    { SetPosition: CanvasPosition -> unit
+      SelectDoc: string -> unit
+      OnOverviewClick: string -> unit
+      OnOverviewDocClick: string -> string -> unit
+      ArchiveDoc: string -> unit
+      DismissError: unit -> unit
+      LaunchSession: unit -> unit }
+
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+    let { SetPosition = setPosition
+          SelectDoc = selectDoc
+          OnOverviewClick = onOverviewClick
+          OnOverviewDocClick = onOverviewDocClick
+          ArchiveDoc = archiveDoc
+          DismissError = dismissError
+          LaunchSession = launchSession } = callbacks
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
             prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")

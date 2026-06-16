@@ -2110,8 +2110,17 @@ let view model dispatch =
             model.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
         | _ -> []
 
+    let canvasCallbacks: CanvasPane.CanvasPaneCallbacks =
+        { SetPosition = SetCanvasPosition >> dispatch
+          SelectDoc = selectCanvasDoc
+          OnOverviewClick = onOverviewClick
+          OnOverviewDocClick = onOverviewDocClick
+          ArchiveDoc = archiveCanvasDoc
+          DismissError = (fun () -> dispatch DismissCanvasMessageError)
+          LaunchSession = launchCanvasSession }
+
     let canvasEl =
-        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasSendState model.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs (SetCanvasPosition >> dispatch) selectCanvasDoc onOverviewClick onOverviewDocClick archiveCanvasDoc (fun () -> dispatch DismissCanvasMessageError) launchCanvasSession
+        CanvasPane.view model.CanvasPaneOpen model.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.CanvasSendState model.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
 
     let children =
         match model.CanvasPosition with
