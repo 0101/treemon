@@ -133,8 +133,8 @@ type CanvasDocKindSerializationTests() =
         | Ok data ->
             let allDocs =
                 data.Worktrees.Repos
-                |> List.collect (fun r -> r.Worktrees)
-                |> List.collect (fun wt -> wt.CanvasDocs)
+                |> List.collect _.Worktrees
+                |> List.collect _.CanvasDocs
             Assert.That(allDocs |> List.exists (fun d -> d.Kind = SystemView && d.Filename = "beads.html"),
                         Is.True, "Fixture should contain a beads.html SystemView doc")
             Assert.That(allDocs |> List.exists (fun d -> d.Kind = AgentDoc),

@@ -198,7 +198,7 @@ let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string)
     repos
     |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
     |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
-    |> Option.map (fun d -> d.Kind)
+    |> Option.map _.Kind
 
 /// True when `filename` names a real CanvasDoc of the worktree `scopedKey`. Gates in-doc link
 /// navigation (NavigateCanvasDoc), whose filename arrives via an untrusted in-iframe postMessage:
@@ -1622,7 +1622,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (wt: WorktreeStatus) =
+let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (wt: WorktreeStatus) =
     let scopedKey = WorktreePath.value wt.Path
     let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let cvEvents = canvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
@@ -1884,7 +1884,7 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
         ]
     ]
 
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (unviewedDocs: Map<string, string list>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (repo: RepoModel) =
+let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
@@ -1896,7 +1896,7 @@ let repoSection dispatch editorName isCompact (focusedElement: FocusTarget optio
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns unviewedDocs canvasEvents canvasPaneOpen))
+                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns canvasEvents canvasPaneOpen))
                     ]
                     archiveSection dispatch repo.ArchivedWorktrees
         ]
@@ -2064,7 +2064,7 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns (unviewedDocsByScopedKey model.Repos model.LastViewedHashes) model.CanvasEvents model.CanvasPaneOpen))
+                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns model.CanvasEvents model.CanvasPaneOpen))
                     ]
 
                 schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
