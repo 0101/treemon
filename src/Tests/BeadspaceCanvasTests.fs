@@ -91,20 +91,42 @@ type BeadspaceCanvasTests() =
     [<Test>]
     member this.``Issues table is filterable by status``() =
         task {
-            // Default filter is 'open' — get the count
-            let! openCount = this.Page.Locator(".issue-table-row").CountAsync()
+            // Capture the default view's row count (default filter is data-driven)
+            let! defaultCount = this.Page.Locator(".issue-table-row").CountAsync()
 
             // Switch to 'All' filter
             let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
             do! allChip.ClickAsync()
             let! allCount = this.Page.Locator(".issue-table-row").CountAsync()
-            Assert.That(allCount, Is.GreaterThanOrEqualTo(openCount), "'All' filter should show at least as many rows as 'Open'")
+            Assert.That(allCount, Is.GreaterThanOrEqualTo(defaultCount), "'All' filter should show at least as many rows as the default view")
 
             // Switch to 'Closed' filter
             let closedChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "Closed"))
             do! closedChip.ClickAsync()
             let! closedCount = this.Page.Locator(".issue-table-row").CountAsync()
             Assert.That(closedCount, Is.GreaterThanOrEqualTo(0), "Closed filter should render without error")
+        }
+
+    [<Test>]
+    member this.``Default filter selects WIP when in-progress issues exist``() =
+        task {
+            // Mock data has in-progress issues, so the default active filter should be WIP
+            let activeChip = this.Page.Locator(".filter-chip.active")
+            let! activeFilter = activeChip.GetAttributeAsync("data-filter")
+            Assert.That(activeFilter, Is.EqualTo("in_progress"), "Default filter should be in_progress (WIP) when in-progress issues exist")
+        }
+
+    [<Test>]
+    member this.``Filter chips show counts for non-empty statuses``() =
+        task {
+            // A status with issues shows its count badge; the 'All' chip never does
+            let wipBadge = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "WIP")).Locator(".filter-count")
+            let! wipVisible = wipBadge.IsVisibleAsync()
+            Assert.That(wipVisible, Is.True, "WIP chip should show a count badge when in-progress issues exist")
+
+            let allBadge = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All")).Locator(".filter-count")
+            let! allVisible = allBadge.IsVisibleAsync()
+            Assert.That(allVisible, Is.False, "'All' chip should not show a count badge")
         }
 
     // ── Goal 3: Detail Panel ─────────────────────────────────────────────

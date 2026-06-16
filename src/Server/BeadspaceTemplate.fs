@@ -128,6 +128,20 @@ body {
 .filter-chip:hover { border-color: var(--border-bright); color: var(--text-primary); }
 .filter-chip.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-bright); }
 
+.filter-count {
+    display: inline-block;
+    margin-left: 0.375rem;
+    padding: 0.0625rem 0.375rem;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.filter-count:empty { display: none; }
+.filter-chip.active .filter-count { background: var(--accent); color: var(--bg-deep); }
+
 .issues-table {
     width: 100%;
     border-collapse: collapse;
@@ -446,6 +460,21 @@ function ageLabel(dateStr) {
     return age > 0 ? age + 'd' : 'today';
 }
 
+function statusCounts(issues) {
+    return issues.reduce(function(acc, i) {
+        acc[i.status] = (acc[i.status] || 0) + 1;
+        return acc;
+    }, {});
+}
+
+// Default to the most actionable non-empty status: WIP > open > blocked > closed.
+function chooseDefaultFilter(issues) {
+    var counts = statusCounts(issues);
+    return ['in_progress', 'open', 'blocked', 'closed'].find(function(s) {
+        return (counts[s] || 0) > 0;
+    }) || 'open';
+}
+
 // ─── Data URL from pathname ──────────────────────────────────────────────────
 var dataUrl = (function() {
     var path = window.location.pathname;
@@ -473,7 +502,8 @@ function renderIssuesView() {
     ];
     var chipsHtml = filters.map(function(f) {
         var cls = f.value === tableState.filter ? 'filter-chip active' : 'filter-chip';
-        return '<button class="' + cls + '" data-filter="' + f.value + '">' + f.label + '</button>';
+        return '<button class="' + cls + '" data-filter="' + f.value + '">' + f.label +
+            '<span class="filter-count" data-count="' + f.value + '"></span></button>';
     }).join('');
     return '<div id="view-issues" class="view">' +
         '<div class="search-bar">' +
@@ -672,6 +702,14 @@ function renderIssuesTable() {
     });
 }
 
+function updateFilterCounts() {
+    var counts = statusCounts(tableState.issues);
+    document.querySelectorAll('.filter-count').forEach(function(el) {
+        var n = counts[el.dataset.count] || 0;
+        el.textContent = n > 0 ? String(n) : '';
+    });
+}
+
 function bindIssuesEvents() {
     document.querySelectorAll('.issues-table th[data-sort]').forEach(function(th) {
         th.addEventListener('click', function() {
@@ -716,6 +754,7 @@ var lastDataJson = null;
 function initialRender(issues) {
     currentIssues = issues;
     tableState.issues = issues;
+    tableState.filter = chooseDefaultFilter(issues);
 
     var app = document.getElementById('app');
     app.textContent = '';
@@ -724,6 +763,7 @@ function initialRender(issues) {
     // Bind issues table events and render
     bindIssuesEvents();
     renderIssuesTable();
+    updateFilterCounts();
     initialized = true;
 }
 
@@ -756,6 +796,7 @@ function refreshData() {
 
             // Re-render only the tbody (preserves search, filter chips, sort, thead)
             renderIssuesTable();
+            updateFilterCounts();
 
             // Restore scroll position
             if (scrollContainer) scrollContainer.scrollTop = savedScroll;
