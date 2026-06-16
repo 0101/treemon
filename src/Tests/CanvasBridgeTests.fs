@@ -151,17 +151,21 @@ type EnqueueTests() =
     member _.``Queue respects max 10 size limit — oldest messages dropped``() =
         let path = uniquePath "enq-limit"
 
-        // Enqueue 12 messages — only last 10 should survive
+        // Enqueue 12 messages — only the last 10 should survive (oldest two evicted).
         [ 1..12 ]
         |> List.iter (fun i ->
             let request = { WorktreePath = WorktreePath path; Filename = ""; Payload = $"msg-{i}" }
             sendMessage request |> Async.RunSynchronously |> ignore)
 
-        // Register a bridge to drain — drain will attempt HTTP and fail,
-        // but we can verify via getStatus that registration worked.
-        // The key test is that enqueue doesn't crash and accepts > 10 messages.
-        // To verify the limit, we test through the drainQueue path below.
-        Assert.Pass("Enqueuing 12 messages without error confirms queue handles overflow")
+        // Drain in-process (no HTTP) and inspect the survivors directly.
+        let survivors = drainPending path
+
+        Assert.That(List.length survivors, Is.EqualTo(10), "Queue should cap at 10 survivors")
+        Assert.That(
+            survivors,
+            Is.EqualTo([ for i in 3..12 -> $"msg-{i}" ]),
+            "Oldest two (msg-1, msg-2) should be evicted, leaving msg-3..msg-12 in order"
+        )
 
 
 // ── drainQueue via register ─────────────────────────────────────────
