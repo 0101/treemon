@@ -15,7 +15,39 @@ type CanvasRegisterRequest =
       injectUrl: string
       sessionId: string }
 
-let canvasRegisterHandler : HttpHandler =
+// ── Shared guards ─────────────────────────────────────────────────────────────
+// The canvas routes (register / heartbeat / doc) only act on worktrees the scheduler already
+// tracks, and only forward to loopback inject targets.
+
+let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
+    let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
+    return
+        state.Repos
+        |> Map.values
+        |> Seq.collect _.KnownPaths
+        |> Set.ofSeq
+}
+
+let private isKnownWorktree agent path = async {
+    let! paths = allKnownPaths agent
+    return paths |> Set.contains path
+}
+
+/// injectUrl is stored and later used as an HTTP POST target by CanvasBridge (sendMessage /
+/// drainQueue), so a non-local value would let a registrant make the server POST to arbitrary
+/// hosts (SSRF). Accept only well-formed absolute http(s) URLs whose host is a loopback IP
+/// (IPAddress.IsLoopback — IPv4 127.0.0.0/8 or IPv6 ::1) or the literal "localhost".
+let isLoopbackInjectUrl (injectUrl: string) : bool =
+    match System.Uri.TryCreate(injectUrl, System.UriKind.Absolute) with
+    | true, uri ->
+        (uri.Scheme = System.Uri.UriSchemeHttp || uri.Scheme = System.Uri.UriSchemeHttps)
+        && (System.String.Equals(uri.Host, "localhost", System.StringComparison.OrdinalIgnoreCase)
+            || (match System.Net.IPAddress.TryParse uri.Host with
+                | true, ip -> System.Net.IPAddress.IsLoopback ip
+                | false, _ -> false))
+    | false, _ -> false
+
+let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
@@ -26,9 +58,19 @@ let canvasRegisterHandler : HttpHandler =
             elif System.String.IsNullOrWhiteSpace body.injectUrl then
                 Log.log "Canvas" $"Registration failed: missing injectUrl for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "missing injectUrl" next ctx
+            elif not (isLoopbackInjectUrl body.injectUrl) then
+                Log.log "Canvas" $"Registration failed: non-loopback injectUrl ({body.injectUrl}) for {body.worktreePath}"
+                return! RequestErrors.BAD_REQUEST "injectUrl must resolve to a loopback host" next ctx
             else
-                CanvasBridge.registerSession body.worktreePath body.injectUrl (Option.ofObj body.sessionId)
-                return! Successful.OK "registered" next ctx
+                let worktreePath = body.worktreePath |> Server.PathUtils.normalizePath
+                let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
+
+                if not isKnown then
+                    Log.log "Canvas" $"Registration failed: unknown worktree — {worktreePath}"
+                    return! RequestErrors.NOT_FOUND "unknown worktree" next ctx
+                else
+                    CanvasBridge.registerSession worktreePath body.injectUrl (Option.ofObj body.sessionId)
+                    return! Successful.OK "registered" next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
@@ -48,20 +90,6 @@ let bridgeStatusHandler : HttpHandler =
             RequestErrors.BAD_REQUEST "missing worktreePath query parameter" next ctx
 
 let private canvasPort = 5002
-
-let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
-    let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
-    return
-        state.Repos
-        |> Map.values
-        |> Seq.collect _.KnownPaths
-        |> Set.ofSeq
-}
-
-let private isKnownWorktree agent path = async {
-    let! paths = allKnownPaths agent
-    return paths |> Set.contains path
-}
 
 let private handleHeartbeat (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     try

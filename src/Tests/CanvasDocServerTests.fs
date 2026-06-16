@@ -62,3 +62,31 @@ type BuildInjectionTests() =
         let injection = buildInjection (CanvasDocKind.classify "status.html")
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
+
+// ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
+// injectUrl is registered then used as a POST target by CanvasBridge, so a non-loopback value
+// would turn /api/canvas/register into an SSRF primitive. Only loopback hosts are accepted.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LoopbackInjectUrlTests() =
+
+    [<TestCase("http://127.0.0.1:8765/inject")>]   // IPv4 loopback (the real extension's value)
+    [<TestCase("http://127.5.6.7/inject")>]        // all of 127.0.0.0/8 is loopback
+    [<TestCase("http://localhost:8765/inject")>]   // literal localhost
+    [<TestCase("http://LOCALHOST/inject")>]        // literal localhost is case-insensitive
+    [<TestCase("https://localhost/inject")>]       // scheme-agnostic
+    [<TestCase("http://[::1]:8765/inject")>]       // IPv6 loopback
+    member _.``accepts loopback inject URLs``(url: string) =
+        Assert.That(isLoopbackInjectUrl url, Is.True, $"{url} resolves to a loopback host")
+
+    [<TestCase("http://evil.com/inject")>]                   // arbitrary remote host
+    [<TestCase("http://169.254.169.254/latest/meta-data")>]  // cloud metadata SSRF target
+    [<TestCase("http://127.0.0.1.evil.com/inject")>]         // loopback-looking label, remote host
+    [<TestCase("http://10.0.0.5/inject")>]                   // private but non-loopback
+    [<TestCase("file://localhost/etc/passwd")>]              // loopback host but non-http scheme
+    [<TestCase("/inject")>]                                  // relative — no absolute host
+    [<TestCase("not a url")>]                                // unparseable
+    [<TestCase("")>]                                         // empty
+    member _.``rejects non-loopback or malformed inject URLs``(url: string) =
+        Assert.That(isLoopbackInjectUrl url, Is.False, $"{url} must be rejected")

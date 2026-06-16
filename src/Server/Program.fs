@@ -174,12 +174,19 @@ let main args =
 
     schedulerAgent |> Option.iter (fun agent -> CanvasDocServer.start agent cts.Token)
 
+    // The register route now needs the scheduler agent for its known-worktree guard. In demo mode
+    // there is no agent (and the canvas doc server is never started — see above), so registration is
+    // unavailable there; bridge-status stays available and simply reports nothing registered.
+    let canvasRegisterRoute =
+        match schedulerAgent with
+        | Some agent -> [ route "/api/canvas/register" >=> POST >=> CanvasDocServer.canvasRegisterHandler agent ]
+        | None -> []
+
     let combinedRouter =
-        choose [
-            route "/api/canvas/register" >=> POST >=> CanvasDocServer.canvasRegisterHandler
-            route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
-            remotingApi
-        ]
+        choose (
+            canvasRegisterRoute
+            @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
+                remotingApi ])
 
     let app =
         application {
