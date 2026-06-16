@@ -691,15 +691,24 @@ let worktreeApi
                               let! owner = CanvasDocOwnership.getOwner path request.Filename
                               let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                               let provider = resolveProvider state path
-                              let launchNewSession () =
+                              // Open a new tab in the live session window when one is tracked, and
+                              // spawn only when none exists (launchAction semantics). This path is
+                              // reached automatically by a canvas-iframe postMessage and has no
+                              // resume identity to preserve, so it must never kill a live session
+                              // window by path the way spawnSession (via spawnAndTrack) does.
+                              let startOrContinueSession () =
                                   async {
                                       let prompt = CanvasPrompt.continueWorking path request.Filename
                                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-                                      let! _ = SessionManager.spawnSession sessionAgent request.WorktreePath command.AsShellString
+                                      let! _ = SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString
                                       ()
                                   }
                               match owner with
                               | Some ownerSessionId ->
+                                  // Resume intentionally uses spawnSession (kill-by-path then respawn),
+                                  // mirroring the user-initiated resumeSession flow: replacing the
+                                  // worktree's window with a fresh resume of the owner session is the
+                                  // desired behavior when there is a resume identity to preserve.
                                   Log.log "API" $"sendCanvasMessage: resuming owner session {ownerSessionId} for {request.Filename}"
                                   let inv = CodingToolCli.build provider (CodingToolCli.Resume (Some ownerSessionId))
                                   let! resumeResult = SessionManager.spawnSession sessionAgent request.WorktreePath inv.AsShellString
@@ -707,11 +716,11 @@ let worktreeApi
                                   | Ok () ->
                                       Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
                                   | Error err ->
-                                      Log.log "API" $"sendCanvasMessage: resume failed ({err}), launching new session for {request.Filename}"
-                                      do! launchNewSession ()
+                                      Log.log "API" $"sendCanvasMessage: resume failed ({err}), starting/continuing session for {request.Filename}"
+                                      do! startOrContinueSession ()
                               | None ->
-                                  Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, launching new session"
-                                  do! launchNewSession ()
+                                  Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, starting/continuing session"
+                                  do! startOrContinueSession ()
                           finally
                               canvasSpawnInFlight.TryRemove(guardKey) |> ignore
                       else
