@@ -693,10 +693,7 @@ let worktreeApi
                               let provider = resolveProvider state path
                               let launchNewSession () =
                                   async {
-                                      let docPath = Path.Combine(path, ".agents", "canvas", request.Filename)
-                                      let prompt =
-                                          $"Continue working on canvas doc: {docPath}\n"
-                                          + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+                                      let prompt = CanvasPrompt.continueWorking path request.Filename
                                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                                       let! _ = SessionManager.spawnSession sessionAgent request.WorktreePath command.AsShellString
                                       ()

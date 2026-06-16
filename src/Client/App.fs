@@ -563,9 +563,7 @@ let update msg model =
             let wtPath = WorktreePath.value wt.Path
             let prompt =
                 activeVisibleDoc model
-                |> Option.map (fun (_, filename) ->
-                    $"Continue working on canvas doc: {wtPath}\\{filename}\n"
-                    + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane.")
+                |> Option.map (fun (_, filename) -> CanvasPrompt.continueWorking wtPath filename)
                 |> Option.defaultValue ""
             let action = CanvasSession prompt
             model, Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = wt.Path; Action = action } LaunchActionResult
