@@ -76,7 +76,7 @@ type Msg =
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
-    | CanvasSendResult of CanvasMessageResult * now: float
+    | CanvasSendResult of CanvasMessageResult * scopedKey: string
     | DismissCanvasMessageError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>
@@ -277,16 +277,11 @@ let update msg model =
                 if isIdle && not (List.isEmpty agentChangedDocs)
                 then findMostRecentChangedDoc repos agentChangedDocs
                 else None
-            // Delivery signal for a queued canvas message: a queued message is genuinely
-            // delivered to the server-side queue and drained when a session registers, so it must
-            // never be reported as a failure. We clear Waiting -> Idle once an agent-authored doc
-            // changes content, which is what a resumed/launched session does in response.
-            // SystemView self-refresh is excluded so it cannot spuriously clear the banner. This
-            // is the success edge the wall-clock timer used to (wrongly) report as a failure.
-            let canvasSendState =
-                match model.Canvas.CanvasSendState with
-                | CanvasSendState.Waiting _ when not (List.isEmpty agentChangedDocs) -> CanvasSendState.Idle
-                | other -> other
+            // Delivery signal for a queued canvas message — see CanvasAwareness.clearWaitingOnDelivery.
+            // The clear is scoped to the queued message's target worktree: an unrelated worktree's doc
+            // change must not dismiss the banner (that would falsely report delivery). This is the
+            // success edge the wall-clock timer used to (wrongly) report as a failure.
+            let canvasSendState = clearWaitingOnDelivery model.Canvas.CanvasSendState agentChangedDocs
             let canvasShowingDoc = model.Canvas.CanvasPaneOpen && Option.isSome (activeVisibleDoc model)
             let repos, autoExpanded =
                 match autoDisplayTarget with
@@ -752,7 +747,7 @@ let update msg model =
         match visibleDoc, worktree with
         | Some (scopedKey, filename), Some wt ->
             Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
-            model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } (fun r -> CanvasSendResult(r, Fable.Core.JS.Constructors.Date.now ())) (fun e -> CanvasSendResult(CanvasMessageResult.Error e.Message, Fable.Core.JS.Constructors.Date.now ()))
+            model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } (fun r -> CanvasSendResult(r, scopedKey)) (fun e -> CanvasSendResult(CanvasMessageResult.Error e.Message, scopedKey))
         | Some (scopedKey, _), None ->
             Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
             model, Cmd.none
@@ -760,7 +755,7 @@ let update msg model =
             Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
             model, Cmd.none
 
-    | CanvasSendResult (result, now) ->
+    | CanvasSendResult (result, scopedKey) ->
         match result with
         | CanvasMessageResult.Error msg ->
             Fable.Core.JS.console.error ("Canvas message error:", msg)
@@ -769,7 +764,7 @@ let update msg model =
             { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
         | CanvasMessageResult.Queued ->
             Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-            { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Waiting now } }, Cmd.none
+            { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Waiting scopedKey } }, Cmd.none
 
     | DismissCanvasMessageError ->
         { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none

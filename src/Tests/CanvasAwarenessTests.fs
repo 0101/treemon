@@ -409,6 +409,64 @@ type AutoDisplayIdleLogicTests() =
         Assert.That(target, Is.EqualTo(None), "Should NOT auto-display when no hashes changed")
 
 
+// ── Queued-send delivery signal (clearWaitingOnDelivery) ─────────────
+// A queued canvas message shows a "Waiting for session…" banner scoped to its target worktree.
+// The banner must clear only when that *target* worktree's agent doc changes (a registering
+// session's response) — never on an unrelated worktree's churn, which would falsely report
+// delivery while the message is in fact still queued.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasSendStateTests() =
+
+    [<Test>]
+    member _.``Waiting clears to Idle when the target worktree's doc changes``() =
+        let waiting = CanvasSendState.Waiting "r/feat"
+        let agentChangedDocs = [ ("r/feat", "status.html") ]
+
+        let result = clearWaitingOnDelivery waiting agentChangedDocs
+
+        Assert.That(result, Is.EqualTo(CanvasSendState.Idle), "Target worktree's doc change is the delivery signal")
+
+    [<Test>]
+    member _.``Waiting is NOT cleared by an unrelated worktree's doc change``() =
+        // Regression for Finding C-02: with several sessions live across worktrees, an unrelated
+        // worktree's doc change used to dismiss the banner within one poll (~5s), falsely signalling
+        // delivery even though the queued message was still waiting for *this* target's session.
+        let waiting = CanvasSendState.Waiting "r/feat"
+        let agentChangedDocs = [ ("r/other", "status.html") ]
+
+        let result = clearWaitingOnDelivery waiting agentChangedDocs
+
+        Assert.That(result, Is.EqualTo(waiting), "Unrelated worktree activity must NOT dismiss the waiting banner")
+
+    [<Test>]
+    member _.``Waiting clears only when the matching scopedKey is among several changed docs``() =
+        let waiting = CanvasSendState.Waiting "r/feat"
+        let unrelatedOnly = [ ("r/other", "a.html"); ("r/another", "b.html") ]
+        let includingTarget = [ ("r/other", "a.html"); ("r/feat", "status.html") ]
+
+        Assert.That(clearWaitingOnDelivery waiting unrelatedOnly, Is.EqualTo(waiting), "No matching scopedKey → stay Waiting")
+        Assert.That(clearWaitingOnDelivery waiting includingTarget, Is.EqualTo(CanvasSendState.Idle), "Matching scopedKey present → clear")
+
+    [<Test>]
+    member _.``Waiting is NOT cleared when no docs changed``() =
+        let waiting = CanvasSendState.Waiting "r/feat"
+
+        let result = clearWaitingOnDelivery waiting []
+
+        Assert.That(result, Is.EqualTo(waiting), "Empty change set must leave Waiting intact")
+
+    [<Test>]
+    member _.``Idle and Failed states pass through unchanged``() =
+        let agentChangedDocs = [ ("r/feat", "status.html") ]
+
+        Assert.That(clearWaitingOnDelivery CanvasSendState.Idle agentChangedDocs, Is.EqualTo(CanvasSendState.Idle))
+        let failed = CanvasSendState.Failed "boom"
+        Assert.That(clearWaitingOnDelivery failed agentChangedDocs, Is.EqualTo(failed), "A real failure must not be silently cleared")
+
+
 // ── MarkDocViewed ────────────────────────────────────────────────────
 
 [<TestFixture>]

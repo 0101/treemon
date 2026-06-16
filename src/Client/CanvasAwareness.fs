@@ -127,3 +127,16 @@ let findMostRecentChangedDoc (repos: RepoModel list) (changedDocs: (string * str
     |> List.sortByDescending (fun (_, _, lastModified) -> lastModified)
     |> List.tryHead
     |> Option.map (fun (scopedKey, filename, _) -> scopedKey, filename)
+
+/// Delivery signal for a queued canvas message. A queued message is genuinely delivered to the
+/// server-side queue and drained when its *target* session registers, so Waiting must never be
+/// reported as a failure. We clear Waiting -> Idle once an agent-authored doc *in the target
+/// worktree* changes content — what a resumed/launched session does in response. The clear is
+/// scoped to the queued message's scopedKey: an unrelated worktree's doc change (common when
+/// several sessions are live across worktrees) must NOT dismiss the banner, which would falsely
+/// signal delivery while the queued message is in fact still waiting (and may silently expire).
+let clearWaitingOnDelivery (sendState: CanvasSendState) (agentChangedDocs: (string * string) list) : CanvasSendState =
+    match sendState with
+    | CanvasSendState.Waiting scopedKey when agentChangedDocs |> List.exists (fun (sk, _) -> sk = scopedKey) ->
+        CanvasSendState.Idle
+    | other -> other

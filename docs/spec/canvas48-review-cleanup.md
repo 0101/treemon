@@ -77,6 +77,20 @@ Fable-compiled to JS and cannot reference `System.IO`. The previously separate `
 single-use and has been inlined into `continueWorking`. The launch-path verify check (`.agents`/`canvas`
 segments present) is satisfied by the forward-slash form.
 
+### Decision: `CanvasSendState.Waiting` carries only `scopedKey` (Finding C-02)
+
+Finding C-02 calls for adding a target identity to `CanvasSendState.Waiting` so the "Waiting for
+session…" banner is cleared only by the *target* worktree's session activity (via the pure
+`CanvasAwareness.clearWaitingOnDelivery`, scoped by `scopedKey`), not by any unrelated worktree's
+doc change. The pre-existing `queuedAt: float` payload became dead at this point — its only consumer,
+the wall-clock failure timer, was already removed by the "Honest send state / pure `update`" work, and
+no view or reducer reads it (`CanvasPane` matches `Waiting _`). Rather than *add* `scopedKey` alongside
+a field nothing reads, `Waiting` now carries **only** `scopedKey: string`; `CanvasSendResult` likewise
+drops its `now` argument (removing two `Date.now()` reads from the send command). This keeps the case
+free of a silent unused field, per the feature's "no footguns" goal. The target `scopedKey` is the
+focused card's key (`WorktreePath.value wt.Path`), the same key space as `agentChangedDocs`, so the
+scoped clear compares equal for the same worktree.
+
 ## Verification
 
 The cleanup is done when a single `verify`-labelled task confirms — falsifiably, each check with an
