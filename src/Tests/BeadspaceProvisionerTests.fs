@@ -24,6 +24,8 @@ let private summaryWithIssues =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type ProvisionTests() =
+    // NUnit lifecycle: assigned per-test in SetUp, removed in TearDown. NUnit invokes SetUp, the
+    // test, and TearDown as separate members, so the temp dir must be shared mutable instance state.
     let mutable tempDir = ""
 
     [<SetUp>]
@@ -81,6 +83,8 @@ type ProvisionTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type RemovalTests() =
+    // NUnit lifecycle: assigned per-test in SetUp, removed in TearDown. NUnit invokes SetUp, the
+    // test, and TearDown as separate members, so the temp dir must be shared mutable instance state.
     let mutable tempDir = ""
 
     [<SetUp>]

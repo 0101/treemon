@@ -222,16 +222,21 @@ type CanvasPaneTests() =
             // Wait until the iframe for a doc has actually navigated to its :5002 origin, so the
             // morph's targetOrigin matches and we can probe the iframe document for the signal.
             let waitForCanvasFrame (fragment: string) =
-                task {
-                    let deadline = DateTime.UtcNow.AddSeconds(10.0)
-                    let mutable found : IFrame option = None
-                    while found.IsNone && DateTime.UtcNow < deadline do
-                        found <-
+                // Tail-recursive task poll (10s deadline, 100ms interval): re-scans the frame list
+                // until the target :5002 frame appears or the deadline passes, returning the match (or None).
+                let deadline = DateTime.UtcNow.AddSeconds(10.0)
+                let rec poll () =
+                    task {
+                        let found =
                             this.Page.Frames
                             |> Seq.tryFind (fun f -> f.Url.StartsWith(canvasOrigin) && f.Url.Contains(fragment))
-                        if found.IsNone then do! System.Threading.Tasks.Task.Delay(100)
-                    return found
-                }
+                        if found.IsSome || DateTime.UtcNow >= deadline then
+                            return found
+                        else
+                            do! System.Threading.Tasks.Task.Delay(100)
+                            return! poll ()
+                    }
+                poll ()
 
             // Select "details": this marks it visited and makes its iframe active. Wait until that
             // iframe has navigated to the :5002 canvas origin so the morph's targetOrigin will match.
@@ -256,15 +261,19 @@ type CanvasPaneTests() =
             do! (tab "details").ClickAsync()
 
             let! contentUpdated =
-                task {
-                    let deadline = DateTime.UtcNow.AddSeconds(5.0)
-                    let mutable got = false
-                    while not got && DateTime.UtcNow < deadline do
-                        let! v = detailsFrame.EvaluateAsync<bool>("() => window.__contentUpdated === true")
-                        got <- v
-                        if not got then do! System.Threading.Tasks.Task.Delay(100)
-                    return got
-                }
+                // Tail-recursive task poll (5s deadline, 100ms interval): probes the iframe flag until
+                // the morph signal is observed or the deadline passes, returning the last observed value.
+                let deadline = DateTime.UtcNow.AddSeconds(5.0)
+                let rec poll () =
+                    task {
+                        let! got = detailsFrame.EvaluateAsync<bool>("() => window.__contentUpdated === true")
+                        if got || DateTime.UtcNow >= deadline then
+                            return got
+                        else
+                            do! System.Threading.Tasks.Task.Delay(100)
+                            return! poll ()
+                    }
+                poll ()
             Assert.That(contentUpdated, Is.True,
                 "Re-selecting the active AgentDoc tab must post {action:'content-updated'} to its iframe so it can morph in place")
 

@@ -9,6 +9,19 @@ open Tests.CanvasTestHelpers
 let [<Literal>] private FixtureCanvasBranch = "feature-active"
 let [<Literal>] private FixtureMultiDocBranch = "feature-multidoc"
 
+/// Click each canvas tab 0..count-1 in order, awaiting the click and a short settle delay
+/// between each. A `for` loop body cannot `do!`-await the click (and List.iteri/Seq.iter cannot
+/// await either), so this tail-recursive task helper drives the awaited clicks while preserving order.
+let private clickTabsInOrder (tabs: ILocator) count =
+    let rec loop i =
+        task {
+            if i < count then
+                do! tabs.Nth(i).ClickAsync()
+                do! Async.Sleep 200 |> Async.StartAsTask
+                return! loop (i + 1)
+        }
+    loop 0
+
 /// E2E tests for Phase 4 canvas awareness visual elements:
 /// badge, liveness dot, start session button, waiting banner, canvas events.
 [<TestFixture>]
@@ -77,9 +90,7 @@ type CanvasPhase4Tests() =
 
             let tabs = this.Page.Locator(".canvas-pane .canvas-tab")
             let! tabCount = tabs.CountAsync()
-            for i in 0 .. tabCount - 1 do
-                do! tabs.Nth(i).ClickAsync()
-                do! Async.Sleep 200 |> Async.StartAsTask
+            do! clickTabsInOrder tabs tabCount
 
             // View multirepo worktree docs
             do! btn.ClickAsync() // close
@@ -89,9 +100,7 @@ type CanvasPhase4Tests() =
 
             let multiTabs = this.Page.Locator(".canvas-pane .canvas-tab")
             let! multiTabCount = multiTabs.CountAsync()
-            for i in 0 .. multiTabCount - 1 do
-                do! multiTabs.Nth(i).ClickAsync()
-                do! Async.Sleep 200 |> Async.StartAsTask
+            do! clickTabsInOrder multiTabs multiTabCount
 
             // Allow time for state updates
             do! Async.Sleep 500 |> Async.StartAsTask
