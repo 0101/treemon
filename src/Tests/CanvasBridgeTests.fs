@@ -202,7 +202,7 @@ type RegisterAndStatusTests() =
 
         // No registry entry may carry Some "" — that is the value that would poison routing.
         Assert.That(
-            sessionsForWorktree path |> List.choose (fun e -> e.SessionId),
+            sessionsForWorktree path |> List.choose _.SessionId,
             Is.Empty,
             "No session entry may carry Some \"\"")
 
@@ -232,7 +232,7 @@ type RegisterAndStatusTests() =
         let sessions = sessionsForWorktree path
         Assert.That(List.length sessions, Is.EqualTo 2, "Distinct sessionIds for one worktree must coexist")
         Assert.That(
-            sessions |> List.choose (fun e -> e.SessionId) |> List.sort,
+            sessions |> List.choose _.SessionId |> List.sort,
             Is.EqualTo(List.sort [ sid1; sid2 ]))
 
         // The single-status view reports the most-recently-registered session.
@@ -417,7 +417,7 @@ type MultiSessionRegistryTests() =
         registerSession path "http://localhost:2/inject" (Some b)
         registerSession path "http://localhost:3/inject" (Some c)
 
-        let ids = sessionsForWorktree path |> List.choose (fun e -> e.SessionId) |> List.sort
+        let ids = sessionsForWorktree path |> List.choose _.SessionId |> List.sort
         Assert.That(ids, Is.EqualTo(List.sort [ a; b; c ]))
 
     [<Test>]
@@ -466,7 +466,7 @@ type MultiSessionRegistryTests() =
         registerSession pathB "http://localhost:3/inject" (Some b1)
 
         Assert.That(sessionsForWorktree pathA |> List.length, Is.EqualTo 2)
-        Assert.That(sessionsForWorktree pathB |> List.choose (fun e -> e.SessionId), Is.EqualTo [ b1 ])
+        Assert.That(sessionsForWorktree pathB |> List.choose _.SessionId, Is.EqualTo [ b1 ])
         Assert.That(sessionsForWorktree (uniquePath "multi-iso-empty") |> List.isEmpty, Is.True)
 
     [<Test>]

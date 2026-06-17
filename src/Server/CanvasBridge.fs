@@ -201,7 +201,7 @@ let sessionsForWorktree (worktreePath: string) : SessionEntry list =
 /// registered wins" semantics for the single-status / single-session views.
 let private freshestSession (worktreePath: string) : SessionEntry option =
     sessionsForWorktree worktreePath
-    |> List.sortByDescending (fun e -> e.RegisteredAt)
+    |> List.sortByDescending _.RegisteredAt
     |> List.tryHead
 
 let private isSessionAlive (entry: SessionEntry) =
@@ -252,7 +252,7 @@ let sendMessage (request: CanvasMessageRequest) =
         let liveSessions =
             sessionsForWorktree worktree
             |> List.filter isSessionAlive
-            |> List.sortByDescending (fun e -> e.RegisteredAt)
+            |> List.sortByDescending _.RegisteredAt
 
         let! owner = CanvasDocOwnership.getOwner worktree request.Filename
 
@@ -333,7 +333,7 @@ let getStatus (worktreePath: string) =
 let getSessionForWorktree (worktreePath: string) : string option =
     // Most-recently-registered session for the worktree. Preserves the prior
     // last-registered semantics now that the registry is sessionId-keyed.
-    freshestSession worktreePath |> Option.bind (fun e -> e.SessionId)
+    freshestSession worktreePath |> Option.bind _.SessionId
 
 let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
     worktreePaths

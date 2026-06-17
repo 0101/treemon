@@ -13,8 +13,6 @@ open Elmish
 open Browser
 open AppTypes
 
-// ---- Shared canvas helpers (used by the arms below and by non-canvas code in App.fs) ----
-
 let activeVisibleDoc (model: Model) : (string * string) option =
     CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
 
@@ -30,8 +28,6 @@ let isKnownCanvasDoc (model: Model) (scopedKey: string) (filename: string) : boo
 
 let markVisibleDocCmd (model: Model) : Cmd<Msg> =
     CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
-
-// ---- Update-arm bodies (App.fs delegates one arm -> one function) ----
 
 let launchCanvasSession (scopedKey: string) (model: Model) =
     match findWorktree scopedKey model with
@@ -194,8 +190,6 @@ let morphActiveDoc (model: Model) =
 
 let morphComplete (model: Model) =
     model, markVisibleDocCmd model
-
-// ---- Subscription glue: wire CanvasPane's window message listener to Elmish dispatch ----
 
 let messageListener (dispatch: Dispatch<Msg>) =
     CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch) (fun () -> dispatch MorphComplete)
