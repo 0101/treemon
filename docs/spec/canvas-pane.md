@@ -98,7 +98,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
 - The extension bridge calls `session.send()` with the canvas payload.
-- Client send state is modeled as `CanvasSendState = Idle | Waiting of queuedAt | Failed of message`.
+- Client send state is modeled as `CanvasSendState = Idle | Waiting of scopedKey: string | Failed of message: string`. The `Waiting` case carries the target worktree's `scopedKey` rather than a timestamp, so the banner is cleared only by that worktree's delivery (see Message Queue and the `CanvasSendState` decision).
 
 ### Message Queue
 
@@ -106,7 +106,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The queue keeps at most 10 messages per worktree and expires entries after 5 minutes.
 - Queued messages drain when a session bridge registers and when a poll heartbeat drains pending work.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
-- If the waiting window passes 5 minutes, the client surfaces `Message expired — no session responded`.
+- The `Waiting` banner clears to `Idle` only when the target worktree's session delivers (a tracked agent doc in that worktree changes, via the pure `CanvasAwareness.clearWaitingOnDelivery`); it is never flipped to `Failed` by a client-side wall-clock timer. The user may dismiss the banner manually, and the server-side queue may silently expire the message after its 5-minute TTL.
 
 ### Bridge Protocol
 
@@ -196,7 +196,7 @@ Three layers of state preservation:
 - **File as source of truth** — Treemon renders HTML from disk and derives `contentHash` from file bytes instead of keeping a separate live-doc state.
 - **Split bridge registry** — `sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
-- **`CanvasSendState` DU** — send state is `Idle`, `Waiting`, or `Failed`, avoiding illegal combinations of optional fields.
+- **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
 - **Per-doc author routing** — docs persist ownership by `sessionId`, canvas messages route to the selected doc's owner session, and liveness/resume operate per doc instead of per-worktree.
 - **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates the session-document machinery. A `SystemView` (currently only the beads dashboard) opts out of liveness, Start-session, the message bridge, morph, content-hash awareness, and archiving, and gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab. This makes the misfit states unrepresentable rather than emergent from `OwnerSessionId = None`.
 - **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date.
