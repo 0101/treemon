@@ -9,6 +9,10 @@ const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/regist
 const TREEMON_ATTRIBUTE_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/attribute`;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_MAX_INTERVAL_MS = 120000;
+// Bound every Treemon fetch so a TCP-alive-but-unresponsive server can't stall the caller
+// (undici's default headersTimeout is ~5min). These calls are best-effort; the catch blocks
+// swallow the resulting AbortError, so a timeout degrades exactly like an unreachable Treemon.
+const TREEMON_FETCH_TIMEOUT_MS = 5000;
 
 const log = (msg) => console.error(`[canvas-bridge] ${msg}`);
 
@@ -183,6 +187,7 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ worktreePath, injectUrl, sessionId }),
+      signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       log(`registration failed: ${res.status} ${res.statusText}`);
@@ -214,6 +219,7 @@ async function declareOwnership(worktreePath, filename, sessionId) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ worktreePath, filename, sessionId }),
+      signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       log(`ownership declaration failed for ${filename}: ${res.status} ${res.statusText}`);
