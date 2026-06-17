@@ -25,23 +25,6 @@ let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
 
-// Owner-routing tests declare ownership via CanvasDocOwnership.attribute, which persists
-// the whole ownership map to data/canvas-owners.json relative to the current directory.
-// Run those tests under a throwaway CWD so they never touch the real data file. The
-// agent flushes each attribute (persist) before it answers the getOwner inside
-// sendMessage, so the write always lands in this temp dir before CWD is restored.
-let private withTempCwd (action: unit -> unit) =
-    let tempDir = Path.Combine(Path.GetTempPath(), $"canvasbridge-test-{Guid.NewGuid()}")
-    Directory.CreateDirectory(tempDir) |> ignore
-    let original = Environment.CurrentDirectory
-    Environment.CurrentDirectory <- tempDir
-
-    try
-        action ()
-    finally
-        Environment.CurrentDirectory <- original
-        try Directory.Delete(tempDir, recursive = true) with _ -> ()
-
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
 // It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
 // admin rights are needed on Windows. Each received request body is recorded and a
@@ -61,15 +44,19 @@ type private HttpSink(port: int) =
                 let sb = StringBuilder()
 
                 // Read until the end-of-headers marker is seen (or the peer closes).
-                let mutable headerEnd = -1
-                while headerEnd < 0 do
-                    let! n = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
-                    if n = 0 then
-                        headerEnd <- sb.Length
-                    else
-                        sb.Append(Encoding.UTF8.GetString(buffer, 0, n)) |> ignore
-                        let idx = sb.ToString().IndexOf("\r\n\r\n", StringComparison.Ordinal)
-                        if idx >= 0 then headerEnd <- idx
+                let rec readToHeaderEnd () =
+                    async {
+                        let! n = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
+                        if n = 0 then
+                            return sb.Length
+                        else
+                            sb.Append(Encoding.UTF8.GetString(buffer, 0, n)) |> ignore
+                            let idx = sb.ToString().IndexOf("\r\n\r\n", StringComparison.Ordinal)
+                            if idx >= 0 then return idx
+                            else return! readToHeaderEnd ()
+                    }
+
+                let! headerEnd = readToHeaderEnd ()
 
                 let text = sb.ToString()
 
@@ -89,14 +76,21 @@ type private HttpSink(port: int) =
                 let bodyStart = headerEnd + 4
                 if text.Length > bodyStart then body.Append(text.Substring(bodyStart)) |> ignore
 
-                let mutable keepReading = body.Length < contentLength
-                while keepReading do
-                    let! n = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
-                    if n = 0 then
-                        keepReading <- false
-                    else
-                        body.Append(Encoding.UTF8.GetString(buffer, 0, n)) |> ignore
-                        keepReading <- body.Length < contentLength
+                // Drain the socket until the full Content-Length is buffered (or the peer closes).
+                let rec readToContentLength () =
+                    async {
+                        if body.Length >= contentLength then
+                            return ()
+                        else
+                            let! n = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
+                            if n = 0 then
+                                return ()
+                            else
+                                body.Append(Encoding.UTF8.GetString(buffer, 0, n)) |> ignore
+                                return! readToContentLength ()
+                    }
+
+                do! readToContentLength ()
 
                 bodies.Enqueue(body.ToString())
 
@@ -117,11 +111,17 @@ type private HttpSink(port: int) =
         // the OS even before the accept loop runs — no connect-races in tests.
         listener.Start()
 
-        async {
-            try
-                while not cts.IsCancellationRequested do
+        let rec acceptLoop () =
+            async {
+                if not cts.IsCancellationRequested then
                     let! client = listener.AcceptTcpClientAsync(cts.Token).AsTask() |> Async.AwaitTask
                     handle client |> Async.Start
+                    return! acceptLoop ()
+            }
+
+        async {
+            try
+                do! acceptLoop ()
             with _ ->
                 ()
         }
@@ -643,8 +643,12 @@ type OwnerRoutingTests() =
             registerSession path ownerSink.Url (Some ownerSid)
 
             let deadline = DateTime.UtcNow.AddSeconds 5.0
-            while List.isEmpty ownerSink.Bodies && DateTime.UtcNow < deadline do
-                Thread.Sleep 50
+            let rec waitForDelivery () =
+                if List.isEmpty ownerSink.Bodies && DateTime.UtcNow < deadline then
+                    Thread.Sleep 50
+                    waitForDelivery ()
+
+            waitForDelivery ()
 
             Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner must receive its queued message on re-register")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner still must not have received it"))

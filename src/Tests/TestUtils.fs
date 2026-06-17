@@ -107,6 +107,23 @@ let withTempFile (prefix: string) (content: string) (action: string -> 'a) =
     finally
         if File.Exists(tempFile) then File.Delete(tempFile)
 
+/// Run `action` with the process CWD swapped to a throwaway temp directory, then
+/// restore and delete it. Tests that persist relative to the current directory
+/// (e.g. CanvasDocOwnership.attribute writes data/canvas-owners.json under CWD) use
+/// this so they never touch the real data file. CWD is process-global, so callers
+/// must stay non-parallel (the canvas fixtures are [<NonParallelizable>]).
+let withTempCwd (action: unit -> unit) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"treemon-cwd-test-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    let original = Environment.CurrentDirectory
+    Environment.CurrentDirectory <- tempDir
+
+    try
+        action ()
+    finally
+        Environment.CurrentDirectory <- original
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
+
 let runAsync (a: Async<'T>) =
     Async.RunSynchronously(a, timeout = 30_000)
 

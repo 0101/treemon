@@ -127,22 +127,6 @@ type AttributeOwnershipTests() =
         let id = System.Guid.NewGuid().ToString("N")[..7]
         $"{prefix}-{id}"
 
-    // attribute persists the whole ownership map to data/canvas-owners.json under the current
-    // directory; run under a throwaway CWD so a test never touches the real data file. getOwner
-    // (PostAndAsyncReply) is ordered after the attribute Post, so the persist flush always lands
-    // in this temp dir before CWD is restored.
-    let withTempCwd (action: unit -> unit) =
-        let tempDir = Path.Combine(Path.GetTempPath(), $"canvasdocserver-test-{System.Guid.NewGuid()}")
-        Directory.CreateDirectory(tempDir) |> ignore
-        let original = System.Environment.CurrentDirectory
-        System.Environment.CurrentDirectory <- tempDir
-
-        try
-            action ()
-        finally
-            System.Environment.CurrentDirectory <- original
-            try Directory.Delete(tempDir, recursive = true) with _ -> ()
-
     // A scheduler agent that knows exactly one worktree. KnownPaths stores WorktreeInfo.Path
     // verbatim and isKnownWorktree compares the normalized request path, so the path is stored
     // normalized just like the real populate path does.
