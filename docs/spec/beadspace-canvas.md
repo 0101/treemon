@@ -9,6 +9,8 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
 - Any worktree with `.beads/beads.db` **and at least one beads issue** gets a `beads.html` canvas page auto-provisioned. Worktrees with an empty database (zero issues) do not get a dashboard.
 - If a previously-provisioned `beads.html` exists but the database now has zero issues, the dashboard is removed (file deleted) so it doesn't show an empty page.
 - The page renders a single **sortable/filterable issues table** (the "All Issues" view), always visible. There is no separate dashboard view (no status donut, priority/label/type charts, completion %, active-issues or triage panels) and no top navigation bar — these were removed in `tm-canvas48-dsh`.
+- Each status **filter chip shows a count badge** of issues in that status (hidden when the count is zero); the `All` chip shows no count.
+- The **default filter on load** is the most actionable non-empty status, chosen in priority order **WIP → open → blocked → closed** (falling back to open when empty). After load, the user's filter choice is preserved across polls.
 - Clicking an issue row expands a **detail panel** showing: full description, all labels, priority badge, type badge, dependency count, dependent count, age
 - Data refreshes every 30 seconds by polling a same-origin JSON endpoint on port 5002
 - Data refresh is **incremental** — only the issues table body re-renders. Scroll position, expanded detail panels, filter/sort selections, and search input are preserved across polls.
@@ -66,9 +68,10 @@ In the refresh scheduler, when scanning worktrees:
 ### Incremental Data Refresh
 
 The template distinguishes the initial render from subsequent polls:
-- **Initial render** (`initialRender`): full DOM build — the issues view (search bar, filter chips, sortable table head, empty `<tbody>`) plus event binding
+- **Initial render** (`initialRender`): full DOM build — the issues view (search bar, filter chips, sortable table head, empty `<tbody>`) plus event binding. The default filter chip is set to the most actionable non-empty status via `chooseDefaultFilter`, and chip count badges are populated via `updateFilterCounts`.
 - **Subsequent polls** (`refreshData`): skip entirely when the `/beads-data` payload is byte-identical to the previous fetch; otherwise update only what changed:
   - Issues table replaces only `<tbody>` (via `renderIssuesTable`), not the entire table or container — the search bar, filter chips, and table head DOM are left intact
+  - Filter chip count badges are recomputed in place via `updateFilterCounts` (the chip DOM is reused, only badge text changes)
   - Scroll position of the `.view` container saved/restored around the `<tbody>` replacement
   - Filter chip state, sort selection, and search input preserved (driven by `tableState`)
   - Expanded detail panel re-expanded if `tableState.expandedId` is still present in the new data
