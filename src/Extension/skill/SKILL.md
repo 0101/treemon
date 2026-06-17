@@ -51,7 +51,7 @@ Instead: write the doc, briefly tell the user it's ready for their input, then *
 
 ## Updating
 
-Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically.
+Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and returns the browser URL in the tool result right after you create or edit a canvas file (open it for the user or share the ctrl+clickable URL). `postMessage` interactions work identically in both modes — no changes needed in your HTML.
 
 ## Multiple docs
 

@@ -62,11 +62,11 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
                 let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
 
                 if not isKnown then
-                    Log.log "Canvas" $"Registration failed: unknown worktree — {worktreePath}"
-                    return! RequestErrors.NOT_FOUND "unknown worktree" next ctx
+                    Log.log "Canvas" $"Registration: unmonitored worktree — {worktreePath} (extension serves the doc in a browser)"
+                    return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
                 else
                     CanvasBridge.registerSession worktreePath body.injectUrl (Option.ofObj body.sessionId)
-                    return! Successful.OK "registered" next ctx
+                    return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
