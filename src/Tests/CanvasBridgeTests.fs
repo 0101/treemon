@@ -476,6 +476,10 @@ type MultiSessionRegistryTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+// CWD-mutating (withTempCwd writes data/canvas-owners.json) and port-reserving (getFreeTcpPorts):
+// only safe because NUnit runs sequentially today. Mark NonParallelizable so enabling assembly
+// parallelization can never race CWD against another fixture or clobber the real owners file.
+[<NonParallelizable>]
 type OwnerRoutingTests() =
 
     [<Test>]
@@ -578,3 +582,43 @@ type OwnerRoutingTests() =
         let path = uniquePath "own-empty"
         let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "x.html"; Payload = "p1" })
         Assert.That(result, Is.EqualTo(CanvasMessageResult.Queued))
+
+    [<Test>]
+    member _.``Owner-offline queued message drains to the owner, never a non-owner or anonymous poll``() =
+        // The core drain fix: a message queued while its owner is offline must survive an
+        // anonymous heartbeat poll and a co-located NON-owner re-registering, and only the
+        // owner may drain it when it (re-)registers. drainQueue POSTs asynchronously, so the
+        // owner's sink is polled with a bounded wait.
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use ownerSink = new HttpSink(ports[0])
+            use otherSink = new HttpSink(ports[1])
+            ownerSink.Start()
+            otherSink.Start()
+
+            let path = uniquePath "drain-owner"
+            let ownerSid = uniqueSid "owner"
+            let otherSid = uniqueSid "other"
+
+            // Attribute the doc to an owner that never registers -> the send queues (owner offline).
+            Server.CanvasDocOwnership.attribute path "a.html" ownerSid
+            let queued = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "a.html"; Payload = "p1" })
+            Assert.That(queued, Is.EqualTo(CanvasMessageResult.Queued), "Owner offline must queue")
+
+            // An anonymous heartbeat poll must NOT collect an owner-bound message (it is re-queued).
+            Assert.That(drainPending path, Is.Empty, "Anonymous poll must not receive an owner-bound message")
+
+            // A co-located NON-owner re-registering must NOT drain it either.
+            registerSession path otherSink.Url (Some otherSid)
+            Thread.Sleep 250 // let any (incorrect) async drain POST land before asserting absence
+            Assert.That(otherSink.Bodies, Is.Empty, "A non-owner must never drain an owner-bound message")
+
+            // The owner registering drains it to the owner's inject URL.
+            registerSession path ownerSink.Url (Some ownerSid)
+
+            let deadline = DateTime.UtcNow.AddSeconds 5.0
+            while List.isEmpty ownerSink.Bodies && DateTime.UtcNow < deadline do
+                Thread.Sleep 50
+
+            Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner must receive its queued message on re-register")
+            Assert.That(otherSink.Bodies, Is.Empty, "Non-owner still must not have received it"))

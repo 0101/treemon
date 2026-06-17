@@ -85,10 +85,27 @@ The bridge registry is keyed by **`sessionId`**, not worktree path, so multiple 
 
 A doc's message is **never** delivered to a non-owner session in the same worktree.
 
+### Queue & Drain (owner-aware)
+
+A queued message carries its doc's resolved owner sessionId (captured at enqueue time; `None`
+when the doc has no declared owner). Both drain paths honor it, so a message queued while its
+owner is offline is never cross-routed to a co-located non-owner that re-registers or polls first:
+
+- **Drain on register** (`drainQueue`, fired by `registerSession`): forwards only messages whose
+  owner is unknown **or** equals the registering session's sessionId; the rest are re-queued
+  (original `EnqueuedAt`/TTL preserved) for the rightful owner to drain when it (re-)registers.
+- **Drain on heartbeat poll** (`drainPending`): the poll carries no sessionId, so it is an
+  anonymous drainer and may collect only owner-unknown messages; owner-bound messages are
+  re-queued and wait for the owner's push-bridge re-registration.
+
+This closes the end-to-end hole — owner-aware `sendMessage` no longer leaks through an
+ownership-blind drain. (Owner is captured at enqueue; ownership changing between enqueue and
+drain is out of scope.)
+
 ### What Doesn't Change
 
 - The "▶ Start session" button always starts a fresh session, not a resume.
-- The message queue (cap 10, 5-min TTL) and drain-on-register are unchanged; they now drain to the owner-resumed session.
+- The message queue (cap 10, 5-min TTL) keeps the same cap and TTL, but each queued message now carries its doc's resolved owner so both drain paths are owner-aware (see "Queue & Drain (owner-aware)") — they drain to the owner-resumed session, never to a co-located non-owner.
 - Auto-resume on interaction is unchanged in spirit — it now resumes the *correct* owner because attribution is explicit.
 
 ## Technical Approach
@@ -175,6 +192,7 @@ In `App.fs`, the focused doc's filename is passed in `CanvasMessageRequest`.
 | 1b-i | `sessionId=None` registry key | Namespaced fallback key `wt:<normalizedWorktree>` (vs `sid:<sessionId>` for identified sessions). Two `None` registrations for one worktree collapse to this single slot; distinct sessionIds (and `None` + an id) coexist. Never clobbers an identified session's slot. |
 | 1b-ii | Freshest-session determinism | A monotonic registration clock issues strictly-increasing `RegisteredAt`, so single-status views (`getStatus`, `getSessionForWorktree`, `getAllLiveness`) deterministically report the **last-registered** session for a worktree even under same-tick registrations. |
 | 1c | Delivery routing | Route by doc **owner** sessionId; fall back to the single live session, else queue; never cross-route to a non-owner |
+| 1c-i | Queue/drain ownership | Each `QueuedMessage` carries the resolved owner sessionId (captured at enqueue). `drainQueue` delivers to the registering session only when owner is unknown or matches it; `drainPending` (anonymous poll, no sessionId) only when owner is unknown; non-matching messages are re-queued (TTL preserved) |
 | 1d | sessionId source | Extension **stamps its own** sessionId; the agent only sends the filename |
 | 2 | Persistence format | JSON file `data/canvas-owners.json` — matches `data/sessions.json` pattern |
 | 3 | Resume mechanism | `SessionManager.spawnSession` using a targeted resume command |

@@ -15,8 +15,14 @@ type SessionEntry =
       SessionId: string option
       RegisteredAt: DateTime }
 
+// A queued canvas message. Owner is the doc's resolved owner sessionId captured at enqueue
+// time (None = no declared owner). The drain paths use it to avoid cross-routing an
+// owner-bound message to a co-located non-owner that re-registers or polls first. Filename is
+// retained for diagnostics.
 type QueuedMessage =
     { EnqueuedAt: DateTime
+      Filename: string
+      Owner: string option
       Payload: string }
 
 // Mutable: ConcurrentDictionary used for thread-safe bridge registry;
@@ -36,8 +42,8 @@ let private cleanExpired (messages: QueuedMessage list) =
     let cutoff = DateTime.UtcNow - queueTtl
     messages |> List.filter (fun m -> m.EnqueuedAt > cutoff)
 
-let private enqueue key payload =
-    let msg = { EnqueuedAt = DateTime.UtcNow; Payload = payload }
+let private enqueue key filename (owner: string option) payload =
+    let msg = { EnqueuedAt = DateTime.UtcNow; Filename = filename; Owner = owner; Payload = payload }
 
     messageQueue.AddOrUpdate(
         key,
@@ -53,16 +59,46 @@ let private enqueue key payload =
     )
     |> ignore
 
+/// A queued message may be handed to a draining session only when it has no known owner
+/// (single-session back-compat / anonymous poll) or that session *is* the owner. This stops an
+/// owner-bound message being cross-routed to a co-located non-owner that re-registers or polls
+/// first. An anonymous drainer (sessionId = None) therefore takes only owner-unknown messages.
+let private deliverableTo (sessionId: string option) (msg: QueuedMessage) =
+    match msg.Owner with
+    | None -> true
+    | Some ownerId -> sessionId = Some ownerId
+
+/// Re-queue messages a drain did not deliver so their owner can collect them later. Survivors
+/// keep their original EnqueuedAt (TTL preserved) and are placed ahead of anything enqueued
+/// during the drain window, then re-capped to maxQueueSize (oldest dropped first, like enqueue).
+let private requeue (key: string) (survivors: QueuedMessage list) =
+    if not (List.isEmpty survivors) then
+        messageQueue.AddOrUpdate(
+            key,
+            survivors,
+            fun _ existing ->
+                let merged = survivors @ cleanExpired existing
+
+                if List.length merged > maxQueueSize then
+                    merged |> List.skip (List.length merged - maxQueueSize)
+                else
+                    merged)
+        |> ignore
+
 let private drainQueue (key: string) (entry: SessionEntry) =
     match messageQueue.TryRemove(key) with
     | false, _ -> ()
     | true, queued ->
         let valid = cleanExpired queued
+        // Owner-aware drain: forward only what this session may receive (owner-unknown, or it
+        // is the owner); re-queue the rest so the rightful owner can drain them on re-register.
+        let deliver, requeued = valid |> List.partition (deliverableTo entry.SessionId)
+        requeue key requeued
 
-        if not (List.isEmpty valid) then
-            Log.log "CanvasBridge" $"Draining {List.length valid} queued message(s) for {key}"
+        if not (List.isEmpty deliver) then
+            Log.log "CanvasBridge" $"Draining {List.length deliver} queued message(s) for {key}"
 
-            valid
+            deliver
             |> List.map (fun msg ->
                 async {
                     try
@@ -71,12 +107,12 @@ let private drainQueue (key: string) (entry: SessionEntry) =
                         use _ = response
 
                         if response.IsSuccessStatusCode then
-                            Log.log "CanvasBridge" $"Drained message forwarded to {Path.GetFileName(key)}"
+                            Log.log "CanvasBridge" $"Drained message for '{msg.Filename}' forwarded to {Path.GetFileName(key)}"
                         else
                             let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
-                            Log.log "CanvasBridge" $"Drain forward failed for {key}: {int response.StatusCode} {body}"
+                            Log.log "CanvasBridge" $"Drain forward failed for {key} ('{msg.Filename}'): {int response.StatusCode} {body}"
                     with ex ->
-                        Log.log "CanvasBridge" $"Drain forward error for {key}: {ex.Message}"
+                        Log.log "CanvasBridge" $"Drain forward error for {key} ('{msg.Filename}'): {ex.Message}"
                 })
             |> Async.Sequential
             |> Async.Ignore
@@ -202,12 +238,12 @@ let sendMessage (request: CanvasMessageRequest) =
             |> List.filter isSessionAlive
             |> List.sortByDescending (fun e -> e.RegisteredAt)
 
+        let! owner = CanvasDocOwnership.getOwner worktree request.Filename
+
         let queueWith reason =
             Log.log "CanvasBridge" $"sendMessage: {reason} for {Path.GetFileName(key)}, message queued"
-            enqueue key request.Payload
+            enqueue key request.Filename owner request.Payload
             CanvasMessageResult.Queued
-
-        let! owner = CanvasDocOwnership.getOwner worktree request.Filename
 
         match owner with
         | Some ownerId ->
@@ -236,15 +272,22 @@ let sendMessage (request: CanvasMessageRequest) =
             | _ -> return queueWith "no owner and multiple live sessions"
     }
 
-/// Atomically drain pending messages for a worktree (used by heartbeat polling).
+/// Atomically drain pending messages for a worktree (used by heartbeat polling). The poll
+/// carries no sessionId, so it is an anonymous drainer: it may collect only owner-unknown
+/// messages. Owner-bound messages are re-queued for their owner to drain when it (re-)registers
+/// a push bridge (drainQueue), so an anonymous poll can never cross-route them to a non-owner.
 let drainPending (worktreePath: string) : string list =
     let key = normalizePath worktreePath
     match messageQueue.TryRemove(key) with
     | true, queued ->
         let valid = cleanExpired queued
-        if not (List.isEmpty valid) then
-            Log.log "CanvasBridge" $"Drained {List.length valid} pending message(s) for {Path.GetFileName(key)} via poll"
-        valid |> List.map _.Payload
+        let deliver, requeued = valid |> List.partition (deliverableTo None)
+        requeue key requeued
+
+        if not (List.isEmpty deliver) then
+            Log.log "CanvasBridge" $"Drained {List.length deliver} pending message(s) for {Path.GetFileName(key)} via poll"
+
+        deliver |> List.map _.Payload
     | false, _ -> []
 
 let private computeLiveness (session: SessionEntry option) (poll: (bool * DateTime)) =
