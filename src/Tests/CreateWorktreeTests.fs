@@ -5,6 +5,7 @@ open NUnit.Framework
 open Shared
 open Shared.EventUtils
 open App
+open AppTypes
 open Navigation
 open CanvasState
 
