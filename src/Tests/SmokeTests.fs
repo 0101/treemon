@@ -6,6 +6,7 @@ open System.IO
 open System.Net.Http
 open System.Text
 open System.Text.RegularExpressions
+open System.Threading.Tasks
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
@@ -18,8 +19,6 @@ let private serverProjectPath =
 
 let private worktreeRoot = @"Q:\code\AITestAgent"
 let private thisRepoName = Path.GetFileName(repoRoot)
-let private smokePort = 5002
-let private smokeUrl = $"http://localhost:{smokePort}"
 
 let private startSmokeServerProc (args: string) =
     let psi =
@@ -35,8 +34,8 @@ let private startSmokeServerProc (args: string) =
 
     Process.Start(psi)
 
-let private startSmokeServer () =
-    startSmokeServerProc $""""{worktreeRoot}" --port {smokePort}"""
+let private startSmokeServer (port: int) =
+    startSmokeServerProc $""""{worktreeRoot}" --port {port} --no-canvas"""
 
 let private startProcess fileName args workingDir envVars redirectOutput =
     TestUtils.startProcess fileName args workingDir envVars redirectOutput
@@ -44,13 +43,26 @@ let private startProcess fileName args workingDir envVars redirectOutput =
 let private killProc procOpt =
     TestUtils.killProc procOpt
 
-let private killOrphansOnPort port =
-    TestUtils.killOrphansOnPort port
+/// When a spawned smoke server exits before becoming ready, surface its captured stdout/stderr
+/// so the real startup failure (for example a port bind error) is visible instead of a generic
+/// readiness timeout.
+let private earlyExitMessage (proc: Process) (stdout: Task<string>) (stderr: Task<string>) =
+    async {
+        let! out = stdout |> Async.AwaitTask
+        let! err = stderr |> Async.AwaitTask
+        return
+            $"Smoke server (PID {proc.Id}) exited early with code {proc.ExitCode} before readiness."
+            + $"{Environment.NewLine}--- stderr ---{Environment.NewLine}{err}"
+            + $"{Environment.NewLine}--- stdout ---{Environment.NewLine}{out}"
+    }
 
 [<TestFixture>]
 [<Category("Smoke")>]
 [<Category("Local")>]
+[<NonParallelizable>]
 type SmokeTests() =
+    let smokePort = TestUtils.getFreeTcpPort ()
+    let smokeUrl = $"http://localhost:{smokePort}"
     let mutable serverProc: Process option = None
 
     let killServer () =
@@ -82,9 +94,12 @@ type SmokeTests() =
 
     let mutable readyBody: string = ""
 
-    let rec waitForReady (client: HttpClient) (deadline: DateTime) : Async<string> =
+    let rec waitForReady (client: HttpClient) (proc: Process) (stdout: Task<string>) (stderr: Task<string>) (deadline: DateTime) : Async<string> =
         async {
-            if DateTime.UtcNow > deadline then
+            if proc.HasExited then
+                let! message = earlyExitMessage proc stdout stderr
+                return failwith message
+            elif DateTime.UtcNow > deadline then
                 return failwith "Timed out waiting for IsReady=true with SchedulerEvents (60s)"
             else
                 try
@@ -96,22 +111,25 @@ type SmokeTests() =
                         return body
                     else
                         do! Async.Sleep 2000
-                        return! waitForReady client deadline
+                        return! waitForReady client proc stdout stderr deadline
                 with
                 | _ ->
                     do! Async.Sleep 2000
-                    return! waitForReady client deadline
+                    return! waitForReady client proc stdout stderr deadline
         }
 
     [<OneTimeSetUp>]
     member _.StartServer() =
         task {
-            let proc = startSmokeServer ()
+            let proc = startSmokeServer smokePort
             serverProc <- Some proc
             TestContext.Out.WriteLine($"Smoke server started (PID {proc.Id}) on port {smokePort}")
 
+            let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+            let stderrTask = proc.StandardError.ReadToEndAsync()
+
             use client = new HttpClient()
-            let! body = waitForReady client (DateTime.UtcNow.AddSeconds(60.0)) |> Async.StartAsTask
+            let! body = waitForReady client proc stdoutTask stderrTask (DateTime.UtcNow.AddSeconds(60.0)) |> Async.StartAsTask
             readyBody <- body
             TestContext.Out.WriteLine($"Server ready. Response (first 1000 chars): {body.Substring(0, Math.Min(1000, body.Length))}")
         }
@@ -156,10 +174,6 @@ type SmokeTests() =
         | Some proc ->
             Assert.That(proc.HasExited, Is.False, "Server should still be running before teardown")
 
-let private multiRepoPort = 5003
-let private multiRepoUrl = $"http://localhost:{multiRepoPort}"
-let private multiRepoVitePort = 5175
-let private multiRepoViteUrl = $"http://localhost:{multiRepoVitePort}"
 let private multiRepoWorktreeRoots = [ @"Q:\code\AITestAgent"; repoRoot ]
 
 let private tryGetUrl (client: HttpClient) (url: string) =
@@ -193,8 +207,15 @@ let private waitForUrlReady (url: string) (timeoutMs: int) =
 [<TestFixture>]
 [<Category("Smoke")>]
 [<Category("Local")>]
+[<NonParallelizable>]
 type MultiRepoSmokeTests() =
     inherit PageTest()
+
+    let freePorts = TestUtils.getFreeTcpPorts 2
+    let multiRepoPort = freePorts[0]
+    let multiRepoVitePort = freePorts[1]
+    let multiRepoUrl = $"http://localhost:{multiRepoPort}"
+    let multiRepoViteUrl = $"http://localhost:{multiRepoVitePort}"
 
     let mutable serverProc: Process option = None
     let mutable viteProc: Process option = None
@@ -209,9 +230,12 @@ type MultiRepoSmokeTests() =
             return int response.StatusCode, body
         }
 
-    let rec waitForAllReposReady (client: HttpClient) (repoCount: int) (deadline: DateTime) : Async<string> =
+    let rec waitForAllReposReady (client: HttpClient) (proc: Process) (stdout: Task<string>) (stderr: Task<string>) (repoCount: int) (deadline: DateTime) : Async<string> =
         async {
-            if DateTime.UtcNow > deadline then
+            if proc.HasExited then
+                let! message = earlyExitMessage proc stdout stderr
+                return failwith message
+            elif DateTime.UtcNow > deadline then
                 return failwith $"Timed out waiting for {repoCount} repos to become IsReady=true (120s)"
             else
                 try
@@ -226,11 +250,11 @@ type MultiRepoSmokeTests() =
                         return body
                     else
                         do! Async.Sleep 3000
-                        return! waitForAllReposReady client repoCount deadline
+                        return! waitForAllReposReady client proc stdout stderr repoCount deadline
                 with
                 | _ ->
                     do! Async.Sleep 3000
-                    return! waitForAllReposReady client repoCount deadline
+                    return! waitForAllReposReady client proc stdout stderr repoCount deadline
         }
 
     override this.ContextOptions() =
@@ -241,21 +265,21 @@ type MultiRepoSmokeTests() =
     [<OneTimeSetUp>]
     member _.StartMultiRepoServer() =
         task {
-            killOrphansOnPort multiRepoPort
-            killOrphansOnPort multiRepoVitePort
-
             let rootArgs =
                 multiRepoWorktreeRoots
                 |> List.map (fun r -> $"\"{r}\"")
                 |> String.concat " "
 
-            let proc = startSmokeServerProc $"""{rootArgs} --port {multiRepoPort}"""
+            let proc = startSmokeServerProc $"""{rootArgs} --port {multiRepoPort} --no-canvas"""
             serverProc <- Some proc
             TestContext.Out.WriteLine($"Multi-repo smoke server started (PID {proc.Id}) on port {multiRepoPort}")
 
+            let stdoutTask = proc.StandardOutput.ReadToEndAsync()
+            let stderrTask = proc.StandardError.ReadToEndAsync()
+
             use client = new HttpClient()
             let! body =
-                waitForAllReposReady client (List.length multiRepoWorktreeRoots) (DateTime.UtcNow.AddSeconds(120.0))
+                waitForAllReposReady client proc stdoutTask stderrTask (List.length multiRepoWorktreeRoots) (DateTime.UtcNow.AddSeconds(120.0))
                 |> Async.StartAsTask
             TestContext.Out.WriteLine($"All repos ready. Response length: {body.Length}")
 

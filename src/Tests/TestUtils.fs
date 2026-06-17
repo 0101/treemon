@@ -136,3 +136,25 @@ let killOrphansOnPort (port: int) =
                 ())
     with ex ->
         TestContext.Error.WriteLine($"[Cleanup] Failed to scan port {port}: {ex.Message}")
+
+/// Reserve `count` distinct free loopback TCP ports by briefly binding ephemeral sockets
+/// (port 0 lets the OS assign a free port). All listeners are held open at once so the ports
+/// returned by a single call are guaranteed distinct from each other, then released for the
+/// caller to bind. Distinctness is only guaranteed within one call, so fixtures that each
+/// reserve ports must not run in parallel (the smoke fixtures are [<NonParallelizable>]).
+/// Use this instead of hardcoded ports so test servers never collide with a running production
+/// instance — and never need to free a port by killing another process.
+let getFreeTcpPorts (count: int) : int list =
+    let listeners =
+        List.init count (fun _ ->
+            let listener = new Net.Sockets.TcpListener(Net.IPAddress.Loopback, 0)
+            listener.Start()
+            listener)
+
+    let ports =
+        listeners |> List.map (fun l -> (l.LocalEndpoint :?> Net.IPEndPoint).Port)
+
+    listeners |> List.iter (fun l -> l.Stop())
+    ports
+
+let getFreeTcpPort () = getFreeTcpPorts 1 |> List.head

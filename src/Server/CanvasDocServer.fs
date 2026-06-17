@@ -85,8 +85,6 @@ let bridgeStatusHandler : HttpHandler =
         | _ ->
             RequestErrors.BAD_REQUEST "missing worktreePath query parameter" next ctx
 
-let private canvasPort = 5002
-
 let private handleHeartbeat (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     try
         let! body = ctx.Request.ReadFromJsonAsync<JsonElement>()
@@ -215,7 +213,7 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
 
-let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (cts: System.Threading.CancellationToken) =
+let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) (cts: System.Threading.CancellationToken) =
     let host =
         Microsoft.AspNetCore.Hosting.WebHostBuilder()
             .UseKestrel(fun opts ->

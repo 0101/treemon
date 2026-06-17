@@ -37,45 +37,63 @@ let readAppVersion () =
 type ServerConfig =
     { WorktreeRoots: string list
       Port: int
+      CanvasPort: int option
       TestFixtures: string option
       Demo: bool }
 
+let private defaultCanvasPort = 5002
+
 let parseArgs (args: string array) =
-    let rec parse roots port testFixtures demo remaining =
+    let rec parse roots port canvasPort testFixtures demo remaining =
         match remaining with
         | "--port" :: portStr :: rest ->
             match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots p testFixtures demo rest
+            | true, p -> parse roots p canvasPort testFixtures demo rest
             | false, _ ->
                 eprintfn $"Invalid port number: {portStr}"
                 exit 1
+        | "--canvas-port" :: portStr :: rest ->
+            match System.Int32.TryParse(portStr) with
+            | true, p -> parse roots port (Some p) testFixtures demo rest
+            | false, _ ->
+                eprintfn $"Invalid canvas port number: {portStr}"
+                exit 1
+        | "--no-canvas" :: rest ->
+            parse roots port None testFixtures demo rest
         | "--test-fixtures" :: path :: rest ->
-            parse roots port (Some path) demo rest
+            parse roots port canvasPort (Some path) demo rest
         | "--demo" :: rest ->
-            parse roots port testFixtures true rest
+            parse roots port canvasPort testFixtures true rest
         | path :: rest when not (path.StartsWith("--")) ->
-            parse (roots @ [ path ]) port testFixtures demo rest
-        | [] -> roots, port, testFixtures, demo
+            parse (roots @ [ path ]) port canvasPort testFixtures demo rest
+        | [] -> roots, port, canvasPort, testFixtures, demo
         | unexpected :: _ ->
             eprintfn $"Unexpected argument: {unexpected}"
             exit 1
 
-    match args |> Array.toList |> parse [] 5000 None false with
-    | _, _, Some _, true ->
+    match args |> Array.toList |> parse [] 5000 (Some defaultCanvasPort) None false with
+    | _, _, _, Some _, true ->
         eprintfn "--demo and --test-fixtures are mutually exclusive"
         exit 1
-    | _, port, _, true ->
+    | _, port, _, _, true ->
         { WorktreeRoots = []
           Port = port
+          CanvasPort = None
           TestFixtures = None
           Demo = true }
-    | roots, port, testFixtures, _ when roots <> [] ->
-        { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
-          Port = port
-          TestFixtures = testFixtures
-          Demo = false }
+    | roots, port, canvasPort, testFixtures, _ when roots <> [] ->
+        match canvasPort with
+        | Some cp when cp = port ->
+            eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
+            exit 1
+        | _ ->
+            { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
+              Port = port
+              CanvasPort = canvasPort
+              TestFixtures = testFixtures
+              Demo = false }
     | _ ->
-        eprintfn "Usage: Server <worktree-root-path> [<additional-roots>...] [--port <port>] [--test-fixtures <path>]"
+        eprintfn "Usage: Server <worktree-root-path> [<additional-roots>...] [--port <port>] [--canvas-port <port> | --no-canvas] [--test-fixtures <path>]"
         eprintfn "       Server --demo [--port <port>]"
         exit 1
 
@@ -172,7 +190,9 @@ let main args =
         cts.Cancel()
         cts.Dispose())
 
-    schedulerAgent |> Option.iter (fun agent -> CanvasDocServer.start agent cts.Token)
+    match schedulerAgent, config.CanvasPort with
+    | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
+    | _ -> ()
 
     // The register route now needs the scheduler agent for its known-worktree guard. In demo mode
     // there is no agent (and the canvas doc server is never started — see above), so registration is
