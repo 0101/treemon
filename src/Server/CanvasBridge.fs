@@ -158,49 +158,82 @@ let private isSessionAlive (entry: SessionEntry) =
 let private isPollAlive (lastHeartbeat: DateTime) =
     (DateTime.UtcNow - lastHeartbeat).TotalSeconds < 60.0
 
+/// POST a payload to one session's inject URL. Ok on a 2xx response; Error (with a
+/// reason) on a non-success status or a transport-level exception. Callers decide
+/// whether a failure surfaces to the client or falls through to the queue.
+let private postPayload (entry: SessionEntry) (payload: string) (key: string) : Async<Result<unit, string>> =
+    async {
+        try
+            use content = new StringContent(payload, Encoding.UTF8, "application/json")
+            let! response = httpClient.PostAsync(entry.InjectUrl, content) |> Async.AwaitTask
+            use _ = response
+
+            if not response.IsSuccessStatusCode then
+                let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
+                Log.log "CanvasBridge" $"sendMessage HTTP failure: status={int response.StatusCode}, body={body}"
+                return Error $"bridge returned {int response.StatusCode}: {body}"
+            else
+                Log.log "CanvasBridge" $"Message forwarded to {Path.GetFileName(key)}"
+                return Ok()
+        with ex ->
+            Log.log "CanvasBridge" $"sendMessage exception: {ex.Message}"
+            return Error ex.Message
+    }
+
+/// Route a canvas-doc message to the doc's owning session.
+///
+/// The registry is sessionId-keyed, so two sessions can share one worktree; this
+/// resolves the doc's declared owner (`CanvasDocOwnership.getOwner`) and delivers only
+/// to that owner. A doc's message is never cross-routed to a non-owner in the worktree.
+///
+/// 1. Owner has a live registry entry  -> POST to it (HTTP failure -> queue for redelivery).
+/// 2. Owner offline/gone               -> queue (never fall back to a non-owner).
+/// 3. No owner, exactly one live session -> deliver to it (single-session back-compat).
+/// 4. No owner, zero or many live sessions -> queue (target is ambiguous).
 let sendMessage (request: CanvasMessageRequest) =
     async {
-        let key = normalizePath (WorktreePath.value request.WorktreePath)
-        Log.log "CanvasBridge" $"sendMessage: key={key}, payload length={request.Payload.Length}"
+        let worktree = WorktreePath.value request.WorktreePath
+        let key = normalizePath worktree
+        Log.log "CanvasBridge" $"sendMessage: key={key}, filename={request.Filename}, payload length={request.Payload.Length}"
 
-        // Owner-aware routing (deliver to the doc's owning session) is a follow-up
-        // task; here we preserve single-session back-compat by delivering to the
-        // worktree's most-recently-registered live session, otherwise queue.
-        let sessions = sessionsForWorktree (WorktreePath.value request.WorktreePath)
-
-        let activeEntry =
-            sessions
+        // Live sessions for this worktree, freshest first.
+        let liveSessions =
+            sessionsForWorktree worktree
             |> List.filter isSessionAlive
             |> List.sortByDescending (fun e -> e.RegisteredAt)
-            |> List.tryHead
 
-        match activeEntry with
-        | Some entry ->
-            try
-                use content = new StringContent(request.Payload, Encoding.UTF8, "application/json")
-                let! response = httpClient.PostAsync(entry.InjectUrl, content) |> Async.AwaitTask
-                use _ = response
-
-                if not response.IsSuccessStatusCode then
-                    let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
-                    Log.log "CanvasBridge" $"sendMessage HTTP failure: status={int response.StatusCode}, body={body}"
-                    return CanvasMessageResult.Error $"bridge returned {int response.StatusCode}: {body}"
-                else
-                    Log.log "CanvasBridge" $"Message forwarded to {Path.GetFileName(key)}"
-                    return CanvasMessageResult.Ok
-            with ex ->
-                Log.log "CanvasBridge" $"sendMessage exception: {ex.Message}"
-                return CanvasMessageResult.Error ex.Message
-        | None ->
-            // No alive session-backed bridge — queue for poll drain (or future session)
-            if not (List.isEmpty sessions) then
-                Log.log "CanvasBridge" $"sendMessage: registered session(s) for {Path.GetFileName(key)} all stale, queuing"
-
-            let hasPolling = pollRegistry.ContainsKey(key)
-            let reason = if hasPolling then "poll-based bridge" else "no bridge"
+        let queueWith reason =
             Log.log "CanvasBridge" $"sendMessage: {reason} for {Path.GetFileName(key)}, message queued"
             enqueue key request.Payload
-            return CanvasMessageResult.Queued
+            CanvasMessageResult.Queued
+
+        let! owner = CanvasDocOwnership.getOwner worktree request.Filename
+
+        match owner with
+        | Some ownerId ->
+            match liveSessions |> List.tryFind (fun e -> e.SessionId = Some ownerId) with
+            | Some entry ->
+                // Owner is live — deliver to it. A transient HTTP failure falls through to
+                // the queue so the message is redelivered when the owner re-registers.
+                match! postPayload entry request.Payload key with
+                | Ok() -> return CanvasMessageResult.Ok
+                | Error _ -> return queueWith $"owner {ownerId} unreachable"
+            | None ->
+                // Owner offline or not registered — queue. Never deliver to a non-owner,
+                // even if another session for the worktree is live.
+                return queueWith $"owner {ownerId} offline"
+        | None ->
+            // No declared owner — single-session back-compat: deliver only when exactly
+            // one live session can claim the doc; zero or many is ambiguous, so queue.
+            match liveSessions with
+            | [ single ] ->
+                match! postPayload single request.Payload key with
+                | Ok() -> return CanvasMessageResult.Ok
+                | Error msg -> return CanvasMessageResult.Error msg
+            | [] ->
+                let reason = if pollRegistry.ContainsKey(key) then "poll-based bridge" else "no bridge"
+                return queueWith reason
+            | _ -> return queueWith "no owner and multiple live sessions"
     }
 
 /// Atomically drain pending messages for a worktree (used by heartbeat polling).

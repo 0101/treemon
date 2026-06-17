@@ -1,9 +1,16 @@
 module Tests.CanvasBridgeTests
 
 open System
+open System.IO
+open System.Text
+open System.Threading
+open System.Net
+open System.Net.Sockets
+open System.Collections.Concurrent
 open NUnit.Framework
 open Shared
 open Server.CanvasBridge
+open Tests.TestUtils
 
 // Each test uses a unique worktree path to avoid shared-state interference
 // between tests (the module uses ConcurrentDictionaries at module level).
@@ -16,6 +23,114 @@ let private uniquePath prefix =
 let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
+
+// Owner-routing tests declare ownership via CanvasDocOwnership.attribute, which persists
+// the whole ownership map to data/canvas-owners.json relative to the current directory.
+// Run those tests under a throwaway CWD so they never touch the real data file. The
+// agent flushes each attribute (persist) before it answers the getOwner inside
+// sendMessage, so the write always lands in this temp dir before CWD is restored.
+let private withTempCwd (action: unit -> unit) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"canvasbridge-test-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    let original = Environment.CurrentDirectory
+    Environment.CurrentDirectory <- tempDir
+
+    try
+        action ()
+    finally
+        Environment.CurrentDirectory <- original
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
+
+// A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
+// It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
+// admin rights are needed on Windows. Each received request body is recorded and a
+// 200 is returned, so by the time sendMessage's POST completes the body is observable.
+// Payloads are ASCII in tests, so comparing char length to byte Content-Length is exact.
+type private HttpSink(port: int) =
+    let bodies = ConcurrentQueue<string>()
+    let listener = new TcpListener(IPAddress.Loopback, port)
+    let cts = new CancellationTokenSource()
+
+    let handle (client: TcpClient) =
+        async {
+            try
+                use client = client
+                use stream = client.GetStream()
+                let buffer = Array.zeroCreate 8192
+                let sb = StringBuilder()
+
+                // Read until the end-of-headers marker is seen (or the peer closes).
+                let mutable headerEnd = -1
+                while headerEnd < 0 do
+                    let! n = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
+                    if n = 0 then
+                        headerEnd <- sb.Length
+                    else
+                        sb.Append(Encoding.UTF8.GetString(buffer, 0, n)) |> ignore
+                        let idx = sb.ToString().IndexOf("\r\n\r\n", StringComparison.Ordinal)
+                        if idx >= 0 then headerEnd <- idx
+
+                let text = sb.ToString()
+
+                let contentLength =
+                    text.Substring(0, min headerEnd text.Length).Split([| "\r\n" |], StringSplitOptions.None)
+                    |> Array.tryPick (fun line ->
+                        let i = line.IndexOf(':')
+                        if i > 0 && line.Substring(0, i).Trim().Equals("Content-Length", StringComparison.OrdinalIgnoreCase) then
+                            match Int32.TryParse(line.Substring(i + 1).Trim()) with
+                            | true, v -> Some v
+                            | _ -> None
+                        else
+                            None)
+                    |> Option.defaultValue 0
+
+                let body = StringBuilder()
+                let bodyStart = headerEnd + 4
+                if text.Length > bodyStart then body.Append(text.Substring(bodyStart)) |> ignore
+
+                let mutable keepReading = body.Length < contentLength
+                while keepReading do
+                    let! n = stream.ReadAsync(buffer, 0, buffer.Length) |> Async.AwaitTask
+                    if n = 0 then
+                        keepReading <- false
+                    else
+                        body.Append(Encoding.UTF8.GetString(buffer, 0, n)) |> ignore
+                        keepReading <- body.Length < contentLength
+
+                bodies.Enqueue(body.ToString())
+
+                let resp = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                do! stream.WriteAsync(resp, 0, resp.Length) |> Async.AwaitTask
+                do! stream.FlushAsync() |> Async.AwaitTask
+            with _ ->
+                ()
+        }
+
+    /// The inject URL callers register; POSTs to it are captured by this sink.
+    member _.Url = $"http://127.0.0.1:{port}/inject"
+    /// Snapshot of request bodies received so far, in arrival order.
+    member _.Bodies = bodies |> List.ofSeq
+
+    member _.Start() =
+        // Start() binds the listening socket synchronously, so connections are queued by
+        // the OS even before the accept loop runs — no connect-races in tests.
+        listener.Start()
+
+        async {
+            try
+                while not cts.IsCancellationRequested do
+                    let! client = listener.AcceptTcpClientAsync(cts.Token).AsTask() |> Async.AwaitTask
+                    handle client |> Async.Start
+            with _ ->
+                ()
+        }
+        |> Async.Start
+
+    interface IDisposable with
+        member _.Dispose() =
+            cts.Cancel()
+            try listener.Stop() with _ -> ()
+            cts.Dispose()
 
 
 // ── isAlive (via getStatus) ──────────────────────────────────────────
@@ -350,3 +465,116 @@ type MultiSessionRegistryTests() =
         Assert.That(liveness |> Map.containsKey path, Is.True)
         Assert.That(liveness[path].IsAlive, Is.True)
         Assert.That(liveness[path].SessionId, Is.EqualTo(Some b), "Liveness reflects the freshest session")
+
+
+// ── owner-aware routing (sendMessage by doc owner) ──────────────────
+// These prove the core fix: a doc's message goes to its *owning* session and is never
+// cross-routed to a co-located non-owner. The result value is itself a routing probe —
+// Queued means "not delivered" while Error means "delivery attempted but failed" — so the
+// no-owner / offline branches are verifiable against unreachable URLs without a live sink.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type OwnerRoutingTests() =
+
+    [<Test>]
+    member _.``Owner-alive message is delivered to the owner, never the co-located non-owner``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use ownerSink = new HttpSink(ports[0])
+            use otherSink = new HttpSink(ports[1])
+            ownerSink.Start()
+            otherSink.Start()
+
+            let path = uniquePath "own-deliver"
+            let ownerSid = uniqueSid "owner"
+            let otherSid = uniqueSid "other"
+
+            // Owner registers first; the non-owner registers last so it is the *freshest*
+            // session. The old "deliver to the freshest live session" path would wrongly
+            // pick the non-owner — owner-aware routing must still target the owner.
+            registerSession path ownerSink.Url (Some ownerSid)
+            registerSession path otherSink.Url (Some otherSid)
+            Server.CanvasDocOwnership.attribute path "a.html" ownerSid
+
+            let request = { WorktreePath = WorktreePath path; Filename = "a.html"; Payload = "p1" }
+            let result = runAsync (sendMessage request)
+
+            Assert.That(result, Is.EqualTo(CanvasMessageResult.Ok), "Owner is live, so delivery should succeed")
+            Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner session must receive the message")
+            Assert.That(otherSink.Bodies, Is.Empty, "Non-owner in the same worktree must never receive it"))
+
+    [<Test>]
+    member _.``Each doc routes to its own owner within a shared worktree``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use sinkA = new HttpSink(ports[0])
+            use sinkB = new HttpSink(ports[1])
+            sinkA.Start()
+            sinkB.Start()
+
+            let path = uniquePath "own-perdoc"
+            let sidA = uniqueSid "A"
+            let sidB = uniqueSid "B"
+            registerSession path sinkA.Url (Some sidA)
+            registerSession path sinkB.Url (Some sidB)
+            Server.CanvasDocOwnership.attribute path "a.html" sidA
+            Server.CanvasDocOwnership.attribute path "b.html" sidB
+
+            let rA = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "a.html"; Payload = "pa" })
+            let rB = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "b.html"; Payload = "pb" })
+
+            Assert.That(rA, Is.EqualTo(CanvasMessageResult.Ok))
+            Assert.That(rB, Is.EqualTo(CanvasMessageResult.Ok))
+            Assert.That(sinkA.Bodies, Is.EqualTo([ "pa" ]), "a.html delivers to owner A only")
+            Assert.That(sinkB.Bodies, Is.EqualTo([ "pb" ]), "b.html delivers to owner B only"))
+
+    [<Test>]
+    member _.``Owner offline queues and never falls back to a live non-owner``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "own-offline"
+            let ownerSid = uniqueSid "owner-gone"
+            let otherSid = uniqueSid "other-live"
+
+            // The owner is attributed but never registers a bridge; a *different* session is
+            // live with an unreachable URL. If routing wrongly fell back to that non-owner it
+            // would POST and fail (-> Error); correct owner-aware routing queues instead.
+            registerSession path "http://127.0.0.1:1/inject" (Some otherSid)
+            Server.CanvasDocOwnership.attribute path "a.html" ownerSid
+
+            let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "a.html"; Payload = "p1" })
+
+            Assert.That(result, Is.EqualTo(CanvasMessageResult.Queued),
+                "Owner offline must queue, never deliver to a co-located non-owner"))
+
+    [<Test>]
+    member _.``No owner with exactly one live session attempts delivery (back-compat)``() =
+        // No attribution -> no owner. One live session with an unreachable URL: single-session
+        // back-compat delivers to it (POST attempted -> Error), proving it does not queue.
+        let path = uniquePath "own-single"
+        registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "solo"))
+
+        let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "lonely.html"; Payload = "p1" })
+
+        Assert.That(result, Is.Not.EqualTo(CanvasMessageResult.Queued),
+            "A single live session with no owner should attempt delivery, not queue")
+
+    [<Test>]
+    member _.``No owner with multiple live sessions queues (ambiguous)``() =
+        // Two live sessions and no declared owner: the target is ambiguous, so the message is
+        // queued and delivered to neither. A wrong "freshest wins" path would POST -> Error.
+        let path = uniquePath "own-ambig"
+        registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "s1"))
+        registerSession path "http://127.0.0.1:2/inject" (Some(uniqueSid "s2"))
+
+        let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "x.html"; Payload = "p1" })
+
+        Assert.That(result, Is.EqualTo(CanvasMessageResult.Queued),
+            "Two live sessions and no owner is ambiguous -> queue, deliver to neither")
+
+    [<Test>]
+    member _.``No owner with no live session queues``() =
+        let path = uniquePath "own-empty"
+        let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "x.html"; Payload = "p1" })
+        Assert.That(result, Is.EqualTo(CanvasMessageResult.Queued))
