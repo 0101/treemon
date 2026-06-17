@@ -210,7 +210,7 @@ In `App.fs`, the focused doc's filename is passed in `CanvasMessageRequest`.
 |------|---------|
 | `src/Shared/Types.fs` | Defines `CanvasDoc.OwnerSessionId` and `CanvasMessageRequest.Filename` |
 | `src/Server/CanvasDocOwnership.fs` | Stores per-doc ownership and persists it to `data/canvas-owners.json` |
-| `src/Server/RefreshScheduler.fs` | Attributes changed canvas docs to the current bridge session during scans |
+| `src/Server/RefreshScheduler.fs` | Fallback-only scanner attribution: credits a no-owner changed doc to the worktree's bridge session **only when exactly one is registered** (`CanvasWatchers.fallbackOwner`/`attributeChangedDocs`); never overwrites a declared owner |
 | `src/Server/CanvasBridge.fs` | sessionId-keyed registry; owner-based delivery routing; liveness |
 | `src/Extension/extension.mjs` | Declares doc ownership — stamps its `sessionId`, forwards to `/api/canvas/attribute` |
 | `src/Extension/skill/SKILL.md` | Instructs the agent to declare ownership when writing a canvas doc |

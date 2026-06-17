@@ -558,6 +558,44 @@ let buildRootPaths (worktreeRoots: string list) =
     |> Map.ofList
 
 module CanvasWatchers =
+    /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
+    /// declarations are the primary attribution path; the scanner only fills the gap for docs
+    /// with no declared owner, and only when it can do so *unambiguously* — i.e. exactly one
+    /// session is registered for the worktree. Zero or many registered sessions (or a single
+    /// anonymous `SessionId = None` registration) leave the doc unowned. This replaces the
+    /// previous last-registered attribution (`getSessionForWorktree`) that credited every
+    /// changed doc to whichever session registered last — the misattribution bug that
+    /// cross-credited docs whenever two sessions shared a worktree.
+    let fallbackOwner (sessions: CanvasBridge.SessionEntry list) : string option =
+        match sessions with
+        | [ single ] -> single.SessionId
+        | _ -> None
+
+    /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. A doc is
+    /// attributed to the worktree's single registered session only when it is new-or-changed
+    /// (relative to the watcher's previous baseline) *and* has no declared owner. Ownership is
+    /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so a doc that already has an owner —
+    /// declared via the endpoint or previously attributed — is skipped: the scanner never
+    /// overwrites it. With zero or many registered sessions, nothing is attributed.
+    let attributeChangedDocs
+        (sessions: CanvasBridge.SessionEntry list)
+        (worktreePath: string)
+        (previousDocs: CanvasDoc list)
+        (currentDocs: CanvasDoc list)
+        =
+        match fallbackOwner sessions with
+        | None -> ()
+        | Some sessionId ->
+            let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
+            currentDocs
+            |> List.iter (fun doc ->
+                let isNewOrChanged =
+                    match prevByName |> Map.tryFind doc.Filename with
+                    | None -> true
+                    | Some prevHash -> prevHash <> doc.ContentHash
+                if isNewOrChanged && Option.isNone doc.OwnerSessionId then
+                    CanvasDocOwnership.attribute worktreePath doc.Filename sessionId)
+
     let reconcile
         (agent: MailboxProcessor<StateMsg>)
         (repos: Map<RepoId, PerRepoState>)
@@ -605,16 +643,11 @@ module CanvasWatchers =
                             // attribution is idempotent (worst case over-attribution, never loss) and a stale
                             // baseline self-heals on the next watcher event / periodic RefreshGit.
                             let prev = previousDocs.Value
-                            let prevByName = prev |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
-                            CanvasBridge.getSessionForWorktree path
-                            |> Option.iter (fun sessionId ->
-                                canvasDocs |> List.iter (fun doc ->
-                                    let isNewOrChanged =
-                                        match prevByName |> Map.tryFind doc.Filename with
-                                        | None -> true
-                                        | Some prevHash -> prevHash <> doc.ContentHash
-                                    if isNewOrChanged then
-                                        CanvasDocOwnership.attribute path doc.Filename sessionId))
+                            // Fallback-only attribution: explicit /api/canvas/attribute declarations are the
+                            // primary path. The scanner only attributes a no-owner changed doc when exactly one
+                            // session is registered for the worktree — never the old last-registered guess that
+                            // misattributed every changed doc whenever two sessions shared a worktree.
+                            attributeChangedDocs (CanvasBridge.sessionsForWorktree path) path prev canvasDocs
                             previousDocs.Value <- canvasDocs
                             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                         return

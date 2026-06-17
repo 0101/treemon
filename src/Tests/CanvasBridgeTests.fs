@@ -10,6 +10,7 @@ open System.Collections.Concurrent
 open NUnit.Framework
 open Shared
 open Server.CanvasBridge
+open Server.RefreshScheduler.CanvasWatchers
 open Tests.TestUtils
 
 // Each test uses a unique worktree path to avoid shared-state interference
@@ -622,3 +623,98 @@ type OwnerRoutingTests() =
 
             Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner must receive its queued message on re-register")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner still must not have received it"))
+
+
+// ── scanner fallback-only attribution (RefreshScheduler.CanvasWatchers) ──────
+// The scanner is the *fallback* attribution path only: it may attribute a no-owner changed
+// doc to the worktree's bridge session ONLY when exactly one session is registered. The
+// original bug attributed every changed doc to the last-registered session
+// (getSessionForWorktree), cross-crediting docs whenever two sessions shared a worktree.
+// These guard the fix end-to-end (through the real CanvasBridge registry + CanvasDocOwnership)
+// and the pure single-session decision in isolation.
+
+// A doc as the scanner would surface it: OwnerSessionId carries the owner read from the
+// ownership map during the scan (None = no declared owner yet).
+let private scannedDoc (owner: string option) filename : CanvasDoc =
+    { Filename = filename
+      ContentHash = "h-" + filename
+      LastModified = DateTimeOffset(DateTime(2026, 1, 1), TimeSpan.Zero)
+      OwnerSessionId = owner
+      Kind = CanvasDocKind.classify filename }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+// withTempCwd mutates CWD and the tests share the module-level ownership agent: only safe
+// because NUnit runs sequentially today. NonParallelizable guards against enabling assembly
+// parallelization (matches OwnerRoutingTests above).
+[<NonParallelizable>]
+type ScannerFallbackAttributionTests() =
+
+    [<Test>]
+    member _.``fallbackOwner attributes only when exactly one session is registered``() =
+        let entry sid : SessionEntry =
+            { WorktreePath = "/w"; InjectUrl = "http://localhost/inject"; SessionId = sid; RegisteredAt = DateTime.UtcNow }
+
+        Assert.That(fallbackOwner [], Is.EqualTo None, "Zero sessions -> no fallback owner")
+        Assert.That(fallbackOwner [ entry (Some "solo") ], Is.EqualTo(Some "solo"), "Exactly one session -> it is the owner")
+        Assert.That(fallbackOwner [ entry None ], Is.EqualTo None, "A single anonymous session has no id to attribute")
+        Assert.That(fallbackOwner [ entry (Some "a"); entry (Some "b") ], Is.EqualTo None,
+            "Two sessions are ambiguous -> leave unowned (the misattribution guard)")
+
+    [<Test>]
+    member _.``Two registered sessions leave a no-owner changed doc UNOWNED (misattribution regression)``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "scan-two"
+            registerSession path "http://localhost:1/inject" (Some(uniqueSid "a"))
+            registerSession path "http://localhost:2/inject" (Some(uniqueSid "b"))
+
+            // previousDocs = [] makes the doc new (change-gate satisfied); two sessions means the
+            // scanner must NOT guess an owner — the exact scenario the old last-registered code broke.
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]
+
+            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo None,
+                "Two sessions share the worktree: a no-owner doc must be left unowned, never last-registered"))
+
+    [<Test>]
+    member _.``Exactly one registered session attributes a no-owner changed doc to it``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "scan-one"
+            let sid = uniqueSid "solo"
+            registerSession path "http://localhost:1/inject" (Some sid)
+
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]
+
+            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some sid),
+                "A single registered session is the unambiguous fallback owner"))
+
+    [<Test>]
+    member _.``A pre-declared owner is never overwritten by the scanner``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "scan-declared"
+            let declared = uniqueSid "declared"
+            let scanner = uniqueSid "scanner"
+            // The single registered session differs from the doc's declared owner.
+            registerSession path "http://localhost:1/inject" (Some scanner)
+            Server.CanvasDocOwnership.attribute path "owned.html" declared
+
+            // The scan surfaces the declared owner on the doc (OwnerSessionId = Some declared); the
+            // scanner must skip it even though the doc looks new and a single session is registered.
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc (Some declared) "owned.html" ]
+
+            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "owned.html"), Is.EqualTo(Some declared),
+                "An explicit declaration is primary: the scanner must not overwrite it with the registered session"))
+
+    [<Test>]
+    member _.``An unchanged doc is not attributed even with a single session``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "scan-unchanged"
+            registerSession path "http://localhost:1/inject" (Some(uniqueSid "solo"))
+
+            // Same doc in the previous baseline and current scan (same hash) -> not new-or-changed,
+            // so the change-gated fallback leaves it alone.
+            let doc = scannedDoc None "stable.html"
+            attributeChangedDocs (sessionsForWorktree path) path [ doc ] [ doc ]
+
+            Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "stable.html"), Is.EqualTo None,
+                "Attribution is change-gated: an unchanged doc is left as-is"))
