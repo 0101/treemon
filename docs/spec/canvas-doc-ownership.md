@@ -131,7 +131,10 @@ type CanvasMessageRequest =
 
 - `src/Extension/extension.mjs` already holds the session's `sessionId` (sent at registration). It gains a tiny local hook: when the agent writes a canvas doc, the agent pings the local bridge with just the `filename`; the extension stamps in its `sessionId` and POSTs `{worktreePath, filename, sessionId}` to Treemon `/api/canvas/attribute`.
 - `src/Extension/skill/SKILL.md` instructs the agent to declare ownership whenever it creates or updates a canvas doc. The agent never needs to know its own sessionId — the extension owns that.
-- Treemon's `/api/canvas/attribute` handler validates the worktree and calls `CanvasDocOwnership.attribute`.
+- Treemon's `/api/canvas/attribute` handler validates the body and worktree exactly like `canvasRegisterHandler`, then calls `CanvasDocOwnership.attribute`. Responses mirror registration:
+  - A blank `worktreePath`/`filename`/`sessionId` (or malformed JSON) → `400` (nothing recorded).
+  - A well-formed body for an **unmonitored** worktree → `200 {attributed:false, monitored:false}` and records nothing (the extension still serves the doc in-browser, so this is a benign no-op, not an error — same as registration's unmonitored case).
+  - A well-formed body for a **monitored** worktree → records ownership and returns `200 {attributed:true, monitored:true}`.
 
 ### Bridge Registry (Server)
 

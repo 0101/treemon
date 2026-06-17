@@ -15,6 +15,21 @@ type CanvasRegisterRequest =
       injectUrl: string
       sessionId: string }
 
+[<CLIMutable>]
+type CanvasAttributeRequest =
+    { worktreePath: string
+      filename: string
+      sessionId: string }
+
+/// Outcome of an ownership-attribution attempt, decoupled from HTTP so it is unit-testable
+/// (the same extraction the SSRF guard uses with isLoopbackInjectUrl). Ownership is recorded for
+/// a *known* (monitored) worktree with a well-formed body and nothing else: a missing field or an
+/// unmonitored worktree records nothing, so a later getOwner stays None.
+type AttributeOutcome =
+    | Attributed                  // ownership recorded + persisted
+    | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
+    | Invalid of reason: string   // missing/blank field — nothing recorded
+
 let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
     let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
     return
@@ -69,6 +84,58 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
                     return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
+            return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
+    }
+
+/// Validate a declared ownership and, only for a known (monitored) worktree, record it via
+/// CanvasDocOwnership.attribute. Returns the decision so canvasAttributeHandler can map it to an
+/// HTTP response and tests can assert it without HTTP plumbing. A missing field or an unmonitored
+/// worktree records nothing — the caller's getOwner stays None.
+let attributeOwnership
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreePath: string)
+    (filename: string)
+    (sessionId: string)
+    : Async<AttributeOutcome> =
+    async {
+        if System.String.IsNullOrWhiteSpace worktreePath then
+            return Invalid "missing worktreePath"
+        elif System.String.IsNullOrWhiteSpace filename then
+            return Invalid "missing filename"
+        elif System.String.IsNullOrWhiteSpace sessionId then
+            return Invalid "missing sessionId"
+        else
+            let worktreePath = worktreePath |> Server.PathUtils.normalizePath
+            let! isKnown = isKnownWorktree agent worktreePath
+
+            if not isKnown then
+                return UnknownWorktree
+            else
+                CanvasDocOwnership.attribute worktreePath filename sessionId
+                return Attributed
+    }
+
+/// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
+/// extension declares which session owns a canvas doc. Validates the body and known-worktree
+/// guard exactly like canvasRegisterHandler, then records ownership for a monitored worktree.
+let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
+    fun next ctx -> task {
+        try
+            let! body = ctx.BindJsonAsync<CanvasAttributeRequest>()
+            let! outcome = attributeOwnership agent body.worktreePath body.filename body.sessionId |> Async.StartAsTask
+
+            match outcome with
+            | Invalid reason ->
+                Log.log "Canvas" $"Attribution failed: {reason}"
+                return! RequestErrors.BAD_REQUEST reason next ctx
+            | UnknownWorktree ->
+                Log.log "Canvas" $"Attribution: unmonitored worktree — {body.worktreePath} (nothing recorded)"
+                return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
+            | Attributed ->
+                Log.log "Canvas" $"Attribution recorded: {body.filename} -> {body.sessionId} for {body.worktreePath}"
+                return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx
+        with ex ->
+            Log.log "Canvas" $"Attribution failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
     }
 

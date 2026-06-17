@@ -194,17 +194,20 @@ let main args =
     | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
     | _ -> ()
 
-    // The register route now needs the scheduler agent for its known-worktree guard. In demo mode
-    // there is no agent (and the canvas doc server is never started — see above), so registration is
-    // unavailable there; bridge-status stays available and simply reports nothing registered.
-    let canvasRegisterRoute =
+    // The register/attribute routes need the scheduler agent for their known-worktree guard. In
+    // demo mode there is no agent (and the canvas doc server is never started — see above), so
+    // these are unavailable there; bridge-status stays available and simply reports nothing
+    // registered.
+    let canvasAgentRoutes =
         match schedulerAgent with
-        | Some agent -> [ route "/api/canvas/register" >=> POST >=> CanvasDocServer.canvasRegisterHandler agent ]
+        | Some agent ->
+            [ route "/api/canvas/register" >=> POST >=> CanvasDocServer.canvasRegisterHandler agent
+              route "/api/canvas/attribute" >=> POST >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 
     let combinedRouter =
         choose (
-            canvasRegisterRoute
+            canvasAgentRoutes
             @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
                 remotingApi ])
 
