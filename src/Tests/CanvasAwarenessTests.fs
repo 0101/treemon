@@ -6,6 +6,7 @@ open Shared
 open Shared.EventUtils
 open App
 open AppTypes
+open CanvasUpdate
 open Navigation
 open CanvasState
 open CanvasAwareness
