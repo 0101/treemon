@@ -6,6 +6,7 @@ import { resolve, sep } from "node:path";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
+const TREEMON_ATTRIBUTE_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/attribute`;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_MAX_INTERVAL_MS = 120000;
 
@@ -202,6 +203,28 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
   }
 }
 
+// Declare this session as the owner of a canvas doc. Decision 1d: the write hook supplies only the
+// filename; the extension stamps in its own sessionId here and POSTs the triple to Treemon, which
+// records ownership for a monitored worktree and routes that doc's messages back to this session.
+// Best-effort — an unmonitored worktree (200 {attributed:false}) or an unreachable Treemon is a
+// benign no-op, never thrown.
+async function declareOwnership(worktreePath, filename, sessionId) {
+  try {
+    const res = await fetch(TREEMON_ATTRIBUTE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ worktreePath, filename, sessionId }),
+    });
+    if (!res.ok) {
+      log(`ownership declaration failed for ${filename}: ${res.status} ${res.statusText}`);
+      return;
+    }
+    log(`declared ownership: ${filename} → ${sessionId}`);
+  } catch (err) {
+    log(`could not declare ownership for ${filename}: ${err.message}`);
+  }
+}
+
 function startHeartbeat(worktreePath, injectUrl, sessionId) {
   let currentInterval = HEARTBEAT_INTERVAL_MS;
   let wasDisconnected = false;
@@ -246,8 +269,6 @@ function parseToolArgs(toolArgs) {
 
 function createCanvasHook(state) {
   return async ({ toolName, toolArgs, toolResult }) => {
-    if (!state.browserMode) return {};
-
     const isCreateOrEdit = toolName === "create" || toolName === "edit";
     if (!isCreateOrEdit) return {};
 
@@ -259,6 +280,21 @@ function createCanvasHook(state) {
     if (toolResult?.resultType === "failure") return {};
 
     const filename = normalized.split("/").pop();
+
+    // Monitored by Treemon: the agent just authored this doc, so declare ownership. This is the
+    // primary, authoritative attribution path (the server's file-watcher is fallback-only). The
+    // agent only ever supplied the filename via its write; the extension stamps in the sessionId.
+    if (!state.browserMode) {
+      if (state.sessionId) {
+        await declareOwnership(state.worktreePath, filename, state.sessionId);
+      } else {
+        log(`onPostToolUse: sessionId not ready, skipping ownership declaration for ${filename}`);
+      }
+      return {};
+    }
+
+    // Browser mode (Treemon unreachable or worktree unmonitored): serve the doc from this
+    // extension's local HTTP server and hand the agent a clickable URL.
     const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
     log(`onPostToolUse: injecting canvas URL for ${filename} → ${url}`);
 
@@ -268,11 +304,12 @@ function createCanvasHook(state) {
   };
 }
 
-const extensionState = { browserMode: false, port: 0 };
+const worktreePath = process.cwd();
+const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
 const session = await joinSession({ hooks: { onPostToolUse: createCanvasHook(extensionState) } });
 const sessionId = session.id ?? session.sessionId;
+extensionState.sessionId = sessionId;
 
-const worktreePath = process.cwd();
 const { server, port } = await startHttpServer(session, extensionState);
 extensionState.port = port;
 const injectUrl = `http://127.0.0.1:${port}/inject`;

@@ -49,6 +49,14 @@ If the canvas doc itself gathers the user's input — choices, a form, buttons, 
 
 Instead: write the doc, briefly tell the user it's ready for their input, then **end your turn and leave the conversation open**. The user's selection arrives as a normal message via `postMessage`, and you continue from there. Only use `ask_user` when there is no canvas doc collecting the response.
 
+## Ownership
+
+When you create or update a canvas doc, your session is automatically recorded as that doc's **owner**. That ownership is what routes the user's `postMessage` replies back to *your* session — even when several agent sessions are running in the same worktree.
+
+You never need to know or send your own session ID: writing the `.html` file with the **create** or **edit** tool *is* the ownership declaration — the extension stamps in the session ID and reports it to Treemon for you. So always author canvas docs with those tools under `.agents/canvas/`. Don't shell out to write the file (e.g. redirecting command output into it); the declaration only fires for the create/edit tools, and without it the doc's messages may reach the wrong session.
+
+Editing a doc another session created transfers ownership to you (most recent author wins), so from then on its messages arrive in your session.
+
 ## Updating
 
 Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and returns the browser URL in the tool result right after you create or edit a canvas file (open it for the user or share the ctrl+clickable URL). `postMessage` interactions work identically in both modes — no changes needed in your HTML.
