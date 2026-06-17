@@ -132,6 +132,18 @@ let private nextRegisteredAt () =
         lastIssuedAt.Value <- t
         t)
 
+/// Collapse a blank/whitespace sessionId to None so a registry entry's SessionId can never be
+/// Some "". That value is the key for owner-based delivery (sendMessage) and the source of the
+/// scanner's fallback attribution (RefreshScheduler.fallbackOwner -> CanvasDocOwnership.attribute):
+/// a Some "" owner is unroutable (no real Some "real-id" session ever equals it) yet sticks
+/// permanently because the scanner never overwrites an existing owner — so a blank registration
+/// would blackhole the doc's messages. A registrant that omits or blanks its sessionId is
+/// anonymous (None), exactly like a missing field.
+let private normalizeSessionId (sessionId: string option) : string option =
+    match sessionId with
+    | Some sid when not (String.IsNullOrWhiteSpace sid) -> Some sid
+    | _ -> None
+
 // The registry is keyed by sessionId so multiple sessions in one worktree coexist.
 // sessionId=None entries fall back to a per-worktree slot (namespaced so it can never
 // collide with a real sessionId). This preserves single-session back-compat and makes
@@ -141,11 +153,15 @@ let private nextRegisteredAt () =
 // sessionId is never registered against two different worktrees, so the WorktreePath
 // carried in the value is not part of the key.
 let private registryKeyFor (normalizedWorktree: string) (sessionId: string option) =
-    match sessionId with
-    | Some sid when not (String.IsNullOrWhiteSpace sid) -> "sid:" + sid
-    | _ -> "wt:" + normalizedWorktree
+    match normalizeSessionId sessionId with
+    | Some sid -> "sid:" + sid
+    | None -> "wt:" + normalizedWorktree
 
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
+    // Defense-in-depth: a blank/whitespace sessionId from any caller collapses to None, so
+    // entry.SessionId is never Some "" (see normalizeSessionId). The HTTP boundary normalizes
+    // too, but every registration funnels through here.
+    let sessionId = normalizeSessionId sessionId
     let worktreeKey = normalizePath worktreePath
     let key = registryKeyFor worktreeKey sessionId
 

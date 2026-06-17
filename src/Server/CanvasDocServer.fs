@@ -80,7 +80,13 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
                     Log.log "Canvas" $"Registration: unmonitored worktree — {worktreePath} (extension serves the doc in a browser)"
                     return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
                 else
-                    CanvasBridge.registerSession worktreePath body.injectUrl (Option.ofObj body.sessionId)
+                    // Normalize a blank/whitespace sessionId to None (anonymous) rather than
+                    // Some "": Option.ofObj only maps null. A Some "" owner is unroutable yet
+                    // sticky (see CanvasBridge.normalizeSessionId), so it must never be stored —
+                    // mirror attributeOwnership's IsNullOrWhiteSpace treatment of sessionId.
+                    let sessionId =
+                        if System.String.IsNullOrWhiteSpace body.sessionId then None else Some body.sessionId
+                    CanvasBridge.registerSession worktreePath body.injectUrl sessionId
                     return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"

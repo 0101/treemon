@@ -186,6 +186,31 @@ type RegisterAndStatusTests() =
         Assert.That(status.Registered, Is.True)
         Assert.That(status.SessionId, Is.EqualTo(None))
 
+    // Finding C-01: /api/canvas/register accepted a blank sessionId and Option.ofObj stored it as
+    // Some "" (only null mapped to None). The scanner's fallbackOwner then stamped docs with owner
+    // "", and sendMessage routed only to SessionId = Some "" — which no real Some "real-id" session
+    // equals — so messages queued forever. A blank sessionId must collapse to None (anonymous).
+    [<TestCase("")>]
+    [<TestCase("   ")>]
+    member _.``Register with blank sessionId is treated as anonymous None``(blank: string) =
+        let path = uniquePath "reg-blank-sid"
+        registerSession path "http://localhost:1234/inject" (Some blank)
+
+        let status = getStatus path
+        Assert.That(status.Registered, Is.True)
+        Assert.That(status.SessionId, Is.EqualTo(None), "A blank sessionId must be stored as None, not Some \"\"")
+
+        // No registry entry may carry Some "" — that is the value that would poison routing.
+        Assert.That(
+            sessionsForWorktree path |> List.choose (fun e -> e.SessionId),
+            Is.Empty,
+            "No session entry may carry Some \"\"")
+
+        // The downstream scanner fallback therefore finds no id to credit: a single anonymous
+        // session leaves docs unowned instead of stamping the sticky, unroutable owner "".
+        Assert.That(fallbackOwner (sessionsForWorktree path), Is.EqualTo(None: string option),
+                    "A single blank-id session must leave docs unowned, not owned by \"\"")
+
     [<Test>]
     member _.``getStatus for unregistered path returns not registered``() =
         let path = uniquePath "unreg"
