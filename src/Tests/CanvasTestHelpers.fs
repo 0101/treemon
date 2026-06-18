@@ -59,12 +59,15 @@ let focusCanvasCard (page: IPage) (branch: string) =
             page.Locator(
                 ".wt-card",
                 PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
+        let branchName =
+            page.Locator(".wt-card .branch-name", PageLocatorOptions(HasText = branch))
+        let focusedCard =
+            page.Locator(
+                ".wt-card.focused",
+                PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
         do! card.First.ScrollIntoViewIfNeededAsync()
-        do! card.First.ClickAsync()
-        let! _ = page.WaitForFunctionAsync(
-            "() => document.querySelector('.focused') !== null",
-            null, PageWaitForFunctionOptions(Timeout = 5000.0f))
-        ()
+        do! branchName.First.ClickAsync()
+        do! focusedCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
     }
 
 /// Press ArrowDown from the dashboard until a wt-card receives focus.
