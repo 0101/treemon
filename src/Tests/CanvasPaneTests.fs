@@ -146,8 +146,7 @@ type CanvasPaneTests() =
     member this.``Canvas iframe src points to canvas doc server``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let iframe = canvasIframe this.Page
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
@@ -292,8 +291,7 @@ type CanvasPaneTests() =
     member this.``PostMessage from canvas iframe triggers sendCanvasMessage API call``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let iframe = canvasIframe this.Page
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
@@ -455,8 +453,7 @@ type CanvasPaneTests() =
     member this.``Single-doc worktree shows header bar but no tabs``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             // Wait for the iframe to appear (confirms canvas doc is loaded)
             let iframe = canvasIframe this.Page
@@ -582,8 +579,7 @@ type CanvasPaneTests() =
     member this.``Position buttons render inside header bar``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             // Position buttons should be inside .canvas-tab-bar
             let posButtons = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn")
@@ -595,8 +591,7 @@ type CanvasPaneTests() =
     member this.``Position buttons have low opacity by default``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let posBtn = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn").First
             do! posBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -611,8 +606,7 @@ type CanvasPaneTests() =
     member this.``No separate canvas-toolbar exists``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             // The old separate toolbar should not exist
             let toolbar = this.Page.Locator(".canvas-pane .canvas-toolbar")
@@ -626,8 +620,7 @@ type CanvasPaneTests() =
     member this.``Archive button appears in header bar for active doc``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let archiveBtn = this.Page.Locator(".canvas-tab-bar .canvas-archive-btn")
             do! archiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))

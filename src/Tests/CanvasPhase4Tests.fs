@@ -79,24 +79,21 @@ type CanvasPhase4Tests() =
 
             // View feature-active docs
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! btn.ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! btn.ClickAsync() // close
+            do! ensureCanvasPaneOpen this.Page
+            do! ensureCanvasPaneClosed this.Page
 
             // View feature-multidoc docs (select each tab)
             do! focusCanvasCard this.Page FixtureMultiDocBranch
-            do! btn.ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let tabs = this.Page.Locator(".canvas-pane .canvas-tab")
             let! tabCount = tabs.CountAsync()
             do! clickTabsInOrder tabs tabCount
+            do! ensureCanvasPaneClosed this.Page
 
             // View multirepo worktree docs
-            do! btn.ClickAsync() // close
             do! focusCanvasCard this.Page "multirepo"
-            do! btn.ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let multiTabs = this.Page.Locator(".canvas-pane .canvas-tab")
             let! multiTabCount = multiTabs.CountAsync()
@@ -176,8 +173,7 @@ type CanvasPhase4Tests() =
         task {
             // No bridge registered in E2E, so start session button should appear
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let launchBtn = this.Page.Locator(".canvas-pane .canvas-launch-btn")
             do! launchBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -211,8 +207,7 @@ type CanvasPhase4Tests() =
         task {
             // Focus a worktree with a canvas doc and open the pane
             do! focusCanvasCard this.Page FixtureCanvasBranch
-            do! (canvasToggleBtn this.Page).ClickAsync()
-            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! ensureCanvasPaneOpen this.Page
 
             let iframe = this.Page.Locator(".canvas-pane .canvas-iframe")
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
