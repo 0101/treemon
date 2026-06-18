@@ -204,3 +204,4 @@ Three layers of state preservation:
 
 - `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
 - `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
+- `docs/spec/future/canvas-roadmap.md` — remaining canvas work (authoring DX, templates)
