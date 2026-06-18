@@ -14,6 +14,7 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
+      CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
       UpstreamRemote: string
       BaseBranch: string
@@ -27,6 +28,7 @@ module PerRepoState =
           BeadsData = Map.empty
           CodingToolData = Map.empty
           PrData = Map.empty
+          CanvasData = Map.empty
           Provider = None
           UpstreamRemote = "origin"
           BaseBranch = "main"
@@ -56,6 +58,7 @@ type StateMsg =
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
     | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
+    | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
     | UpdateUpstreamRemote of repoId: RepoId * remote: string
@@ -94,7 +97,8 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         WorktreeList = repo.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
-        CodingToolData = repo.CodingToolData |> Map.remove path }
+        CodingToolData = repo.CodingToolData |> Map.remove path
+        CanvasData = repo.CanvasData |> Map.remove path }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -133,6 +137,13 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
             updateRepo repoId { repo with CodingToolData = repo.CodingToolData |> Map.add path data } state
+        else
+            state
+
+    | UpdateCanvasDoc(repoId, path, canvasDocs) ->
+        let repo = getRepo repoId state
+        if Set.contains path repo.KnownPaths then
+            updateRepo repoId { repo with CanvasData = repo.CanvasData |> Map.add path canvasDocs } state
         else
             state
 
@@ -370,9 +381,35 @@ let private executeTask
             let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
 
+            let! canvasDocs = CanvasScanner.scan path
+            let branch = Path.GetFileName(path)
+            let previous = repo.CanvasData |> Map.tryFind path |> Option.defaultValue []
+            let prevNames = previous |> List.map _.Filename |> Set.ofList
+            let currNames = canvasDocs |> List.map _.Filename |> Set.ofList
+            let added = Set.difference currNames prevNames
+            let removed = Set.difference prevNames currNames
+            let changed =
+                canvasDocs
+                |> List.filter (fun doc ->
+                    previous |> List.exists (fun prev -> prev.Filename = doc.Filename && prev.ContentHash <> doc.ContentHash))
+                |> List.map _.Filename
+            if not (Set.isEmpty added) then
+                let names = added |> String.concat ", "
+                Log.log "CanvasScanner" $"Added in {branch}: {names}"
+            if not (Set.isEmpty removed) then
+                let names = removed |> String.concat ", "
+                Log.log "CanvasScanner" $"Removed from {branch}: {names}"
+            if not (List.isEmpty changed) then
+                let names = changed |> String.concat ", "
+                Log.log "CanvasScanner" $"Changed in {branch}: {names}"
+            agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
+
         | RefreshBeads(repoId, path) ->
             let! beads = BeadsStatus.getBeadsSummary path
             agent.Post(UpdateBeads(repoId, path, beads))
+
+            BeadspaceProvisioner.provisionDashboard path beads
+            |> Option.iter (Log.log "BeadspaceProvisioner")
 
         | RefreshCodingTool(repoId, path) ->
             let result = CodingToolStatus.getRefreshData path
@@ -520,6 +557,117 @@ let buildRootPaths (worktreeRoots: string list) =
     |> List.map (fun root -> PathUtils.toRepoId root, root)
     |> Map.ofList
 
+module CanvasWatchers =
+    /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
+    /// declarations are the primary attribution path; the scanner only fills the gap for docs
+    /// with no declared owner, and only when it can do so *unambiguously* — i.e. exactly one
+    /// session is registered for the worktree. Zero or many registered sessions (or a single
+    /// anonymous `SessionId = None` registration) leave the doc unowned. This replaces the
+    /// previous last-registered attribution (`getSessionForWorktree`) that credited every
+    /// changed doc to whichever session registered last — the misattribution bug that
+    /// cross-credited docs whenever two sessions shared a worktree.
+    let fallbackOwner (sessions: CanvasBridge.SessionEntry list) : string option =
+        match sessions with
+        | [ single ] -> single.SessionId
+        | _ -> None
+
+    /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. A doc is
+    /// attributed to the worktree's single registered session only when it is new-or-changed
+    /// (relative to the watcher's previous baseline) *and* has no declared owner. Ownership is
+    /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so a doc that already has an owner —
+    /// declared via the endpoint or previously attributed — is skipped: the scanner never
+    /// overwrites it. With zero or many registered sessions, nothing is attributed.
+    let attributeChangedDocs
+        (sessions: CanvasBridge.SessionEntry list)
+        (worktreePath: string)
+        (previousDocs: CanvasDoc list)
+        (currentDocs: CanvasDoc list)
+        =
+        match fallbackOwner sessions with
+        | None -> ()
+        | Some sessionId ->
+            let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
+            currentDocs
+            |> List.iter (fun doc ->
+                let isNewOrChanged =
+                    match prevByName |> Map.tryFind doc.Filename with
+                    | None -> true
+                    | Some prevHash -> prevHash <> doc.ContentHash
+                if isNewOrChanged && Option.isNone doc.OwnerSessionId then
+                    CanvasDocOwnership.attribute worktreePath doc.Filename sessionId)
+
+    let reconcile
+        (agent: MailboxProcessor<StateMsg>)
+        (repos: Map<RepoId, PerRepoState>)
+        (current: Map<string, FileSystemWatcher>)
+        =
+        async {
+            let allPaths =
+                repos
+                |> Map.toSeq
+                |> Seq.collect (fun (_, repo) -> repo.KnownPaths)
+                |> Set.ofSeq
+
+            let removed =
+                current
+                |> Map.filter (fun path _ -> not (Set.contains path allPaths))
+
+            removed |> Map.iter (fun path watcher ->
+                try watcher.Dispose()
+                with _ -> ()
+                Log.log "CanvasWatcher" $"Disposed watcher for {Path.GetFileName(path)}")
+
+            let surviving = current |> Map.filter (fun path _ -> Set.contains path allPaths)
+
+            let repoIdByPath =
+                repos
+                |> Map.toSeq
+                |> Seq.collect (fun (repoId, repo) -> repo.KnownPaths |> Seq.map (fun p -> p, repoId))
+                |> Map.ofSeq
+
+            let newPaths = Set.difference allPaths (current |> Map.keys |> Set.ofSeq)
+
+            let! added =
+                newPaths
+                |> Set.toList
+                |> List.map (fun path ->
+                    async {
+                        let repoId = repoIdByPath |> Map.find path
+                        // Track previous docs per-watcher to diff on each callback.
+                        // ref cell is isolated per closure — not shared across watchers.
+                        let! initialDocs = CanvasScanner.scan path
+                        let previousDocs = ref initialDocs
+                        let post (canvasDocs: CanvasDoc list) =
+                            // Unsynchronized read-compute-write of previousDocs: handleEvent does Async.Start,
+                            // so two rapid FS events for this path can race the baseline. Tolerated, not locked —
+                            // attribution is idempotent (worst case over-attribution, never loss) and a stale
+                            // baseline self-heals on the next watcher event / periodic RefreshGit.
+                            let prev = previousDocs.Value
+                            // Fallback-only attribution: explicit /api/canvas/attribute declarations are the
+                            // primary path. The scanner only attributes a no-owner changed doc when exactly one
+                            // session is registered for the worktree — never the old last-registered guess that
+                            // misattributed every changed doc whenever two sessions shared a worktree.
+                            attributeChangedDocs (CanvasBridge.sessionsForWorktree path) path prev canvasDocs
+                            previousDocs.Value <- canvasDocs
+                            agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
+                        return
+                            CanvasScanner.tryCreateWatcher post path
+                            |> Option.map (fun watcher ->
+                                Log.log "CanvasWatcher" $"Created watcher for {Path.GetFileName(path)}"
+                                path, watcher)
+                    })
+                |> Async.Sequential
+
+            let added =
+                added |> Array.toList |> List.choose id |> Map.ofList
+
+            return Map.fold (fun acc k v -> Map.add k v acc) surviving added
+        }
+
+    let disposeAll (watchers: Map<string, FileSystemWatcher>) =
+        watchers |> Map.iter (fun _ watcher ->
+            try watcher.Dispose() with _ -> ())
+
 let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
     let rootPaths = buildRootPaths worktreeRoots
 
@@ -531,13 +679,18 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
     |> Map.iter (fun repoId _ ->
         agent.Post(UpdateWorktreeList(repoId, [])))
 
-    let rec loop (lastRuns: Map<RefreshTask, DateTimeOffset>) =
+    /// Mutable ref for the latest canvas file watchers, shared between the reconcile
+    /// callback and the main scheduler loop so watcher updates are visible across iterations.
+    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
         async {
             let! state = agent.PostAndAsyncReply(GetState)
 
             let repos =
                 if Map.isEmpty state.Repos then initialRepos
                 else state.Repos
+
+            let! watchers = CanvasWatchers.reconcile agent repos watchers
+            latestWatchers.Value <- watchers
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
@@ -566,17 +719,23 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 | _ -> ()
 
                 let updatedRuns = lastRuns |> Map.add task now
-                return! loop updatedRuns
+                return! loop latestWatchers updatedRuns watchers
             | None ->
                 let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
-                return! loop lastRuns
+                return! loop latestWatchers lastRuns watchers
         }
 
     let startup =
         async {
             let! lastRuns = runInitialBurst agent rootPaths
-            return! loop lastRuns
+            let! state = agent.PostAndAsyncReply(GetState)
+            let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
+            let latestWatchers = ref initialWatchers
+            try
+                return! loop latestWatchers lastRuns latestWatchers.Value
+            finally
+                CanvasWatchers.disposeAll latestWatchers.Value
         }
 
     Async.Start(startup, ct)

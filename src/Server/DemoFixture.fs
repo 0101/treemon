@@ -156,7 +156,7 @@ let private wtAzDoMain: WorktreeStatus =
       Branch = "main"
       LastCommitMessage = "Merge PR #4198: Update dependencies to latest stable"
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
-      Beads = { Open = 0; InProgress = 0; Closed = 12 }
+      Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
       CodingTool = Idle
       CodingToolProvider = None
       LastUserMessage = None
@@ -167,14 +167,15 @@ let private wtAzDoMain: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = true
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 let private wtRetryLogic: WorktreeStatus =
     { Path = azDoPath "feature-retry"
       Branch = "feature/retry-logic"
       LastCommitMessage = "Add exponential backoff to blob storage retries"
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
-      Beads = { Open = 3; InProgress = 1; Closed = 5 }
+      Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
       CodingTool = Working
       CodingToolProvider = Some Claude
       LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
@@ -185,14 +186,15 @@ let private wtRetryLogic: WorktreeStatus =
       HasActiveSession = true
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
       Branch = "refactor/config-loading"
       LastCommitMessage = "Extract config validation into separate module"
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
-      Beads = { Open = 1; InProgress = 1; Closed = 3 }
+      Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
       CodingTool = Working
       CodingToolProvider = Some Claude
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
@@ -203,14 +205,15 @@ let private wtConfigLoading: WorktreeStatus =
       HasActiveSession = true
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
       Branch = "feature/auth-middleware"
       LastCommitMessage = "Add JWT validation and claims extraction"
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
-      Beads = { Open = 1; InProgress = 0; Closed = 5 }
+      Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       CodingTool = Done
       CodingToolProvider = Some Copilot
       LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
@@ -221,14 +224,15 @@ let private wtAuthMiddleware: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 let private wtArchived: WorktreeStatus =
     { Path = azDoPath "old-migration"
       Branch = "feature/db-migration"
       LastCommitMessage = "Complete database migration script v2"
       LastCommitTime = baseTimestamp.AddHours(-48.0)
-      Beads = { Open = 0; InProgress = 0; Closed = 7 }
+      Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
       CodingTool = Done
       CodingToolProvider = Some Claude
       LastUserMessage = None
@@ -239,7 +243,8 @@ let private wtArchived: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = true }
+      IsArchived = true
+      CanvasDocs = [] }
 
 let private wtGithubMain: WorktreeStatus =
     { Path = githubPath "main"
@@ -257,14 +262,15 @@ let private wtGithubMain: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = true
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 let private wtStreaming: WorktreeStatus =
     { Path = githubPath "streaming"
       Branch = "feature/streaming-agg"
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
-      Beads = { Open = 2; InProgress = 2; Closed = 4 }
+      Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
       CodingTool = Working
       CodingToolProvider = Some Copilot
       LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
@@ -275,14 +281,15 @@ let private wtStreaming: WorktreeStatus =
       HasActiveSession = true
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
       Branch = "fix/csv-parser"
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
-      Beads = { Open = 0; InProgress = 0; Closed = 2 }
+      Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       CodingTool = Done
       CodingToolProvider = Some Copilot
       LastUserMessage = None
@@ -293,7 +300,8 @@ let private wtCsvFix: WorktreeStatus =
       HasActiveSession = false
       HasTestFailureLog = false
       IsMainWorktree = false
-      IsArchived = false }
+      IsArchived = false
+      CanvasDocs = [] }
 
 // --- Scheduler footer (all 6 categories populated) ---
 
@@ -348,7 +356,9 @@ let private baseDashboard: DashboardResponse =
       DeployBranch = None
       SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code"
-      CollapsedRepos = Set.empty }
+      CollapsedRepos = Set.empty
+      CanvasPaneOpen = false
+      CanvasPosition = CanvasPosition.Right }
 
 let private baseFixture: FixtureData =
     { Worktrees = baseDashboard
@@ -459,7 +469,7 @@ let private f11 =
 let private f12 =
     f11
     |> withRetry (fun wt ->
-        { wt with Beads = { Open = 2; InProgress = 1; Closed = 6 } })
+        { wt with Beads = { Open = 2; InProgress = 1; Blocked = 0; Closed = 6 } })
     |> withCpu 42.0 14200
 
 // --- Frame list ---

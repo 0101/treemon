@@ -12,6 +12,11 @@
     <Compile Include="ArchiveViews.fs" />
     <Compile Include="ActionButtons.fs" />
     <Compile Include="ConfirmModal.fs" />
+    <Compile Include="CanvasPane.fs" />
+    <Compile Include="CanvasAwareness.fs" />
+    <Compile Include="CanvasState.fs" />
+    <Compile Include="AppTypes.fs" />
+    <Compile Include="CanvasUpdate.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 

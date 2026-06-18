@@ -40,6 +40,14 @@
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
+    <Compile Include="CanvasTestHelpers.fs" />
+    <Compile Include="CanvasPaneTests.fs" />
+    <Compile Include="CanvasPhase4Tests.fs" />
+    <Compile Include="CanvasAwarenessTests.fs" />
+    <Compile Include="CanvasBridgeTests.fs" />
+    <Compile Include="BeadspaceCanvasTests.fs" />
+    <Compile Include="BeadspaceProvisionerTests.fs" />
+    <Compile Include="CanvasDocServerTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 

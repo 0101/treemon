@@ -282,7 +282,8 @@ type SortWorktreesTests() =
           HasActiveSession = false
           HasTestFailureLog = false
           IsMainWorktree = false
-          IsArchived = false }
+          IsArchived = false
+          CanvasDocs = [] }
 
     let baseTime = DateTimeOffset(2025, 6, 1, 12, 0, 0, TimeSpan.Zero)
 

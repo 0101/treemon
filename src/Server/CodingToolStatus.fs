@@ -155,6 +155,7 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
         $"Please fix the failing tests. See the test failure report in {TestFailureLog.relPath} for details."
     | ConfigureTests, _ -> configureTestsPrompt "the repo root"
     | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
+    | CanvasSession prompt, _ -> prompt
 
 let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with

@@ -107,6 +107,23 @@ let withTempFile (prefix: string) (content: string) (action: string -> 'a) =
     finally
         if File.Exists(tempFile) then File.Delete(tempFile)
 
+/// Run `action` with the process CWD swapped to a throwaway temp directory, then
+/// restore and delete it. Tests that persist relative to the current directory
+/// (e.g. CanvasDocOwnership.attribute writes data/canvas-owners.json under CWD) use
+/// this so they never touch the real data file. CWD is process-global, so callers
+/// must stay non-parallel (the canvas fixtures are [<NonParallelizable>]).
+let withTempCwd (action: unit -> unit) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"treemon-cwd-test-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    let original = Environment.CurrentDirectory
+    Environment.CurrentDirectory <- tempDir
+
+    try
+        action ()
+    finally
+        Environment.CurrentDirectory <- original
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
+
 let runAsync (a: Async<'T>) =
     Async.RunSynchronously(a, timeout = 30_000)
 
@@ -136,3 +153,25 @@ let killOrphansOnPort (port: int) =
                 ())
     with ex ->
         TestContext.Error.WriteLine($"[Cleanup] Failed to scan port {port}: {ex.Message}")
+
+/// Reserve `count` distinct free loopback TCP ports by briefly binding ephemeral sockets
+/// (port 0 lets the OS assign a free port). All listeners are held open at once so the ports
+/// returned by a single call are guaranteed distinct from each other, then released for the
+/// caller to bind. Distinctness is only guaranteed within one call, so fixtures that each
+/// reserve ports must not run in parallel (the smoke fixtures are [<NonParallelizable>]).
+/// Use this instead of hardcoded ports so test servers never collide with a running production
+/// instance — and never need to free a port by killing another process.
+let getFreeTcpPorts (count: int) : int list =
+    let listeners =
+        List.init count (fun _ ->
+            let listener = new Net.Sockets.TcpListener(Net.IPAddress.Loopback, 0)
+            listener.Start()
+            listener)
+
+    let ports =
+        listeners |> List.map (fun l -> (l.LocalEndpoint :?> Net.IPEndPoint).Port)
+
+    listeners |> List.iter (fun l -> l.Stop())
+    ports
+
+let getFreeTcpPort () = getFreeTcpPorts 1 |> List.head

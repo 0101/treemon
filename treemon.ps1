@@ -459,6 +459,39 @@ function Install-Skill {
     }
 }
 
+function Install-Extension {
+    $src = Join-Path $PSScriptRoot "src" "Extension"
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "canvas-bridge"
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
+    Copy-Item (Join-Path $src "package.json") $dest -Force
+    Write-Host "Canvas bridge extension installed to $dest" -ForegroundColor Green
+
+    # Install canvas authoring skill
+    $skillSource = Join-Path $src "skill" "SKILL.md"
+    if (Test-Path $skillSource) {
+        $installed = @()
+
+        $copilotDir = Join-Path $HOME ".copilot" "skills" "canvas"
+        if (Test-Path (Join-Path $HOME ".copilot")) {
+            if (-not (Test-Path $copilotDir)) { New-Item -ItemType Directory -Path $copilotDir | Out-Null }
+            Copy-Item $skillSource (Join-Path $copilotDir "SKILL.md") -Force
+            $installed += "GitHub Copilot CLI"
+        }
+
+        $claudeDir = Join-Path $HOME ".claude" "skills" "canvas"
+        if (Test-Path (Join-Path $HOME ".claude")) {
+            if (-not (Test-Path $claudeDir)) { New-Item -ItemType Directory -Path $claudeDir | Out-Null }
+            Copy-Item $skillSource (Join-Path $claudeDir "SKILL.md") -Force
+            $installed += "Claude Code"
+        }
+
+        if ($installed.Count -gt 0) {
+            $installed | ForEach-Object { Write-Host "  Canvas skill installed for $_" -ForegroundColor Green }
+        }
+    }
+}
+
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
     Build-Frontend
@@ -466,6 +499,7 @@ function Deploy-Frontend {
 
     try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
+    try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
 
     $runningPid = Get-RunningPid
     if ($runningPid) {

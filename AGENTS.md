@@ -78,6 +78,7 @@ This project uses [focused-review](https://github.com/0101/focused-review) for a
 |---|---|
 | Production server | 5000 |
 | Dev server (API) | 5001 |
+| Canvas doc server | 5002 |
 | Dev client (Vite) | 5174 |
 
 ## Operations

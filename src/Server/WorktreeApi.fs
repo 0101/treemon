@@ -1,6 +1,7 @@
 module Server.WorktreeApi
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open System.Text.RegularExpressions
 open Shared
@@ -9,11 +10,30 @@ open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 
+let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
+
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
         let json = File.ReadAllText(path)
         let converter = Fable.Remoting.Json.FableJsonConverter()
-        Ok(JsonConvert.DeserializeObject<FixtureData>(json, converter))
+        let data = JsonConvert.DeserializeObject<FixtureData>(json, converter)
+        // Sanitize null lists — Fable.Remoting client can't deserialize null as F# list
+        let sanitized =
+            { data with
+                Worktrees =
+                    { data.Worktrees with
+                        Repos =
+                            data.Worktrees.Repos
+                            |> List.map (fun r ->
+                                { r with
+                                    Worktrees =
+                                        r.Worktrees
+                                        |> List.map (fun wt ->
+                                            { wt with
+                                                CanvasDocs =
+                                                    if obj.ReferenceEquals(wt.CanvasDocs, null) then []
+                                                    else wt.CanvasDocs }) }) } }
+        Ok sanitized
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
 
@@ -40,7 +60,31 @@ let readOnlyApi
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
-      resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" } }
+      saveCanvasPaneOpen = fun _ -> async { return () }
+      saveCanvasPosition = fun _ -> async { return () }
+      resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
+      sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
+      archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
+      saveLastViewedHashes = fun _ -> async { return () }
+      loadLastViewedHashes = fun () -> async { return Map.empty }
+      getBridgeLiveness = fun _ -> async { return Map.empty } }
+
+let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
+    let path = WorktreePath.value request.WorktreePath
+    asyncResult {
+        let! sourcePath =
+            Server.PathUtils.validateCanvasPath path request.Filename
+            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
+
+        if not (File.Exists sourcePath) then
+            return! Error $"File not found: {request.Filename}"
+
+        let canvasDir = Path.Combine(path, ".agents", "canvas")
+        let archiveDir = Path.Combine(canvasDir, "archive")
+        Directory.CreateDirectory archiveDir |> ignore
+        let destPath = Path.Combine(archiveDir, request.Filename)
+        File.Move(sourcePath, destPath, overwrite = true)
+    }
 
 let private assembleFromState
     (activeSessions: Set<string>)
@@ -81,7 +125,8 @@ let private assembleFromState
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
-        |> Option.defaultValue false }
+        |> Option.defaultValue false
+      CanvasDocs = repo.CanvasData |> Map.tryFind wt.Path |> Option.defaultValue [] }
 
 type WorktreeContext =
     { Worktree: GitWorktree.WorktreeInfo
@@ -164,7 +209,7 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
-let private writeCollapsedRepos (repos: RepoId list) =
+let private updateGlobalConfig (description: string) (update: System.Text.Json.Nodes.JsonObject -> unit) =
     let configPath = globalConfigPath ()
     try
         let dir = Path.GetDirectoryName(configPath)
@@ -176,13 +221,79 @@ let private writeCollapsedRepos (repos: RepoId list) =
                 with _ -> System.Text.Json.Nodes.JsonObject()
             else System.Text.Json.Nodes.JsonObject()
 
-        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
-        root["collapsedRepos"] <- repoArray
+        update root
 
         let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
         File.WriteAllText(configPath, root.ToJsonString(options))
     with ex ->
-        Log.log "Config" $"Failed to save collapsed repos: {ex.Message}"
+        Log.log "Config" $"Failed to save {description}: {ex.Message}"
+
+let private writeCollapsedRepos (repos: RepoId list) =
+    updateGlobalConfig "collapsed repos" (fun root ->
+        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
+        root["collapsedRepos"] <- repoArray)
+
+let private readCanvasPaneOpen () : bool =
+    withConfigDocument false (fun root ->
+        match root.TryGetProperty("canvasPaneOpen") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.True -> true
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.False -> false
+        | _ -> false)
+
+let private writeCanvasPaneOpen (isOpen: bool) =
+    updateGlobalConfig "canvas pane open state" (fun root ->
+        root["canvasPaneOpen"] <- System.Text.Json.Nodes.JsonValue.Create(isOpen))
+
+let private readCanvasPosition () : CanvasPosition =
+    withConfigDocument CanvasPosition.Right (fun root ->
+        match root.TryGetProperty("canvasPosition") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String ->
+            match prop.GetString() with
+            | "left" -> CanvasPosition.Left
+            | "right" -> CanvasPosition.Right
+            | "top" -> CanvasPosition.Top
+            | "bottom" -> CanvasPosition.Bottom
+            | _ -> CanvasPosition.Right
+        | _ -> CanvasPosition.Right)
+
+let private writeCanvasPosition (position: CanvasPosition) =
+    let value =
+        match position with
+        | CanvasPosition.Left -> "left"
+        | CanvasPosition.Right -> "right"
+        | CanvasPosition.Top -> "top"
+        | CanvasPosition.Bottom -> "bottom"
+    updateGlobalConfig "canvas position" (fun root ->
+        root["canvasPosition"] <- System.Text.Json.Nodes.JsonValue.Create(value))
+
+let private readLastViewedHashes () : Map<string, Map<string, string>> =
+    withConfigDocument Map.empty (fun root ->
+        match root.TryGetProperty("lastViewedHashes") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Object ->
+            prop.EnumerateObject()
+            |> Seq.choose (fun worktreeProp ->
+                if worktreeProp.Value.ValueKind = System.Text.Json.JsonValueKind.Object then
+                    let fileHashes =
+                        worktreeProp.Value.EnumerateObject()
+                        |> Seq.choose (fun fileProp ->
+                            if fileProp.Value.ValueKind = System.Text.Json.JsonValueKind.String
+                            then Some (fileProp.Name, fileProp.Value.GetString())
+                            else None)
+                        |> Map.ofSeq
+                    Some (worktreeProp.Name, fileHashes)
+                else None)
+            |> Map.ofSeq
+        | _ -> Map.empty)
+
+let private writeLastViewedHashes (hashes: Map<string, Map<string, string>>) =
+    updateGlobalConfig "last viewed hashes" (fun root ->
+        let outerObj = System.Text.Json.Nodes.JsonObject()
+        hashes |> Map.iter (fun worktreePath fileHashes ->
+            let innerObj = System.Text.Json.Nodes.JsonObject()
+            fileHashes |> Map.iter (fun filename hash ->
+                innerObj[filename] <- System.Text.Json.Nodes.JsonValue.Create(hash))
+            outerObj[worktreePath] <- innerObj)
+        root["lastViewedHashes"] <- outerObj)
 
 let private getEditorConfig () =
     let config = readGlobalConfig ()
@@ -241,7 +352,9 @@ let getWorktrees
               DeployBranch = deployBranch
               SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd
-              CollapsedRepos = readCollapsedRepos () }
+              CollapsedRepos = readCollapsedRepos ()
+              CanvasPaneOpen = readCanvasPaneOpen ()
+              CanvasPosition = readCanvasPosition () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -375,7 +488,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos () } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -554,6 +667,8 @@ let worktreeApi
                   })
           reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
+          saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
+          saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {
@@ -563,4 +678,59 @@ let worktreeApi
                       let sessionId = CodingToolStatus.getLastSessionId provider path
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
-                  }) }
+                  })
+          sendCanvasMessage = fun request ->
+              async {
+                  let! result = CanvasBridge.sendMessage request
+                  match result with
+                  | CanvasMessageResult.Queued ->
+                      let path = WorktreePath.value request.WorktreePath
+                      let guardKey = path
+                      if canvasSpawnInFlight.TryAdd(guardKey, true) then
+                          try
+                              let! owner = CanvasDocOwnership.getOwner path request.Filename
+                              let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                              let provider = resolveProvider state path
+                              // Open a new tab in the live session window when one is tracked, and
+                              // spawn only when none exists (launchAction semantics). This path is
+                              // reached automatically by a canvas-iframe postMessage and has no
+                              // resume identity to preserve, so it must never kill a live session
+                              // window by path the way spawnSession (via spawnAndTrack) does.
+                              let startOrContinueSession () =
+                                  async {
+                                      let prompt = CanvasPrompt.continueWorking path request.Filename
+                                      let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                                      let! _ = SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString
+                                      ()
+                                  }
+                              match owner with
+                              | Some ownerSessionId ->
+                                  // Resume intentionally uses spawnSession (kill-by-path then respawn),
+                                  // mirroring the user-initiated resumeSession flow: replacing the
+                                  // worktree's window with a fresh resume of the owner session is the
+                                  // desired behavior when there is a resume identity to preserve.
+                                  Log.log "API" $"sendCanvasMessage: resuming owner session {ownerSessionId} for {request.Filename}"
+                                  let inv = CodingToolCli.build provider (CodingToolCli.Resume (Some ownerSessionId))
+                                  let! resumeResult = SessionManager.spawnSession sessionAgent request.WorktreePath inv.AsShellString
+                                  match resumeResult with
+                                  | Ok () ->
+                                      Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
+                                  | Error err ->
+                                      Log.log "API" $"sendCanvasMessage: resume failed ({err}), starting/continuing session for {request.Filename}"
+                                      do! startOrContinueSession ()
+                              | None ->
+                                  Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, starting/continuing session"
+                                  do! startOrContinueSession ()
+                          finally
+                              canvasSpawnInFlight.TryRemove(guardKey) |> ignore
+                      else
+                          Log.log "API" $"sendCanvasMessage: resume/spawn already in flight for {path}, skipping"
+                  | _ -> ()
+                  return result
+              }
+          archiveCanvasDoc = fun req ->
+              withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
+                  archiveCanvasDocImpl req)
+          saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
+          loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
+          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths } }
