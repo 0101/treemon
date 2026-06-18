@@ -747,3 +747,132 @@ type ScannerFallbackAttributionTests() =
 
             Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "stable.html"), Is.EqualTo None,
                 "Attribution is change-gated: an unchanged doc is left as-is"))
+
+
+// ── Verification tm-canvas48-gbjq: owner-correct canvas routing (multi-session) ──────────────
+// In-process integration of the 4-step verification scenario through the REAL CanvasBridge
+// registry + CanvasDocOwnership, with two loopback HTTP sinks standing in for the agent inject
+// bridges L_A / L_B. Each test maps to numbered step(s) in the task description and asserts the
+// observable OUTCOME (which inject URL actually received the POST), not just the result code.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+// CWD-mutating (withTempCwd writes data/canvas-owners.json) and port-reserving (getFreeTcpPorts):
+// keep non-parallel for the same reasons as OwnerRoutingTests above.
+[<NonParallelizable>]
+type VerifyGbjqOwnerCorrectRoutingTests() =
+
+    // Steps 1 & 2: two sessions A and B share worktree W; a.html is owned by A, b.html by B.
+    // a.html's message must reach ONLY L_A; b.html's must reach ONLY L_B; neither disturbs the other.
+    [<Test>]
+    member _.``gbjq Steps 1-2 - each doc routes to its declared owner; the co-located non-owner gets nothing``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use lA = new HttpSink(ports[0])
+            use lB = new HttpSink(ports[1])
+            lA.Start()
+            lB.Start()
+
+            let w = uniquePath "gbjq12"
+            let sidA = uniqueSid "A"
+            let sidB = uniqueSid "B"
+
+            // registerSession {W, injectUrl=L_A, sessionId=A} and {W, L_B, B}; attribute a->A, b->B.
+            registerSession w lA.Url (Some sidA)
+            registerSession w lB.Url (Some sidB)
+            Server.CanvasDocOwnership.attribute w "a.html" sidA
+            Server.CanvasDocOwnership.attribute w "b.html" sidB
+
+            // Step 1: sendMessage {W,'a.html',p1} -> L_A gets exactly one POST with p1; L_B gets zero.
+            let r1 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p1" })
+            Assert.That(r1, Is.EqualTo(CanvasMessageResult.Ok), "Step1: owner A live -> Ok")
+            Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "Step1: L_A gets exactly one POST with p1")
+            Assert.That(lB.Bodies, Is.Empty, "Step1: L_B gets zero (FAIL if L_B receives it)")
+
+            // Step 2: sendMessage {W,'b.html',p2} -> L_B receives p2; L_A unchanged.
+            let r2 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "b.html"; Payload = "p2" })
+            Assert.That(r2, Is.EqualTo(CanvasMessageResult.Ok), "Step2: owner B live -> Ok")
+            Assert.That(lB.Bodies, Is.EqualTo([ "p2" ]), "Step2: L_B receives p2")
+            Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "Step2: L_A unchanged (still only p1)"))
+
+    // Step 3: with owner A's bridge stopped, a.html's message must QUEUE (never fall back to the
+    // co-located non-owner B). The task's literal wording "drainPending W returns p3" predates the
+    // owner-aware drain (dep tm-canvas48-2uz0 / Decision 1c-i): an anonymous poll may collect only
+    // owner-UNKNOWN messages, so drainPending now returns [] and the owner-bound p3 is re-queued and
+    // recovered when owner A re-registers (drainQueue). Both the queue and the recovery are proven.
+    [<Test>]
+    member _.``gbjq Step 3 - owner offline queues, never cross-routes to non-owner B; owner re-register recovers p3``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 3
+            use lB = new HttpSink(ports[1])
+            lB.Start()
+
+            let w = uniquePath "gbjq3"
+            let sidA = uniqueSid "A"
+            let sidB = uniqueSid "B"
+
+            // Owner A and non-owner B both register live bridges; a.html is owned by A.
+            let lA = new HttpSink(ports[0])
+
+            try
+                lA.Start()
+                registerSession w lA.Url (Some sidA)
+                registerSession w lB.Url (Some sidB)
+                Server.CanvasDocOwnership.attribute w "a.html" sidA
+
+                // Sanity: while A is live, a.html delivers to L_A only (precondition for "Stop L_A").
+                let warm = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p1" })
+                Assert.That(warm, Is.EqualTo(CanvasMessageResult.Ok), "owner A live -> Ok")
+                Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "owner A receives p1")
+                Assert.That(lB.Bodies, Is.Empty, "non-owner B receives nothing")
+            finally
+                // Stop L_A (owner offline): the listener dies; A's registry entry remains.
+                (lA :> IDisposable).Dispose()
+
+            // sendMessage {W,'a.html',p3}: owner A is unreachable -> Queued. FAIL if Ok or delivered to B.
+            let r3 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p3" })
+            Assert.That(r3, Is.EqualTo(CanvasMessageResult.Queued), "Step3: owner offline -> Queued (FAIL if Ok)")
+            Thread.Sleep 250 // let any (incorrect) cross-route POST land before asserting absence
+            Assert.That(lB.Bodies, Is.Empty, "Step3: L_B (non-owner) must NEVER receive p3")
+
+            // Literal-step note: drainPending (anonymous heartbeat poll) returns [] under owner-aware
+            // drain; p3 is owner-bound and is re-queued for owner A to recover. Recorded for the report.
+            let anonDrain = drainPending w
+            TestContext.WriteLine($"gbjq Step3: drainPending(anonymous) returned {anonDrain} (owner-aware: owner-bound p3 re-queued)")
+            Assert.That(anonDrain, Is.Empty,
+                "Step3: owner-aware drainPending must NOT hand an owner-bound message to an anonymous poll")
+
+            // Recovery (spec-correct): owner A re-registers a live bridge -> drainQueue delivers p3 to A, never B.
+            use lA2 = new HttpSink(ports[2])
+            lA2.Start()
+            registerSession w lA2.Url (Some sidA)
+
+            let deadline = DateTime.UtcNow.AddSeconds 5.0
+            let rec waitForDelivery () =
+                if List.isEmpty lA2.Bodies && DateTime.UtcNow < deadline then
+                    Thread.Sleep 50
+                    waitForDelivery ()
+
+            waitForDelivery ()
+            Assert.That(lA2.Bodies, Is.EqualTo([ "p3" ]), "Step3: owner A re-register drains p3 to A (message not lost)")
+            Assert.That(lB.Bodies, Is.Empty, "Step3: B still never received p3"))
+
+    // Step 4: doc c.html has NO declared owner and exactly one live session (B). Single-session
+    // back-compat must DELIVER it to L_B (FAIL if Queued/dropped). isSessionAlive is time-based, so
+    // "only B live" means exactly one session is registered for the worktree.
+    [<Test>]
+    member _.``gbjq Step 4 - no-owner doc with exactly one live session delivers to it (single-session back-compat)``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use lB = new HttpSink(ports[0])
+            lB.Start()
+
+            let w = uniquePath "gbjq4"
+            let sidB = uniqueSid "B"
+
+            // Only B is registered/live; c.html is never attributed -> no owner.
+            registerSession w lB.Url (Some sidB)
+
+            let r4 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "c.html"; Payload = "p4" })
+            Assert.That(r4, Is.EqualTo(CanvasMessageResult.Ok), "Step4: no owner + exactly one live session -> delivered (FAIL if Queued)")
+            Assert.That(lB.Bodies, Is.EqualTo([ "p4" ]), "Step4: c.html delivered to the lone live session L_B"))
