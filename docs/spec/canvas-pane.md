@@ -82,8 +82,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 
 ### Liveness and Session Routing
 
-- Current shipped behavior uses a per-worktree bridge registry keyed by normalized worktree path.
-- Session registration for the same worktree is last-writer-wins.
+- The bridge registry is keyed by `sessionId`, so multiple sessions in one worktree coexist instead of overwriting a single per-worktree slot (see `docs/spec/canvas-doc-ownership.md`).
 - Each doc records its author `sessionId` via `CanvasDocOwnership.fs`.
 - The liveness dot shown in tabs and overview reflects the selected doc's `OwnerSessionId` against `BridgeLiveness`, so liveness is per-doc rather than per-worktree. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
 - When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button — only when the active doc is an `AgentDoc` (starting a session for a server-generated `SystemView` is meaningless).
@@ -102,11 +101,9 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 
 ### Message Queue
 
-- If no session-backed bridge is registered, the server queues the message per worktree and returns `Queued`.
-- The queue keeps at most 10 messages per worktree and expires entries after 5 minutes.
-- Queued messages drain when a session bridge registers and when a poll heartbeat drains pending work.
+- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. Draining is owner-aware — see `docs/spec/canvas-doc-ownership.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
-- The `Waiting` banner clears to `Idle` only when the target worktree's session delivers (a tracked agent doc in that worktree changes, via the pure `CanvasAwareness.clearWaitingOnDelivery`); it is never flipped to `Failed` by a client-side wall-clock timer. The user may dismiss the banner manually, and the server-side queue may silently expire the message after its 5-minute TTL.
+- The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
 
 ### Bridge Protocol
 
@@ -142,12 +139,8 @@ Three layers of state preservation:
 - Without this guard, the iframe unmounts when focus switches, destroying all JS state. On switch-back the iframe remounts fresh, resetting nav tabs (e.g., beadspace "All Issues" jumps to "Dashboard").
 
 **Level 3 — Canvas-wide iframe morph (general case):**
-- On `contentHash` change, the open doc morphs in place instead of reloading the iframe. This applies to `AgentDoc` docs only — a `SystemView` is served without the idiomorph runtime or morph controller and is never sent a morph signal, because it self-refreshes from its own data endpoint (see Canvas Doc Kinds).
-- Scroll position, focused elements, and in-progress inputs stay intact across updates.
-- Implementation: inject idiomorph (~5KB, MIT) plus a morph controller via the existing `CanvasDocServer.fs` `</head>` injection point.
-- The morph controller listens for a `content-updated` postMessage from the parent. On receive, it fetches its own URL (same-origin on `:5002`, bypassing cache), extracts `<body>`, and calls `Idiomorph.morph(document.body, newBody)`.
-- The Elmish client stabilizes the iframe `src` (removes `?v={contentHash}` cache-buster) and sends `content-updated` via postMessage when the hash changes, instead of changing the iframe `src`.
-- The doc server already sets `Cache-Control: no-cache`, so removing the cache-buster query param is safe.
+- On `contentHash` change, the open doc morphs in place (via injected idiomorph) instead of reloading the iframe, so scroll position, focused elements, and in-progress inputs stay intact. The client sends a `content-updated` postMessage on hash change and keeps the iframe `src` stable rather than reloading it.
+- Applies to `AgentDoc` docs only — a `SystemView` is served without the morph runtime and is never sent a morph signal, because it self-refreshes from its own data endpoint (see Canvas Doc Kinds).
 
 **Level 4 — Tab switch persistence:**
 - When switching between canvas doc tabs in the same worktree, keep the previous iframe mounted but hidden (`display: none`) instead of unmounting it.
@@ -206,18 +199,6 @@ Three layers of state preservation:
 - **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetCanvasPosition`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the shared canvas helpers (`activeVisibleDoc`, `isKnownCanvasDoc`, `markVisibleDocCmd`), and the `messageListener` subscription glue move to `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` is now a one-line delegation (`| ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model`). This is **body extraction**, not a `Cmd.map` sub-component split: `update` stays a single function over the flat `Msg`, and each helper takes the whole `Model` and returns `Model * Cmd<Msg>` (data-last `model` parameter). `FocusOverviewCard` stays inline in `App.fs` — it is an overview-card focus arm, not a doc/morph/archive arm, and is outside the moved set. The `isKnownCanvasDoc` consumer in the tests adds `open CanvasUpdate`. Realized line counts: `App.fs` 2015 → 1861 (canvas update logic, ~150 lines, removed); it does **not** reach `main` size (1635) because the canvas **view** code (`canvasEventEntry`, `canvasEventLog`, `focusedWorktreeCanvasDoc`, and the pane-view dispatch wiring) and the canvas params threaded through `worktreeCard`/`renderCard`/`repoSection` remain — a separate view extraction deferred to `docs/spec/future/app-fs-view-extraction.md`. The stale "~430 lines / main size" estimate in the original task conflated this deferred view extraction with the update-arm extraction; only the update arms are in scope here. The structural gate (each canvas arm is a one-line delegation; bodies live in `CanvasUpdate.fs`) is what proves the extraction.
 - **Canvas model slice as a nested record** — the canvas Model-field group is extracted as a nested record `Canvas: CanvasState.CanvasState` on `App.Model` (mirroring the existing `CreateModal`/`ConfirmModal` nesting precedent). The four pure helpers (`touchVisitedDoc`, `canvasDocKind`, `activeVisibleDoc`, `markVisibleDocCmd`) plus the `MaxLiveIframes` literal live in `src/Client/CanvasState.fs` (compiled before `App.fs`); they take pure slices (`repos`/`focused`/`activeCanvasDoc`) rather than the whole `Model`, and `markVisibleDocCmd` is parameterized over the message constructor so the module needs no concrete `Msg` type. Thin `App.fs` wrappers keep `update` call sites unchanged. This is field-path nesting only — **not** the larger `Cmd.map` sub-component split (no sub-`Msg`/sub-`update`; `update` stays one function), which is out of scope.
 - **Cross-platform canvas doc path** — `CanvasPrompt.continueWorking` (`src/Shared/Types.fs`) builds the canvas-session launch path with forward slashes (`{worktree}/.agents/canvas/{filename}`), which resolve correctly on Windows, Linux, and macOS. `System.IO.Path.Combine` is deliberately not used because `src/Shared` is Fable-compiled to JavaScript and cannot reference `System.IO`.
-
-## Implementation Status
-
-- Shipped: Phase 1-4, multi-doc discovery, overview, toolbar positioning, archive, bridge resilience, awareness, per-doc author routing, liveness indicators, queueing, auto-resume, and review fixes.
-- Shipped: Per-doc author routing is implemented via `CanvasDocOwnership.fs` (refactored to MailboxProcessor).
-- Shipped: Beadspace canvas dashboard — template customization, same-origin `beads-data` endpoint, auto-provisioning, incremental DOM refresh, empty-DB suppression, E2E verification (17 unit + E2E tests).
-- Shipped: Code quality refactors — `CanvasScanner` extracted from `RefreshScheduler`, `CanvasDocServer` extracted from `Program.fs`, `CanvasEventKind` DU replacing bool, tuple pattern matching in `App.fs`.
-- Shipped: Level 2 auto-display guard — suppresses focus-steal when canvas pane is open and showing a doc, preventing iframe unmount and JS state loss.
-- Shipped: Level 3 iframe morph — idiomorph-based DOM morphing on content hash change, morph controller injected via `</head>` injection point.
-- Shipped: Level 4 tab switch persistence — hidden iframes kept mounted across tab switches, LRU eviction at 3 iframes, lazy morph on tab switch.
-- Shipped: Canvas doc kinds (`tm-canvas48-0su`) — `CanvasDocKind` (`AgentDoc | SystemView`) separates the beads dashboard from agent-doc machinery (liveness, Start-session, bridge, morph, awareness, archive all gated on `AgentDoc`; distinct `.canvas-system-tab` for `SystemView`).
-- 🔮 Levels 1-4 of DOM morph and state persistence are shipped. Level 1 (in-page incremental refresh) for beadspace, Level 2 (auto-display guard), Level 3 (canvas-wide iframe morph), Level 4 (tab switch persistence).
 
 ## Related Specs
 

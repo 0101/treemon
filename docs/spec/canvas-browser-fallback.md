@@ -44,33 +44,10 @@ will display the docs.
 
 ### Injected Scripts
 
-**Transport shim** — intercepts `window.parent.postMessage()` calls (which post to `window` itself when no parent frame) and forwards via `fetch POST` to `/_message`:
-```js
-if (window.parent === window) {
-  window.addEventListener('message', function(e) {
-    if (e.source === window && e.data && typeof e.data.action === 'string') {
-      fetch('http://127.0.0.1:PORT/_message', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(e.data)
-      });
-    }
-  });
-}
-```
+Browser-mode docs receive two scripts injected before `</head>`:
 
-**Content-polling reload** — polls `/hash` every 3s and reloads on change:
-```js
-(function() {
-  var lastHash = null;
-  setInterval(function() {
-    fetch(location.href + '/hash').then(r => r.text()).then(function(hash) {
-      if (lastHash && hash !== lastHash) location.reload();
-      lastHash = hash;
-    }).catch(function() {});
-  }, 3000);
-})();
-```
+- **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
+- **Content-polling reload** — polls `/canvas/:filename/hash` every 3s and reloads the page when the hash changes.
 
 ### `onPostToolUse` Hook
 

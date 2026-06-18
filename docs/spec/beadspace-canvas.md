@@ -34,27 +34,15 @@ See `docs/spec/canvas-pane.md` for the generic pane behavior and the full `Agent
 
 ### Beadspace Template Customization
 
-Fork `cameronsjo/beadspace:index.html` (40KB, MIT, vanilla JS) and apply:
-- **Strip the dashboard view and top navigation bar** (`tm-canvas48-dsh`) — the upstream template's second "Dashboard" view (stat cards, status donut, priority/label/type charts, completion %, active-issues and triage panels) and the nav bar that toggled between views are removed. Only the "All Issues" table view remains, always visible via `.view { display: block }` (no nav/`.active` toggle).
-- **Remove Google Fonts** — 3 `<link>` tags; system font fallbacks already defined
-- **Delete light theme** media query — canvas pane is always dark
-- **Remap CSS variables** to Catppuccin Mocha:
-  - `--bg-deep: #1e1e2e`, `--bg-surface: #181825`, `--bg-elevated: #313244`
-  - `--text-primary: #cdd6f4`, `--text-secondary: #bac2de`, `--accent: #cba6f7`
-  - Keep semantic status/priority/type colors as-is (they work on dark backgrounds)
-- **Replace `fetch('issues.json')`** with polling from same-origin endpoint: `fetch(dataUrl)` every 30s, where `dataUrl` is derived from `window.location.pathname`
-- **Add postMessage listener** for `refresh-beads` action
-- **Add issue detail panel** — click a table row to expand a panel showing full description (rendered as text), labels as colored pills, priority/type badges, dependency/dependent counts
+Fork `cameronsjo/beadspace:index.html` (MIT, vanilla JS) and apply:
+- **Strip the dashboard view and top nav bar** (`tm-canvas48-dsh`) — only the "All Issues" table view remains, always visible.
+- **Dark-only theme** — remove Google Fonts and the light-theme media query; remap the CSS variables to Catppuccin Mocha (the canvas pane is always dark), keeping the semantic status/priority/type colors.
+- **Poll a same-origin endpoint** instead of `issues.json` — fetch the `beads-data` URL (derived from `window.location.pathname`) every 30s, and reload on a `refresh-beads` postMessage.
+- **Add an issue detail panel** — clicking a row expands full description, labels, priority/type badges, and dependency counts.
 
 ### Same-Origin Data Endpoint
 
-Add to `CanvasDocServer` (port 5002):
-- Route: `GET /{encodedWorktreePath}/beads-data`
-- Runs `bd list --json --db {path}/.beads/beads.db`
-- Returns `application/json` with `Cache-Control: no-cache`
-- Validates worktree is known (same `isKnownWorktree` check as HTML serving; no filesystem path validation needed since this is a virtual endpoint)
-
-**Data format** — `bd list --json` returns an array of objects with fields: `id`, `title`, `description`, `status` (open/in_progress/blocked/closed), `priority` (int), `issue_type` (task/feature/bug/etc.), `labels` (string array), `created_at`, `updated_at`, `dependency_count`, `dependent_count`. The template JS must be adapted to consume this format (not GitHub Issues format).
+`GET /{encodedWorktreePath}/beads-data` on the canvas doc server (port 5002) runs `bd list --json` against the worktree's `.beads/beads.db` and returns the issue array as `application/json` (`Cache-Control: no-cache`). It validates the worktree is known (the same `isKnownWorktree` check as HTML serving; no path validation is needed for this virtual endpoint). The template consumes the `bd` issue shape, not the GitHub Issues format.
 
 ### Auto-Provisioning
 
@@ -68,13 +56,8 @@ In the refresh scheduler, when scanning worktrees:
 ### Incremental Data Refresh
 
 The template distinguishes the initial render from subsequent polls:
-- **Initial render** (`initialRender`): full DOM build — the issues view (search bar, filter chips, sortable table head, empty `<tbody>`) plus event binding. The default filter chip is set to the most actionable non-empty status via `chooseDefaultFilter`, and chip count badges are populated via `updateFilterCounts`.
-- **Subsequent polls** (`refreshData`): skip entirely when the `/beads-data` payload is byte-identical to the previous fetch; otherwise update only what changed:
-  - Issues table replaces only `<tbody>` (via `renderIssuesTable`), not the entire table or container — the search bar, filter chips, and table head DOM are left intact
-  - Filter chip count badges are recomputed in place via `updateFilterCounts` (the chip DOM is reused, only badge text changes)
-  - Scroll position of the `.view` container saved/restored around the `<tbody>` replacement
-  - Filter chip state, sort selection, and search input preserved (driven by `tableState`)
-  - Expanded detail panel re-expanded if `tableState.expandedId` is still present in the new data
+- **Initial render**: full DOM build (search bar, filter chips, sortable table head, empty body) plus event binding; the default filter is the most actionable non-empty status (WIP → open → blocked → closed).
+- **Subsequent polls**: skipped entirely when the payload is byte-identical to the previous fetch; otherwise only the table body and the filter-chip counts re-render in place. Scroll position, filter/sort selections, search input, and any expanded detail panel are preserved across the refresh.
 
 ### Key Files
 
