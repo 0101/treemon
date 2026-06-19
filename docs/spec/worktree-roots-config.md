@@ -147,6 +147,20 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
   process lifecycle stays in PowerShell — clean separation.
 - **Orphan `~/.treemon/roots.json`** is migrated-then-deleted by the server; `.treemon.config` is
   migrated-then-deleted by `treemon.ps1`.
+- **treemon.ps1 §7 implementation edge cases.** Three robustness details settled while implementing
+  the shims: (1) **Migration file deleted only after a confirmed start.** `Read-LegacyRoots` is a
+  pure reader; `Start-ProductionServer` removes `.treemon.config` *after* the post-launch
+  `HasExited` success check (by which point the server has persisted the roots into the global
+  config), so a `dotnet publish` failure or an immediate server crash can never lose the migrated
+  roots. (2) **Null/empty roots are filtered before building args.** `start`/`dev`/`restart` pass
+  `$WorktreeRoots` straight through, but with `[ValueFromRemainingArguments]` an omitted path binds
+  the parameter to `$null` (and `@($null)` is a *1-element* array), so `Start-ProductionServer`/
+  `Start-DevMode` normalize via `@($Roots | Where-Object { $_ })` — otherwise the "no path" feature
+  threw on `$null.TrimEnd()` (and `restart` would kill prod then throw). (3) **add/remove restart
+  only on CLI success.** The shims gate the restart on `tm`'s exit code (`$tmExit -eq 0`) so a
+  rejected add/remove (bad path, server down) doesn't needlessly bounce prod; `Invoke-Tm` routes
+  the CLI's stdout to the host (`| Out-Host`) and returns only `[int]$LASTEXITCODE`, so the exit
+  code stays a scalar and the CLI's own messages aren't swallowed.
 - **Config-dir test isolation uses `TREEMON_CONFIG_DIR`, not a fixture-set `USERPROFILE`/`HOME`.**
   The spec preferred redirecting `USERPROFILE`/`HOME`, but on Windows .NET 9
   `Environment.GetFolderPath(SpecialFolder.UserProfile)` reads the user token, **not** the env

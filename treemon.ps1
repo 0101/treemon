@@ -13,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $PidFile = Join-Path $ScriptDir ".treemon.pid"
 $ConfigFile = Join-Path $ScriptDir ".treemon.config"
+$TmScript = Join-Path $ScriptDir "tm.ps1"
 $LogDir = Join-Path $ScriptDir "logs"
 $LogFile = Join-Path $LogDir "treemon-prod.log"
 $PublishDir = Join-Path $ScriptDir ".publish"
@@ -27,37 +28,61 @@ if (-not $Command) {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Commands:" -ForegroundColor White
-    Write-Host "  start <path> [<path>...]   Start production server (auto-builds if wwwroot/ is empty)"
+    Write-Host "  start [<path>...]          Start production server (auto-builds if wwwroot/ is empty)"
+    Write-Host "                             No path uses the global config roots (~/.treemon/config.json)"
     Write-Host "  stop                       Stop the production server"
-    Write-Host "  restart                    Stop + start (reuses previously configured roots)"
-    Write-Host "  status                     Show production server status"
+    Write-Host "  restart                    Stop + start (uses the global config roots)"
+    Write-Host "  status                     Show production server status (lists roots via 'tm roots')"
     Write-Host "  log                        Tail the production server log"
-    Write-Host "  dev <path> [<path>...]     Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
+    Write-Host "  dev [<path>...]            Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
     Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
-    Write-Host "  add <path> [<path>...]      Add watched root(s) to config"
+    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (restarts prod if running)"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
-    Write-Host "  remove <path>              Remove a watched root from config"
+    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
     Write-Host "  install-skill              Install the tm CLI skill for AI coding agents"
     exit 0
 }
 
-function Get-SavedConfig {
-    if (Test-Path $ConfigFile) {
+function Read-LegacyRoots {
+    # One-time migration of the legacy PowerShell-managed .treemon.config.
+    # Reads its WorktreeRoots and returns them (or @()). Does NOT delete the file —
+    # Start-ProductionServer removes it only after the server has actually started
+    # (and thus persisted the roots into ~/.treemon/config.json), so a publish/start
+    # failure can't lose the roots.
+    if (-not (Test-Path $ConfigFile)) { return @() }
+
+    $roots = @()
+    try {
         $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
         if ($config.PSObject.Properties.Name -contains "WorktreeRoots") {
-            return @{ WorktreeRoots = @($config.WorktreeRoots) }
+            $roots = @($config.WorktreeRoots | Where-Object { $_ })
         }
-        if ($config.PSObject.Properties.Name -contains "WorktreeRoot") {
-            return @{ WorktreeRoots = @($config.WorktreeRoot) }
-        }
+    } catch {
+        Write-Host "Warning: could not parse legacy .treemon.config; it will be removed after the server starts" -ForegroundColor Yellow
     }
-    return $null
+
+    if ($roots.Count -gt 0) {
+        Write-Host "Migrating worktree roots from .treemon.config into global config" -ForegroundColor Gray
+    }
+    return @($roots)
 }
 
-function Save-Config([string[]]$Roots) {
-    $trimmed = $Roots | ForEach-Object { $_.TrimEnd('\', '/') }
-    @{ WorktreeRoots = @($trimmed) } | ConvertTo-Json | Set-Content $ConfigFile
+function Invoke-Tm([string[]]$TmArgs) {
+    # Thin wrapper around the local tm CLI (src/Cli via tm.ps1). Returns ONLY the
+    # CLI's integer exit code; the CLI's own stdout is routed to the host via Out-Host
+    # so it is not captured into the return value (which would both hide the CLI's
+    # messages and turn the returned exit code into an array). Wrapped in try/catch so
+    # a non-zero CLI exit can never abort treemon.ps1.
+    try {
+        & $TmScript @TmArgs | Out-Host
+        if ($null -eq $LASTEXITCODE) { return 0 }
+        return [int]$LASTEXITCODE
+    } catch {
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { return [int]$LASTEXITCODE }
+        return 1
+    }
 }
 
 function Get-RunningPid {
@@ -67,21 +92,6 @@ function Get-RunningPid {
     $process = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
     if ($process -and -not $process.HasExited) { return [int]$savedPid }
     return $null
-}
-
-function Resolve-WorktreeRoots([string]$Cmd) {
-    if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) { return $WorktreeRoots }
-
-    $config = Get-SavedConfig
-    if ($config) {
-        $roots = $config.WorktreeRoots -join ", "
-        Write-Host "Using previously configured worktree roots: $roots" -ForegroundColor Gray
-        return $config.WorktreeRoots
-    }
-
-    Write-Host "Error: worktree root path is required for first $Cmd" -ForegroundColor Red
-    Write-Host "Usage: .\treemon.ps1 $Cmd <worktree-root-path> [<additional-roots>...]" -ForegroundColor Gray
-    exit 1
 }
 
 function Build-Frontend {
@@ -148,18 +158,27 @@ function Start-ProductionServer([string[]]$Roots) {
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
     "" | Set-Content $LogFile
 
-    Save-Config $Roots
+    # Resolve the roots to launch with. Explicit roots (from the command line) win.
+    # Filter out any $null/empty entries first: with ValueFromRemainingArguments an
+    # omitted path binds the parameter to $null, and @($null) is a 1-element array.
+    # With no roots, migrate a legacy .treemon.config (one-time) so the server persists
+    # it. Empty is valid: the server then resolves roots from its global config.
+    $effectiveRoots = @($Roots | Where-Object { $_ })
+    if ($effectiveRoots.Count -eq 0) {
+        $effectiveRoots = Read-LegacyRoots
+    }
 
     Write-Host "Publishing server..." -ForegroundColor Cyan
     dotnet publish -c Release -o $PublishDir src/Server/Server.fsproj
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 
     $serverExe = Join-Path $PublishDir "Treemon.exe"
-    $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
+    $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
+    $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort" } else { "--port $DefaultPort" }
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $serverExe `
-        -ArgumentList "$rootArgs --port $DefaultPort" `
+        -ArgumentList $serverArgs `
         -WorkingDirectory $ScriptDir `
         -RedirectStandardOutput $LogFile `
         -RedirectStandardError (Join-Path $LogDir "treemon-prod-stderr.log") `
@@ -182,8 +201,17 @@ function Start-ProductionServer([string[]]$Roots) {
         exit 1
     }
 
+    # Server is up — it has resolved+persisted its roots into the global config, so the
+    # legacy .treemon.config (if any) is now safe to retire. Removing it only after a
+    # confirmed start means a publish/start failure never loses the migrated roots.
+    if (Test-Path $ConfigFile) { Remove-Item $ConfigFile -ErrorAction SilentlyContinue }
+
     Write-Host "Production server started (PID: $($process.Id))" -ForegroundColor Green
-    $Roots | ForEach-Object { Write-Host "Monitoring: $_" -ForegroundColor Gray }
+    if ($effectiveRoots.Count -gt 0) {
+        $effectiveRoots | ForEach-Object { Write-Host "Monitoring: $_" -ForegroundColor Gray }
+    } else {
+        Write-Host "Monitoring roots from global config (~/.treemon/config.json)" -ForegroundColor Gray
+    }
     Write-Host "URL: http://localhost:$DefaultPort" -ForegroundColor Gray
     Write-Host "Log: $LogFile" -ForegroundColor Gray
 }
@@ -215,15 +243,24 @@ function Show-Status {
                  elseif ($uptime.Hours -gt 0) { "$($uptime.Hours)h $($uptime.Minutes)m" }
                  else { "$($uptime.Minutes)m $($uptime.Seconds)s" }
 
-    $config = Get-SavedConfig
-
     Write-Host "Production server is running" -ForegroundColor Green
     Write-Host "  PID:     $runningPid"
     Write-Host "  Port:    $DefaultPort"
     Write-Host "  Uptime:  $uptimeStr"
     Write-Host "  URL:     http://localhost:$DefaultPort"
-    if ($config) {
-        $config.WorktreeRoots | ForEach-Object { Write-Host "  Monitor: $_" }
+
+    # Watched roots come from the server (the single source of truth) via `tm roots`.
+    $rootLines = @()
+    try {
+        $rootsOutput = & $TmScript roots --port $DefaultPort 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $rootLines = @($rootsOutput | Where-Object { $_ -and $_.Trim() -and $_.Trim() -ne "No worktree roots configured." })
+        }
+    } catch { }
+    if ($rootLines.Count -gt 0) {
+        $rootLines | ForEach-Object { Write-Host "  Monitor: $_" }
+    } else {
+        Write-Host "  Monitor: (none configured)"
     }
     Write-Host "  Log:     $LogFile"
 }
@@ -293,8 +330,11 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
 }
 
 function Start-DevMode([string[]]$Roots) {
-    $rootArgs = ($Roots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
-    Start-DualProcess -ServerArgs $rootArgs -ModeName "Dev" -ServerLabel "dotnet watch" -MonitorPaths $Roots
+    # Drop any $null/empty entries: an omitted path binds $Roots to $null, and
+    # @($null) is a 1-element array that would call .TrimEnd() on $null below.
+    $cleanRoots = @($Roots | Where-Object { $_ })
+    $rootArgs = ($cleanRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
+    Start-DualProcess -ServerArgs $rootArgs -ModeName "Dev" -ServerLabel "dotnet watch" -MonitorPaths $cleanRoots
 }
 
 function Start-DemoMode {
@@ -311,89 +351,6 @@ function Set-UpstreamRemote([string]$RepoRoot, [string]$RemoteName) {
     $json | Add-Member -NotePropertyName "upstreamRemote" -NotePropertyValue $RemoteName -Force
     $json | ConvertTo-Json -Depth 10 | Set-Content $configPath
     Write-Host "  Upstream remote set to '$RemoteName' for $RepoRoot" -ForegroundColor Green
-}
-
-function Add-Roots([string[]]$NewRoots) {
-    $config = Get-SavedConfig
-    $existing = if ($config) { @($config.WorktreeRoots) } else { @() }
-
-    $added = @()
-    foreach ($root in $NewRoots) {
-        $normalized = (Resolve-Path $root).Path.TrimEnd('\', '/')
-        if ($existing -contains $normalized) {
-            Write-Host "Already monitored: $normalized" -ForegroundColor Yellow
-        } else {
-            $existing += $normalized
-            $added += $normalized
-        }
-
-        if ($Upstream) {
-            Set-UpstreamRemote $normalized $Upstream
-        }
-    }
-
-    if ($added.Count -eq 0 -and -not $Upstream) {
-        Write-Host "No new roots to add" -ForegroundColor Yellow
-        return
-    }
-
-    if ($added.Count -gt 0) {
-        Save-Config $existing
-        $added | ForEach-Object { Write-Host "Added: $_" -ForegroundColor Green }
-    }
-
-    $runningPid = Get-RunningPid
-    if ($runningPid -and $added.Count -gt 0) {
-        Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer $existing
-    }
-}
-
-function Remove-Roots([string[]]$RootsToRemove) {
-    $config = Get-SavedConfig
-    if (-not $config) {
-        Write-Host "No roots configured" -ForegroundColor Yellow
-        return
-    }
-
-    $existing = @($config.WorktreeRoots)
-    $removed = @()
-    $remaining = $existing
-
-    foreach ($root in $RootsToRemove) {
-        $normalized = (Resolve-Path $root).Path.TrimEnd('\', '/')
-        $filtered = @($remaining | Where-Object { $_ -ne $normalized })
-        if ($filtered.Count -eq $remaining.Count) {
-            Write-Host "Root not found: $normalized" -ForegroundColor Yellow
-            Write-Host "Current roots:" -ForegroundColor Gray
-            $existing | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        } else {
-            $remaining = $filtered
-            $removed += $normalized
-        }
-    }
-
-    if ($removed.Count -eq 0) {
-        return
-    }
-
-    if ($remaining.Count -eq 0) {
-        Write-Host "Error: cannot remove the last root" -ForegroundColor Red
-        return
-    }
-
-    Save-Config $remaining
-    $removed | ForEach-Object { Write-Host "Removed: $_" -ForegroundColor Green }
-
-    $runningPid = Get-RunningPid
-    if ($runningPid) {
-        Write-Host "Restarting server to pick up changes..." -ForegroundColor Cyan
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer $remaining
-    }
 }
 
 function Install-TmCommand {
@@ -504,17 +461,9 @@ function Deploy-Frontend {
     $runningPid = Get-RunningPid
     if ($runningPid) {
         Write-Host "Restarting production server..." -ForegroundColor Cyan
-        $config = Get-SavedConfig
-        $roots = if ($config) { $config.WorktreeRoots } else { $null }
-
-        if (-not $roots) {
-            Write-Host "Warning: could not find saved worktree roots, skipping restart" -ForegroundColor Yellow
-            return
-        }
-
         Stop-ProductionServer
         Start-Sleep -Seconds 1
-        Start-ProductionServer $roots
+        Start-ProductionServer @()
     } else {
         Write-Host "Production server is not running, skipping restart" -ForegroundColor Gray
     }
@@ -522,32 +471,23 @@ function Deploy-Frontend {
 
 switch ($Command) {
     "start" {
-        $roots = Resolve-WorktreeRoots "start"
-        $roots | ForEach-Object {
-            if (-not (Test-Path $_)) {
-                Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
-                exit 1
+        if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) {
+            $WorktreeRoots | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
+                    exit 1
+                }
             }
         }
-        Start-ProductionServer $roots
+        Start-ProductionServer $WorktreeRoots
     }
     "stop" {
         Stop-ProductionServer
     }
     "restart" {
-        $config = Get-SavedConfig
-        $roots = if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) { $WorktreeRoots }
-                 elseif ($config) { $config.WorktreeRoots }
-                 else { $null }
-
-        if (-not $roots) {
-            Write-Host "Error: no worktree roots configured. Run 'start' first." -ForegroundColor Red
-            exit 1
-        }
-
         Stop-ProductionServer
         Start-Sleep -Seconds 1
-        Start-ProductionServer $roots
+        Start-ProductionServer $WorktreeRoots
     }
     "status" {
         Show-Status
@@ -556,14 +496,15 @@ switch ($Command) {
         Show-Log
     }
     "dev" {
-        $roots = Resolve-WorktreeRoots "dev"
-        $roots | ForEach-Object {
-            if (-not (Test-Path $_)) {
-                Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
-                exit 1
+        if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) {
+            $WorktreeRoots | ForEach-Object {
+                if (-not (Test-Path $_)) {
+                    Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
+                    exit 1
+                }
             }
         }
-        Start-DevMode $roots
+        Start-DevMode $WorktreeRoots
     }
     "demo" {
         Start-DemoMode
@@ -577,13 +518,31 @@ switch ($Command) {
             Write-Host "Usage: .\treemon.ps1 add <path> [<path>...]" -ForegroundColor Gray
             exit 1
         }
-        $WorktreeRoots | ForEach-Object {
-            if (-not (Test-Path $_)) {
-                Write-Host "Error: path does not exist: $_" -ForegroundColor Red
-                exit 1
+
+        # Thin shim: the server (single config writer) persists the roots; the change
+        # applies on the next (re)start, which we trigger below if prod is running.
+        $tmExit = Invoke-Tm (@("add") + $WorktreeRoots + @("--port", "$DefaultPort"))
+
+        if ($Upstream) {
+            $WorktreeRoots | ForEach-Object {
+                if (Test-Path $_) {
+                    Set-UpstreamRemote ((Resolve-Path $_).Path.TrimEnd('\', '/')) $Upstream
+                }
             }
         }
-        Add-Roots $WorktreeRoots
+
+        # Restart only on a successful add so a failed/rejected CLI call (e.g. bad path,
+        # server down) doesn't needlessly bounce the production server.
+        if ($tmExit -eq 0) {
+            $runningPid = Get-RunningPid
+            if ($runningPid) {
+                Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
+                Stop-ProductionServer
+                Start-Sleep -Seconds 1
+                Start-ProductionServer @()
+            }
+        }
+        exit $tmExit
     }
     "remove" {
         if (-not $WorktreeRoots -or $WorktreeRoots.Count -eq 0) {
@@ -591,13 +550,23 @@ switch ($Command) {
             Write-Host "Usage: .\treemon.ps1 remove <path> [<path>...]" -ForegroundColor Gray
             exit 1
         }
-        $WorktreeRoots | ForEach-Object {
-            if (-not (Test-Path $_)) {
-                Write-Host "Error: path does not exist: $_" -ForegroundColor Red
-                exit 1
+
+        # Thin shim: the server removes the root from global config; applies on next
+        # (re)start, which we trigger below if prod is running. No existence check —
+        # a root whose directory was deleted must still be removable.
+        $tmExit = Invoke-Tm (@("remove") + $WorktreeRoots + @("--port", "$DefaultPort"))
+
+        # Restart only on a successful remove (see 'add' above).
+        if ($tmExit -eq 0) {
+            $runningPid = Get-RunningPid
+            if ($runningPid) {
+                Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
+                Stop-ProductionServer
+                Start-Sleep -Seconds 1
+                Start-ProductionServer @()
             }
         }
-        Remove-Roots $WorktreeRoots
+        exit $tmExit
     }
     "install-skill" {
         Install-Skill
