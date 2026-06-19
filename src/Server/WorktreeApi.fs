@@ -180,12 +180,13 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
 /// `Environment.GetFolderPath(UserProfile)` ignores the USERPROFILE/HOME env vars, so an
 /// in-process test can only redirect the config dir via this explicit override.
 let internal globalConfigDir () =
-    match Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR") with
-    | null | "" ->
+    Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR")
+    |> Option.ofObj
+    |> Option.filter (fun d -> d <> "")
+    |> Option.defaultWith (fun () ->
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".treemon")
-    | dir -> dir
+            ".treemon"))
 
 let private globalConfigPath () =
     Path.Combine(globalConfigDir (), "config.json")

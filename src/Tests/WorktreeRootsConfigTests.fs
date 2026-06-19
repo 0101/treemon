@@ -61,7 +61,7 @@ type WorktreeRootsConfigTests() =
 
             let collapsed =
                 root.GetProperty("collapsedRepos").EnumerateArray()
-                |> Seq.map (fun e -> e.GetString())
+                |> Seq.map _.GetString()
                 |> List.ofSeq
 
             Assert.That(collapsed, Is.EqualTo([ "repo-one"; "repo-two" ])))
