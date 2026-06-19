@@ -215,17 +215,32 @@ let worktreesCmd =
         setAction handler
     }
 
+/// Folds a per-path root operation (add/remove) into a tri-state exit code:
+///   0 = all paths succeeded, 1 = all paths failed, 2 = partial success.
+/// A partial batch returns 2 (not 1) because the paths that succeeded WERE persisted
+/// server-side immediately, before a later path failed validation. The treemon.ps1 shims
+/// restart prod on 0 OR 2 so those persisted roots actually apply, while a full failure (1)
+/// skips the restart (don't bounce prod when nothing changed). Any failure still yields a
+/// non-zero exit, so callers/scripts can still detect rejected paths.
+let foldRootResults (verb: string) (op: string -> Async<Result<unit, string>>) (paths: string[]) : int =
+    let anySuccess, anyFailure =
+        ((false, false), paths)
+        ||> Array.fold (fun (anySuccess, anyFailure) path ->
+            match op path |> Async.RunSynchronously with
+            | Ok() -> printfn $"✓ %s{verb} %s{path} (applies on next server restart)"; (true, anyFailure)
+            | Error e -> eprintfn $"Error: %s{e}"; (anySuccess, true))
+
+    match anySuccess, anyFailure with
+    | true, true -> 2
+    | false, true -> 1
+    | _ -> 0
+
 let addCmd =
     let handler (paths: string[], port: int option) =
         withPort port (fun port ->
             // One tryCallServer for the whole batch so the "server is not running" message
             // (and the connection check) happens once, not once per path.
-            tryCallServer port (fun api ->
-                (0, paths)
-                ||> Array.fold (fun exitCode path ->
-                    match api.addRoot path |> Async.RunSynchronously with
-                    | Ok() -> printfn $"✓ Added %s{path} (applies on next server restart)"; exitCode
-                    | Error e -> eprintfn $"Error: %s{e}"; 1)))
+            tryCallServer port (fun api -> foldRootResults "Added" api.addRoot paths))
 
     command "add" {
         description "Add one or more worktree roots to watch (applies on next server restart)"
@@ -241,12 +256,7 @@ let addCmd =
 let removeCmd =
     let handler (paths: string[], port: int option) =
         withPort port (fun port ->
-            tryCallServer port (fun api ->
-                (0, paths)
-                ||> Array.fold (fun exitCode path ->
-                    match api.removeRoot path |> Async.RunSynchronously with
-                    | Ok() -> printfn $"✓ Removed %s{path} (applies on next server restart)"; exitCode
-                    | Error e -> eprintfn $"Error: %s{e}"; 1)))
+            tryCallServer port (fun api -> foldRootResults "Removed" api.removeRoot paths))
 
     command "remove" {
         description "Remove one or more worktree roots (applies on next server restart)"

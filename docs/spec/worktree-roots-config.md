@@ -157,10 +157,16 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
   the parameter to `$null` (and `@($null)` is a *1-element* array), so `Start-ProductionServer`/
   `Start-DevMode` normalize via `@($Roots | Where-Object { $_ })` — otherwise the "no path" feature
   threw on `$null.TrimEnd()` (and `restart` would kill prod then throw). (3) **add/remove restart
-  only on CLI success.** The shims gate the restart on `tm`'s exit code (`$tmExit -eq 0`) so a
-  rejected add/remove (bad path, server down) doesn't needlessly bounce prod; `Invoke-Tm` routes
-  the CLI's stdout to the host (`| Out-Host`) and returns only `[int]$LASTEXITCODE`, so the exit
-  code stays a scalar and the CLI's own messages aren't swallowed.
+  on any genuine change (tri-state exit code — fix tm-config-audit-rf2).** The CLI folds a path
+  batch into a tri-state exit code (`Cli.foldRootResults`): `0` = all succeeded, `1` = all failed,
+  `2` = partial. The shims gate the restart on `$tmExit -eq 0 -or $tmExit -eq 2` and keep
+  `exit $tmExit`, so prod restarts whenever at least one root was actually persisted (full or partial
+  success) while a fully-failed call (bad path, server down) still skips the restart and reports
+  non-zero. The original *binary* gate (`$tmExit -eq 0`) was the bug: `addRootToConfig` persists each
+  accepted path immediately, so a `[valid; invalid]` batch persisted `valid` but returned exit 1 —
+  the shim skipped the restart and the new root stayed dormant despite the printed success line.
+  `Invoke-Tm` routes the CLI's stdout to the host (`| Out-Host`) and returns only `[int]$LASTEXITCODE`,
+  so the exit code stays a scalar and the CLI's own messages aren't swallowed.
 - **Config-dir test isolation uses `TREEMON_CONFIG_DIR`, not a fixture-set `USERPROFILE`/`HOME`.**
   The spec preferred redirecting `USERPROFILE`/`HOME`, but on Windows .NET 9
   `Environment.GetFolderPath(SpecialFolder.UserProfile)` reads the user token, **not** the env

@@ -531,9 +531,12 @@ switch ($Command) {
             }
         }
 
-        # Restart only on a successful add so a failed/rejected CLI call (e.g. bad path,
-        # server down) doesn't needlessly bounce the production server.
-        if ($tmExit -eq 0) {
+        # Restart when at least one root actually changed. tm returns a tri-state exit
+        # code: 0 = all added, 2 = partial (some paths persisted, some rejected), 1 = all
+        # failed. Both 0 and 2 mean roots were persisted and need a restart to apply; exit 1
+        # (e.g. bad path, server down — nothing persisted) skips the restart so we don't
+        # needlessly bounce the production server.
+        if ($tmExit -eq 0 -or $tmExit -eq 2) {
             $runningPid = Get-RunningPid
             if ($runningPid) {
                 Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
@@ -556,8 +559,9 @@ switch ($Command) {
         # a root whose directory was deleted must still be removable.
         $tmExit = Invoke-Tm (@("remove") + $WorktreeRoots + @("--port", "$DefaultPort"))
 
-        # Restart only on a successful remove (see 'add' above).
-        if ($tmExit -eq 0) {
+        # Restart on full (0) or partial (2) success — see 'add' above. Exit 1 (nothing
+        # removed) skips the restart.
+        if ($tmExit -eq 0 -or $tmExit -eq 2) {
             $runningPid = Get-RunningPid
             if ($runningPid) {
                 Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
