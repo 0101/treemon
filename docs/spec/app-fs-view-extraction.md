@@ -48,6 +48,24 @@ These were chosen deliberately (see *Per-family evidence* for why):
    already uses for `relativeTime`, `workMetricsView`, `cardTitle`, etc. — so card-side call
    sites stay untouched and there is a single source of truth.
 
+### Leaf helpers take `CardCallbacks`, not `dispatch` (Step 2 implementation)
+
+To keep `CardViewProps`/`CardCallbacks` **Msg-free** (so they relocate ahead of `AppTypes` with
+the card views in Steps 3–4), the card **leaf** helpers (`terminalButton`, `editorButton`,
+`syncButton`, `eventLog`, `canvasEventEntry`, the PR badge/section helpers, etc.) were converted
+from taking raw `dispatch` to taking the whole `callbacks: CardCallbacks` record — a 1:1 swap of a
+single capability handle, but a strictly narrower one (it can only raise named card actions, not an
+arbitrary `Msg`). The composite views (`compactWorktreeCard`/`worktreeCard`/`renderCard`/
+`repoSection`) then hold no `dispatch` at all. Consequences, all behavior-preserving:
+- `terminalButton`'s `FocusSession`-vs-`OpenTerminal` choice moved into the `OpenTerminal` callback
+  lambda built in `view`; the button keeps only its title text.
+- The `archiveSection dispatch` wrapper was removed; `repoSection` calls
+  `ArchiveViews.archiveSection callbacks.DispatchArchive` directly.
+- Pre-existing dead args were dropped: `renderCard`'s `repoId` and `worktreeCard`'s `canvasPaneOpen`
+  (the model bool is still carried in `CardViewProps.CanvasPaneOpen` to preserve the 8-field shape).
+
+This makes Step 3 (leaf relocation) a pure file move with no further signature changes.
+
 ### Why a vertical slice for Mascot but not Cards
 
 | Family (~size) | State owned | Msg / update owned | Disposition |

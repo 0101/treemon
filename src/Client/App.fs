@@ -688,6 +688,48 @@ let beadsProgressBar (b: BeadsSummary) =
         ]
     ]
 
+/// The model read-slice the card views render over. Bundles the eight values that were
+/// previously threaded as loose positional args through repoSection/renderCard/worktreeCard
+/// (repoSection alone took nine), so a silent argument transposition can no longer compile.
+/// References only Shared/Navigation/CanvasAwareness types — no Model/Msg dependency — so this
+/// record can later move ahead of AppTypes alongside the card views.
+type CardViewProps =
+    { EditorName: string
+      IsCompact: bool
+      FocusedElement: FocusTarget option
+      BranchEvents: Map<string, CardEvent list>
+      SyncPending: Set<string>
+      ActionCooldowns: Set<WorktreePath>
+      CanvasEvents: Map<string, CanvasEvent list>
+      /// Currently unread by the card views; kept as part of the model read-slice — it
+      /// formalizes the previously dead `canvasPaneOpen` arg that was threaded through renderCard.
+      CanvasPaneOpen: bool }
+
+/// The dispatch-derived actions the card views raise back to the host, mirroring
+/// CanvasPaneCallbacks. Every field is a plain `… -> unit` function — no Msg dependency — so the
+/// card views invoke named card actions instead of holding raw `dispatch`, and App.fs builds the
+/// record from `dispatch` in `view`. This is a strictly narrower capability than the old
+/// `dispatch` (which could send any Msg); leaf helpers take this whole record in its place.
+type CardCallbacks =
+    { FocusCard: string -> unit
+      ToggleRepo: RepoId -> unit
+      CreateWorktree: RepoId -> unit
+      /// Primary terminal action: focuses the active session when one exists, else opens a terminal.
+      /// Intent-named (not a 1:1 Msg mirror) — do not "simplify" to always dispatch OpenTerminal.
+      OpenTerminal: WorktreeStatus -> unit
+      OpenEditor: WorktreeStatus -> unit
+      OpenNewTab: WorktreeStatus -> unit
+      ResumeSession: WorktreeStatus -> unit
+      /// Raises the delete *confirmation* (ConfirmDeleteWorktree), not an immediate delete.
+      DeleteWorktree: string -> unit
+      /// Raises the archive *confirmation* (ConfirmArchiveWorktree), not an immediate archive.
+      ArchiveWorktree: string -> unit
+      StartSync: WorktreePath -> string -> unit
+      CancelSync: WorktreePath -> unit
+      LaunchAction: WorktreePath -> ActionKind -> unit
+      OpenCanvasDoc: string -> string -> unit
+      DispatchArchive: ArchiveViews.Msg -> unit }
+
 let mainBehindIndicator (baseBranch: string) (count: int) =
     if count = 0 then
         Html.span [
@@ -709,7 +751,7 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some Copilot -> "Copilot"
     | None -> "Coding tool"
 
-let syncButton dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     if isPending then
         Html.button [
             prop.className "sync-starting-btn"
@@ -725,7 +767,7 @@ let syncButton dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents:
             Html.button [
                 prop.className "sync-cancel-btn"
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Path))
+                prop.onClick (fun e -> e.stopPropagation(); callbacks.CancelSync wt.Path)
                 prop.text "Cancel"
             ]
         else
@@ -733,12 +775,12 @@ let syncButton dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents:
                 prop.className (if disabled then "sync-btn disabled" else "sync-btn")
                 prop.disabled disabled
                 yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
+                prop.onClick (fun e -> e.stopPropagation(); callbacks.StartSync wt.Path scopedKey)
                 prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else $"Sync with {baseBranch} (S)")
                 prop.text "Sync"
             ]
 
-let mainBehindWithSync dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
@@ -749,7 +791,7 @@ let mainBehindWithSync dispatch (baseBranch: string) (wt: WorktreeStatus) (branc
                         prop.className "dirty-warning"
                         prop.text "uncommitted changes"
                     ]
-                else syncButton dispatch baseBranch wt branchEvents isPending scopedKey
+                else syncButton callbacks baseBranch wt branchEvents isPending scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -803,28 +845,28 @@ let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -
         ]
     ]
 
-let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (hasTestFailureLog: bool) (events: CardEvent list) =
+let eventLog (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (hasTestFailureLog: bool) (events: CardEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
         let onFixTests =
             if not hasTestFailureLog || cooldowns.Contains wtPath then None
-            else Some (fun () -> dispatch (LaunchAction (wtPath, FixTests)))
+            else Some (fun () -> callbacks.LaunchAction wtPath FixTests)
         let onConfigureTests =
             if cooldowns.Contains wtPath then None
-            else Some (fun () -> dispatch (LaunchAction (wtPath, ConfigureTests)))
+            else Some (fun () -> callbacks.LaunchAction wtPath ConfigureTests)
         Html.div [
             prop.className "event-log"
             prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
         ]
 
-let canvasEventEntry dispatch (scopedKey: string) (evt: CanvasEvent) =
+let canvasEventEntry (callbacks: CardCallbacks) (scopedKey: string) (evt: CanvasEvent) =
     let verb = match evt.Kind with NewDoc -> "published" | UpdatedDoc -> "updated"
     Html.div [
         prop.className "event-entry canvas-event"
         prop.onClick (fun e ->
             e.stopPropagation()
-            dispatch (OpenCanvasDoc (scopedKey, evt.Filename)))
+            callbacks.OpenCanvasDoc scopedKey evt.Filename)
         prop.children [
             Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
             Html.span [ prop.className "event-message"; prop.text $"{verb} " ]
@@ -832,13 +874,13 @@ let canvasEventEntry dispatch (scopedKey: string) (evt: CanvasEvent) =
         ]
     ]
 
-let canvasEventLog dispatch (scopedKey: string) (events: CanvasEvent list) =
+let canvasEventLog (callbacks: CardCallbacks) (scopedKey: string) (events: CanvasEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (canvasEventEntry dispatch scopedKey))
+            prop.children (evts |> List.map (canvasEventEntry callbacks scopedKey))
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
@@ -894,14 +936,13 @@ let buildBadge (repoName: string) (build: BuildInfo) =
             | None -> ()
         ]
 
-let terminalButton dispatch (wt: WorktreeStatus) =
-    let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
+let terminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
     let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
     Html.button [
         prop.className "terminal-btn"
         prop.title title
         yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch action)
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenTerminal wt)
         prop.text ">"
     ]
 
@@ -917,21 +958,21 @@ let editorIcon () =
         ]
     ]
 
-let editorButton dispatch editorName (wt: WorktreeStatus) =
+let editorButton (callbacks: CardCallbacks) editorName (wt: WorktreeStatus) =
     Html.button [
         prop.className "editor-btn"
         prop.title $"Open in {editorName} (E)"
         yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenEditor wt)
         prop.children [ editorIcon () ]
     ]
 
-let newTabButton dispatch (wt: WorktreeStatus) =
+let newTabButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
     Html.button [
         prop.className "new-tab-btn"
         prop.title "Open new tab in tracked window (+)"
         yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenNewTab wt)
         prop.text "+"
     ]
 
@@ -946,12 +987,12 @@ let resumeIcon () =
         ]
     ]
 
-let resumeButton dispatch (wt: WorktreeStatus) =
+let resumeButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
     Html.button [
         prop.className "resume-btn"
         prop.title "Resume last session (R)"
         yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (ResumeSession wt.Path))
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.ResumeSession wt)
         prop.children [ resumeIcon () ]
     ]
 
@@ -975,23 +1016,23 @@ let binIcon () =
         ]
     ]
 
-let deleteButton dispatch scopedKey (wt: WorktreeStatus) =
+let deleteButton (callbacks: CardCallbacks) scopedKey (wt: WorktreeStatus) =
     Html.button [
         prop.className "delete-btn"
         prop.title "Remove worktree (Del)"
         yield! noFocusProps
         prop.onClick (fun e ->
             e.stopPropagation()
-            dispatch (ConfirmDeleteWorktree scopedKey))
+            callbacks.DeleteWorktree scopedKey)
         prop.children [ binIcon () ]
     ]
 
-let archiveButton dispatch scopedKey (wt: WorktreeStatus) =
+let archiveButton (callbacks: CardCallbacks) scopedKey (wt: WorktreeStatus) =
     Html.button [
         prop.className "archive-btn"
         prop.title "Archive worktree (A)"
         yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (ConfirmArchiveWorktree scopedKey))
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.ArchiveWorktree scopedKey)
         prop.children [ ArchiveViews.archiveIcon ]
     ]
 
@@ -1009,18 +1050,18 @@ let conflictIcon () =
         ]
     ]
 
-let prActionButton dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (action: ActionKind) (title: string) (icon: ReactElement) =
+let prActionButton (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (action: ActionKind) (title: string) (icon: ReactElement) =
     let onCooldown = cooldowns.Contains wt.Path
     Html.button [
         prop.className (if onCooldown then "action-btn disabled" else "action-btn")
         prop.disabled onCooldown
         yield! noFocusProps
         prop.title (if onCooldown then "Action already triggered" else title)
-        prop.onClick (fun e -> e.stopPropagation(); if not onCooldown then dispatch (LaunchAction (wt.Path, action)))
+        prop.onClick (fun e -> e.stopPropagation(); if not onCooldown then callbacks.LaunchAction wt.Path action)
         prop.children [ icon ]
     ]
 
-let prBadgeContent dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
+let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.fragment [
         if pr.IsMerged then
             Interop.createElement "a" [
@@ -1048,36 +1089,36 @@ let prBadgeContent dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) 
                     prop.text ($"{unresolved}/{total} threads")
                 ]
                 if unresolved > 0 then
-                    prActionButton dispatch cooldowns wt (FixPr pr.Url) "Fix PR comments" commentIcon
+                    prActionButton callbacks cooldowns wt (FixPr pr.Url) "Fix PR comments" commentIcon
             | _ -> ()
             yield! pr.Builds |> List.collect (fun build -> [
                     buildBadge repoName build
                     if build.Status = Failed then
                         match build.Url with
-                        | Some url -> prActionButton dispatch cooldowns wt (FixBuild url) "Fix build" wrenchIcon
+                        | Some url -> prActionButton callbacks cooldowns wt (FixBuild url) "Fix build" wrenchIcon
                         | None -> ()
                 ])
     ]
 
-let prSection dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
+let prSection (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr with
     | NoPr -> Html.none
-    | HasPr pr -> prBadgeContent dispatch cooldowns wt repoName pr
+    | HasPr pr -> prBadgeContent callbacks cooldowns wt repoName pr
 
-let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
+let prRow (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
     match wt.Pr, wt.Branch with
     | NoPr, ("main" | "master") -> Html.none
     | NoPr, _ ->
         Html.div [
             prop.className "pr-row"
             prop.children [
-                prActionButton dispatch cooldowns wt CreatePr "Create PR" createPrIcon
+                prActionButton callbacks cooldowns wt CreatePr "Create PR" createPrIcon
             ]
         ]
     | HasPr pr, _ ->
         Html.div [
             prop.className "pr-row"
-            prop.children [ prBadgeContent dispatch cooldowns wt repoName pr ]
+            prop.children [ prBadgeContent callbacks cooldowns wt repoName pr ]
         ]
 
 let workMetricsView = Components.workMetricsView
@@ -1085,13 +1126,13 @@ let workMetricsItems = Components.workMetricsItems
 let FitOrHide = Components.FitOrHide
 let cardTitle = Components.cardTitle
 
-let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.key (WorktreePath.value wt.Path)
         prop.className className
-        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
+        prop.onClick (fun _ -> callbacks.FocusCard scopedKey)
         prop.children [
             Html.div [
                 prop.className "card-header"
@@ -1105,12 +1146,12 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
                         ]
                     ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
-                    terminalButton dispatch wt
-                    if wt.HasActiveSession then newTabButton dispatch wt
-                    if canResumeSession wt then resumeButton dispatch wt
-                    editorButton dispatch editorName wt
-                    archiveButton dispatch scopedKey wt
-                    if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
+                    terminalButton callbacks wt
+                    if wt.HasActiveSession then newTabButton callbacks wt
+                    if canResumeSession wt then resumeButton callbacks wt
+                    editorButton callbacks props.EditorName wt
+                    archiveButton callbacks scopedKey wt
+                    if not wt.IsMainWorktree then deleteButton callbacks scopedKey wt
                 ]
             ]
             Html.div [
@@ -1118,13 +1159,13 @@ let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: stri
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
-                    prSection dispatch cooldowns wt repoName
+                    prSection callbacks props.ActionCooldowns wt repoName
                 ]
             ]
         ]
     ]
 
-let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (canvasPaneOpen: bool) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
@@ -1132,7 +1173,7 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
     Html.div [
         prop.key (WorktreePath.value wt.Path)
         prop.className className
-        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
+        prop.onClick (fun _ -> callbacks.FocusCard scopedKey)
         prop.children [
             Html.div [
                 prop.className "card-body"
@@ -1148,12 +1189,12 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
                             ]
-                            terminalButton dispatch wt
-                            if wt.HasActiveSession then newTabButton dispatch wt
-                            if canResumeSession wt then resumeButton dispatch wt
-                            editorButton dispatch editorName wt
-                            archiveButton dispatch scopedKey wt
-                            if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
+                            terminalButton callbacks wt
+                            if wt.HasActiveSession then newTabButton callbacks wt
+                            if canResumeSession wt then resumeButton callbacks wt
+                            editorButton callbacks props.EditorName wt
+                            archiveButton callbacks scopedKey wt
+                            if not wt.IsMainWorktree then deleteButton callbacks scopedKey wt
                         ]
                     ]
 
@@ -1166,9 +1207,9 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                             ]
                         ]
 
-                    mainBehindWithSync dispatch baseBranch wt branchEvents isPending scopedKey
+                    mainBehindWithSync callbacks baseBranch wt branchEvents isPending scopedKey
 
-                    prRow dispatch cooldowns wt repoName
+                    prRow callbacks props.ActionCooldowns wt repoName
                 ]
             ]
 
@@ -1187,23 +1228,21 @@ let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (co
                             ]
                         | None -> ()
 
-                    eventLog dispatch cooldowns wt.Path wt.HasTestFailureLog branchEvents
-                    canvasEventLog dispatch scopedKey canvasEvents
+                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
+                    canvasEventLog callbacks scopedKey canvasEvents
                 ]
             ]
         ]
     ]
 
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (wt: WorktreeStatus) =
+let renderCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (wt: WorktreeStatus) =
     let scopedKey = WorktreePath.value wt.Path
-    let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
-    let cvEvents = canvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
-    let isPending = syncPending |> Set.contains scopedKey
-    let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName baseBranch cooldowns scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName baseBranch cooldowns events cvEvents canvasPaneOpen isPending scopedKey isFocused wt
-
-let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
+    let events = props.BranchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
+    let cvEvents = props.CanvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
+    let isPending = props.SyncPending |> Set.contains scopedKey
+    let isFocused = props.FocusedElement = Some (Card scopedKey)
+    if props.IsCompact then compactWorktreeCard props callbacks repoName baseBranch scopedKey isFocused wt
+    else worktreeCard props callbacks repoName baseBranch events cvEvents isPending scopedKey isFocused wt
 
 let skeletonCard () =
     Html.div [
@@ -1425,14 +1464,14 @@ let providerIcon (provider: RepoProvider option) =
             prop.children [ icon (0, 0, 18, 18) azdoPath ]
         ]
 
-let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoModel) =
+let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget option) (repo: RepoModel) =
     let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
     let isFocused = focusedElement = Some (RepoHeader repo.RepoId)
     let baseClass = if repo.IsCollapsed then "repo-header collapsed" else "repo-header"
     let className = if isFocused then baseClass + " focused" else baseClass
     Html.div [
         prop.className className
-        prop.onClick (fun _ -> dispatch (ToggleCollapse repo.RepoId))
+        prop.onClick (fun _ -> callbacks.ToggleRepo repo.RepoId)
         prop.children [
             Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
             Html.span [ prop.className "repo-name"; prop.text repo.Name ]
@@ -1450,27 +1489,27 @@ let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoM
             Html.button [
                 prop.className "create-wt-btn"
                 prop.title "Create worktree"
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repo.RepoId)))
+                prop.onClick (fun e -> e.stopPropagation(); callbacks.CreateWorktree repo.RepoId)
                 prop.text "+"
             ]
         ]
     ]
 
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (canvasEvents: Map<string, CanvasEvent list>) (canvasPaneOpen: bool) (repo: RepoModel) =
+let repoSection (props: CardViewProps) (callbacks: CardCallbacks) (repo: RepoModel) =
     Html.div [
         prop.key (RepoId.value repo.RepoId)
         prop.className "repo-section"
         prop.children [
-            repoSectionHeader dispatch focusedElement repo
+            repoSectionHeader callbacks props.FocusedElement repo
             if not repo.IsCollapsed then
                 if not repo.IsReady && repo.Worktrees.IsEmpty then
                     skeletonGrid ()
                 else
                     Html.div [
                         prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns canvasEvents canvasPaneOpen))
+                        prop.children (repo.Worktrees |> List.map (renderCard props callbacks repo.Name repo.BaseBranch))
                     ]
-                    archiveSection dispatch repo.ArchivedWorktrees
+                    ArchiveViews.archiveSection callbacks.DispatchArchive repo.ArchivedWorktrees
         ]
     ]
 
@@ -1613,6 +1652,32 @@ let view model dispatch =
         | true -> $"app-layout canvas-open {canvasPositionClass}"
         | false -> "app-layout"
 
+    let cardProps: CardViewProps =
+        { EditorName = model.EditorName
+          IsCompact = model.IsCompact
+          FocusedElement = model.FocusedElement
+          BranchEvents = model.BranchEvents
+          SyncPending = model.SyncPending
+          ActionCooldowns = model.ActionCooldowns
+          CanvasEvents = model.Canvas.CanvasEvents
+          CanvasPaneOpen = model.Canvas.CanvasPaneOpen }
+
+    let cardCallbacks: CardCallbacks =
+        { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
+          ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
+          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+          OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
+          OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
+          OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
+          ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
+          DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
+          ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)
+          StartSync = fun path key -> dispatch (StartSync (path, key))
+          CancelSync = fun path -> dispatch (CancelSync path)
+          LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
+          OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
+          DispatchArchive = ArchiveMsg >> dispatch }
+
     let dashboardEl =
         Html.div [
             prop.className dashboardClass
@@ -1636,7 +1701,7 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns model.Canvas.CanvasEvents model.Canvas.CanvasPaneOpen))
+                        prop.children (model.Repos |> List.map (repoSection cardProps cardCallbacks))
                     ]
 
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
