@@ -580,14 +580,6 @@ let labelColor (pct: float) =
     elif pct >= 50.0 then Some "#f9e2af"
     else None
 
-let focusedWorktreeCanvasDoc (model: Model) =
-    CanvasUpdate.activeVisibleDoc model
-    |> Option.bind (fun (scopedKey, filename) ->
-        findWorktree scopedKey model
-        |> Option.bind (fun wt ->
-            wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename)
-            |> Option.map (fun d -> wt, d)))
-
 let viewMetricBar (pct: float) (label: string) =
     Html.div [
         prop.className "metric-bar-row"
@@ -768,53 +760,8 @@ let view model dispatch =
             ]
         ]
 
-    let selectCanvasDoc filename =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (SelectCanvasDoc (scopedKey, filename))
-        | _ -> ()
-
-    let onOverviewClick scopedKey =
-        dispatch (FocusOverviewCard scopedKey)
-
-    let onOverviewDocClick scopedKey filename =
-        dispatch (OpenCanvasDoc (scopedKey, filename))
-
-    let archiveCanvasDoc filename =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
-        | _ -> ()
-
-    let launchCanvasSession () =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (LaunchCanvasSession scopedKey)
-        | _ -> ()
-
-    let focusedUnviewedFilenames =
-        match model.FocusedElement with
-        | Some (Card scopedKey) ->
-            unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
-            |> Map.tryFind scopedKey
-            |> Option.defaultValue []
-            |> Set.ofList
-        | _ -> Set.empty
-
-    let focusedVisitedDocs =
-        match model.FocusedElement with
-        | Some (Card scopedKey) ->
-            model.Canvas.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
-        | _ -> []
-
-    let canvasCallbacks: CanvasPane.CanvasPaneCallbacks =
-        { SetPosition = SetCanvasPosition >> dispatch
-          SelectDoc = selectCanvasDoc
-          OnOverviewClick = onOverviewClick
-          OnOverviewDocClick = onOverviewDocClick
-          ArchiveDoc = archiveCanvasDoc
-          DismissError = (fun () -> dispatch DismissCanvasMessageError)
-          LaunchSession = launchCanvasSession }
-
     let canvasEl =
-        CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+        CanvasView.view model dispatch
 
     let children =
         match model.Canvas.CanvasPosition with

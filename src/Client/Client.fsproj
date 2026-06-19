@@ -22,6 +22,7 @@
     <Compile Include="AppTypes.fs" />
     <Compile Include="CanvasUpdate.fs" />
     <Compile Include="MascotUpdate.fs" />
+    <Compile Include="CanvasView.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 
