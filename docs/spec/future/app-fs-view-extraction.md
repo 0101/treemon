@@ -1,6 +1,8 @@
 # App.fs View Extraction
 
-Status: **Future / Deferred** — design only. NOT implemented on the canvas48 branch.
+Status: **Activated** — see `docs/spec/app-fs-view-extraction.md` for the authoritative,
+decided plan. This document is retained for provenance and the original sizing/opportunity
+analysis (Opportunity A / B framing).
 
 Parent spec: `docs/spec/canvas-pane.md`.
 
