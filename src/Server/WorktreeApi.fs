@@ -68,9 +68,9 @@ let readOnlyApi
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
       getBridgeLiveness = fun _ -> async { return Map.empty }
-      // Roots are read-only/no-op in demo and fixture modes (roots stay []).
-      addRoot = fun _ -> async { return Ok() }
-      removeRoot = fun _ -> async { return Ok() }
+      // Root management is unavailable in demo/fixture modes (roots stay []); getRoots is just empty.
+      addRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
+      removeRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       getRoots = fun () -> async { return [] } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =

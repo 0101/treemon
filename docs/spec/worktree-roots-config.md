@@ -224,6 +224,12 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
 - **Demo/fixture modes pass `[]` to `worktreeApi`/scheduler** (resolution is bypassed entirely).
   This is behaviorally inert for fixture mode because `worktreeApi`'s fixture branch is built from
   `readOnlyApi` and ignores `rootPaths`; passing `[]` matches the spec's "(roots stay [])".
+- **Read-only `addRoot`/`removeRoot` return `Error` (fix tm-config-audit-rf3).** In `--demo`/
+  `--test-fixtures`, `readOnlyApi` wires these to `Error $"Root management is not available in
+  {modeName}"` (matching every other unsupported mutation), not a silent `Ok()`. The old `Ok()`
+  made the CLI print `✓ Added … (applies on next server restart)` against a read-only server even
+  though nothing is persisted (these modes force `worktreeRoots=[]`). `getRoots` still returns `[]`
+  (a read, correctly empty).
 - **Smoke tests isolate the config dir.** Both `SmokeTests` fixtures start the server in *normal*
   mode with real roots, which now triggers the startup persist; without isolation that would write
   the developer's real `~/.treemon`. Each fixture points the child server at a throwaway
