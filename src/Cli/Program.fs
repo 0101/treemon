@@ -215,6 +215,66 @@ let worktreesCmd =
         setAction handler
     }
 
+let addCmd =
+    let handler (paths: string[], port: int option) =
+        withPort port (fun port ->
+            // One tryCallServer for the whole batch so the "server is not running" message
+            // (and the connection check) happens once, not once per path.
+            tryCallServer port (fun api ->
+                (0, paths)
+                ||> Array.fold (fun exitCode path ->
+                    match api.addRoot path |> Async.RunSynchronously with
+                    | Ok() -> printfn $"✓ Added %s{path} (applies on next server restart)"; exitCode
+                    | Error e -> eprintfn $"Error: %s{e}"; 1)))
+
+    command "add" {
+        description "Add one or more worktree roots to watch (applies on next server restart)"
+
+        inputs (
+            argument<string[]> "paths" |> arity Arity.OneOrMore |> desc "Worktree root path(s) to watch",
+            optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
+        )
+
+        setAction handler
+    }
+
+let removeCmd =
+    let handler (paths: string[], port: int option) =
+        withPort port (fun port ->
+            tryCallServer port (fun api ->
+                (0, paths)
+                ||> Array.fold (fun exitCode path ->
+                    match api.removeRoot path |> Async.RunSynchronously with
+                    | Ok() -> printfn $"✓ Removed %s{path} (applies on next server restart)"; exitCode
+                    | Error e -> eprintfn $"Error: %s{e}"; 1)))
+
+    command "remove" {
+        description "Remove one or more worktree roots (applies on next server restart)"
+
+        inputs (
+            argument<string[]> "paths" |> arity Arity.OneOrMore |> desc "Worktree root path(s) to stop watching",
+            optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
+        )
+
+        setAction handler
+    }
+
+let rootsCmd =
+    let handler (port: int option) =
+        withPort port (fun port ->
+            tryCallServer port (fun api ->
+                match api.getRoots() |> Async.RunSynchronously with
+                | [] -> printfn "No worktree roots configured."; 0
+                | roots ->
+                    roots |> List.iter (fun root -> printfn $"%s{sanitizeForTerminal root}")
+                    0))
+
+    command "roots" {
+        description "List the configured worktree roots"
+        inputs (optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)")
+        setAction handler
+    }
+
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
@@ -224,4 +284,7 @@ let main argv =
         addCommand launchCmd
         addCommand newCmd
         addCommand worktreesCmd
+        addCommand addCmd
+        addCommand removeCmd
+        addCommand rootsCmd
     }
