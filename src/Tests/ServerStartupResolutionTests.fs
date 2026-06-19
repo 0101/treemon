@@ -1,6 +1,5 @@
 module Tests.ServerStartupResolutionTests
 
-open System
 open System.IO
 open System.Text.Json.Nodes
 open NUnit.Framework
@@ -9,27 +8,7 @@ open NUnit.Framework
 // module; `Server` exposes internals to `Tests` (InternalsVisibleTo), so `resolveWorktreeRoots`
 // (internal) is reachable here.
 open Program
-
-/// Isolates the machine-level config dir to a throwaway temp dir via the TREEMON_CONFIG_DIR
-/// override (mirrors WorktreeRootsConfigTests). Required, not convenient: on Windows
-/// Environment.GetFolderPath(UserProfile) ignores USERPROFILE/HOME, so this is the only way to
-/// keep the in-process resolver off the real ~/.treemon. Both the global config read/write and the
-/// orphan roots.json lookup resolve under this dir.
-let private withTempConfigDir (action: string -> unit) =
-    let tempDir = Path.Combine(Path.GetTempPath(), $"treemon-startup-test-{Guid.NewGuid()}")
-    Directory.CreateDirectory(tempDir) |> ignore
-    let original = Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR")
-    Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", tempDir)
-
-    try
-        action tempDir
-    finally
-        Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", original)
-
-        try
-            Directory.Delete(tempDir, recursive = true)
-        with _ ->
-            ()
+open Tests.TestUtils
 
 /// Writes an orphan `roots.json` (`{ "WorktreeRoots": [...] }`) into the isolated config dir using
 /// the JSON node API, so test paths never need manual backslash escaping.
@@ -80,7 +59,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots persists CLI args when config has no roots``() =
-        withTempConfigDir (fun _ ->
+        withTempConfigDir "treemon-startup-test" (fun _ ->
             let cliRoots = [ @"C:\code\one"; @"C:\code\two" ]
             let resolved = resolveWorktreeRoots cliRoots
             Assert.That(resolved, Is.EqualTo(cliRoots))
@@ -89,7 +68,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots prefers CLI args but does not overwrite a populated config``() =
-        withTempConfigDir (fun _ ->
+        withTempConfigDir "treemon-startup-test" (fun _ ->
             let configured = [ @"C:\code\configured" ]
             match Server.WorktreeApi.writeWorktreeRoots configured with
             | Ok () -> ()
@@ -103,7 +82,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots reads global config when no CLI args``() =
-        withTempConfigDir (fun _ ->
+        withTempConfigDir "treemon-startup-test" (fun _ ->
             let configured = [ @"C:\code\x"; @"C:\code\y" ]
             match Server.WorktreeApi.writeWorktreeRoots configured with
             | Ok () -> ()
@@ -114,7 +93,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots imports orphan roots.json then persists and deletes it``() =
-        withTempConfigDir (fun tempDir ->
+        withTempConfigDir "treemon-startup-test" (fun tempDir ->
             let orphanRoots = [ @"C:\code\orphan-a"; @"C:\code\orphan-b" ]
             writeOrphan tempDir orphanRoots
 
@@ -128,7 +107,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots returns empty when no args, no config, no orphan``() =
-        withTempConfigDir (fun _ ->
+        withTempConfigDir "treemon-startup-test" (fun _ ->
             let resolved = resolveWorktreeRoots []
             Assert.That(resolved, Is.Empty)
             // Nothing to persist, so the config stays absent/empty.
@@ -141,7 +120,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots leaves an explicit empty config empty despite an orphan roots.json``() =
-        withTempConfigDir (fun tempDir ->
+        withTempConfigDir "treemon-startup-test" (fun tempDir ->
             // The user removed every root: the key is PRESENT but empty (not absent).
             match Server.WorktreeApi.writeWorktreeRoots [] with
             | Ok () -> ()
@@ -163,7 +142,7 @@ type ServerStartupResolutionTests() =
 
     [<Test>]
     member _.``resolveWorktreeRoots does not persist CLI args over an explicit empty config``() =
-        withTempConfigDir (fun _ ->
+        withTempConfigDir "treemon-startup-test" (fun _ ->
             match Server.WorktreeApi.writeWorktreeRoots [] with
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
