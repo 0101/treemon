@@ -67,7 +67,11 @@ let readOnlyApi
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
-      getBridgeLiveness = fun _ -> async { return Map.empty } }
+      getBridgeLiveness = fun _ -> async { return Map.empty }
+      // Roots are read-only/no-op in demo and fixture modes (roots stay []).
+      addRoot = fun _ -> async { return Ok() }
+      removeRoot = fun _ -> async { return Ok() }
+      getRoots = fun () -> async { return [] } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -733,4 +737,8 @@ let worktreeApi
                   archiveCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
-          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths } }
+          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
+          // Stubs — real implementation lands in tm-config-audit-9ow.
+          addRoot = fun _ -> async { return Ok() }
+          removeRoot = fun _ -> async { return Ok() }
+          getRoots = fun () -> async { return [] } }
