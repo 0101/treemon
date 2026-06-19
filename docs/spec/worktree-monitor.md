@@ -23,7 +23,8 @@
 
 ### Multi-Repo
 
-- Server accepts multiple root paths as positional CLI args
+- Watched roots resolve at server startup by priority: CLI args → the global `worktreeRoots` key in `~/.treemon/config.json` → one-time import of the legacy `~/.treemon/roots.json`. With roots configured, `treemon.ps1 start`/`dev` no longer require a path; with no args the server uses the global config (an empty list is valid, as in demo mode).
+- Roots are managed live through the `tm` CLI — `tm add <path>...`, `tm remove <path>...`, and `tm roots` (list). The server is the single writer of `config.json`; changes persist immediately and take effect on the next server (re)start. The `treemon.ps1 add`/`remove` shims call `tm` and then restart the production server when it is running.
 - Each root is an independent section — cards never mix across repos
 - Scheduler picks most-overdue task globally across all repos
 - Branch events scoped by `{repoId}/{branch}` to prevent cross-repo collisions
@@ -254,6 +255,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 ## Related Specs
 
+- `docs/spec/worktree-roots-config.md` — global `worktreeRoots` config, CLI-managed roots (`tm add`/`remove`/`roots`), server as the single config writer
 - `docs/spec/user-idle-detection.md` — adaptive refresh cadence based on user activity level
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
