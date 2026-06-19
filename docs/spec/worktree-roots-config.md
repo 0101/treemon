@@ -160,6 +160,17 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
   whose `USERPROFILE`/`HOME` point at a temp dir (a server process *does* honor those for path
   building), or that reader must also adopt the override.
 
+- **`addRoot`/`removeRoot` surface persistence failures.** `updateGlobalConfig` was changed to
+  return `Result<unit,string>` (it previously logged-and-swallowed write exceptions, which would
+  have made the endpoints report a false `Ok()` on a failed write); `writeWorktreeRoots`
+  propagates that outcome so the endpoints return `Error` when the config write fails. The four
+  best-effort UI-state writers (collapsedRepos, canvas open/position, lastViewedHashes) explicitly
+  `|> ignore` the result — their `save*` members are `Async<unit>` and a dropped UI-state write is
+  non-critical. The roots read-modify-write reads (`readWorktreeRootsConfig`) outside the lock and
+  writes (`writeWorktreeRoots`) inside it; the read-then-write window is accepted because add/remove
+  are driven by the serialized, online-only CLI (one path per call), so it is uncontended in
+  practice. A future live model would move the read inside the locked `updateGlobalConfig` callback.
+
 ## Key Files
 
 | File | Role in this change |
