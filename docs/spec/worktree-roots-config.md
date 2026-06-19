@@ -171,6 +171,30 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
   are driven by the serialized, online-only CLI (one path per call), so it is uncontended in
   practice. A future live model would move the read inside the locked `updateGlobalConfig` callback.
 
+- **Startup resolution (§5 / `Program.fs`).** `parseArgs` now accepts zero positional roots in
+  normal mode (the previously-`exit 1` "usage" arm was removed; it had become unreachable once the
+  `roots <> []` guard was dropped, so the top-level match stays exhaustive with no redundant arm).
+  `resolveWorktreeRoots` resolves CLI args > global `worktreeRoots` > orphan `roots.json`, and
+  persists the resolved set **only when `config.json` has no `worktreeRoots` yet** — so a populated
+  config is never clobbered and CLI args act as an *ephemeral* override there (they win for the run
+  but don't rewrite the durable config). The orphan is read by a *pure* reader and deleted **only
+  after a successful persist** (not before): an eager read-then-delete would silently lose the
+  migrated set if the config write failed. Consequently the orphan is consumed only on the
+  priority-3 path (no args, empty config); with args present (e.g. `treemon.ps1` migrating
+  `.treemon.config`) the args win and a still-present orphan is left untouched. Orphan roots are
+  migrated verbatim (no `GetFullPath`/existence check) — downstream comparisons canonicalize at
+  compare time and the scheduler tolerates missing dirs.
+- **Demo/fixture modes pass `[]` to `worktreeApi`/scheduler** (resolution is bypassed entirely).
+  This is behaviorally inert for fixture mode because `worktreeApi`'s fixture branch is built from
+  `readOnlyApi` and ignores `rootPaths`; passing `[]` matches the spec's "(roots stay [])".
+- **Smoke tests isolate the config dir.** Both `SmokeTests` fixtures start the server in *normal*
+  mode with real roots, which now triggers the startup persist; without isolation that would write
+  the developer's real `~/.treemon`. Each fixture points the child server at a throwaway
+  `TREEMON_CONFIG_DIR` and deletes it in teardown. New in-process coverage lives in
+  `src/Tests/ServerStartupResolutionTests.fs` (parseArgs empty-roots + resolveWorktreeRoots
+  priority/persist/no-clobber/orphan-migration), isolated via the same `TREEMON_CONFIG_DIR` override
+  used by `WorktreeRootsConfigTests`.
+
 ## Key Files
 
 | File | Role in this change |

@@ -81,7 +81,10 @@ let parseArgs (args: string array) =
           CanvasPort = None
           TestFixtures = None
           Demo = true }
-    | roots, port, canvasPort, testFixtures, _ when roots <> [] ->
+    | roots, port, canvasPort, testFixtures, _ ->
+        // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
+        // When no roots are passed the server resolves them from global config (or migrates a
+        // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
         match canvasPort with
         | Some cp when cp = port ->
             eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
@@ -92,10 +95,6 @@ let parseArgs (args: string array) =
               CanvasPort = canvasPort
               TestFixtures = testFixtures
               Demo = false }
-    | _ ->
-        eprintfn "Usage: Server <worktree-root-path> [<additional-roots>...] [--port <port>] [--canvas-port <port> | --no-canvas] [--test-fixtures <path>]"
-        eprintfn "       Server --demo [--port <port>]"
-        exit 1
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
@@ -136,6 +135,72 @@ let private buildRemotingHandler (api: IWorktreeApi) =
         Propagate ex.Message)
     |> Remoting.buildHttpHandler
 
+/// Path of the orphan `roots.json` under the (TREEMON_CONFIG_DIR-aware) global config dir. The
+/// file is a stale migration artifact read by nothing per the config investigation.
+let private orphanRootsPath () =
+    System.IO.Path.Combine(WorktreeApi.globalConfigDir (), "roots.json")
+
+/// Reads the orphan `roots.json` (schema `{ "WorktreeRoots": [...] }`), returning its roots or
+/// `[]` when absent/unreadable. Pure read — the file is deleted only after its roots are durably
+/// persisted (see resolveWorktreeRoots), so a failed config write can never lose the migrated set.
+let private readOrphanRoots () : string list =
+    let orphanPath = orphanRootsPath ()
+    if not (System.IO.File.Exists orphanPath) then []
+    else
+        try
+            use doc = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText orphanPath)
+            match doc.RootElement.TryGetProperty("WorktreeRoots") with
+            | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+                prop.EnumerateArray()
+                |> Seq.choose (fun el ->
+                    if el.ValueKind = System.Text.Json.JsonValueKind.String then Some(el.GetString())
+                    else None)
+                |> List.ofSeq
+            | _ -> []
+        with ex ->
+            Log.log "Startup" $"Failed to read orphan roots.json: {ex.Message}"
+            []
+
+/// Removes the orphan `roots.json` once its roots have been migrated into the global config.
+/// Best-effort: a delete failure is logged, not fatal (the migrated roots are already persisted).
+let private deleteOrphanRoots () =
+    let orphanPath = orphanRootsPath ()
+    if System.IO.File.Exists orphanPath then
+        try
+            System.IO.File.Delete orphanPath
+            Log.log "Startup" "Deleted migrated orphan roots.json"
+        with ex ->
+            Log.log "Startup" $"Failed to delete orphan roots.json: {ex.Message}"
+
+/// Resolves the effective worktree roots at startup by priority:
+///   1. roots passed as CLI args (used by `dev`/tests; preserves current arg behavior),
+///   2. else `worktreeRoots` from the global `config.json`,
+///   3. else a one-time import of the orphan `roots.json`.
+/// When `config.json` has no `worktreeRoots` yet, the resolved set is persisted so an arg-provided
+/// or migrated set becomes the durable source of truth (a populated config is left untouched, so
+/// CLI args act as an ephemeral override there). An orphan-sourced set is deleted only after that
+/// persist succeeds — never before — so a failed write can't drop the migration. Demo/fixture
+/// modes never call this; their roots stay `[]`.
+let internal resolveWorktreeRoots (cliRoots: string list) : string list =
+    let configRoots = WorktreeApi.readWorktreeRootsConfig ()
+
+    let resolved, cameFromOrphan =
+        if not (List.isEmpty cliRoots) then cliRoots, false
+        elif not (List.isEmpty configRoots) then configRoots, false
+        else
+            let orphanRoots = readOrphanRoots ()
+            orphanRoots, not (List.isEmpty orphanRoots)
+
+    if List.isEmpty configRoots && not (List.isEmpty resolved) then
+        match WorktreeApi.writeWorktreeRoots resolved with
+        | Ok () ->
+            Log.log "Startup" $"Persisted {List.length resolved} worktree root(s) to global config"
+            if cameFromOrphan then deleteOrphanRoots ()
+        | Error msg ->
+            Log.log "Startup" $"Failed to persist worktree roots: {msg}"
+
+    resolved
+
 [<EntryPoint>]
 let main args =
     let config = parseArgs args
@@ -143,7 +208,14 @@ let main args =
     let serverUrl = $"http://localhost:{config.Port}"
 
     Log.init ()
-    config.WorktreeRoots |> List.iter (fun root -> Log.log "Startup" $"Worktree root: {root}")
+
+    // Effective roots: CLI args > global config > orphan import (persisted first-time). Demo and
+    // fixture modes bypass resolution entirely — they serve synthetic data, so roots stay [].
+    let worktreeRoots =
+        if config.Demo || config.TestFixtures.IsSome then []
+        else resolveWorktreeRoots config.WorktreeRoots
+
+    worktreeRoots |> List.iter (fun root -> Log.log "Startup" $"Worktree root: {root}")
     Log.log "Startup" $"Server URL: {serverUrl}"
 
     let appVersion = readAppVersion ()
@@ -155,7 +227,7 @@ let main args =
 
     config.TestFixtures |> Option.iter (fun path -> Log.log "Startup" $"Test fixtures: {path}")
 
-    config.WorktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
+    worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
     let cts = new CancellationTokenSource()
 
@@ -179,10 +251,10 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
             | None ->
-                RefreshScheduler.start agent config.WorktreeRoots cts.Token
+                RefreshScheduler.start agent worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            WorktreeApi.worktreeApi agent syncAgent sessionAgent config.WorktreeRoots config.TestFixtures appVersion deployBranch
+            WorktreeApi.worktreeApi agent syncAgent sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
