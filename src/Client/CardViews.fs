@@ -1,6 +1,7 @@
 module CardViews
 
 open Shared
+open Shared.EventUtils
 open Navigation
 open Feliz
 open Components
@@ -502,3 +503,233 @@ let prRow (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: Worktre
             prop.className "pr-row"
             prop.children [ prBadgeContent callbacks cooldowns wt repoName pr ]
         ]
+
+let canResumeSession (wt: WorktreeStatus) =
+    not wt.HasActiveSession
+    && wt.LastUserMessage.IsSome
+    && wt.CodingTool <> Working
+    && wt.CodingTool <> WaitingForUser
+
+let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+    let baseClass = cardClassName wt + " compact"
+    let className = if isFocused then baseClass + " focused" else baseClass
+    Html.div [
+        prop.key (WorktreePath.value wt.Path)
+        prop.className className
+        prop.onClick (fun _ -> callbacks.FocusCard scopedKey)
+        prop.children [
+            Html.div [
+                prop.className "card-header"
+                prop.children [
+                    Html.div [
+                        prop.className "header-info"
+                        prop.children [
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                            Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
+                            FitOrHide (workMetricsItems wt.WorkMetrics)
+                        ]
+                    ]
+                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
+                    terminalButton callbacks wt
+                    if wt.HasActiveSession then newTabButton callbacks wt
+                    if canResumeSession wt then resumeButton callbacks wt
+                    editorButton callbacks props.EditorName wt
+                    archiveButton callbacks scopedKey wt
+                    if not wt.IsMainWorktree then deleteButton callbacks scopedKey wt
+                ]
+            ]
+            Html.div [
+                prop.className "compact-detail"
+                prop.children [
+                    if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
+                    mainBehindIndicator baseBranch wt.MainBehindCount
+                    prSection callbacks props.ActionCooldowns wt repoName
+                ]
+            ]
+        ]
+    ]
+
+let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+    let baseClass = cardClassName wt
+    let className = if isFocused then baseClass + " focused" else baseClass
+    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
+    let footerClass = if hasContent then "card-footer has-content" else "card-footer"
+    Html.div [
+        prop.key (WorktreePath.value wt.Path)
+        prop.className className
+        prop.onClick (fun _ -> callbacks.FocusCard scopedKey)
+        prop.children [
+            Html.div [
+                prop.className "card-body"
+                prop.children [
+                    Html.div [
+                        prop.className "card-header"
+                        prop.children [
+                            Html.div [
+                                prop.className "header-info"
+                                prop.children [
+                                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                                    Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
+                                    FitOrHide (workMetricsItems wt.WorkMetrics)
+                                ]
+                            ]
+                            terminalButton callbacks wt
+                            if wt.HasActiveSession then newTabButton callbacks wt
+                            if canResumeSession wt then resumeButton callbacks wt
+                            editorButton callbacks props.EditorName wt
+                            archiveButton callbacks scopedKey wt
+                            if not wt.IsMainWorktree then deleteButton callbacks scopedKey wt
+                        ]
+                    ]
+
+                    if beadsTotal wt.Beads > 0 then
+                        Html.div [
+                            prop.className "beads-row"
+                            prop.children [
+                                beadsCounts "beads-counts" wt.Beads
+                                beadsProgressBar wt.Beads
+                            ]
+                        ]
+
+                    mainBehindWithSync callbacks baseBranch wt branchEvents isPending scopedKey
+
+                    prRow callbacks props.ActionCooldowns wt repoName
+                ]
+            ]
+
+            Html.div [
+                prop.className footerClass
+                prop.children [
+                    if List.isEmpty canvasEvents then
+                        match wt.LastUserMessage with
+                        | Some (prompt, ts) ->
+                            Html.div [
+                                prop.className "user-prompt"
+                                prop.children [
+                                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                                    Html.span [ prop.text prompt ]
+                                ]
+                            ]
+                        | None -> ()
+
+                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
+                    canvasEventLog callbacks scopedKey canvasEvents
+                ]
+            ]
+        ]
+    ]
+
+let renderCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (wt: WorktreeStatus) =
+    let scopedKey = WorktreePath.value wt.Path
+    let events = props.BranchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
+    let cvEvents = props.CanvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
+    let isPending = props.SyncPending |> Set.contains scopedKey
+    let isFocused = props.FocusedElement = Some (Card scopedKey)
+    if props.IsCompact then compactWorktreeCard props callbacks repoName baseBranch scopedKey isFocused wt
+    else worktreeCard props callbacks repoName baseBranch events cvEvents isPending scopedKey isFocused wt
+
+let skeletonCard () =
+    Html.div [
+        prop.className "wt-card skeleton"
+        prop.children [
+            Html.div [
+                prop.className "card-header"
+                prop.children [
+                    Html.span [ prop.className "skeleton-dot" ]
+                    Html.span [ prop.className "skeleton-bar skeleton-branch" ]
+                ]
+            ]
+            Html.div [ prop.className "skeleton-bar skeleton-commit" ]
+            Html.div [ prop.className "skeleton-bar skeleton-beads" ]
+        ]
+    ]
+
+let skeletonGrid () =
+    Html.div [
+        prop.className "card-grid"
+        prop.children (List.init 6 (fun _ -> skeletonCard ()))
+    ]
+
+let sortLabel =
+    function
+    | ByName -> "A-Z"
+    | ByActivity -> "Recent"
+
+let providerIcon (provider: RepoProvider option) =
+    let icon viewBox (svgPath: string) =
+        Svg.svg [
+            svg.className "provider-icon"
+            svg.viewBox viewBox
+            svg.children [ Svg.path [ svg.d svgPath; svg.fill "currentColor" ] ]
+        ]
+
+    let githubPath = "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+    let azdoPath = "M17 4v9.74l-4 3.28-6.2-2.26V17l-3.51-4.59 10.23.8V4.44zm-3.41.49L7.85 1v2.29L2.58 4.84 1 6.87v4.61l2.26 1V6.57z"
+
+    match provider with
+    | None | Some UnknownProvider -> Html.none
+    | Some(GitHubProvider url) ->
+        Html.a [
+            prop.className "provider-link"
+            prop.href url
+            prop.target "_blank"
+            prop.onClick (fun e -> e.stopPropagation())
+            prop.children [ icon (0, 0, 24, 24) githubPath ]
+        ]
+    | Some(AzDoProvider url) ->
+        Html.a [
+            prop.className "provider-link"
+            prop.href url
+            prop.target "_blank"
+            prop.onClick (fun e -> e.stopPropagation())
+            prop.children [ icon (0, 0, 18, 18) azdoPath ]
+        ]
+
+let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget option) (repo: RepoModel) =
+    let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
+    let isFocused = focusedElement = Some (RepoHeader repo.RepoId)
+    let baseClass = if repo.IsCollapsed then "repo-header collapsed" else "repo-header"
+    let className = if isFocused then baseClass + " focused" else baseClass
+    Html.div [
+        prop.className className
+        prop.onClick (fun _ -> callbacks.ToggleRepo repo.RepoId)
+        prop.children [
+            Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
+            Html.span [ prop.className "repo-name"; prop.text repo.Name ]
+            providerIcon repo.Provider
+            if repo.BaseBranch <> "main" then
+                Html.span [ prop.className "deploy-branch"; prop.text repo.BaseBranch ]
+            if repo.IsCollapsed then
+                Html.span [
+                    prop.className "repo-ct-dots"
+                    prop.children (
+                        repo.Worktrees
+                        |> List.map (fun wt ->
+                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
+                ]
+            Html.button [
+                prop.className "create-wt-btn"
+                prop.title "Create worktree"
+                prop.onClick (fun e -> e.stopPropagation(); callbacks.CreateWorktree repo.RepoId)
+                prop.text "+"
+            ]
+        ]
+    ]
+
+let repoSection (props: CardViewProps) (callbacks: CardCallbacks) (repo: RepoModel) =
+    Html.div [
+        prop.key (RepoId.value repo.RepoId)
+        prop.className "repo-section"
+        prop.children [
+            repoSectionHeader callbacks props.FocusedElement repo
+            if not repo.IsCollapsed then
+                if not repo.IsReady && repo.Worktrees.IsEmpty then
+                    skeletonGrid ()
+                else
+                    Html.div [
+                        prop.className "card-grid"
+                        prop.children (repo.Worktrees |> List.map (renderCard props callbacks repo.Name repo.BaseBranch))
+                    ]
+                    ArchiveViews.archiveSection callbacks.DispatchArchive repo.ArchivedWorktrees
+        ]
+    ]
