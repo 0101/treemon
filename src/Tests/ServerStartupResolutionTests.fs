@@ -133,3 +133,46 @@ type ServerStartupResolutionTests() =
             Assert.That(resolved, Is.Empty)
             // Nothing to persist, so the config stays absent/empty.
             Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.Empty))
+
+    // ----- Regression (tm-config-audit-rf1): an explicit `worktreeRoots:[]` must stay empty -----
+    // The bug: readWorktreeRootsConfig() returned [] for BOTH a missing key and a present-but-empty
+    // one, so resolveWorktreeRoots treated a curated-down-to-zero config like a fresh install and
+    // repopulated it from a stale orphan roots.json (or from CLI args). These pin the fix.
+
+    [<Test>]
+    member _.``resolveWorktreeRoots leaves an explicit empty config empty despite an orphan roots.json``() =
+        withTempConfigDir (fun tempDir ->
+            // The user removed every root: the key is PRESENT but empty (not absent).
+            match Server.WorktreeApi.writeWorktreeRoots [] with
+            | Ok () -> ()
+            | Error msg -> Assert.Fail $"setup write failed: {msg}"
+            // A stale orphan roots.json from a legacy upgrade still lingers on disk.
+            writeOrphan tempDir [ @"C:\code\removed-a"; @"C:\code\removed-b" ]
+
+            let resolved = resolveWorktreeRoots []
+
+            // The orphan must NOT resurrect the removed roots for this run...
+            Assert.That(resolved, Is.Empty)
+            // ...the explicit empty config is preserved (present key, still empty — not None, not
+            // repopulated with the orphan's roots)...
+            match Server.WorktreeApi.tryReadWorktreeRootsConfig () with
+            | Some [] -> ()
+            | other -> Assert.Fail $"expected the config to stay an explicit empty (Some []), got %A{other}"
+            // ...and the unconsumed orphan is left untouched (it is only migrated when the key is absent).
+            Assert.That(File.Exists(Path.Combine(tempDir, "roots.json")), Is.True))
+
+    [<Test>]
+    member _.``resolveWorktreeRoots does not persist CLI args over an explicit empty config``() =
+        withTempConfigDir (fun _ ->
+            match Server.WorktreeApi.writeWorktreeRoots [] with
+            | Ok () -> ()
+            | Error msg -> Assert.Fail $"setup write failed: {msg}"
+
+            let resolved = resolveWorktreeRoots [ @"C:\code\arg" ]
+
+            // CLI args still win for THIS run (ephemeral override)...
+            Assert.That(resolved, Is.EqualTo([ @"C:\code\arg" ]))
+            // ...but the explicit empty config is not clobbered, so a restart with no args stays empty.
+            match Server.WorktreeApi.tryReadWorktreeRootsConfig () with
+            | Some [] -> ()
+            | other -> Assert.Fail $"expected the config to stay an explicit empty (Some []), got %A{other}")

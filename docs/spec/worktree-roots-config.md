@@ -189,15 +189,32 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
   normal mode (the previously-`exit 1` "usage" arm was removed; it had become unreachable once the
   `roots <> []` guard was dropped, so the top-level match stays exhaustive with no redundant arm).
   `resolveWorktreeRoots` resolves CLI args > global `worktreeRoots` > orphan `roots.json`, and
-  persists the resolved set **only when `config.json` has no `worktreeRoots` yet** — so a populated
-  config is never clobbered and CLI args act as an *ephemeral* override there (they win for the run
-  but don't rewrite the durable config). The orphan is read by a *pure* reader and deleted **only
+  persists the resolved set **only when `config.json` has no `worktreeRoots` *key* yet** (absence,
+  not mere emptiness — see the missing-vs-empty decision below) — so a present config is never
+  clobbered and CLI args act as an *ephemeral* override there (they win for the run but don't
+  rewrite the durable config). The orphan is read by a *pure* reader and deleted **only
   after a successful persist** (not before): an eager read-then-delete would silently lose the
   migrated set if the config write failed. Consequently the orphan is consumed only on the
-  priority-3 path (no args, empty config); with args present (e.g. `treemon.ps1` migrating
+  priority-3 path (no args, no `worktreeRoots` key); with args present (e.g. `treemon.ps1` migrating
   `.treemon.config`) the args win and a still-present orphan is left untouched. Orphan roots are
   migrated verbatim (no `GetFullPath`/existence check) — downstream comparisons canonicalize at
   compare time and the scheduler tolerates missing dirs.
+- **Missing-vs-empty `worktreeRoots` (fix tm-config-audit-rf1).** Startup resolution must
+  distinguish a *missing* `worktreeRoots` key (fresh install / pre-migration) from a *present but
+  empty* one (the user curated every root away). The original `readWorktreeRootsConfig` collapsed
+  both to `[]`, so an explicit `worktreeRoots:[]` was treated like a fresh install and got
+  repopulated on restart — a stale orphan `roots.json` resurrected removed roots, and CLI args
+  overwrote the explicit empty. Fix: `WorktreeApi.tryReadWorktreeRootsConfig () : string list option`
+  is the presence-aware reader (`None` = key absent, `Some []` = explicit empty, `Some roots` =
+  populated; a malformed non-array value reports `None` to preserve the old lenient behavior).
+  `readWorktreeRootsConfig () : string list` stays as a thin `Option.defaultValue []` wrapper so the
+  `getRoots` endpoint and add/remove read-modify-write are unchanged. `resolveWorktreeRoots` gates
+  BOTH the orphan-import fallthrough AND the first-time persist on key **absence**
+  (`Option.isSome configRoots`), never on `List.isEmpty`. Result: a present `worktreeRoots:[]` is
+  the priority-2 source (resolves to `[]`, no orphan import) and is never persisted over, so removed
+  roots stay removed across restarts. Regression coverage:
+  `ServerStartupResolutionTests` — orphan-present and CLI-args-present each leave the explicit empty
+  intact.
 - **Demo/fixture modes pass `[]` to `worktreeApi`/scheduler** (resolution is bypassed entirely).
   This is behaviorally inert for fixture mode because `worktreeApi`'s fixture branch is built from
   `readOnlyApi` and ignores `rootPaths`; passing `[]` matches the spec's "(roots stay [])".

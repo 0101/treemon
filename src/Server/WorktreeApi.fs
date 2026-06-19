@@ -256,11 +256,14 @@ let private writeCollapsedRepos (repos: RepoId list) =
         root["collapsedRepos"] <- repoArray)
     |> ignore // best-effort UI state; failures are logged in updateGlobalConfig
 
-/// Reads the machine-level set of watched worktree roots (`worktreeRoots` in `config.json`).
-/// Returns `[]` when the key (or file) is absent. `internal` so the startup resolver
-/// (`Program.fs`) and the `getRoots` endpoint can share the single reader.
-let internal readWorktreeRootsConfig () : string list =
-    withConfigDocument [] (fun root ->
+/// Reads the machine-level set of watched worktree roots (`worktreeRoots` in `config.json`),
+/// distinguishing a MISSING key (`None`) from a present-but-empty list (`Some []`). The startup
+/// resolver depends on that distinction: an explicit `worktreeRoots:[]` means the user curated
+/// every root away, so it must NOT be treated like a fresh install and repopulated from CLI args
+/// or a stale orphan `roots.json`. A malformed (non-array) value is reported as `None` — absent —
+/// matching the original lenient behavior. `internal` so the resolver (`Program.fs`) shares it.
+let internal tryReadWorktreeRootsConfig () : string list option =
+    withConfigDocument None (fun root ->
         match root.TryGetProperty("worktreeRoots") with
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
             prop.EnumerateArray()
@@ -268,7 +271,14 @@ let internal readWorktreeRootsConfig () : string list =
                 if el.ValueKind = System.Text.Json.JsonValueKind.String then Some(el.GetString())
                 else None)
             |> List.ofSeq
-        | _ -> [])
+            |> Some
+        | _ -> None)
+
+/// Flattens `tryReadWorktreeRootsConfig` to a plain list (missing key -> `[]`) for callers that
+/// don't need the missing-vs-empty distinction: the `getRoots` endpoint and the add/remove
+/// read-modify-write. `internal` so the startup resolver and the endpoint can share the reader.
+let internal readWorktreeRootsConfig () : string list =
+    tryReadWorktreeRootsConfig () |> Option.defaultValue []
 
 /// Persists the watched worktree roots through the locked single-writer path, leaving every
 /// other global-config key untouched. Returns the write outcome so the `addRoot`/`removeRoot`

@@ -174,24 +174,33 @@ let private deleteOrphanRoots () =
 
 /// Resolves the effective worktree roots at startup by priority:
 ///   1. roots passed as CLI args (used by `dev`/tests; preserves current arg behavior),
-///   2. else `worktreeRoots` from the global `config.json`,
-///   3. else a one-time import of the orphan `roots.json`.
-/// When `config.json` has no `worktreeRoots` yet, the resolved set is persisted so an arg-provided
-/// or migrated set becomes the durable source of truth (a populated config is left untouched, so
-/// CLI args act as an ephemeral override there). An orphan-sourced set is deleted only after that
-/// persist succeeds — never before — so a failed write can't drop the migration. Demo/fixture
-/// modes never call this; their roots stay `[]`.
+///   2. else `worktreeRoots` from the global `config.json` (a PRESENT key, even an explicit empty
+///      list, wins here — the user may have curated every root away),
+///   3. else (the key is ABSENT) a one-time import of the orphan `roots.json`.
+/// When `config.json` has no `worktreeRoots` KEY yet, the resolved set is persisted so an
+/// arg-provided or migrated set becomes the durable source of truth. A present key (even
+/// `worktreeRoots:[]`) is left untouched, so CLI args act as an ephemeral override and an explicit
+/// empty is never repopulated on restart. An orphan-sourced set is deleted only after that persist
+/// succeeds — never before — so a failed write can't drop the migration. Demo/fixture modes never
+/// call this; their roots stay `[]`.
 let internal resolveWorktreeRoots (cliRoots: string list) : string list =
-    let configRoots = WorktreeApi.readWorktreeRootsConfig ()
+    // `None` = the `worktreeRoots` key is absent (fresh install / pre-migration); `Some roots` =
+    // the key is present (possibly an explicit empty list). Gating migration on KEY ABSENCE — not
+    // `List.isEmpty` — is what stops an explicit `worktreeRoots:[]` from being resurrected by a
+    // stale orphan `roots.json` or overwritten by CLI args on restart.
+    let configRoots = WorktreeApi.tryReadWorktreeRootsConfig ()
+    let configHasKey = Option.isSome configRoots
 
     let resolved, cameFromOrphan =
         if not (List.isEmpty cliRoots) then cliRoots, false
-        elif not (List.isEmpty configRoots) then configRoots, false
         else
-            let orphanRoots = readOrphanRoots ()
-            orphanRoots, not (List.isEmpty orphanRoots)
+            match configRoots with
+            | Some roots -> roots, false
+            | None ->
+                let orphanRoots = readOrphanRoots ()
+                orphanRoots, not (List.isEmpty orphanRoots)
 
-    if List.isEmpty configRoots && not (List.isEmpty resolved) then
+    if not configHasKey && not (List.isEmpty resolved) then
         match WorktreeApi.writeWorktreeRoots resolved with
         | Ok () ->
             Log.log "Startup" $"Persisted {List.length resolved} worktree root(s) to global config"
