@@ -15,6 +15,7 @@
     <Compile Include="CanvasPane.fs" />
     <Compile Include="CanvasAwareness.fs" />
     <Compile Include="CanvasState.fs" />
+    <Compile Include="MascotState.fs" />
     <Compile Include="OverviewViews.fs" />
     <Compile Include="CardViews.fs" />
     <Compile Include="AppTypes.fs" />

@@ -38,7 +38,6 @@ let init () =
       SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
-      EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
@@ -46,17 +45,9 @@ let init () =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
-      LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
-      ActivityLevel = ActivityLevel.Active
+      Mascot = { MascotState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Canvas = CanvasState.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
-
-let rng = System.Random()
-
-let randomEyeDirection () =
-    let dx = rng.NextDouble() * 3.0 - 1.5
-    let dy = rng.NextDouble() * 2.0 - 1.0
-    (dx, dy)
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
@@ -98,17 +89,6 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
-
-let idleThresholdMs = 180_000.0
-let deepIdleThresholdMs = 900_000.0
-let autoDisplayIdleMs = 60_000.0
-
-let computeActivityLevel (lastActivityTime: float) (now: float) =
-    let elapsed = now - lastActivityTime
-
-    if elapsed < idleThresholdMs then ActivityLevel.Active
-    elif elapsed < deepIdleThresholdMs then ActivityLevel.Idle
-    else ActivityLevel.DeepIdle
 
 let update msg model =
     match msg with
@@ -153,7 +133,7 @@ let update msg model =
                 if isFirstLoad then []
                 else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
             let now = now.ToUnixTimeMilliseconds() |> float
-            let isIdle = now - model.LastActivityTime > autoDisplayIdleMs
+            let isIdle = now - model.Mascot.LastActivityTime > MascotState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
             // dashboard) is server-generated and self-refreshing, so its data churn must not
             // hijack focus; filter it out of the candidates before picking the most recent.
@@ -191,7 +171,7 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
-                EyeDirection = randomEyeDirection ()
+                Mascot = { model.Mascot with EyeDirection = MascotState.randomEyeDirection () }
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
@@ -282,11 +262,11 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | Tick now ->
-        let newLevel = computeActivityLevel model.LastActivityTime now
+        let newLevel = MascotState.computeActivityLevel model.Mascot.LastActivityTime now
         let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
 
         let reportCmd =
-            if newLevel <> model.ActivityLevel then
+            if newLevel <> model.Mascot.ActivityLevel then
                 Cmd.OfAsync.attempt worktreeApi.Value.reportActivity newLevel (fun _ -> NoOp)
             else
                 Cmd.none
@@ -295,11 +275,11 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        { model with ActivityLevel = newLevel; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
+        { model with Mascot = { model.Mascot with ActivityLevel = newLevel }; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
     | UserActivity now ->
-        let wasActive = model.ActivityLevel = ActivityLevel.Active
+        let wasActive = model.Mascot.ActivityLevel = ActivityLevel.Active
 
         let wakeUpCmd =
             if not wasActive then
@@ -311,8 +291,7 @@ let update msg model =
                 Cmd.none
 
         { model with
-            LastActivityTime = now
-            ActivityLevel = ActivityLevel.Active },
+            Mascot = { model.Mascot with LastActivityTime = now; ActivityLevel = ActivityLevel.Active } },
         wakeUpCmd
 
     | StartSync (path, key) ->
@@ -562,12 +541,12 @@ let update msg model =
 
 let appSubscriptions (model: Model) : Sub<Msg> =
     let pollingIntervalMs =
-        match model.ActivityLevel with
+        match model.Mascot.ActivityLevel with
         | ActivityLevel.Active | ActivityLevel.Idle -> 1000
         | ActivityLevel.DeepIdle -> 15000
 
     let activityLevelKey =
-        match model.ActivityLevel with
+        match model.Mascot.ActivityLevel with
         | ActivityLevel.Active -> "active"
         | ActivityLevel.Idle -> "idle"
         | ActivityLevel.DeepIdle -> "deep-idle"
@@ -848,7 +827,7 @@ let viewAppHeader model dispatch =
                     if model.HasError then viewEyeRolledBack ()
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
-                        viewEyeOpen pupilColor model.ActivityLevel model.EyeDirection
+                        viewEyeOpen pupilColor model.Mascot.ActivityLevel model.Mascot.EyeDirection
                     else viewEyeClosed ()
                 ]
             ]

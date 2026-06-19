@@ -195,32 +195,32 @@ type ComputeActivityLevelTests() =
 
     [<Test>]
     member _.``Recent activity (0 elapsed) returns Active``() =
-        Assert.That(App.computeActivityLevel nowMs nowMs, Is.EqualTo(ActivityLevel.Active))
+        Assert.That(MascotState.computeActivityLevel nowMs nowMs, Is.EqualTo(ActivityLevel.Active))
 
     [<Test>]
     member _.``Activity 30s ago returns Active``() =
-        Assert.That(App.computeActivityLevel (nowMs - 30_000.0) nowMs, Is.EqualTo(ActivityLevel.Active))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 30_000.0) nowMs, Is.EqualTo(ActivityLevel.Active))
 
     [<Test>]
     member _.``Activity 2m59.999s ago returns Active``() =
-        Assert.That(App.computeActivityLevel (nowMs - 179_999.0) nowMs, Is.EqualTo(ActivityLevel.Active))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 179_999.0) nowMs, Is.EqualTo(ActivityLevel.Active))
 
     [<Test>]
     member _.``Activity exactly 3 min ago returns Idle``() =
-        Assert.That(App.computeActivityLevel (nowMs - 180_000.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 180_000.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
 
     [<Test>]
     member _.``Activity 5 min ago returns Idle``() =
-        Assert.That(App.computeActivityLevel (nowMs - 300_000.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 300_000.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
 
     [<Test>]
     member _.``Activity 14m59s ago returns Idle``() =
-        Assert.That(App.computeActivityLevel (nowMs - 899_999.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 899_999.0) nowMs, Is.EqualTo(ActivityLevel.Idle))
 
     [<Test>]
     member _.``Activity exactly 15 min ago returns DeepIdle``() =
-        Assert.That(App.computeActivityLevel (nowMs - 900_000.0) nowMs, Is.EqualTo(ActivityLevel.DeepIdle))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 900_000.0) nowMs, Is.EqualTo(ActivityLevel.DeepIdle))
 
     [<Test>]
     member _.``Activity 1 hour ago returns DeepIdle``() =
-        Assert.That(App.computeActivityLevel (nowMs - 3_600_000.0) nowMs, Is.EqualTo(ActivityLevel.DeepIdle))
+        Assert.That(MascotState.computeActivityLevel (nowMs - 3_600_000.0) nowMs, Is.EqualTo(ActivityLevel.DeepIdle))
