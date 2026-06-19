@@ -262,37 +262,19 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | Tick now ->
-        let newLevel = MascotState.computeActivityLevel model.Mascot.LastActivityTime now
+        // Tick stays in the root update because it also expires canvas events and drives the
+        // worktree/sync poll; only the mascot activity-recompute delegates to MascotUpdate.
+        let mascot, reportCmd = MascotUpdate.tickActivity now model.Mascot
         let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
-
-        let reportCmd =
-            if newLevel <> model.Mascot.ActivityLevel then
-                Cmd.OfAsync.attempt worktreeApi.Value.reportActivity newLevel (fun _ -> NoOp)
-            else
-                Cmd.none
 
         // A queued canvas message is honestly pending, not failed: it is delivered to the
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        { model with Mascot = { model.Mascot with ActivityLevel = newLevel }; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
+        { model with Mascot = mascot; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
-    | UserActivity now ->
-        let wasActive = model.Mascot.ActivityLevel = ActivityLevel.Active
-
-        let wakeUpCmd =
-            if not wasActive then
-                Cmd.batch [
-                    Cmd.ofMsg (Tick now)
-                    Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
-                ]
-            else
-                Cmd.none
-
-        { model with
-            Mascot = { model.Mascot with LastActivityTime = now; ActivityLevel = ActivityLevel.Active } },
-        wakeUpCmd
+    | UserActivity now -> MascotUpdate.userActivity now model
 
     | StartSync (path, key) ->
         let syntheticEvent =
@@ -563,181 +545,15 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    let activityDetection (dispatch: Dispatch<Msg>) =
-        let mutable lastDispatchTime = Fable.Core.JS.Constructors.Date.now ()
-        let throttleMs = 5000.0
-
-        let handler =
-            fun (_: Browser.Types.Event) ->
-                let now = Fable.Core.JS.Constructors.Date.now ()
-                if now - lastDispatchTime >= throttleMs then
-                    lastDispatchTime <- now
-                    dispatch (UserActivity now)
-
-        let events = [| "mousemove"; "keydown"; "click"; "scroll" |]
-        events |> Array.iter (fun evt -> Dom.document.addEventListener (evt, handler))
-
-        { new System.IDisposable with
-            member _.Dispose() =
-                events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
-
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
-          [ "activity" ], activityDetection
+          [ "activity" ], MascotUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener ]
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
     else
         subs
-
-let viewEyeOpen (pupilColor: string) (activity: ActivityLevel) (dx: float, dy: float) =
-    Svg.svg [
-        svg.className "eye-logo"
-        svg.viewBox (-2, -2, 44, 24)
-        svg.children [
-            Svg.path [
-                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                svg.fill "#e8e8e8"
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.5
-            ]
-            Svg.g [
-                svg.className "eye-iris"
-                svg.custom ("transform", $"translate({dx}, {dy})")
-                svg.children [
-                    Svg.circle [
-                        svg.cx 20
-                        svg.cy 10
-                        svg.r 9
-                        svg.fill "#1a1b2e"
-                    ]
-                    Svg.circle [
-                        svg.cx 20
-                        svg.cy 10
-                        svg.r 6
-                        svg.fill "#56b6c2"
-                    ]
-                    Svg.circle [
-                        svg.cx 20
-                        svg.cy 10
-                        svg.r 3
-                        svg.fill pupilColor
-                    ]
-                ]
-            ]
-            Svg.circle [
-                svg.cx 23
-                svg.cy 5
-                svg.r 2
-                svg.fill "rgba(255, 255, 255, 0.8)"
-            ]
-            match activity with
-            | ActivityLevel.Idle ->
-                Svg.path [
-                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 4 20 5 Q10 4 2 10 Z"
-                    svg.fill "#b0b0b0"
-                ]
-                Svg.path [
-                    svg.d "M2 10 Q10 4 20 5 Q30 4 38 10"
-                    svg.fill "none"
-                    svg.stroke "#56b6c2"
-                    svg.strokeWidth 2.0
-                ]
-            | ActivityLevel.DeepIdle ->
-                Svg.path [
-                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 9 20 12 Q10 9 2 10 Z"
-                    svg.fill "#b0b0b0"
-                ]
-                Svg.path [
-                    svg.d "M2 10 Q10 9 20 12 Q30 9 38 10"
-                    svg.fill "none"
-                    svg.stroke "#56b6c2"
-                    svg.strokeWidth 2.0
-                ]
-            | ActivityLevel.Active -> ()
-        ]
-    ]
-
-let viewEyeRolledBack () =
-    Svg.svg [
-        svg.className "eye-logo"
-        svg.viewBox (-2, -2, 44, 24)
-        svg.children [
-            Svg.defs [
-                Svg.clipPath [
-                    svg.id "eye-shape"
-                    svg.children [
-                        Svg.path [
-                            svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                        ]
-                    ]
-                ]
-            ]
-            Svg.path [
-                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                svg.fill "#e8e8e8"
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.5
-            ]
-            Svg.g [
-                svg.custom ("clipPath", "url(#eye-shape)")
-                svg.children [
-                    Svg.g [
-                        svg.custom ("transform", "translate(0, -9)")
-                        svg.children [
-                            Svg.circle [
-                                svg.cx 20
-                                svg.cy 10
-                                svg.r 9
-                                svg.fill "#1a1b2e"
-                            ]
-                            Svg.circle [
-                                svg.cx 20
-                                svg.cy 10
-                                svg.r 6
-                                svg.fill "#888"
-                            ]
-                            Svg.circle [
-                                svg.cx 20
-                                svg.cy 10
-                                svg.r 3
-                                svg.fill "#1a1b2e"
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-            Svg.circle [
-                svg.cx 23
-                svg.cy 5
-                svg.r 2
-                svg.fill "rgba(255, 255, 255, 0.8)"
-            ]
-        ]
-    ]
-
-let viewEyeClosed () =
-    Svg.svg [
-        svg.className "eye-logo eye-closed"
-        svg.viewBox (-2, -2, 44, 24)
-        svg.children [
-            Svg.path [
-                svg.d "M2 10 Q10 4 20 4 Q30 4 38 10 Q30 16 20 16 Q10 16 2 10 Z"
-                svg.fill "#e8e8e8"
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.5
-            ]
-            Svg.line [
-                svg.x1 4
-                svg.y1 10
-                svg.x2 36
-                svg.y2 10
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.0
-            ]
-        ]
-    ]
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->
@@ -824,11 +640,11 @@ let viewAppHeader model dispatch =
             Html.div [
                 prop.className "header-center"
                 prop.children [
-                    if model.HasError then viewEyeRolledBack ()
+                    if model.HasError then MascotView.viewEyeRolledBack ()
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
-                        viewEyeOpen pupilColor model.Mascot.ActivityLevel model.Mascot.EyeDirection
-                    else viewEyeClosed ()
+                        MascotView.viewEyeOpen pupilColor model.Mascot
+                    else MascotView.viewEyeClosed ()
                 ]
             ]
             Html.div [

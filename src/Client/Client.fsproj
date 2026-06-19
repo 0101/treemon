@@ -16,10 +16,12 @@
     <Compile Include="CanvasAwareness.fs" />
     <Compile Include="CanvasState.fs" />
     <Compile Include="MascotState.fs" />
+    <Compile Include="MascotView.fs" />
     <Compile Include="OverviewViews.fs" />
     <Compile Include="CardViews.fs" />
     <Compile Include="AppTypes.fs" />
     <Compile Include="CanvasUpdate.fs" />
+    <Compile Include="MascotUpdate.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 
