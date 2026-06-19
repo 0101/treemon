@@ -449,6 +449,40 @@ function Install-Extension {
     }
 }
 
+function Test-WorktreeRootPaths([string[]]$Roots) {
+    # Validate that each provided worktree root exists before launching the server.
+    # exit inside a function still terminates the script, so callers need no extra guard.
+    if ($Roots -and $Roots.Count -gt 0) {
+        $Roots | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
+}
+
+function Restart-ServerIfRunning {
+    # Restart the production server only when it is currently running, so persisted
+    # config changes (added/removed roots, redeployed frontend) take effect. Roots are
+    # re-read from the global config at startup, so we restart with empty args (@()).
+    # Optional parameters let Deploy-Frontend keep its distinct log text while sharing
+    # the same lifecycle logic.
+    param(
+        [string]$Message = "Restarting server to apply changes...",
+        [string]$NotRunningMessage = ""
+    )
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host $Message -ForegroundColor Cyan
+        Stop-ProductionServer
+        Start-Sleep -Seconds 1
+        Start-ProductionServer @()
+    } elseif ($NotRunningMessage) {
+        Write-Host $NotRunningMessage -ForegroundColor Gray
+    }
+}
+
 function Deploy-Frontend {
     Write-Host "Building frontend..." -ForegroundColor Cyan
     Build-Frontend
@@ -458,27 +492,12 @@ function Deploy-Frontend {
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
     try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
 
-    $runningPid = Get-RunningPid
-    if ($runningPid) {
-        Write-Host "Restarting production server..." -ForegroundColor Cyan
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer @()
-    } else {
-        Write-Host "Production server is not running, skipping restart" -ForegroundColor Gray
-    }
+    Restart-ServerIfRunning -Message "Restarting production server..." -NotRunningMessage "Production server is not running, skipping restart"
 }
 
 switch ($Command) {
     "start" {
-        if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) {
-            $WorktreeRoots | ForEach-Object {
-                if (-not (Test-Path $_)) {
-                    Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
-                    exit 1
-                }
-            }
-        }
+        Test-WorktreeRootPaths $WorktreeRoots
         Start-ProductionServer $WorktreeRoots
     }
     "stop" {
@@ -496,14 +515,7 @@ switch ($Command) {
         Show-Log
     }
     "dev" {
-        if ($WorktreeRoots -and $WorktreeRoots.Count -gt 0) {
-            $WorktreeRoots | ForEach-Object {
-                if (-not (Test-Path $_)) {
-                    Write-Host "Error: worktree root path does not exist: $_" -ForegroundColor Red
-                    exit 1
-                }
-            }
-        }
+        Test-WorktreeRootPaths $WorktreeRoots
         Start-DevMode $WorktreeRoots
     }
     "demo" {
@@ -536,15 +548,7 @@ switch ($Command) {
         # failed. Both 0 and 2 mean roots were persisted and need a restart to apply; exit 1
         # (e.g. bad path, server down — nothing persisted) skips the restart so we don't
         # needlessly bounce the production server.
-        if ($tmExit -eq 0 -or $tmExit -eq 2) {
-            $runningPid = Get-RunningPid
-            if ($runningPid) {
-                Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
-                Stop-ProductionServer
-                Start-Sleep -Seconds 1
-                Start-ProductionServer @()
-            }
-        }
+        if ($tmExit -eq 0 -or $tmExit -eq 2) { Restart-ServerIfRunning }
         exit $tmExit
     }
     "remove" {
@@ -561,15 +565,7 @@ switch ($Command) {
 
         # Restart on full (0) or partial (2) success — see 'add' above. Exit 1 (nothing
         # removed) skips the restart.
-        if ($tmExit -eq 0 -or $tmExit -eq 2) {
-            $runningPid = Get-RunningPid
-            if ($runningPid) {
-                Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
-                Stop-ProductionServer
-                Start-Sleep -Seconds 1
-                Start-ProductionServer @()
-            }
-        }
+        if ($tmExit -eq 0 -or $tmExit -eq 2) { Restart-ServerIfRunning }
         exit $tmExit
     }
     "install-skill" {
