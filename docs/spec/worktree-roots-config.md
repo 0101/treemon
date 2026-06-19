@@ -147,6 +147,18 @@ the global `worktreeRoots` key, and that `start`/`dev` no longer need a path.
   process lifecycle stays in PowerShell — clean separation.
 - **Orphan `~/.treemon/roots.json`** is migrated-then-deleted by the server; `.treemon.config` is
   migrated-then-deleted by `treemon.ps1`.
+- **Config-dir test isolation uses `TREEMON_CONFIG_DIR`, not a fixture-set `USERPROFILE`/`HOME`.**
+  The spec preferred redirecting `USERPROFILE`/`HOME`, but on Windows .NET 9
+  `Environment.GetFolderPath(SpecialFolder.UserProfile)` reads the user token, **not** the env
+  vars (empirically confirmed), so in-process unit tests can't redirect it that way. Per the
+  spec's allowed fallback, `WorktreeApi.globalConfigDir ()` honors a `TREEMON_CONFIG_DIR` override
+  (the directory that holds `config.json`, i.e. the `~/.treemon` equivalent); `globalConfigDir` is
+  `internal` so §5's `Program.fs` orphan-`roots.json` handling can resolve the same dir. Note this
+  override only covers `WorktreeApi`'s global reads/writes; the deferred-consolidation duplicate
+  reader in `TreemonConfig.fs` still targets the real `~/.treemon` — so a future endpoint/server
+  test that needs `TreemonConfig`-mediated global reads isolated must run in a separate process
+  whose `USERPROFILE`/`HOME` point at a temp dir (a server process *does* honor those for path
+  building), or that reader must also adopt the override.
 
 ## Key Files
 

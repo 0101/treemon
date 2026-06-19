@@ -36,6 +36,7 @@
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SerializationTests.fs" />
+    <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="VsCodeCopilotDetectorTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />

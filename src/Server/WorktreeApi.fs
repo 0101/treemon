@@ -175,11 +175,20 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
         |> Map.tryFind path
         |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
 
+/// Directory holding the machine-level Treemon config (`config.json`), normally `~/.treemon`.
+/// The `TREEMON_CONFIG_DIR` override exists for test isolation: on Windows
+/// `Environment.GetFolderPath(UserProfile)` ignores the USERPROFILE/HOME env vars, so an
+/// in-process test can only redirect the config dir via this explicit override.
+let internal globalConfigDir () =
+    match Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR") with
+    | null | "" ->
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".treemon")
+    | dir -> dir
+
 let private globalConfigPath () =
-    Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".treemon",
-        "config.json")
+    Path.Combine(globalConfigDir (), "config.json")
 
 let private withConfigDocument (defaultValue: 'a) (f: System.Text.Json.JsonElement -> 'a) : 'a =
     let path = globalConfigPath ()
@@ -213,29 +222,62 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
+/// Serializes every write to the machine-level `config.json`. All global-config writers
+/// (collapsedRepos, canvas state, lastViewedHashes, worktreeRoots) funnel through
+/// `updateGlobalConfig`, so this lock makes the server the single serialized writer and stops
+/// concurrent read-modify-write cycles from clobbering each other's keys.
+let private globalConfigLock = obj ()
+
 let private updateGlobalConfig (description: string) (update: System.Text.Json.Nodes.JsonObject -> unit) =
-    let configPath = globalConfigPath ()
-    try
-        let dir = Path.GetDirectoryName(configPath)
-        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+    lock globalConfigLock (fun () ->
+        let configPath = globalConfigPath ()
+        try
+            let dir = Path.GetDirectoryName(configPath)
+            if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
 
-        let root =
-            if File.Exists(configPath) then
-                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
-                with _ -> System.Text.Json.Nodes.JsonObject()
-            else System.Text.Json.Nodes.JsonObject()
+            let root =
+                if File.Exists(configPath) then
+                    try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
+                    with _ -> System.Text.Json.Nodes.JsonObject()
+                else System.Text.Json.Nodes.JsonObject()
 
-        update root
+            update root
 
-        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
-        File.WriteAllText(configPath, root.ToJsonString(options))
-    with ex ->
-        Log.log "Config" $"Failed to save {description}: {ex.Message}"
+            let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
+            File.WriteAllText(configPath, root.ToJsonString(options))
+        with ex ->
+            Log.log "Config" $"Failed to save {description}: {ex.Message}")
 
 let private writeCollapsedRepos (repos: RepoId list) =
     updateGlobalConfig "collapsed repos" (fun root ->
         let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
         root["collapsedRepos"] <- repoArray)
+
+/// Reads the machine-level set of watched worktree roots (`worktreeRoots` in `config.json`).
+/// Returns `[]` when the key (or file) is absent. `internal` so the startup resolver
+/// (`Program.fs`) and the `getRoots` endpoint can share the single reader.
+let internal readWorktreeRootsConfig () : string list =
+    withConfigDocument [] (fun root ->
+        match root.TryGetProperty("worktreeRoots") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some(el.GetString())
+                else None)
+            |> List.ofSeq
+        | _ -> [])
+
+/// Persists the watched worktree roots through the locked single-writer path, leaving every
+/// other global-config key untouched. `internal` so the startup resolver and the
+/// `addRoot`/`removeRoot` endpoints all write through this one helper.
+let internal writeWorktreeRoots (roots: string list) =
+    updateGlobalConfig "worktree roots" (fun root ->
+        let rootArray =
+            System.Text.Json.Nodes.JsonArray(
+                roots
+                |> List.map (fun r -> System.Text.Json.Nodes.JsonValue.Create(r) :> System.Text.Json.Nodes.JsonNode)
+                |> List.toArray)
+        root["worktreeRoots"] <- rootArray)
 
 let private readCanvasPaneOpen () : bool =
     withConfigDocument false (fun root ->
