@@ -44,7 +44,7 @@ its own worktree. This file is the entry point; detailed designs live in their o
 
 ## Done
 
-- **App.fs view extraction** — `src/Client/App.fs` 1685 → 705 lines. Extracted
+- **App.fs view extraction** — `src/Client/App.fs` 1861 → 795 lines. Extracted
   `OverviewViews.fs`, `CardViews.fs` (with `CardViewProps`/`CardCallbacks` records),
   `MascotState.fs`/`MascotView.fs`, and `CanvasView.fs`; flat `Msg` + single `update`
   preserved. Branch `code-improvement`.
