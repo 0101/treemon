@@ -537,6 +537,26 @@
             font-size: 1em; padding: 0 4px; opacity: 0.6;
         }
         .canvas-waiting-dismiss:hover { opacity: 1; }
+        /* Doc-side JS error banner. Amber accent keeps it visually distinct from the red
+           message-delivery failure banner (.canvas-error-banner) and the blue waiting banner.
+           As a normal flex child of the column-layout .canvas-pane it pushes the iframe down
+           rather than overlaying it; the single-line text ellipsizes (full text in the title)
+           so a long error can never grow the banner over the doc content. */
+        .canvas-doc-error-banner {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            background: #3a2e1e; color: #fab387; padding: 4px 12px;
+            font-size: 0.85em; line-height: 1.4; border-bottom: 1px solid #5a4420;
+        }
+        .canvas-doc-error-text {
+            flex: 1; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            font-family: 'Consolas', 'Cascadia Mono', monospace;
+        }
+        .canvas-doc-error-dismiss {
+            background: none; border: none; color: #fab387; cursor: pointer;
+            font-size: 1em; padding: 0 4px; opacity: 0.6; flex-shrink: 0;
+        }
+        .canvas-doc-error-dismiss:hover { opacity: 1; }
         .canvas-iframe {
             width: 100%;
             height: 100%;

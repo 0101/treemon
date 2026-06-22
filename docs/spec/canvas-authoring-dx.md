@@ -76,9 +76,11 @@ An injected handler (**AgentDoc only**, alongside the bridge) installs `window.o
 the message-delivery failures already shown via `CanvasSendState.Failed`.
 
 - The banner must never cover doc content and must be dismissible.
-- The banner is **doc-scoped**: switching to another tab (`SelectDoc`) clears it, so a stale
-  error from a doc you've navigated away from is never shown. It reappears only if a doc throws
-  again.
+- The banner is **doc-scoped**: the stored error is stamped with the doc visible when it arrived,
+  and the pane shows the banner **only while that same doc is focused**, so navigating away — by
+  tab (`SelectDoc`), card, or keyboard focus — never shows a stale error over a different doc (nor
+  over the overview). `SelectDoc` additionally clears it so a tab switch (and switching back) never
+  re-shows it. It reappears only if a doc throws again.
 - **Acceptance:** a doc that throws on load shows the error text in a banner, and the pane (tabs,
   position controls, other docs) keeps working.
 
@@ -120,11 +122,16 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
   injected helper (literal kept in sync with `CanvasPane.fs`).
 
 ### Client — `src/Client/CanvasPane.fs` + `src/Client/Components.fs`
-- **Doc-error banner:** add model state for the latest doc error (e.g. `Some message`), a message
-  handler for `canvas-doc-error`, a dismiss action, and a `canvas-doc-error-banner` element next
-  to the existing `errorBanner`. Reuse the banner/dismiss CSS classes (add a doc-error class if a
-  distinct accent is wanted). Wire the new callback through `CanvasPaneCallbacks`. `SelectDoc`
-  clears the doc-error state so the banner never carries a stale error across tabs.
+- **Doc-error banner:** add model state for the latest doc error — a record **stamped with the
+  doc that was visible when it arrived** (`DocJsError { ScopedKey; Filename; Message }`, not a bare
+  `Some message`) — a message handler for `canvas-doc-error`, a dismiss action, and a
+  `canvas-doc-error-banner` element next to the existing `errorBanner`. Reuse the banner/dismiss CSS
+  classes (add a doc-error class if a distinct accent is wanted). Wire the new callback through
+  `CanvasPaneCallbacks`. The banner is rendered **only when the stamp matches the focused doc**, so
+  every navigation path (tab/card/keyboard) hides a stale error with no per-reducer clear; `SelectDoc`
+  still clears the state outright so a tab switch (and back) never re-shows it. The handler (the
+  `canvas-doc-error` arm of `CanvasPane.messageListener`) is pane-internal — it must **not** be
+  forwarded to the session like a normal doc payload.
 - **Always-visible tab:** change the `tabs` condition so the active doc's tab always renders;
   preserve the existing SystemView-first ordering and the lone-SystemView behavior.
 - **Compact age:** add `Components.relativeTimeCompact` (a sibling of `relativeTime`) returning

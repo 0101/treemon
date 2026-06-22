@@ -37,6 +37,9 @@ let private styleBlock (injection: string) =
 // ── Item 2: injected window.canvasSend helper markers ─────────────────────────
 let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
 
+// ── Item 3: injected JS error overlay marker ──────────────────────────────────
+let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
+
 // The cap the client enforces (MaxPayloadBytes in src/Client/CanvasPane.fs, which is `private` so it
 // can't be referenced directly). The injected helper must carry the identical literal so the
 // doc-side drop decision matches the client's.
@@ -173,6 +176,35 @@ type BuildInjectionTests() =
         // verdict in F# would only restate the trichotomy identity `not (x > c) = (x <= c)`.
         Assert.That(buildInjection AgentDoc, Does.Contain("if(size>MAX)"),
                     "helper must drop only when size STRICTLY exceeds the cap, so exactly-cap is delivered (matches the client's <=)")
+
+    // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
+    // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
+    // {action:'canvas-doc-error', message, source, line, col} message the client surfaces in a
+    // dismissible banner. A SystemView runs no author JS, so it never gets the overlay.
+
+    [<Test>]
+    member _.``AgentDoc injection includes the JS error overlay``() =
+        let injection = buildInjection AgentDoc
+        Assert.That(injection, Does.Contain(errorOverlayMarker),
+                    "Agent docs get the JS error overlay that forwards doc-side errors to the pane")
+        Assert.That(injection, Does.Contain("window.onerror="),
+                    "the overlay installs window.onerror to catch uncaught errors")
+        Assert.That(injection, Does.Contain("unhandledrejection"),
+                    "the overlay also catches unhandled promise rejections")
+
+    [<Test>]
+    member _.``SystemView injection omits the JS error overlay``() =
+        let injection = buildInjection SystemView
+        Assert.That(injection, Does.Not.Contain(errorOverlayMarker),
+                    "A system view runs no author JS, so the error overlay is omitted")
+
+    [<Test>]
+    member _.``the error overlay wraps its postMessage in try/catch so the error path can't loop``() =
+        // A throw inside the onerror handler would re-enter window.onerror and spin an error loop;
+        // the post is guarded so a serialization failure in the error path is swallowed, not rethrown.
+        let injection = buildInjection AgentDoc
+        Assert.That(injection, Does.Contain("catch(e){}"),
+                    "the overlay's postMessage must be wrapped so the error handler can never re-throw")
 
     // ── End-to-end of the server's decision: classify(filename) -> injection ──
 

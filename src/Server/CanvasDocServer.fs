@@ -258,9 +258,37 @@ let private canvasSendScript =
       "})()</script>" ]
     |> String.concat ""
 
+/// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
+/// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
+/// unhandledrejection listener and forwards each doc-side failure to the pane as the FLAT
+/// {action:'canvas-doc-error', message, source, line, col} message the client surfaces in a
+/// non-blocking, dismissible banner (src/Client/CanvasPane.fs). window.onerror's
+/// (message, source, lineno, colno, error) signature maps 1:1 onto that payload; error.message is
+/// preferred when present (the author's bare "boom" over the host's "Uncaught Error: boom"), else
+/// the raw message string. Any window.onerror a <head> script installed before this </head>
+/// injection is chained (prev.apply) so the overlay never silently swallows a doc's own handler, and
+/// nothing is suppressed (no `return true`) so the native console error still reaches the author. The
+/// postMessage is wrapped in try/catch so a throw inside the error path can never re-enter onerror
+/// and spin an error loop. unhandledrejection reports reason.message (or String(reason)) with no
+/// source/line/col, matching the same flat shape.
+let private errorOverlayScript =
+    [ "<script>(function(){"
+      "function report(message,source,line,col){"
+      "try{window.parent.postMessage({action:'canvas-doc-error',message:String(message),source:source||'',line:(line==null?null:line),col:(col==null?null:col)},'*')}catch(e){}}"
+      "var prev=window.onerror;"
+      "window.onerror=function(message,source,line,col,error){"
+      "report((error&&error.message)||message,source,line,col);"
+      "return prev?prev.apply(this,arguments):false};"
+      "window.addEventListener('unhandledrejection',function(e){"
+      "var r=e&&e.reason;"
+      "report((r&&r.message)||String(r),'',null,null)})"
+      "})()</script>" ]
+    |> String.concat ""
+
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, and the idiomorph runtime + morph controller.
+/// heartbeat, the window.canvasSend helper, the JS error overlay, and the idiomorph runtime +
+/// morph controller.
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
@@ -268,7 +296,7 @@ let private canvasSendScript =
 let buildInjection (kind: CanvasDocKind) : string =
     match kind with
     | SystemView -> baseStyle + linkInterceptor
-    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string

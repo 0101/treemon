@@ -17,6 +17,17 @@ type CanvasSendState =
     | Waiting of scopedKey: string
     | Failed of message: string
 
+/// A doc-side JS error (window.onerror / unhandledrejection forwarded from an AgentDoc iframe via
+/// the injected errorOverlayScript), stamped with the worktree+doc that was visible when it arrived.
+/// The pane shows the banner only while that same doc is focused (CanvasPane.docErrorBanner gates on
+/// ScopedKey+Filename), so card/tab/keyboard navigation to any OTHER doc auto-hides a stale error —
+/// truly doc-scoped — without a clear in every focus-changing reducer. Stamping with the
+/// active-visible doc also attributes the error to a concrete doc rather than a global slot.
+type DocJsError =
+    { ScopedKey: string
+      Filename: string
+      Message: string }
+
 type RepoModel =
     { RepoId: RepoId
       Name: string

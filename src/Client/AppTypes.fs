@@ -80,6 +80,11 @@ type Msg =
     | CanvasMessageReceived of payload: string
     | CanvasSendResult of CanvasMessageResult * scopedKey: string
     | DismissCanvasMessageError
+    // Doc-side JS error forwarded from an AgentDoc iframe (window.onerror / unhandledrejection via
+    // the injected errorOverlayScript). Carried as its own message + model field, distinct from
+    // CanvasSendState.Failed (which is a pane→session *delivery* failure, a different source).
+    | CanvasDocError of message: string
+    | DismissCanvasDocError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>
     | BridgeLivenessLoaded of Map<string, BridgeLiveness>

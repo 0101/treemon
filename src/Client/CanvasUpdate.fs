@@ -63,6 +63,10 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     { model with
         Canvas =
             { model.Canvas with
+                // Doc-scoped error: a tab switch must never carry a stale error from the doc we're
+                // leaving into the one we're showing, so clear it here (it reappears only if the new
+                // doc throws again).
+                DocError = None
                 ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
                 VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
     Cmd.batch [
@@ -180,6 +184,23 @@ let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (model: M
 let dismissCanvasMessageError (model: Model) =
     { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
 
+/// Record a doc-side JS error (window.onerror / unhandledrejection) forwarded from an AgentDoc
+/// iframe. The error is stamped with the doc visible at receipt (activeVisibleDoc) so the banner is
+/// shown only while that doc stays focused — navigating to another doc/card hides it (the view
+/// gates on the stamp), making it truly doc-scoped without a clear in every focus reducer. Kept
+/// separate from CanvasSendState so the doc-error and message-delivery banners never overwrite each
+/// other; the newest error wins. If no doc is currently visible there is nothing to attribute the
+/// error to, so it is dropped. (Arrival is already logged in CanvasPane.messageListener.)
+let canvasDocError (message: string) (model: Model) =
+    match activeVisibleDoc model with
+    | Some (scopedKey, filename) ->
+        { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
+    | None ->
+        model, Cmd.none
+
+let dismissCanvasDocError (model: Model) =
+    { model with Canvas = { model.Canvas with DocError = None } }, Cmd.none
+
 let morphActiveDoc (model: Model) =
     model,
     Cmd.ofEffect (fun _ ->
@@ -192,4 +213,4 @@ let morphComplete (model: Model) =
     model, markVisibleDocCmd model
 
 let messageListener (dispatch: Dispatch<Msg>) =
-    CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch) (fun () -> dispatch MorphComplete)
+    CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch) (fun () -> dispatch MorphComplete) (CanvasDocError >> dispatch)

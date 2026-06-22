@@ -150,15 +150,17 @@ type CanvasPaneCallbacks =
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
       DismissError: unit -> unit
+      DismissDocError: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
     let { SetPosition = setPosition
           SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
           DismissError = dismissError
+          DismissDocError = dismissDocError
           LaunchSession = launchSession } = callbacks
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
@@ -222,6 +224,32 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     Html.button [
                         prop.className "canvas-error-dismiss"
                         prop.onClick (fun _ -> dismissError ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        | _ -> Html.none
+
+    // Doc-side JS error banner — a distinct source from CanvasSendState.Failed (which is a
+    // pane→session *delivery* failure). Rendered as a normal flex child of the column-layout pane
+    // (never absolutely positioned), so it pushes the iframe down instead of covering doc content.
+    // Doc-scoped: shown ONLY when the stored error's stamp matches the currently focused doc, so a
+    // stale error from a doc you navigated away from (tab, card, or keyboard focus) is never shown
+    // over a different doc — and never over the overview (focusedDoc = None).
+    let docErrorBanner =
+        match docError, focusedDoc with
+        | Some err, Some (wt, doc) when WorktreePath.value wt.Path = err.ScopedKey && doc.Filename = err.Filename ->
+            Html.div [
+                prop.className "canvas-doc-error-banner"
+                prop.children [
+                    Html.span [
+                        prop.className "canvas-doc-error-text"
+                        prop.title err.Message
+                        prop.text $"Doc error: {err.Message}"
+                    ]
+                    Html.button [
+                        prop.className "canvas-doc-error-dismiss"
+                        prop.onClick (fun _ -> dismissDocError ())
                         prop.text "✕"
                     ]
                 ]
@@ -302,6 +330,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             React.fragment [
                 headerBar tabs (Some doc) (doc.Kind = AgentDoc && not isFocusedDocAlive)
                 errorBanner
+                docErrorBanner
                 waitingBanner
                 yield! iframes
             ]
@@ -309,6 +338,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             React.fragment [
                 headerBar [] None false
                 errorBanner
+                docErrorBanner
                 waitingBanner
                 overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
             ]
@@ -323,7 +353,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         prop.children [ content ]
     ]
 
-let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMorphComplete: unit -> unit) =
+let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMorphComplete: unit -> unit) (onDocError: string -> unit) =
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -340,6 +370,16 @@ let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMo
                 elif action = "morph-complete" then
                     Fable.Core.JS.console.log "[canvas] morph-complete received"
                     onMorphComplete ()
+                elif action = "canvas-doc-error" then
+                    // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
+                    // in the doc-error banner, never forwarded to the session like a normal payload.
+                    // message/line/col are coerced defensively (the post crosses an untrusted '*'
+                    // boundary): build "msg (line N:C)" when a line is present, else just the message.
+                    let message =
+                        Fable.Core.JsInterop.emitJsExpr<string> me.data
+                            "(function(d){var m=(d.message==null?'Unknown error':String(d.message).slice(0,500));return (d.line==null)?m:(m+' (line '+d.line+(d.col==null?'':(':'+d.col))+')');})($0)"
+                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received: {message}")
+                    onDocError message
                 else
                     let payload = Fable.Core.JS.JSON.stringify me.data
                     Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")

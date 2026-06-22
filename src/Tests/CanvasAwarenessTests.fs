@@ -759,3 +759,76 @@ type NavigateCanvasDocTests() =
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1" ] ] ] }
         Assert.That(isKnownCanvasDoc model "myrepo/ghost" "status.html", Is.False,
             "No worktree for the scoped key means nothing is known, so the navigation is dropped")
+
+
+// ── Doc-side JS error (item 3: error overlay → canvas-doc-error banner) ───────
+// A doc-side JS error is stored in Canvas.DocError stamped with the doc visible at receipt
+// (DocJsError { ScopedKey; Filename; Message }) so the pane can show the banner only while that doc
+// stays focused — navigating away auto-hides a stale error (the view gates on the stamp). It is a
+// distinct source from CanvasSendState.Failed, and SelectCanvasDoc clears it so a tab switch (and
+// switching back) never re-shows it.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DocErrorTests() =
+
+    // A model whose focused card resolves to a real visible doc, so canvasDocError can stamp it
+    // (activeVisibleDoc falls back to the worktree's first doc when ActiveCanvasDoc is empty).
+    let focusedModel (canvasDocs: CanvasDoc list) =
+        { defaultModel with
+            Repos = [ makeRepo "r" [ makeWorktree "r" "feat" canvasDocs ] ]
+            FocusedElement = Some (Card "r/feat") }
+
+    [<Test>]
+    member _.``CanvasDocError stamps the message with the visible doc``() =
+        let model = focusedModel [ makeDoc "a.html" "ha" ]
+        let updated = tryUpdateModel (CanvasDocError "Uncaught Error: boom (line 3:5)") model
+        Assert.That(updated.Canvas.DocError,
+            Is.EqualTo(Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "Uncaught Error: boom (line 3:5)" }),
+            "A doc-side JS error must be stored, stamped with the doc visible when it arrived (so the banner is doc-scoped)")
+
+    [<Test>]
+    member _.``CanvasDocError is dropped when no doc is visible``() =
+        let updated = tryUpdateModel (CanvasDocError "boom") defaultModel  // no focused card / docs
+        Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
+            "With no visible doc there is nothing to attribute the error to, so it is dropped")
+
+    [<Test>]
+    member _.``CanvasDocError does NOT touch CanvasSendState (distinct source)``() =
+        let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
+        let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
+        let updated = tryUpdateModel (CanvasDocError "boom") model
+        Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
+            "Doc JS errors and message-delivery state are independent and must not overwrite each other")
+        Assert.That(updated.Canvas.DocError |> Option.map _.Message, Is.EqualTo(Some "boom"))
+
+    [<Test>]
+    member _.``the newest doc error wins``() =
+        let model = focusedModel [ makeDoc "a.html" "ha" ]
+        let afterFirst = tryUpdateModel (CanvasDocError "first") model
+        let afterSecond = tryUpdateModel (CanvasDocError "second") afterFirst
+        Assert.That(afterSecond.Canvas.DocError |> Option.map _.Message, Is.EqualTo(Some "second"),
+            "A fresh error replaces the prior one")
+
+    [<Test>]
+    member _.``DismissCanvasDocError clears the doc error``() =
+        let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
+        let model = { baseModel with Canvas = { baseModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" } } }
+        let updated = tryUpdateModel DismissCanvasDocError model
+        Assert.That(updated.Canvas.DocError, Is.EqualTo(None), "Dismiss must clear the banner")
+
+    [<Test>]
+    member _.``DismissCanvasDocError leaves CanvasSendState untouched``() =
+        let model = { defaultModel with Canvas = { defaultModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" }; CanvasSendState = CanvasSendState.Failed "send failed" } }
+        let updated = tryUpdateModel DismissCanvasDocError model
+        Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Failed "send failed"),
+            "Dismissing the doc-error banner must not clear an unrelated send failure")
+
+    [<Test>]
+    member _.``SelectCanvasDoc clears a stale doc error (so a tab switch back never re-shows it)``() =
+        let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
+        let model = { baseModel with Canvas = { baseModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "stale" } } }
+        let updated = tryUpdateModel (SelectCanvasDoc ("r/feat", "b.html")) model
+        Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
+            "Switching tabs clears the stored error so it can never re-show when you switch back")

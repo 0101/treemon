@@ -533,6 +533,10 @@ let update msg model =
 
     | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
 
+    | CanvasDocError message -> CanvasUpdate.canvasDocError message model
+
+    | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
+
     | MarkDocViewed (scopedKey, filename) ->
         let worktree = findWorktree scopedKey model
         let currentHash =
@@ -1825,10 +1829,11 @@ let view model dispatch =
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveCanvasDoc
           DismissError = (fun () -> dispatch DismissCanvasMessageError)
+          DismissDocError = (fun () -> dispatch DismissCanvasDocError)
           LaunchSession = launchCanvasSession }
 
     let canvasEl =
-        CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+        CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
 
     let children =
         match model.Canvas.CanvasPosition with
