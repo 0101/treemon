@@ -86,12 +86,13 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``both doc kinds inject the dark-theme base reset``() =
-        for kind in [ SystemView; AgentDoc ] do
+        [ SystemView; AgentDoc ]
+        |> List.iter (fun kind ->
             let injection = buildInjection kind "status.html"
             Assert.That(injection, Does.Contain(resetWrapMarker),
                         $"{kind}: the base reset (:where(body)) must be injected for both kinds")
             Assert.That(injection, Does.Contain(resetDarkBgMarker),
-                        $"{kind}: the reset must set the dark theme background so a plain doc renders dark")
+                        $"{kind}: the reset must set the dark theme background so a plain doc renders dark"))
 
     [<Test>]
     member _.``the base reset carries zero specificity (no bare element selectors, no !important)``() =
