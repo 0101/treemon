@@ -5,8 +5,7 @@ module CanvasView
 // from the model, and calls `CanvasPane.view` to render the pane element. This is the view-layer
 // companion to `CanvasUpdate.fs` (whose `activeVisibleDoc` it reuses): pure render wiring, no
 // `update` logic. Compiled after `CanvasUpdate.fs` and before `App.fs`, whose `view` now calls
-// `CanvasView.view model dispatch` in place of the inlined block. See
-// docs/spec/app-fs-view-extraction.md.
+// `CanvasView.view model dispatch` in place of the inlined block.
 
 open Shared
 open Navigation

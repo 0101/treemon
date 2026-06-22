@@ -4,7 +4,7 @@ module MascotView
 // `MascotState` slice (gaze direction + activity level) so the eyes' view sits next to their
 // state and update (`MascotState.fs`/`MascotUpdate.fs`), mirroring the canvas slice. Compiled
 // before `AppTypes.fs`, so these depend only on `Shared`/`Feliz` and the `MascotState` record —
-// never on `Model`/`Msg`. See docs/spec/app-fs-view-extraction.md.
+// never on `Model`/`Msg`.
 
 open Shared
 open Feliz

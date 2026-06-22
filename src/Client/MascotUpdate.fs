@@ -5,7 +5,7 @@ module MascotUpdate
 // `match` and delegates to these functions (no sub-`Msg`/`Cmd.map` split). `Tick` stays in the
 // root arm because it also expires canvas events and drives the worktree/sync poll; only its
 // mascot activity-recompute lifts here. Compiled after `AppTypes.fs` (which holds `Model`/`Msg`)
-// and before `App.fs`. See docs/spec/app-fs-view-extraction.md.
+// and before `App.fs`.
 
 open Shared
 open Elmish
@@ -50,6 +50,9 @@ let userActivity (now: float) (model: Model) : Model * Cmd<Msg> =
 /// (mousemove/keydown/click/scroll), throttled to once per 5s, and removes its listeners on
 /// dispose. Mirrors `CanvasUpdate.messageListener` as the mascot's entry in `appSubscriptions`.
 let activityDetection (dispatch: Dispatch<Msg>) =
+    // Throttle timestamp confined to this subscription closure — Elmish's designated impure
+    // boundary (same pattern as setInterval). An immutable alternative would have to re-register
+    // the DOM listeners on every event; `let mutable` (never a ref cell) is the right tool here.
     let mutable lastDispatchTime = Fable.Core.JS.Constructors.Date.now ()
     let throttleMs = 5000.0
 
