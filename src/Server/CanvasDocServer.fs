@@ -232,6 +232,12 @@ let private linkInterceptor = "<script>document.addEventListener('click',functio
 /// canvasSend('navigate-canvas-doc',{filename}) posts {action:'navigate-canvas-doc', filename} via
 /// window.parent.postMessage(...,'*'), identical in effect to a hand-rolled postMessage.
 ///
+/// The explicit `action` argument ALWAYS wins: payload is merged FIRST and {action} is applied OVER
+/// it (Object.assign({},payload,{action:action})), so a payload that carries its own `action` key
+/// can't silently override the caller's action — canvasSend('navigate-canvas-doc',{action:'x',...})
+/// still posts (and size-checks) {action:'navigate-canvas-doc',...}, not {action:'x',...}. Applying
+/// {action} last is load-bearing; do NOT flip it back to Object.assign({action:action},payload).
+///
 /// The size guard mirrors the client EXACTLY. CanvasPane.fs computes JSON.stringify(me.data).length
 /// — where me.data IS the posted {action,...payload} object and .length is UTF-16 code units (the JS
 /// String.length) — and DROPS the message when that exceeds MaxPayloadBytes (the "postMessage
@@ -248,7 +254,7 @@ let private canvasSendScript =
     [ "<script>(function(){"
       "var MAX=64000;"
       "window.canvasSend=function(action,payload){"
-      "var msg=Object.assign({action:action},payload);"
+      "var msg=Object.assign({},payload,{action:action});"
       "var size=JSON.stringify(msg).length;"
       "if(size>MAX){"
       "console.error('[canvas] canvasSend DROPPED: '+action+' message too large ('+size+' > '+MAX+' UTF-16 code units); not sent');"

@@ -177,6 +177,28 @@ type BuildInjectionTests() =
         Assert.That(buildInjection AgentDoc, Does.Contain("if(size>MAX)"),
                     "helper must drop only when size STRICTLY exceeds the cap, so exactly-cap is delivered (matches the client's <=)")
 
+    [<Test>]
+    member _.``the canvasSend action argument overrides an action key in the payload``() =
+        // Regression guard (focused-review A-01). The helper originally built
+        //   var msg=Object.assign({action:action},payload);
+        // which applies `payload` LAST, so a payload carrying its OWN `action` key silently overrode
+        // the caller's action argument: canvasSend('navigate-canvas-doc',{action:'x',filename:'y'})
+        // posted {action:'x',...}, the pane never recognised it as navigate-canvas-doc, and the size
+        // check ran against the wrong object — yet canvasSend still returned true, so the failure was
+        // silent. The explicit action argument must ALWAYS win, so it has to be merged AFTER payload
+        // (Object.assign({},payload,{action:action})). There is no JS engine in this test project, so
+        // the behaviour is pinned via the merge ORDER in the emitted JS the doc actually runs. (If the
+        // helper is ever refactored to `msg.action=action` after the assign, update the second regex.)
+        let injection = buildInjection AgentDoc
+        // (a) the original action-FIRST order — which let payload.action win — must be gone
+        Assert.That(Regex.IsMatch(injection, @"Object\.assign\(\s*\{\s*action\s*:\s*action\s*\}\s*,\s*payload"),
+                    Is.False,
+                    "action must not be merged BEFORE payload, or a payload `action` key would override the caller's action argument")
+        // (b) the explicit action must be merged AFTER payload so it overrides any payload.action
+        Assert.That(Regex.IsMatch(injection, @"Object\.assign\([^)]*payload[^)]*action\s*:\s*action"),
+                    Is.True,
+                    "canvasSend's explicit action argument must be merged last so it overrides any `action` key in payload")
+
     // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
     // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
     // {action:'canvas-doc-error', message, source, line, col} message the client surfaces in a
