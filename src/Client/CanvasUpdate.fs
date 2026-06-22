@@ -185,17 +185,22 @@ let dismissCanvasMessageError (model: Model) =
     { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
 
 /// Record a doc-side JS error (window.onerror / unhandledrejection) forwarded from an AgentDoc
-/// iframe. The error is stamped with the doc visible at receipt (activeVisibleDoc) so the banner is
-/// shown only while that doc stays focused — navigating to another doc/card hides it (the view
-/// gates on the stamp), making it truly doc-scoped without a clear in every focus reducer. Kept
-/// separate from CanvasSendState so the doc-error and message-delivery banners never overwrite each
-/// other; the newest error wins. If no doc is currently visible there is nothing to attribute the
-/// error to, so it is dropped. (Arrival is already logged in CanvasPane.messageListener.)
-let canvasDocError (message: string) (model: Model) =
-    match activeVisibleDoc model with
-    | Some (scopedKey, filename) ->
+/// iframe. `filename` is the EMITTING doc, carried in the postMessage `doc` field and threaded
+/// through the listener, so the error is stamped with the doc that actually threw — not the active
+/// tab. This matters because visited docs stay mounted as hidden iframes and keep running JS, so an
+/// async error from a hidden doc must not be attributed to the focused tab (focused-review A-02).
+/// The emitter is validated against the focused worktree's docs (isKnownCanvasDoc) before being
+/// stored, so a stale/forged filename — e.g. from an archived doc — can never raise a banner. The
+/// stamp drives doc-scoped display: the banner shows only while that doc stays focused; navigating
+/// to another doc/card hides it (the view gates on the stamp). Kept separate from CanvasSendState so
+/// the doc-error and message-delivery banners never overwrite each other; the newest error wins. If
+/// there is no focused card, or the emitter is not a known doc of it, the error is dropped. (Arrival
+/// is already logged in CanvasPane.messageListener.)
+let canvasDocError (filename: string) (message: string) (model: Model) =
+    match model.FocusedElement with
+    | Some (Card scopedKey) when isKnownCanvasDoc model scopedKey filename ->
         { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
-    | None ->
+    | _ ->
         model, Cmd.none
 
 let dismissCanvasDocError (model: Model) =
@@ -213,4 +218,8 @@ let morphComplete (model: Model) =
     model, markVisibleDocCmd model
 
 let messageListener (dispatch: Dispatch<Msg>) =
-    CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch) (fun () -> dispatch MorphComplete) (CanvasDocError >> dispatch)
+    CanvasPane.messageListener
+        { Dispatch = CanvasMessageReceived >> dispatch
+          SelectDoc = NavigateCanvasDoc >> dispatch
+          OnMorphComplete = fun () -> dispatch MorphComplete
+          OnDocError = fun filename message -> dispatch (CanvasDocError (filename, message)) }

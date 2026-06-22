@@ -533,7 +533,7 @@ let update msg model =
 
     | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
 
-    | CanvasDocError message -> CanvasUpdate.canvasDocError message model
+    | CanvasDocError (filename, message) -> CanvasUpdate.canvasDocError filename message model
 
     | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
 

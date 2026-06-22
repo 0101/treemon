@@ -267,7 +267,7 @@ let private canvasSendScript =
 /// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
 /// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
 /// unhandledrejection listener and forwards each doc-side failure to the pane as the FLAT
-/// {action:'canvas-doc-error', message, source, line, col} message the client surfaces in a
+/// {action:'canvas-doc-error', doc, message, source, line, col} message the client surfaces in a
 /// non-blocking, dismissible banner (src/Client/CanvasPane.fs). window.onerror's
 /// (message, source, lineno, colno, error) signature maps 1:1 onto that payload; error.message is
 /// preferred when present (the author's bare "boom" over the host's "Uncaught Error: boom"), else
@@ -277,10 +277,22 @@ let private canvasSendScript =
 /// postMessage is wrapped in try/catch so a throw inside the error path can never re-enter onerror
 /// and spin an error loop. unhandledrejection reports reason.message (or String(reason)) with no
 /// source/line/col, matching the same flat shape.
-let private errorOverlayScript =
+///
+/// The `doc` field carries THIS doc's filename (the overlay is served per-doc, so the emitter is
+/// known at injection time) so the pane attributes the error to the doc that actually threw — not the
+/// active tab. Visited docs stay mounted as hidden iframes and keep running JS, so an async error
+/// from a hidden doc would otherwise be stamped onto whatever tab is active when the message is
+/// processed (focused-review A-02). The pane re-validates `doc` against the focused worktree's docs
+/// before showing a banner, so a stale/forged filename can't surface one.
+let private errorOverlayScript (filename: string) =
+    // JsonSerializer.Serialize yields a properly-escaped, HTML-safe JS string literal (e.g.
+    // "status.html"; <,>,& and quotes are \uXXXX-escaped so a crafted filename can neither close the
+    // <script> nor break out of the string), safe to splice straight into the injected source.
+    let docLiteral = JsonSerializer.Serialize(filename)
     [ "<script>(function(){"
+      $"var DOC={docLiteral};"
       "function report(message,source,line,col){"
-      "try{window.parent.postMessage({action:'canvas-doc-error',message:String(message),source:source||'',line:(line==null?null:line),col:(col==null?null:col)},'*')}catch(e){}}"
+      "try{window.parent.postMessage({action:'canvas-doc-error',doc:DOC,message:String(message),source:source||'',line:(line==null?null:line),col:(col==null?null:col)},'*')}catch(e){}}"
       "var prev=window.onerror;"
       "window.onerror=function(message,source,line,col,error){"
       "report((error&&error.message)||message,source,line,col);"
@@ -294,15 +306,17 @@ let private errorOverlayScript =
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
 /// heartbeat, the window.canvasSend helper, the JS error overlay, and the idiomorph runtime +
-/// morph controller.
+/// morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
+/// doc-side error carries its own identity (the emitter), letting the pane attribute it correctly
+/// even when other docs are mounted as hidden iframes. It is unused for SystemViews (no overlay).
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
 /// them, and they post nothing back — so the bridge, canvasSend, and morph pieces are all omitted.
-let buildInjection (kind: CanvasDocKind) : string =
+let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> baseStyle + linkInterceptor
-    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -351,7 +365,7 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
             | Ok resolvedPath ->
                 let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                 let html = System.Text.Encoding.UTF8.GetString(rawBytes)
-                let injection = buildInjection (CanvasDocKind.classify filename)
+                let injection = buildInjection (CanvasDocKind.classify filename) filename
                 let injected =
                     if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
                     then html.Replace("</head>", injection + "</head>", System.StringComparison.OrdinalIgnoreCase)

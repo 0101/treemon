@@ -359,7 +359,25 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         prop.children [ content ]
     ]
 
-let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMorphComplete: unit -> unit) (onDocError: string -> unit) =
+/// Callbacks the pane-internal `messageListener` raises for each recognized doc→pane message.
+/// Grouped into a record (mirroring CanvasPaneCallbacks) so they are passed by name: Dispatch and
+/// SelectDoc both share the type `string -> unit`, so positional passing let a silent argument
+/// transposition compile and surface only at runtime.
+type MessageListenerCallbacks =
+    { /// Forward an unrecognized (normal) doc payload on to the session.
+      Dispatch: string -> unit
+      /// Switch the active tab to the named doc (navigate-canvas-doc).
+      SelectDoc: string -> unit
+      /// The active doc finished an idiomorph (morph-complete).
+      OnMorphComplete: unit -> unit
+      /// A doc-side JS error arrived: (emitting filename, display message).
+      OnDocError: string -> string -> unit }
+
+let messageListener (callbacks: MessageListenerCallbacks) =
+    let { Dispatch = dispatch
+          SelectDoc = selectDoc
+          OnMorphComplete = onMorphComplete
+          OnDocError = onDocError } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -379,13 +397,22 @@ let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMo
                 elif action = "canvas-doc-error" then
                     // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                     // in the doc-error banner, never forwarded to the session like a normal payload.
-                    // message/line/col are coerced defensively (the post crosses an untrusted '*'
-                    // boundary): build "msg (line N:C)" when a line is present, else just the message.
+                    // The `doc` field is the emitting doc's filename, threaded so the reducer can stamp
+                    // the error with the doc that threw (not the active tab); it is re-validated against
+                    // the focused worktree's docs there. message/line/col cross an untrusted '*'
+                    // boundary, so each field is read with a null-safe String() coercion and the display
+                    // string "msg (line N:C)" is assembled here in F#.
+                    let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.doc==='string'?$0.doc:''"
+                    let rawMessage = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.message==null?'Unknown error':String($0.message)"
+                    let line = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.line==null?'':String($0.line)"
+                    let col = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.col==null?'':String($0.col)"
+                    let body = if rawMessage.Length > 500 then rawMessage.Substring(0, 500) else rawMessage
                     let message =
-                        Fable.Core.JsInterop.emitJsExpr<string> me.data
-                            "(function(d){var m=(d.message==null?'Unknown error':String(d.message).slice(0,500));return (d.line==null)?m:(m+' (line '+d.line+(d.col==null?'':(':'+d.col))+')');})($0)"
-                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received: {message}")
-                    onDocError message
+                        if line = "" then body
+                        elif col = "" then $"{body} (line {line})"
+                        else $"{body} (line {line}:{col})"
+                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received from {filename}: {message}")
+                    onDocError filename message
                 else
                     let payload = Fable.Core.JS.JSON.stringify me.data
                     Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")

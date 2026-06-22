@@ -18,11 +18,13 @@ type CanvasSendState =
     | Failed of message: string
 
 /// A doc-side JS error (window.onerror / unhandledrejection forwarded from an AgentDoc iframe via
-/// the injected errorOverlayScript), stamped with the worktree+doc that was visible when it arrived.
+/// the injected errorOverlayScript), stamped with the worktree + the doc that EMITTED it. The
+/// emitting doc's filename rides along in the postMessage `doc` field (the overlay is served per-doc)
+/// and is validated against the focused worktree's docs before being stored, so an error from a
+/// hidden/background iframe is attributed to the doc that actually threw — not the active tab.
 /// The pane shows the banner only while that same doc is focused (CanvasPane.docErrorBanner gates on
 /// ScopedKey+Filename), so card/tab/keyboard navigation to any OTHER doc auto-hides a stale error —
-/// truly doc-scoped — without a clear in every focus-changing reducer. Stamping with the
-/// active-visible doc also attributes the error to a concrete doc rather than a global slot.
+/// truly doc-scoped — without a clear in every focus-changing reducer.
 type DocJsError =
     { ScopedKey: string
       Filename: string

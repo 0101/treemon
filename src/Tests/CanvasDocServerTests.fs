@@ -64,7 +64,7 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``SystemView injection omits the idiomorph runtime and morph controller``() =
-        let injection = buildInjection SystemView
+        let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs),
                     "A system view must never morph, so the idiomorph runtime is omitted")
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController),
@@ -72,13 +72,13 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``SystemView injection omits the message-bridge heartbeat``() =
-        let injection = buildInjection SystemView
+        let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(bridgeMarker),
                     "A system view has no owner session, so the bridge heartbeat is omitted")
 
     [<Test>]
     member _.``SystemView injection keeps the base style and link interceptor``() =
-        let injection = buildInjection SystemView
+        let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Contain(baseStyleMarker), "Both kinds keep the scrollbar base style")
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
 
@@ -87,7 +87,7 @@ type BuildInjectionTests() =
     [<Test>]
     member _.``both doc kinds inject the dark-theme base reset``() =
         for kind in [ SystemView; AgentDoc ] do
-            let injection = buildInjection kind
+            let injection = buildInjection kind "status.html"
             Assert.That(injection, Does.Contain(resetWrapMarker),
                         $"{kind}: the base reset (:where(body)) must be injected for both kinds")
             Assert.That(injection, Does.Contain(resetDarkBgMarker),
@@ -99,7 +99,7 @@ type BuildInjectionTests() =
         // specificity it would win the source-order tiebreak and stomp the doc; wrapping every
         // selector in :where(...) drops it to zero specificity so even a bare body{} doc rule — and
         // the beads SystemView template's own body{background:var(--bg-deep)} — overrides it.
-        let style = styleBlock (buildInjection SystemView)
+        let style = styleBlock (buildInjection SystemView "beads.html")
         Assert.That(style, Does.Not.Contain("!important"),
                     "no reset rule may use !important — that would defeat doc/template overrides")
         let bare = bareElementSelector.Match(style)
@@ -111,7 +111,7 @@ type BuildInjectionTests() =
     // match. The filename is taken from a.pathname (which excludes ?query/#hash), not the raw href.
     [<Test>]
     member _.``link interceptor derives the filename from a.pathname so ?query/#hash are stripped``() =
-        let injection = buildInjection SystemView
+        let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Contain("(a.pathname||h).split('/').pop()"),
                     "The clicked filename must come from a.pathname (no ?query/#hash), not the raw href")
         Assert.That(injection, Does.Not.Contain("var f=h.split('/').pop()"),
@@ -121,7 +121,7 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``AgentDoc injection includes the full morph + bridge machinery``() =
-        let injection = buildInjection AgentDoc
+        let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController), "Agent docs keep the morph controller")
         Assert.That(injection, Does.Contain(bridgeMarker), "Agent docs keep the message-bridge heartbeat")
@@ -135,13 +135,13 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasSend helper``() =
-        let injection = buildInjection AgentDoc
+        let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain(canvasSendMarker),
                     "Agent docs get the first-class window.canvasSend(action,payload) helper")
 
     [<Test>]
     member _.``SystemView injection omits the canvasSend helper``() =
-        let injection = buildInjection SystemView
+        let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(canvasSendMarker),
                     "A system view is server-generated and posts nothing, so canvasSend is omitted")
 
@@ -150,7 +150,7 @@ type BuildInjectionTests() =
         // The client drops on JSON.stringify(me.data).length (UTF-16 code units / JS String.length).
         // The helper must measure the identical metric on the object it posts — NOT a UTF-8 byte
         // length, which would diverge from the client's String.length check.
-        let injection = buildInjection AgentDoc
+        let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain("JSON.stringify(msg).length"),
                     "helper must size-check JSON.stringify(...).length — the same metric the client enforces")
 
@@ -158,7 +158,7 @@ type BuildInjectionTests() =
     member _.``the canvasSend size cap matches the client's MaxPayloadBytes``() =
         // Drift guard: the helper's literal must equal the cap the client enforces in CanvasPane.fs,
         // otherwise the helper could block a payload the client accepts (or pass one it drops).
-        Assert.That(helperCap (buildInjection AgentDoc), Is.EqualTo(ClientMaxPayloadBytes),
+        Assert.That(helperCap (buildInjection AgentDoc "status.html"), Is.EqualTo(ClientMaxPayloadBytes),
                     "canvasSend's cap must equal MaxPayloadBytes (src/Client/CanvasPane.fs)")
 
     [<Test>]
@@ -174,7 +174,7 @@ type BuildInjectionTests() =
         // both, and cap+1 is dropped by both. (A non-strict `>=` would drop at exactly-cap and
         // diverge.) Asserting the operator in the EMITTED JS is the real guard; re-deriving the
         // verdict in F# would only restate the trichotomy identity `not (x > c) = (x <= c)`.
-        Assert.That(buildInjection AgentDoc, Does.Contain("if(size>MAX)"),
+        Assert.That(buildInjection AgentDoc "status.html", Does.Contain("if(size>MAX)"),
                     "helper must drop only when size STRICTLY exceeds the cap, so exactly-cap is delivered (matches the client's <=)")
 
     [<Test>]
@@ -189,7 +189,7 @@ type BuildInjectionTests() =
         // (Object.assign({},payload,{action:action})). There is no JS engine in this test project, so
         // the behaviour is pinned via the merge ORDER in the emitted JS the doc actually runs. (If the
         // helper is ever refactored to `msg.action=action` after the assign, update the second regex.)
-        let injection = buildInjection AgentDoc
+        let injection = buildInjection AgentDoc "status.html"
         // (a) the original action-FIRST order — which let payload.action win — must be gone
         Assert.That(Regex.IsMatch(injection, @"Object\.assign\(\s*\{\s*action\s*:\s*action\s*\}\s*,\s*payload"),
                     Is.False,
@@ -201,12 +201,12 @@ type BuildInjectionTests() =
 
     // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
     // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
-    // {action:'canvas-doc-error', message, source, line, col} message the client surfaces in a
+    // {action:'canvas-doc-error', doc, message, source, line, col} message the client surfaces in a
     // dismissible banner. A SystemView runs no author JS, so it never gets the overlay.
 
     [<Test>]
     member _.``AgentDoc injection includes the JS error overlay``() =
-        let injection = buildInjection AgentDoc
+        let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain(errorOverlayMarker),
                     "Agent docs get the JS error overlay that forwards doc-side errors to the pane")
         Assert.That(injection, Does.Contain("window.onerror="),
@@ -216,7 +216,7 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``SystemView injection omits the JS error overlay``() =
-        let injection = buildInjection SystemView
+        let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(errorOverlayMarker),
                     "A system view runs no author JS, so the error overlay is omitted")
 
@@ -224,21 +224,44 @@ type BuildInjectionTests() =
     member _.``the error overlay wraps its postMessage in try/catch so the error path can't loop``() =
         // A throw inside the onerror handler would re-enter window.onerror and spin an error loop;
         // the post is guarded so a serialization failure in the error path is swallowed, not rethrown.
-        let injection = buildInjection AgentDoc
+        let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain("catch(e){}"),
                     "the overlay's postMessage must be wrapped so the error handler can never re-throw")
+
+    [<Test>]
+    member _.``the error overlay embeds the emitting doc's filename and posts it as the doc field``() =
+        // Doc identity (focused-review A-02): the overlay is served per-doc, so it stamps THIS doc's
+        // filename into the posted payload (doc:DOC) — letting the pane attribute the error to the
+        // emitter, not the active tab, even when other docs are mounted as hidden iframes. The literal
+        // is JSON-serialized at injection time, so it is a quoted, HTML-safe JS string.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain("var DOC=\"status.html\""),
+                    "the overlay must embed the served doc's filename as a JS string constant")
+        Assert.That(injection, Does.Contain("doc:DOC"),
+                    "the canvas-doc-error payload must carry the emitting doc's identity in the doc field")
+
+    [<Test>]
+    member _.``the error overlay's embedded filename is escaped so a crafted name can't break out``() =
+        // The filename is spliced into injected <script> source. JSON-serializing it escapes quotes
+        // and HTML-significant chars (<,>,&) to \uXXXX, so a name carrying e.g. </script> or a quote
+        // can neither close the script element nor terminate the JS string literal early.
+        let injection = buildInjection AgentDoc "a\"</script>.html"
+        Assert.That(injection, Does.Not.Contain("var DOC=\"a\"</script>"),
+                    "a raw quote/script tag must not appear unescaped in the embedded doc literal")
+        Assert.That(injection, Does.Not.Contain("</script>.html"),
+                    "the embedded filename must be HTML-escaped so it cannot close the injected script")
 
     // ── End-to-end of the server's decision: classify(filename) -> injection ──
 
     [<Test>]
     member _.``beads.html classifies as a SystemView and gets the stripped injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "beads.html")
+        let injection = buildInjection (CanvasDocKind.classify "beads.html") "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController))
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "status.html")
+        let injection = buildInjection (CanvasDocKind.classify "status.html") "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
 

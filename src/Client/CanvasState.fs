@@ -17,12 +17,13 @@ type CanvasState =
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasSendState: CanvasSendState
-      // Latest doc-side JS error from a focused AgentDoc's iframe, stamped with the doc that was
-      // visible when it arrived (DocJsError). The banner is shown only while that same doc is
-      // focused (CanvasPane gates on it), so navigating to another doc/card auto-hides a stale
-      // error — doc-scoped without a clear in every focus reducer. SelectCanvasDoc additionally
-      // clears it so a tab switch (and switch back) never re-shows it. Distinct from
-      // CanvasSendState.Failed, which models pane→session message-delivery failures.
+      // Latest doc-side JS error from a focused AgentDoc's iframe, stamped with the doc that EMITTED
+      // it — its filename is carried in the postMessage and validated against the focused worktree's
+      // docs (DocJsError). The banner is shown only while that same doc is focused (CanvasPane gates
+      // on it), so navigating to another doc/card auto-hides a stale error — doc-scoped without a
+      // clear in every focus reducer. SelectCanvasDoc additionally clears it so a tab switch (and
+      // switch back) never re-shows it. Distinct from CanvasSendState.Failed, which models
+      // pane→session message-delivery failures.
       DocError: DocJsError option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
