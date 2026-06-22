@@ -118,8 +118,11 @@ Timeline replay tests verify status transitions against checked-in fixture data 
 A "+" button on each repo header opens a modal to create new worktrees without leaving the dashboard.
 
 - **Name input** (auto-focused) + **source branch dropdown** (sorted: main > master > develop > dev* > alphabetical from dashboard worktrees)
-- If `fork.ps1` (Windows) or `fork.sh` (Unix) exists in repo root, delegates to it with branch name as sole argument (runs from source worktree directory). Otherwise falls back to `git worktree add -b {name} {parentDir}/tm-{name}`.
-- Modal shows creating animation, then auto-closes on success or displays error
+- Treemon creates the worktree itself: it fetches the base branch from the upstream remote, then forks via `git worktree add -b {name} {parentDir}/tm-{name} {baseRef}`. `baseRef` prefers the remote-tracking ref `{remote}/{base}` — so a new worktree forks from the upstream tip rather than a possibly-stale local branch — falling back to the local `{base}` branch when no remote-tracking ref exists. No worktree needs the base checked out; fetch/remote failures fall back to whatever ref is available.
+- After creation, an optional `post-fork.ps1` (Windows) / `post-fork.sh` (Unix) in the repo root runs **inside the new worktree**, receiving `{worktreePath} {sourceRepoRoot} {baseRef} {branchName}`. It is for setup only (symlinks, dependency install); a failure is reported as a non-fatal warning since the worktree already exists.
+- Legacy `fork.ps1`/`fork.sh` scripts are **no longer executed** — Treemon now owns forking. If one is present, creation still succeeds but returns a warning to migrate setup steps into `post-fork.*`.
+- Warnings (legacy fork script present, post-fork failure) flow back through `createWorktree` (`Result<string list, string>`) and are surfaced in the modal (UI) or console (CLI).
+- Modal shows creating animation, then auto-closes on clean success, or shows warnings / error
 - Server expedites worktree list refresh for the repo so the new card appears quickly
 
 ### Native Session Management

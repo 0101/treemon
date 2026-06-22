@@ -337,32 +337,106 @@ let validateBranchName (branchName: string) =
     else
         Error $"Invalid branch name: '{branchName}'"
 
-let resolveWorktreeCommand (repoRoot: string) (sourceWorktreePath: string) (branchName: string) (forkScript: string option) =
-    match forkScript with
-    | Some scriptPath ->
-        let fileName, arguments =
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{branchName}\""
-            else "bash", $"\"{scriptPath}\" \"{branchName}\""
-
-        fileName, arguments, Some sourceWorktreePath
-    | None ->
-        let parentDir = Path.GetDirectoryName(repoRoot)
-        let dirName = branchName.Replace('/', '-')
-        let worktreePath = Path.Combine(parentDir, $"tm-{dirName}")
-        "git", $"-C \"{sourceWorktreePath}\" worktree add -b \"{branchName}\" \"{worktreePath}\"", None
-
-let createWorktree (repoRoot: string) (sourceWorktreePath: string) (branchName: string) =
+let private gitRefExists (repoRoot: string) (gitRef: string) =
     async {
-        match validateBranchName branchName with
-        | Error msg -> return Error msg
-        | Ok name ->
-            let scriptPath =
-                if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then Path.Combine(repoRoot, "fork.ps1")
-                else Path.Combine(repoRoot, "fork.sh")
+        let! output = runGit repoRoot $"rev-parse --verify --quiet \"{gitRef}\""
+        return output |> Option.exists (fun s -> s.Trim().Length > 0)
+    }
 
-            let forkScript = if File.Exists(scriptPath) then Some scriptPath else None
-            let fileName, arguments, workingDir = resolveWorktreeCommand repoRoot sourceWorktreePath name forkScript
+/// Resolves the base branch to a concrete git ref to fork from. Prefers the
+/// remote-tracking ref (e.g. `upstream/main`) so a new worktree forks from the
+/// upstream tip rather than a possibly-stale local branch, falling back to the
+/// local branch when no remote-tracking ref exists. Does not require any worktree
+/// to currently have the base checked out.
+let resolveBaseRef (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
+    async {
+        let remoteRef = mainRef upstreamRemote baseBranch
+        let! remoteExists = gitRefExists repoRoot $"refs/remotes/{remoteRef}"
 
-            let! result = ProcessRunner.runResult "CreateWorktree" fileName arguments workingDir
-            return result |> Result.map ignore
+        if remoteExists then
+            return Ok remoteRef
+        else
+            let! localExists = gitRefExists repoRoot $"refs/heads/{baseBranch}"
+
+            return
+                if localExists then Ok baseBranch
+                else Error $"Base branch '{baseBranch}' not found as '{remoteRef}' or as a local branch"
+    }
+
+/// Best-effort fetch of the base branch from upstream so the remote-tracking ref
+/// reflects the latest upstream tip. Connectivity/remote failures are ignored —
+/// worktree creation must not depend on the network.
+let private fetchBaseBranch (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
+    async {
+        let! _ = runGit repoRoot $"fetch {upstreamRemote} {baseBranch}"
+        return ()
+    }
+
+let private worktreeDir (repoRoot: string) (branchName: string) =
+    let parentDir = Path.GetDirectoryName(repoRoot)
+    let dirName = branchName.Replace('/', '-')
+    Path.Combine(parentDir, $"tm-{dirName}")
+
+/// Builds the git command that forks `branchName` from `baseRef` into a
+/// `tm-`prefixed sibling of the repo root. Returns the command and the new
+/// worktree path.
+let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: string) =
+    let worktreePath = worktreeDir repoRoot branchName
+    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" \"{baseRef}\""
+    "git", arguments, worktreePath
+
+let private legacyForkScriptWarning (repoRoot: string) =
+    let scriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
+
+    if File.Exists(Path.Combine(repoRoot, scriptName)) then
+        Some $"'{scriptName}' is no longer used — Treemon now creates worktrees itself. Move any setup steps into 'post-fork.ps1'/'post-fork.sh'."
+    else
+        None
+
+/// Runs an optional `post-fork` setup script inside the freshly created worktree,
+/// passing the worktree path, the source repo root, the base ref and the branch
+/// name. A failure is reported as a warning, never a hard error — the worktree
+/// already exists at this point.
+let private runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) =
+    async {
+        let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+        let scriptName = if isWindows then "post-fork.ps1" else "post-fork.sh"
+        let scriptPath = Path.Combine(repoRoot, scriptName)
+
+        if not (File.Exists scriptPath) then
+            return None
+        else
+            let fileName, arguments =
+                if isWindows then "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                else "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+
+            let! result = ProcessRunner.runResult "PostFork" fileName arguments (Some worktreePath)
+
+            return
+                match result with
+                | Ok _ -> None
+                | Error msg -> Some $"Worktree created, but '{scriptName}' failed: {msg}"
+    }
+
+/// Creates a new worktree, forking `branchName` from `baseBranch`. Treemon owns
+/// the forking: it fetches the base from upstream, forks from the remote-tracking
+/// ref when available, then runs an optional `post-fork` setup script. Returns any
+/// non-fatal warnings (a legacy fork script is present, or post-fork failed).
+let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) =
+    asyncResult {
+        let! name = validateBranchName branchName
+        let! validBase = validateBranchName baseBranch
+        let! upstreamRemote = resolveUpstreamRemote repoRoot
+        do! fetchBaseBranch repoRoot upstreamRemote validBase
+        let! baseRef = resolveBaseRef repoRoot upstreamRemote validBase
+
+        let fileName, arguments, worktreePath = resolveWorktreeCommand repoRoot baseRef name
+
+        do!
+            ProcessRunner.runResult "CreateWorktree" fileName arguments None
+            |> AsyncResult.ignore
+
+        let! postForkWarning = runPostFork repoRoot worktreePath baseRef name
+
+        return List.choose id [ legacyForkScriptWarning repoRoot; postForkWarning ]
     }

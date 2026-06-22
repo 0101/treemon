@@ -25,6 +25,7 @@
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="UpstreamRemoteTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
+    <Compile Include="CreateWorktreeServerTests.fs" />
     <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
     <Compile Include="EventProcessingTests.fs" />

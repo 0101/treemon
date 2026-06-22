@@ -361,9 +361,24 @@ type CreateWorktreeCompletedTests() =
     [<Test>]
     member _.``CreateWorktreeCompleted Ok closes modal``() =
         let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
-        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok ()))) creating
+        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) creating
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
+
+    [<Test>]
+    member _.``CreateWorktreeCompleted Ok with warnings shows CreateWarning``() =
+        let result, _ =
+            Modal.update
+                (lazy Unchecked.defaultof<IWorktreeApi>)
+                (Modal.CreateWorktreeCompleted (Ok [ "fork.ps1 is no longer used" ]))
+                (Modal.Creating testRepoId)
+
+        match result.Modal with
+        | Modal.CreateWarning (repoId, messages) ->
+            Assert.That(repoId, Is.EqualTo(testRepoId))
+            Assert.That(messages, Is.EqualTo([ "fork.ps1 is no longer used" ]))
+        | other ->
+            Assert.Fail($"Expected CreateWarning but got {other}")
 
     [<Test>]
     member _.``CreateWorktreeCompleted Error transitions to CreateError``() =
@@ -515,7 +530,7 @@ type FullStateMachineRoundtripTests() =
         let m5 = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) m4
         Assert.That((match m5.CreateModal with Modal.Creating _ -> true | _ -> false), Is.True)
 
-        let m6 = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok ()))) m5
+        let m6 = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) m5
         Assert.That(m6.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
@@ -706,7 +721,7 @@ type FocusRestorationTests() =
     [<Test>]
     member _.``CreateWorktreeCompleted Ok restores focus to RepoHeader``() =
         let creating = { modelWithFocusAndModal with CreateModal = Modal.Creating repoId }
-        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok ()))) creating
+        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) creating
 
         Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
             "Successful creation should restore focus to RepoHeader")

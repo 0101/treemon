@@ -17,6 +17,7 @@ type ModalState =
     | Open of CreateWorktreeForm
     | Creating of RepoId
     | CreateError of repoId: RepoId * message: string
+    | CreateWarning of repoId: RepoId * messages: string list
 
 type Msg =
     | OpenCreateWorktree of RepoId
@@ -24,7 +25,7 @@ type Msg =
     | SetNewWorktreeName of string
     | SetBaseBranch of string
     | SubmitCreateWorktree
-    | CreateWorktreeCompleted of Result<unit, string>
+    | CreateWorktreeCompleted of Result<string list, string>
     | CloseCreateModal
 
 let repoId =
@@ -34,6 +35,7 @@ let repoId =
     | Open form -> Some form.RepoId
     | Creating repoId -> Some repoId
     | CreateError (repoId, _) -> Some repoId
+    | CreateWarning (repoId, _) -> Some repoId
 
 let isOpen =
     function
@@ -87,9 +89,13 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
             Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
         | _ -> just modal
 
-    | CreateWorktreeCompleted (Ok _) ->
-        let restored = repoId modal |> Option.map RepoHeader
-        { Modal = Closed; RestoredFocus = restored; RefreshWorktrees = true }, Cmd.none
+    | CreateWorktreeCompleted (Ok warnings) ->
+        match modal with
+        | Creating rid when not (List.isEmpty warnings) ->
+            { Modal = CreateWarning (rid, warnings); RestoredFocus = None; RefreshWorktrees = true }, Cmd.none
+        | _ ->
+            let restored = repoId modal |> Option.map RepoHeader
+            { Modal = Closed; RestoredFocus = restored; RefreshWorktrees = true }, Cmd.none
 
     | CreateWorktreeCompleted (Error errorMsg) ->
         match modal with
@@ -186,6 +192,31 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                 prop.className "modal-body"
                 prop.children [
                     Html.div [ prop.className "modal-error-message"; prop.text message ]
+                ]
+            ]
+            Html.div [
+                prop.className "modal-footer"
+                prop.children [
+                    Html.button [
+                        prop.className "modal-btn cancel"
+                        prop.onClick (fun _ -> dispatch CloseCreateModal)
+                        prop.text "Close"
+                    ]
+                ]
+            ]
+        ]
+
+    | CreateWarning (_, messages) ->
+        modalOverlay dispatch true [
+            Html.div [
+                prop.className "modal-header warning"
+                prop.text "Worktree created — with warnings"
+            ]
+            Html.div [
+                prop.className "modal-body"
+                prop.children [
+                    for message in messages ->
+                        Html.div [ prop.className "modal-warning-message"; prop.text message ]
                 ]
             ]
             Html.div [
