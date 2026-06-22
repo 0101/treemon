@@ -2,6 +2,7 @@ module CanvasState
 
 open Shared
 open Navigation
+open CanvasTypes
 open CanvasAwareness
 open Elmish
 

@@ -202,7 +202,7 @@ type BuildInjectionTests() =
 
     // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
     // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
-    // {action:'canvas-doc-error', doc, message, source, line, col} message the client surfaces in a
+    // {action:'canvas-doc-error', wt, doc, message, source, line, col} message the client surfaces in a
     // dismissible banner. A SystemView runs no author JS, so it never gets the overlay.
 
     [<Test>]
@@ -231,15 +231,20 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``the error overlay embeds the emitting doc's filename and posts it as the doc field``() =
-        // Doc identity (focused-review A-02): the overlay is served per-doc, so it stamps THIS doc's
-        // filename into the posted payload (doc:DOC) — letting the pane attribute the error to the
-        // emitter, not the active tab, even when other docs are mounted as hidden iframes. The literal
+        // Doc identity (focused-review A-02, C-06): the overlay is served per-doc and derives its own
+        // worktree from location.pathname, so it stamps THIS doc's worktree + filename into the posted
+        // payload (wt:WT, doc:DOC) — letting the pane attribute the error to the emitter, not the active
+        // tab, even when other docs (in any worktree) are mounted as hidden iframes. The filename literal
         // is JSON-serialized at injection time, so it is a quoted, HTML-safe JS string.
         let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain("var DOC=\"status.html\""),
                     "the overlay must embed the served doc's filename as a JS string constant")
         Assert.That(injection, Does.Contain("doc:DOC"),
                     "the canvas-doc-error payload must carry the emitting doc's identity in the doc field")
+        Assert.That(injection, Does.Contain("var WT=decodeURIComponent(location.pathname"),
+                    "the overlay must derive the emitting worktree from its own URL (mirrors the bridge heartbeat)")
+        Assert.That(injection, Does.Contain("wt:WT"),
+                    "the canvas-doc-error payload must carry the emitting worktree so attribution doesn't depend on focus")
 
     [<Test>]
     member _.``the error overlay's embedded filename is escaped so a crafted name can't break out``() =

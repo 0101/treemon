@@ -9,6 +9,7 @@ module CanvasUpdate
 
 open Shared
 open Navigation
+open CanvasTypes
 open Elmish
 open Browser
 open AppTypes
@@ -185,22 +186,22 @@ let dismissCanvasMessageError (model: Model) =
     { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
 
 /// Record a doc-side JS error (window.onerror / unhandledrejection) forwarded from an AgentDoc
-/// iframe. `filename` is the EMITTING doc, carried in the postMessage `doc` field and threaded
-/// through the listener, so the error is stamped with the doc that actually threw — not the active
-/// tab. This matters because visited docs stay mounted as hidden iframes and keep running JS, so an
-/// async error from a hidden doc must not be attributed to the focused tab (focused-review A-02).
-/// The emitter is validated against the focused worktree's docs (isKnownCanvasDoc) before being
-/// stored, so a stale/forged filename — e.g. from an archived doc — can never raise a banner. The
-/// stamp drives doc-scoped display: the banner shows only while that doc stays focused; navigating
-/// to another doc/card hides it (the view gates on the stamp). Kept separate from CanvasSendState so
-/// the doc-error and message-delivery banners never overwrite each other; the newest error wins. If
-/// there is no focused card, or the emitter is not a known doc of it, the error is dropped. (Arrival
-/// is already logged in CanvasPane.messageListener.)
-let canvasDocError (filename: string) (message: string) (model: Model) =
-    match model.FocusedElement with
-    | Some (Card scopedKey) when isKnownCanvasDoc model scopedKey filename ->
+/// iframe. `scopedKey` and `filename` are the EMITTING worktree + doc, carried in the postMessage
+/// `wt`/`doc` fields and threaded through the listener, so the error is stamped with the doc that
+/// actually threw — independent of the active tab. This matters because visited docs stay mounted as
+/// hidden iframes and keep running JS, so an async error from a hidden doc (even in a non-focused
+/// worktree) must not be attributed to the focused tab (focused-review A-02, C-06). The emitter is
+/// validated against that worktree's docs (isKnownCanvasDoc) before being stored, so a stale/forged
+/// identity — e.g. from an archived doc — can never raise a banner. The stamp drives doc-scoped
+/// display: the banner shows only while that doc stays focused; navigating to another doc/card hides
+/// it (the view gates on the stamp). Kept separate from CanvasSendState so the doc-error and
+/// message-delivery banners never overwrite each other; the newest error wins. If the emitter is not
+/// a known doc of a known worktree, the error is dropped. (Arrival is already logged in
+/// CanvasPane.messageListener.)
+let canvasDocError (scopedKey: string) (filename: string) (message: string) (model: Model) =
+    if isKnownCanvasDoc model scopedKey filename then
         { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
-    | _ ->
+    else
         model, Cmd.none
 
 let dismissCanvasDocError (model: Model) =
@@ -222,4 +223,4 @@ let messageListener (dispatch: Dispatch<Msg>) =
         { Dispatch = CanvasMessageReceived >> dispatch
           SelectDoc = NavigateCanvasDoc >> dispatch
           OnMorphComplete = fun () -> dispatch MorphComplete
-          OnDocError = fun filename message -> dispatch (CanvasDocError (filename, message)) }
+          OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message)) }

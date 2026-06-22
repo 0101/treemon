@@ -267,7 +267,7 @@ let private canvasSendScript =
 /// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
 /// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
 /// unhandledrejection listener and forwards each doc-side failure to the pane as the FLAT
-/// {action:'canvas-doc-error', doc, message, source, line, col} message the client surfaces in a
+/// {action:'canvas-doc-error', wt, doc, message, source, line, col} message the client surfaces in a
 /// non-blocking, dismissible banner (src/Client/CanvasPane.fs). window.onerror's
 /// (message, source, lineno, colno, error) signature maps 1:1 onto that payload; error.message is
 /// preferred when present (the author's bare "boom" over the host's "Uncaught Error: boom"), else
@@ -278,12 +278,14 @@ let private canvasSendScript =
 /// and spin an error loop. unhandledrejection reports reason.message (or String(reason)) with no
 /// source/line/col, matching the same flat shape.
 ///
-/// The `doc` field carries THIS doc's filename (the overlay is served per-doc, so the emitter is
-/// known at injection time) so the pane attributes the error to the doc that actually threw — not the
-/// active tab. Visited docs stay mounted as hidden iframes and keep running JS, so an async error
-/// from a hidden doc would otherwise be stamped onto whatever tab is active when the message is
-/// processed (focused-review A-02). The pane re-validates `doc` against the focused worktree's docs
-/// before showing a banner, so a stale/forged filename can't surface one.
+/// The `wt` and `doc` fields carry THIS doc's emitting identity — the worktree (derived in-iframe from
+/// location.pathname, mirroring the bridge heartbeat) and the filename (the overlay is served per-doc).
+/// The pane stamps the error from `wt`+`doc`, so it attributes the failure to the doc that actually
+/// threw — independent of the active tab. Visited docs stay mounted as hidden iframes and keep running
+/// JS, so an async error from a hidden/background doc (even in a different worktree) is no longer
+/// misattributed to whatever tab is focused when the message is processed (focused-review A-02, C-06).
+/// The reducer re-validates `wt`+`doc` against that worktree's docs before showing a banner, so a
+/// stale/forged identity can't surface one.
 let private errorOverlayScript (filename: string) =
     // JsonSerializer.Serialize yields a properly-escaped, HTML-safe JS string literal (e.g.
     // "status.html"; <,>,& and quotes are \uXXXX-escaped so a crafted filename can neither close the
@@ -291,8 +293,9 @@ let private errorOverlayScript (filename: string) =
     let docLiteral = JsonSerializer.Serialize(filename)
     [ "<script>(function(){"
       $"var DOC={docLiteral};"
+      "var WT=decodeURIComponent(location.pathname.substring(1,location.pathname.lastIndexOf('/')));"
       "function report(message,source,line,col){"
-      "try{window.parent.postMessage({action:'canvas-doc-error',doc:DOC,message:String(message),source:source||'',line:(line==null?null:line),col:(col==null?null:col)},'*')}catch(e){}}"
+      "try{window.parent.postMessage({action:'canvas-doc-error',wt:WT,doc:DOC,message:String(message),source:source||'',line:(line==null?null:line),col:(col==null?null:col)},'*')}catch(e){}}"
       "var prev=window.onerror;"
       "window.onerror=function(message,source,line,col,error){"
       "report((error&&error.message)||message,source,line,col);"
@@ -372,6 +375,14 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
                     else injection + html
                 ctx.Response.ContentType <- "text/html; charset=utf-8"
                 ctx.Response.Headers["Cache-Control"] <- "no-cache"
+                // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames
+                // docs cross-origin (loopback, with dev/prod ports that vary), so a port-wildcard
+                // loopback allowlist permits the pane while blocking any public page from framing a doc
+                // and harvesting its iframe→parent postMessages (canvasSend input, doc-error text). CSP
+                // frame-ancestors is the modern successor to X-Frame-Options, which is deliberately NOT
+                // set: its only cross-origin option is DENY/SAMEORIGIN, which would also block the
+                // legitimate cross-origin pane.
+                ctx.Response.Headers["Content-Security-Policy"] <- "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
                 do! ctx.Response.WriteAsync(injected)
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }

@@ -8,6 +8,7 @@ open App
 open AppTypes
 open CanvasUpdate
 open Navigation
+open CanvasTypes
 open CanvasState
 open CanvasAwareness
 
@@ -762,13 +763,13 @@ type NavigateCanvasDocTests() =
 
 
 // ── Doc-side JS error (item 3: error overlay → canvas-doc-error banner) ───────
-// A doc-side JS error is stored in Canvas.DocError stamped with the doc that EMITTED it — its
-// filename rides along in the message and is validated against the focused worktree's docs
+// A doc-side JS error is stored in Canvas.DocError stamped with the worktree + doc that EMITTED it —
+// both ride along in the message (wt/doc fields) and are validated against that worktree's docs
 // (DocJsError { ScopedKey; Filename; Message }) so the pane can show the banner only while that doc
 // stays focused — navigating away auto-hides a stale error (the view gates on the stamp). Stamping
-// with the emitter (not the active tab) means an async error from a hidden/background iframe is
-// attributed correctly (focused-review A-02). It is a distinct source from CanvasSendState.Failed,
-// and SelectCanvasDoc clears it so a tab switch (and switching back) never re-shows it.
+// with the emitter (not the active tab) means an async error from a hidden/background iframe — even in
+// a non-focused worktree — is attributed correctly (focused-review A-02, C-06). It is a distinct
+// source from CanvasSendState.Failed, and SelectCanvasDoc clears it so a tab switch never re-shows it.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -785,45 +786,49 @@ type DocErrorTests() =
     [<Test>]
     member _.``CanvasDocError stamps the error with the emitting doc``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let updated = tryUpdateModel (CanvasDocError ("a.html", "Uncaught Error: boom (line 3:5)")) model
+        let updated = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "Uncaught Error: boom (line 3:5)")) model
         Assert.That(updated.Canvas.DocError,
             Is.EqualTo(Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "Uncaught Error: boom (line 3:5)" }),
             "A doc-side JS error must be stored, stamped with the doc that emitted it (so the banner is doc-scoped)")
 
     [<Test>]
-    member _.``a background doc's error is attributed to the emitting doc, not the active tab``() =
+    member _.``an error is attributed to the emitter's worktree, not the focused one``() =
         // Visited docs stay mounted as hidden iframes and keep running JS, so an async error from a
-        // HIDDEN doc (b.html) must be stamped with the emitter carried in the message — even though a
-        // DIFFERENT doc (a.html) is the active tab. (Pre-fix this stamped activeVisibleDoc = a.html,
-        // misattributing a hidden doc's error to the foreground tab — focused-review A-02.)
-        let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ] } }
-        let updated = tryUpdateModel (CanvasDocError ("b.html", "boom from hidden")) model
+        // HIDDEN doc in a DIFFERENT worktree (r/other → b.html) must be stamped with the emitter carried
+        // in the message, even while a doc in r/feat is focused. (Pre-fix the reducer stamped the
+        // FOCUSED worktree, misattributing a hidden worktree's error to the foreground — C-06.)
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "ha" ]
+                                         makeWorktree "r" "other" [ makeDoc "b.html" "hb" ] ] ]
+                FocusedElement = Some (Card "r/feat") }
+        let updated = tryUpdateModel (CanvasDocError ("r/other", "b.html", "boom from hidden")) model
         Assert.That(updated.Canvas.DocError,
-            Is.EqualTo(Some { ScopedKey = "r/feat"; Filename = "b.html"; Message = "boom from hidden" }),
-            "The error must be attributed to the doc that emitted it (b.html), not the active tab (a.html)")
+            Is.EqualTo(Some { ScopedKey = "r/other"; Filename = "b.html"; Message = "boom from hidden" }),
+            "The error must be attributed to the emitter's worktree (r/other), not the focused worktree (r/feat)")
 
     [<Test>]
-    member _.``CanvasDocError is dropped when there is no focused card``() =
-        let updated = tryUpdateModel (CanvasDocError ("a.html", "boom")) defaultModel  // FocusedElement = None
+    member _.``CanvasDocError is dropped when the emitter's worktree is unknown``() =
+        let model = focusedModel [ makeDoc "a.html" "ha" ]   // only r/feat exists
+        let updated = tryUpdateModel (CanvasDocError ("r/ghost", "a.html", "boom")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
-            "With no focused card there is no worktree to attribute the error to, so it is dropped")
+            "An error whose worktree is not known has nothing to attribute it to, so it is dropped")
 
     [<Test>]
-    member _.``CanvasDocError is dropped when the emitter is not a known doc of the focused worktree``() =
+    member _.``CanvasDocError is dropped when the emitter is not a known doc of its worktree``() =
         // Validation guard (mirrors NavigateCanvasDoc): only a filename naming a real doc of the
-        // focused worktree may raise a banner, so a stale/forged filename — e.g. from an archived or
+        // emitting worktree may raise a banner, so a stale/forged filename — e.g. from an archived or
         // deleted doc still posting from a lingering iframe — is dropped, never attributed.
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let updated = tryUpdateModel (CanvasDocError ("ghost.html", "boom")) model
+        let updated = tryUpdateModel (CanvasDocError ("r/feat", "ghost.html", "boom")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
-            "An error whose emitting filename is not a known doc of the focused worktree is dropped")
+            "An error whose emitting filename is not a known doc of its worktree is dropped")
 
     [<Test>]
     member _.``CanvasDocError does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
         let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
-        let updated = tryUpdateModel (CanvasDocError ("a.html", "boom")) model
+        let updated = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "boom")) model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Doc JS errors and message-delivery state are independent and must not overwrite each other")
         Assert.That(updated.Canvas.DocError |> Option.map _.Message, Is.EqualTo(Some "boom"))
@@ -831,8 +836,8 @@ type DocErrorTests() =
     [<Test>]
     member _.``the newest doc error wins``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let afterFirst = tryUpdateModel (CanvasDocError ("a.html", "first")) model
-        let afterSecond = tryUpdateModel (CanvasDocError ("a.html", "second")) afterFirst
+        let afterFirst = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "first")) model
+        let afterSecond = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "second")) afterFirst
         Assert.That(afterSecond.Canvas.DocError |> Option.map _.Message, Is.EqualTo(Some "second"),
             "A fresh error replaces the prior one")
 

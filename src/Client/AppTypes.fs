@@ -81,11 +81,11 @@ type Msg =
     | CanvasSendResult of CanvasMessageResult * scopedKey: string
     | DismissCanvasMessageError
     // Doc-side JS error forwarded from an AgentDoc iframe (window.onerror / unhandledrejection via
-    // the injected errorOverlayScript). `filename` is the emitting doc (carried in the postMessage
-    // `doc` field) so the reducer stamps the error with the doc that actually threw, not the active
-    // tab. Carried as its own message + model field, distinct from CanvasSendState.Failed (which is a
-    // pane→session *delivery* failure, a different source).
-    | CanvasDocError of filename: string * message: string
+    // the injected errorOverlayScript). `scopedKey`+`filename` are the emitting worktree + doc
+    // (carried in the postMessage `wt`/`doc` fields) so the reducer stamps the error with the doc that
+    // actually threw, not the active tab. Carried as its own message + model field, distinct from
+    // CanvasSendState.Failed (which is a pane→session *delivery* failure, a different source).
+    | CanvasDocError of scopedKey: string * filename: string * message: string
     | DismissCanvasDocError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>

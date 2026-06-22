@@ -2,6 +2,7 @@ module CanvasPane
 
 open Shared
 open Navigation
+open CanvasTypes
 open Feliz
 open Browser
 
@@ -370,8 +371,8 @@ type MessageListenerCallbacks =
       SelectDoc: string -> unit
       /// The active doc finished an idiomorph (morph-complete).
       OnMorphComplete: unit -> unit
-      /// A doc-side JS error arrived: (emitting filename, display message).
-      OnDocError: string -> string -> unit }
+      /// A doc-side JS error arrived: (emitting worktree scopedKey, emitting filename, display message).
+      OnDocError: string -> string -> string -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
@@ -384,12 +385,24 @@ let messageListener (callbacks: MessageListenerCallbacks) =
             if me.origin = CanvasOrigin
                && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
             then
+                // True when THIS message came from a mounted-but-HIDDEN canvas iframe (a visited doc that
+                // stays mounted and keeps running JS) rather than the active one. The origin check above
+                // already proves the sender is a canvas doc iframe, so a hidden-iframe match means a
+                // background/co-resident doc is posting. Session forwarding and navigate-canvas-doc honor
+                // only the active doc, so such a message is dropped — a hidden doc can't inject a payload
+                // (or force a tab switch) attributed to the active doc's owner session. The per-doc error
+                // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
+                let isFromHiddenCanvasIframe () =
+                    Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe:not(.canvas-iframe-active)'), function(f){return f.contentWindow === $0.source})"
                 let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                 if action = "navigate-canvas-doc" then
                     match Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename" |> Option.ofObj with
                     | Some filename when filename <> "" ->
-                        Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
-                        selectDoc filename
+                        if isFromHiddenCanvasIframe () then
+                            Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: from a hidden background doc iframe"
+                        else
+                            Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
+                            selectDoc filename
                     | _ -> ()
                 elif action = "morph-complete" then
                     Fable.Core.JS.console.log "[canvas] morph-complete received"
@@ -397,11 +410,12 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                 elif action = "canvas-doc-error" then
                     // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                     // in the doc-error banner, never forwarded to the session like a normal payload.
-                    // The `doc` field is the emitting doc's filename, threaded so the reducer can stamp
-                    // the error with the doc that threw (not the active tab); it is re-validated against
-                    // the focused worktree's docs there. message/line/col cross an untrusted '*'
+                    // The `wt`/`doc` fields are the emitting worktree + filename, so the reducer stamps
+                    // the error with the doc that threw (not the active tab); they are re-validated
+                    // against that worktree's docs there. wt/message/line/col cross an untrusted '*'
                     // boundary, so each field is read with a null-safe String() coercion and the display
                     // string "msg (line N:C)" is assembled here in F#.
+                    let scopedKey = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.wt==='string'?$0.wt:''"
                     let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.doc==='string'?$0.doc:''"
                     let rawMessage = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.message==null?'Unknown error':String($0.message)"
                     let line = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.line==null?'':String($0.line)"
@@ -411,14 +425,17 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                         if line = "" then body
                         elif col = "" then $"{body} (line {line})"
                         else $"{body} (line {line}:{col})"
-                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received from {filename}: {message}")
-                    onDocError filename message
+                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received from {scopedKey}/{filename}: {message}")
+                    onDocError scopedKey filename message
                 else
                     let payload = Fable.Core.JS.JSON.stringify me.data
                     Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
-                    if payload.Length <= MaxPayloadBytes
-                    then dispatch payload
-                    else Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
+                    if isFromHiddenCanvasIframe () then
+                        Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: from a hidden background doc iframe (action={action})")
+                    elif payload.Length <= MaxPayloadBytes then
+                        dispatch payload
+                    else
+                        Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
 
     Dom.window.addEventListener ("message", handler)
 
