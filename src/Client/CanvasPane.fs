@@ -6,6 +6,11 @@ open Feliz
 open Browser
 
 let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
+// Doc→pane message size cap, in UTF-16 code units (JS String.length): the listener below drops a
+// message when JSON.stringify(me.data).length exceeds this. The injected window.canvasSend helper
+// enforces the SAME cap doc-side (var MAX=64000 in canvasSendScript, src/Server/CanvasDocServer.fs)
+// so its accept/drop verdict matches this check — keep the two literals in sync if you change this
+// value (CanvasDocServerTests pins the helper's copy).
 let [<Literal>] private MaxPayloadBytes = 64_000
 
 let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =

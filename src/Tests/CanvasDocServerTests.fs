@@ -34,6 +34,24 @@ let private styleBlock (injection: string) =
     Assert.That(m.Success, Is.True, "injection must contain a <style> block")
     m.Groups[1].Value
 
+// ── Item 2: injected window.canvasSend helper markers ─────────────────────────
+let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
+
+// The cap the client enforces (MaxPayloadBytes in src/Client/CanvasPane.fs, which is `private` so it
+// can't be referenced directly). The injected helper must carry the identical literal so the
+// doc-side drop decision matches the client's.
+let [<Literal>] private ClientMaxPayloadBytes = 64000
+
+/// The size cap the injected canvasSend helper actually enforces, parsed straight out of the
+/// injected JS (`var MAX=<n>`). Reading the REAL literal — rather than hard-coding a second copy of
+/// the helper's value — means a change to the helper's own cap is caught here. (The client's
+/// MaxPayloadBytes is `private`/unreferenceable, so drift on the *client* side is instead guarded by
+/// a reciprocal sync comment at MaxPayloadBytes in src/Client/CanvasPane.fs.)
+let private helperCap (injection: string) =
+    let m = Regex.Match(injection, @"var MAX=(\d+)")
+    Assert.That(m.Success, Is.True, "canvasSend must define its size cap as `var MAX=<n>`")
+    int m.Groups[1].Value
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -106,6 +124,55 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(bridgeMarker), "Agent docs keep the message-bridge heartbeat")
         Assert.That(injection, Does.Contain(baseStyleMarker))
         Assert.That(injection, Does.Contain(linkInterceptorMarker))
+
+    // ── Item 2: injected window.canvasSend(action, payload) helper ────────────
+    // canvasSend wraps the flat postMessage contract and enforces the SAME size cap the client
+    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). It is
+    // injected for AgentDocs only — a SystemView is server-generated and posts nothing.
+
+    [<Test>]
+    member _.``AgentDoc injection includes the canvasSend helper``() =
+        let injection = buildInjection AgentDoc
+        Assert.That(injection, Does.Contain(canvasSendMarker),
+                    "Agent docs get the first-class window.canvasSend(action,payload) helper")
+
+    [<Test>]
+    member _.``SystemView injection omits the canvasSend helper``() =
+        let injection = buildInjection SystemView
+        Assert.That(injection, Does.Not.Contain(canvasSendMarker),
+                    "A system view is server-generated and posts nothing, so canvasSend is omitted")
+
+    [<Test>]
+    member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =
+        // The client drops on JSON.stringify(me.data).length (UTF-16 code units / JS String.length).
+        // The helper must measure the identical metric on the object it posts — NOT a UTF-8 byte
+        // length, which would diverge from the client's String.length check.
+        let injection = buildInjection AgentDoc
+        Assert.That(injection, Does.Contain("JSON.stringify(msg).length"),
+                    "helper must size-check JSON.stringify(...).length — the same metric the client enforces")
+
+    [<Test>]
+    member _.``the canvasSend size cap matches the client's MaxPayloadBytes``() =
+        // Drift guard: the helper's literal must equal the cap the client enforces in CanvasPane.fs,
+        // otherwise the helper could block a payload the client accepts (or pass one it drops).
+        Assert.That(helperCap (buildInjection AgentDoc), Is.EqualTo(ClientMaxPayloadBytes),
+                    "canvasSend's cap must equal MaxPayloadBytes (src/Client/CanvasPane.fs)")
+
+    [<Test>]
+    member _.``the canvasSend helper drops STRICTLY above the cap, so exactly-cap is still delivered``() =
+        // The client accepts iff JSON.stringify(me.data).length <= MaxPayloadBytes. For the helper's
+        // verdict to match the client's at EVERY size, three things must line up — each pinned by a
+        // test here so none can drift silently:
+        //   1. the same metric   — `JSON.stringify(msg).length`          (test above)
+        //   2. the same cap      — `var MAX=64000` == MaxPayloadBytes    (test above)
+        //   3. a strict `>` drop — so accept is `<=`, boundary inclusive (this test)
+        // With an identical metric and cap, a strict `size>MAX` drop is the exact complement of the
+        // client's `<=` accept: a message whose serialized length is EXACTLY the cap is delivered by
+        // both, and cap+1 is dropped by both. (A non-strict `>=` would drop at exactly-cap and
+        // diverge.) Asserting the operator in the EMITTED JS is the real guard; re-deriving the
+        // verdict in F# would only restate the trichotomy identity `not (x > c) = (x <= c)`.
+        Assert.That(buildInjection AgentDoc, Does.Contain("if(size>MAX)"),
+                    "helper must drop only when size STRICTLY exceeds the cap, so exactly-cap is delivered (matches the client's <=)")
 
     // ── End-to-end of the server's decision: classify(filename) -> injection ──
 

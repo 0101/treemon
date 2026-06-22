@@ -226,16 +226,49 @@ let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,9
 /// with .html.
 let private linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=(a.pathname||h).split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
 
+/// window.canvasSend(action, payload): the first-class doc→pane message helper, injected in the
+/// AgentDoc arm only (a SystemView is server-generated and posts nothing, so it never gets the
+/// helper). It wraps the existing FLAT message contract the pane already handles —
+/// canvasSend('navigate-canvas-doc',{filename}) posts {action:'navigate-canvas-doc', filename} via
+/// window.parent.postMessage(...,'*'), identical in effect to a hand-rolled postMessage.
+///
+/// The size guard mirrors the client EXACTLY. CanvasPane.fs computes JSON.stringify(me.data).length
+/// — where me.data IS the posted {action,...payload} object and .length is UTF-16 code units (the JS
+/// String.length) — and DROPS the message when that exceeds MaxPayloadBytes (the "postMessage
+/// DROPPED: payload too large" path). The helper measures the identical metric on the identical
+/// object (var size=JSON.stringify(msg).length) and refuses to post when size>MAX, so the doc-side
+/// verdict equals the client's drop decision — accept iff length<=cap, drop iff length>cap — but the
+/// author gets an immediate doc-side console.error instead of a silent client-side drop. The cap is
+/// applied uniformly to every action; the navigate/morph payloads the client special-cases ahead of
+/// its size check are tiny, so the uniform guard never diverges in practice. UTF-8 byte length is
+/// deliberately NOT used: it would disagree with the client's String.length check and could block a
+/// payload the client accepts (or pass one it drops). The 64000 literal mirrors MaxPayloadBytes in
+/// src/Client/CanvasPane.fs and is kept in sync by hand (CanvasDocServerTests pins the two together).
+let private canvasSendScript =
+    [ "<script>(function(){"
+      "var MAX=64000;"
+      "window.canvasSend=function(action,payload){"
+      "var msg=Object.assign({action:action},payload);"
+      "var size=JSON.stringify(msg).length;"
+      "if(size>MAX){"
+      "console.error('[canvas] canvasSend DROPPED: '+action+' message too large ('+size+' > '+MAX+' UTF-16 code units); not sent');"
+      "return false}"
+      "window.parent.postMessage(msg,'*');"
+      "return true}"
+      "})()</script>" ]
+    |> String.concat ""
+
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat and the idiomorph runtime + morph controller. SystemViews (e.g. the beads dashboard)
-/// are server-generated and data-driven with no owner session: they drive their own refresh and
-/// must never morph (a morph would stomp the live, JS-rendered dashboard back to the empty
-/// template shell), and nothing routes session→doc messages to them, so those three are omitted.
+/// heartbeat, the window.canvasSend helper, and the idiomorph runtime + morph controller.
+/// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
+/// session: they drive their own refresh and must never morph (a morph would stomp the live,
+/// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
+/// them, and they post nothing back — so the bridge, canvasSend, and morph pieces are all omitted.
 let buildInjection (kind: CanvasDocKind) : string =
     match kind with
     | SystemView -> baseStyle + linkInterceptor
-    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
