@@ -1,6 +1,7 @@
 module Tests.CanvasDocServerTests
 
 open System.IO
+open System.Text.RegularExpressions
 open NUnit.Framework
 open Shared
 open Server
@@ -13,6 +14,25 @@ open Tests.TestUtils
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
+
+// ── Item 1: dark-theme base reset markers ─────────────────────────────────────
+let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wrapped (zero specificity)
+let private resetDarkBgMarker = "#1e1e2e"      // the dark background the reset paints on a plain doc
+
+// Element-name selectors that, if they appeared *bare* (name directly followed by `{`), would carry
+// non-zero specificity and could beat a doc's own rule via the source-order tiebreak (the reset is
+// injected AFTER the doc's <head> styles). Every reset selector must instead be :where()-wrapped, so
+// none of these may appear in bare `name{` form. Inside :where(...) each name is followed by `,`/`)`
+// (never `{`), so this only fires on a genuinely unwrapped selector.
+let private bareElementSelector =
+    Regex(@"(?<![\w-])(body|h1|h2|h3|h4|h5|h6|a|code|pre|kbd|samp|table|th|td)\s*\{")
+
+/// Extract the <style> block content from an injection so specificity assertions never see the
+/// injected <script> bodies (idiomorph/bridge/link-interceptor JS can legitimately contain `x{`).
+let private styleBlock (injection: string) =
+    let m = Regex.Match(injection, "<style>(.*?)</style>", RegexOptions.Singleline)
+    Assert.That(m.Success, Is.True, "injection must contain a <style> block")
+    m.Groups[1].Value
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -40,6 +60,30 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView
         Assert.That(injection, Does.Contain(baseStyleMarker), "Both kinds keep the scrollbar base style")
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
+
+    // ── Item 1: dark-theme base reset, injected for BOTH kinds, zero specificity ──
+
+    [<Test>]
+    member _.``both doc kinds inject the dark-theme base reset``() =
+        for kind in [ SystemView; AgentDoc ] do
+            let injection = buildInjection kind
+            Assert.That(injection, Does.Contain(resetWrapMarker),
+                        $"{kind}: the base reset (:where(body)) must be injected for both kinds")
+            Assert.That(injection, Does.Contain(resetDarkBgMarker),
+                        $"{kind}: the reset must set the dark theme background so a plain doc renders dark")
+
+    [<Test>]
+    member _.``the base reset carries zero specificity (no bare element selectors, no !important)``() =
+        // The reset lands right before </head>, AFTER any doc/template <head> styles. At equal
+        // specificity it would win the source-order tiebreak and stomp the doc; wrapping every
+        // selector in :where(...) drops it to zero specificity so even a bare body{} doc rule — and
+        // the beads SystemView template's own body{background:var(--bg-deep)} — overrides it.
+        let style = styleBlock (buildInjection SystemView)
+        Assert.That(style, Does.Not.Contain("!important"),
+                    "no reset rule may use !important — that would defeat doc/template overrides")
+        let bare = bareElementSelector.Match(style)
+        Assert.That(bare.Success, Is.False,
+                    $"reset selectors must be :where()-wrapped (zero specificity); found bare selector '{bare.Value}'")
 
     // ── Finding 11: query/hash-safe in-doc navigation ────────────────────────
     // A link like status.html?tab=errors must post the bare "status.html" a CanvasDoc.Filename can

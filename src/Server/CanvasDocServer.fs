@@ -206,7 +206,16 @@ let private bridgeScript =
       "})()</script>" ]
     |> String.concat ""
 
-let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}</style>"
+/// Scrollbar styling + a small dark-theme base reset, injected for BOTH doc kinds at the </head>
+/// slot (handleCanvasRequest). Because the injection lands AFTER any <head> styles the doc/template
+/// already declares, an equal-specificity element rule here would win the source-order tiebreak and
+/// stomp the doc. So every reset selector is wrapped in :where(...) — carrying ZERO specificity like
+/// the universal `*` scrollbar rule — and no rule uses !important. Then any real doc rule (even a
+/// bare body{}) and the SystemView template's own element rules (e.g. BeadspaceTemplate.html's
+/// body{background:var(--bg-deep)}, specificity 0,0,1) override the reset (specificity 0,0,0),
+/// regardless of source order. Literal colours mirror the app theme (Catppuccin --bg-deep /
+/// --text-primary / --accent) since a plain doc never defines those CSS variables.
+let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}:where(body){background:#1e1e2e;color:#cdd6f4;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;line-height:1.5;margin:0;padding:1rem}:where(h1,h2,h3,h4,h5,h6){line-height:1.25;margin:1.2em 0 .6em}:where(a){color:#cba6f7;text-decoration:none}:where(a:hover){text-decoration:underline}:where(code,kbd,samp,pre){font-family:'Consolas','Courier New',monospace}:where(code){background:#313244;padding:.1em .3em;border-radius:4px;font-size:.9em}:where(pre){background:#181825;padding:1em;border-radius:6px;overflow:auto}:where(pre code){background:none;padding:0;font-size:inherit}:where(table){border-collapse:collapse}:where(th,td){border:1px solid #45475a;padding:.4em .6em;text-align:left}:where(th){background:#313244}</style>"
 
 /// Intercepts in-doc link clicks: same-origin .html links become navigate-canvas-doc messages
 /// (tab switch), everything else opens in a new tab. The target filename is taken from a.pathname
