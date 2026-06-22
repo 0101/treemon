@@ -209,24 +209,52 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
-let private updateGlobalConfig (description: string) (update: System.Text.Json.Nodes.JsonObject -> unit) =
-    let configPath = globalConfigPath ()
+let private globalConfigLock = obj ()
+
+let private tryParseJsonObject (text: string) : System.Text.Json.Nodes.JsonObject option =
     try
-        let dir = Path.GetDirectoryName(configPath)
-        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+        match System.Text.Json.Nodes.JsonNode.Parse(text) with
+        | :? System.Text.Json.Nodes.JsonObject as root -> Some root
+        | _ -> None
+    with _ -> None
 
-        let root =
-            if File.Exists(configPath) then
-                try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
-                with _ -> System.Text.Json.Nodes.JsonObject()
-            else System.Text.Json.Nodes.JsonObject()
+/// Read-modify-write a JSON config file safely. Serialized by an in-process lock,
+/// written atomically (temp file in the same directory, then replace), and never
+/// discarding existing data: an unparseable file is backed up to a timestamped sibling
+/// rather than overwritten. Takes the path so it can be unit-tested against a temp file.
+let internal updateConfigAtPath (configPath: string) (update: System.Text.Json.Nodes.JsonObject -> unit) : Result<unit, string> =
+    lock globalConfigLock (fun () ->
+        try
+            let dir = Path.GetDirectoryName(configPath)
+            if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
 
-        update root
+            let root =
+                if not (File.Exists(configPath)) then
+                    System.Text.Json.Nodes.JsonObject()
+                else
+                    match File.ReadAllText(configPath) |> tryParseJsonObject with
+                    | Some existing -> existing
+                    | None ->
+                        let timestamp = DateTime.Now.ToString("yyyyMMddHHmmss")
+                        let backupPath = $"{configPath}.corrupt-{timestamp}"
+                        Log.log "Config" $"Config at {configPath} is unparseable; backing up to {backupPath} and starting fresh"
+                        File.Copy(configPath, backupPath, overwrite = true)
+                        System.Text.Json.Nodes.JsonObject()
 
-        let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
-        File.WriteAllText(configPath, root.ToJsonString(options))
-    with ex ->
-        Log.log "Config" $"Failed to save {description}: {ex.Message}"
+            update root
+
+            let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
+            let tempPath = configPath + ".tmp"
+            File.WriteAllText(tempPath, root.ToJsonString(options))
+            File.Move(tempPath, configPath, overwrite = true)
+            Ok()
+        with ex ->
+            Error ex.Message)
+
+let private updateGlobalConfig (description: string) (update: System.Text.Json.Nodes.JsonObject -> unit) =
+    match updateConfigAtPath (globalConfigPath ()) update with
+    | Ok() -> ()
+    | Error msg -> Log.log "Config" $"Failed to save {description}: {msg}"
 
 let private writeCollapsedRepos (repos: RepoId list) =
     updateGlobalConfig "collapsed repos" (fun root ->
