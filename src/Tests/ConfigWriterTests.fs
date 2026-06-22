@@ -14,8 +14,7 @@ let private withTempDir (action: string -> unit) =
     try action tempDir
     finally try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
-let private setString (key: string) (value: string) (root: JsonObject) =
-    root[key] <- JsonValue.Create(value)
+let private str (value: string) : JsonNode = JsonValue.Create(value) :> JsonNode
 
 let private readStringMap (path: string) : Map<string, string> =
     use doc = JsonDocument.Parse(File.ReadAllText(path))
@@ -35,8 +34,8 @@ type UpdateConfigAtPathTests() =
         withTempDir (fun dir ->
             let configPath = Path.Combine(dir, "config.json")
 
-            assertOk (updateConfigAtPath configPath (setString "editor" "vim")) "first write"
-            assertOk (updateConfigAtPath configPath (setString "editorName" "Neovim")) "second write"
+            assertOk (updateConfigAtPath configPath [ "editor", str "vim" ]) "first write"
+            assertOk (updateConfigAtPath configPath [ "editorName", str "Neovim" ]) "second write"
 
             let root = readStringMap configPath
             Assert.That(Map.tryFind "editor" root, Is.EqualTo(Some "vim"),
@@ -50,7 +49,7 @@ type UpdateConfigAtPathTests() =
             let corruptContent = "{ this is not valid json "
             File.WriteAllText(configPath, corruptContent)
 
-            assertOk (updateConfigAtPath configPath (setString "editor" "vim")) "write over corrupt file"
+            assertOk (updateConfigAtPath configPath [ "editor", str "vim" ]) "write over corrupt file"
 
             let backups = Directory.GetFiles(dir, "config.json.corrupt-*")
             Assert.That(backups.Length, Is.EqualTo(1), "exactly one timestamped backup of the corrupt file")
@@ -65,6 +64,6 @@ type UpdateConfigAtPathTests() =
     member _.``successful write leaves no temp file behind``() =
         withTempDir (fun dir ->
             let configPath = Path.Combine(dir, "config.json")
-            assertOk (updateConfigAtPath configPath (setString "editor" "vim")) "write"
+            assertOk (updateConfigAtPath configPath [ "editor", str "vim" ]) "write"
             Assert.That(File.Exists(configPath + ".tmp"), Is.False,
                 "atomic move must consume the temp file"))
