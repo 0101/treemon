@@ -225,37 +225,60 @@ let private readCollapsedRepos () : Set<RepoId> =
 
 /// Serializes every write to the machine-level `config.json`. All global-config writers
 /// (collapsedRepos, canvas state, lastViewedHashes, worktreeRoots) funnel through
-/// `updateGlobalConfig`, so this lock makes the server the single serialized writer and stops
+/// `updateConfigAtPath`, so this lock makes the server the single serialized writer and stops
 /// concurrent read-modify-write cycles from clobbering each other's keys.
 let private globalConfigLock = obj ()
 
-let private updateGlobalConfig (description: string) (update: System.Text.Json.Nodes.JsonObject -> unit) : Result<unit, string> =
+let private tryParseJsonObject (text: string) : System.Text.Json.Nodes.JsonObject option =
+    try
+        match System.Text.Json.Nodes.JsonNode.Parse(text) with
+        | :? System.Text.Json.Nodes.JsonObject as root -> Some root
+        | _ -> None
+    with _ -> None
+
+/// Read-modify-write a JSON config file safely. Serialized by an in-process lock,
+/// written atomically (temp file in the same directory, then replace), and never
+/// discarding existing data: an unparseable file is backed up to a timestamped sibling
+/// rather than overwritten. Updates are described as (key, node) pairs, applied as the only
+/// mutation of the JSON tree. Takes the path so it can be unit-tested against a temp file.
+let internal updateConfigAtPath (configPath: string) (updates: (string * System.Text.Json.Nodes.JsonNode) list) : Result<unit, string> =
     lock globalConfigLock (fun () ->
-        let configPath = globalConfigPath ()
         try
             let dir = Path.GetDirectoryName(configPath)
             if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
 
             let root =
-                if File.Exists(configPath) then
-                    try File.ReadAllText(configPath) |> System.Text.Json.Nodes.JsonNode.Parse :?> System.Text.Json.Nodes.JsonObject
-                    with _ -> System.Text.Json.Nodes.JsonObject()
-                else System.Text.Json.Nodes.JsonObject()
+                if not (File.Exists(configPath)) then
+                    System.Text.Json.Nodes.JsonObject()
+                else
+                    match File.ReadAllText(configPath) |> tryParseJsonObject with
+                    | Some existing -> existing
+                    | None ->
+                        let timestamp = DateTime.Now.ToString("yyyyMMddHHmmss")
+                        let backupPath = $"{configPath}.corrupt-{timestamp}"
+                        Log.log "Config" $"Config at {configPath} is unparseable; backing up to {backupPath} and starting fresh"
+                        File.Copy(configPath, backupPath, overwrite = true)
+                        System.Text.Json.Nodes.JsonObject()
 
-            update root
+            updates |> List.iter (fun (key, value) -> root[key] <- value)
 
             let options = System.Text.Json.JsonSerializerOptions(WriteIndented = true)
-            File.WriteAllText(configPath, root.ToJsonString(options))
+            let tempPath = configPath + ".tmp"
+            File.WriteAllText(tempPath, root.ToJsonString(options))
+            File.Move(tempPath, configPath, overwrite = true)
             Ok()
         with ex ->
-            Log.log "Config" $"Failed to save {description}: {ex.Message}"
-            Error $"Failed to save {description}: {ex.Message}")
+            Error ex.Message)
+
+let private updateGlobalConfig (description: string) (updates: (string * System.Text.Json.Nodes.JsonNode) list) =
+    match updateConfigAtPath (globalConfigPath ()) updates with
+    | Ok() -> ()
+    | Error msg -> Log.log "Config" $"Failed to save {description}: {msg}"
 
 let private writeCollapsedRepos (repos: RepoId list) =
-    updateGlobalConfig "collapsed repos" (fun root ->
-        let repoArray = System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
-        root["collapsedRepos"] <- repoArray)
-    |> ignore // best-effort UI state; failures are logged in updateGlobalConfig
+    let repoArray =
+        System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
+    updateGlobalConfig "collapsed repos" [ "collapsedRepos", repoArray :> System.Text.Json.Nodes.JsonNode ]
 
 /// Reads the machine-level set of watched worktree roots (`worktreeRoots` in `config.json`),
 /// distinguishing a MISSING key (`None`) from a present-but-empty list (`Some []`). The startup
@@ -281,18 +304,18 @@ let internal tryReadWorktreeRootsConfig () : string list option =
 let internal readWorktreeRootsConfig () : string list =
     tryReadWorktreeRootsConfig () |> Option.defaultValue []
 
-/// Persists the watched worktree roots through the locked single-writer path, leaving every
-/// other global-config key untouched. Returns the write outcome so the `addRoot`/`removeRoot`
-/// endpoints can surface a persistence failure to the CLI instead of reporting a false success.
-/// `internal` so the startup resolver can also write through this one helper.
+/// Persists the watched worktree roots through the locked, atomic single-writer path
+/// (`updateConfigAtPath`), leaving every other global-config key untouched. Returns the write
+/// outcome so the `addRoot`/`removeRoot` endpoints can surface a persistence failure to the CLI
+/// instead of reporting a false success. `internal` so the startup resolver can also write
+/// through this one helper.
 let internal writeWorktreeRoots (roots: string list) : Result<unit, string> =
-    updateGlobalConfig "worktree roots" (fun root ->
-        let rootArray =
-            System.Text.Json.Nodes.JsonArray(
-                roots
-                |> List.map (fun r -> System.Text.Json.Nodes.JsonValue.Create(r) :> System.Text.Json.Nodes.JsonNode)
-                |> List.toArray)
-        root["worktreeRoots"] <- rootArray)
+    let rootArray =
+        System.Text.Json.Nodes.JsonArray(
+            roots
+            |> List.map (fun r -> System.Text.Json.Nodes.JsonValue.Create(r) :> System.Text.Json.Nodes.JsonNode)
+            |> List.toArray)
+    updateConfigAtPath (globalConfigPath ()) [ "worktreeRoots", rootArray :> System.Text.Json.Nodes.JsonNode ]
 
 /// Canonical comparison form for a worktree root: absolute path with trailing separators
 /// trimmed. Total (never throws) so it is safe to fold over already-stored roots — a malformed
@@ -348,9 +371,7 @@ let private readCanvasPaneOpen () : bool =
         | _ -> false)
 
 let private writeCanvasPaneOpen (isOpen: bool) =
-    updateGlobalConfig "canvas pane open state" (fun root ->
-        root["canvasPaneOpen"] <- System.Text.Json.Nodes.JsonValue.Create(isOpen))
-    |> ignore // best-effort UI state; failures are logged in updateGlobalConfig
+    updateGlobalConfig "canvas pane open state" [ "canvasPaneOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
 
 let private readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->
@@ -371,9 +392,7 @@ let private writeCanvasPosition (position: CanvasPosition) =
         | CanvasPosition.Right -> "right"
         | CanvasPosition.Top -> "top"
         | CanvasPosition.Bottom -> "bottom"
-    updateGlobalConfig "canvas position" (fun root ->
-        root["canvasPosition"] <- System.Text.Json.Nodes.JsonValue.Create(value))
-    |> ignore // best-effort UI state; failures are logged in updateGlobalConfig
+    updateGlobalConfig "canvas position" [ "canvasPosition", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
 let private readLastViewedHashes () : Map<string, Map<string, string>> =
     withConfigDocument Map.empty (fun root ->
@@ -395,15 +414,13 @@ let private readLastViewedHashes () : Map<string, Map<string, string>> =
         | _ -> Map.empty)
 
 let private writeLastViewedHashes (hashes: Map<string, Map<string, string>>) =
-    updateGlobalConfig "last viewed hashes" (fun root ->
-        let outerObj = System.Text.Json.Nodes.JsonObject()
-        hashes |> Map.iter (fun worktreePath fileHashes ->
-            let innerObj = System.Text.Json.Nodes.JsonObject()
-            fileHashes |> Map.iter (fun filename hash ->
-                innerObj[filename] <- System.Text.Json.Nodes.JsonValue.Create(hash))
-            outerObj[worktreePath] <- innerObj)
-        root["lastViewedHashes"] <- outerObj)
-    |> ignore // best-effort UI state; failures are logged in updateGlobalConfig
+    let outerObj = System.Text.Json.Nodes.JsonObject()
+    hashes |> Map.iter (fun worktreePath fileHashes ->
+        let innerObj = System.Text.Json.Nodes.JsonObject()
+        fileHashes |> Map.iter (fun filename hash ->
+            innerObj[filename] <- System.Text.Json.Nodes.JsonValue.Create(hash))
+        outerObj[worktreePath] <- innerObj)
+    updateGlobalConfig "last viewed hashes" [ "lastViewedHashes", outerObj :> System.Text.Json.Nodes.JsonNode ]
 
 let private getEditorConfig () =
     let config = readGlobalConfig ()
