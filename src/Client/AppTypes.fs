@@ -25,7 +25,6 @@ type Model =
       SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
-      EyeDirection: float * float
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
@@ -33,8 +32,8 @@ type Model =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       ActionCooldowns: Set<WorktreePath>
-      LastActivityTime: float
-      ActivityLevel: ActivityLevel
+      Activity: ActivityState.ActivityState
+      Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState }
 
 type Msg =

@@ -67,15 +67,14 @@ let private defaultModel : Model =
       AppVersion = Some "1.0"
       DeployBranch = None
       SystemMetrics = None
-      EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
       ActionCooldowns = Set.empty
-      LastActivityTime = 0.0
-      ActivityLevel = ActivityLevel.Active
+      Activity = ActivityState.empty
+      Mascot = MascotState.empty
       Canvas = CanvasState.empty }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
@@ -330,13 +329,13 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                LastActivityTime = 0.0
+                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty; CanvasPaneOpen = false } }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0 // 120s since epoch — well past 60s idle threshold
-        let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
@@ -353,13 +352,13 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                LastActivityTime = 0.0
+                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = previousHashes; CanvasPaneOpen = false } }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
-        let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
@@ -377,11 +376,11 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                LastActivityTime = jsNow - 10_000.0 // 10s ago, well within 60s threshold
+                Activity = { defaultModel.Activity with LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty } }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
-        let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
@@ -397,12 +396,12 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                LastActivityTime = 0.0
+                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = currentHashes } }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
-        let isIdle = jsNow - model.LastActivityTime > autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
