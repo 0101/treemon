@@ -13,6 +13,17 @@ let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
 
+/// Compact sibling of relativeTime for tight UI like the canvas tab strip: same thresholds and
+/// the same int truncation, but renders "now"/"3m"/"2h"/"2d" (sub-minute is "now", not "just now",
+/// and the "m"/"h"/"d" buckets carry no " ago" suffix).
+let relativeTimeCompact (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
+    let diff = now - dt
+    match diff with
+    | d when d.TotalMinutes < 1.0 -> "now"
+    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m"
+    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h"
+    | d -> $"{int d.TotalDays}d"
+
 let cardTitle (wt: WorktreeStatus) =
     if wt.Branch = WorktreeStatus.DetachedBranchName then WorktreePath.displayName wt.Path
     else wt.Branch

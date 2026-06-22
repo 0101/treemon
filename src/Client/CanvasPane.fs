@@ -277,10 +277,9 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         | Some (wt, doc) ->
             let isFocusedDocAlive = isDocAlive bridgeLiveness doc
             // The SystemView (beads) entry gets a distinct affordance pinned to the far left of the
-            // strip; AgentDocs keep the normal tab treatment. The strip also renders for a lone
-            // SystemView so its beads-count badge stays visible, while a lone AgentDoc still shows
-            // no tabs (its iframe fills the pane).
-            let hasSystemView = wt.CanvasDocs |> List.exists (fun d -> d.Kind = SystemView)
+            // strip; AgentDocs keep the normal tab treatment. The strip always renders the active
+            // doc's tab — including a lone AgentDoc (so it gets a labeled tab instead of a bare
+            // iframe) and a lone SystemView (so its beads-count badge stays visible).
             let agentTab (d: CanvasDoc) =
                 let isActive = d.Filename = doc.Filename
                 let isViewed = not (Set.contains d.Filename unviewedFilenames)
@@ -296,17 +295,24 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     prop.children [
                         livenessDotFor bridgeLiveness d
                         Html.text (d.Filename.Replace(".html", ""))
+                        // On-disk freshness of the authored file, refreshed on the pane's existing
+                        // render cadence. Scoped to AgentDoc tabs (a SystemView is server-generated
+                        // and carries no authored-file age).
+                        Html.span [
+                            prop.className "canvas-tab-age"
+                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
+                        ]
                     ]
                 ]
+            // Always render the active doc's tab — no lone-AgentDoc suppression — while preserving
+            // the SystemView-first ordering (so the beads "BD" tab stays pinned left when present).
             let tabs =
-                if wt.CanvasDocs.Length > 1 || hasSystemView then
-                    wt.CanvasDocs
-                    |> List.sortBy (fun d -> match d.Kind with SystemView -> 0 | AgentDoc -> 1)
-                    |> List.map (fun d ->
-                        match d.Kind with
-                        | SystemView -> systemViewTab wt (d.Filename = doc.Filename) selectDoc d
-                        | AgentDoc -> agentTab d)
-                else []
+                wt.CanvasDocs
+                |> List.sortBy (fun d -> match d.Kind with SystemView -> 0 | AgentDoc -> 1)
+                |> List.map (fun d ->
+                    match d.Kind with
+                    | SystemView -> systemViewTab wt (d.Filename = doc.Filename) selectDoc d
+                    | AgentDoc -> agentTab d)
             // Render iframes for all visited docs; active is visible, others are hidden.
             // Ensure the active doc is always included even if not yet in visitedDocs.
             let docsToRender =
