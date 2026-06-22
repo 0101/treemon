@@ -33,4 +33,7 @@ wwwroot/
 # Server runtime data
 data
 
+# .NET test output
+src/Tests/TestResults/
+
 .agents/

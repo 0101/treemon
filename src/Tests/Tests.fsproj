@@ -43,6 +43,7 @@
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPaneTests.fs" />
+    <Compile Include="CanvasAuthoringDxE2ETests.fs" />
     <Compile Include="CanvasPhase4Tests.fs" />
     <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
