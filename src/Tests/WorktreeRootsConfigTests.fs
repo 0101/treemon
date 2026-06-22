@@ -92,7 +92,7 @@ type WorktreeRootsConfigTests() =
             assertOk (addRootToConfig root) "addRootToConfig should succeed"
             let roots = readWorktreeRootsConfig ()
             Assert.That(roots.Length, Is.EqualTo(1))
-            Assert.That(sameRoot roots.[0] root, Is.True))
+            Assert.That(sameRoot roots[0] root, Is.True))
 
     [<Test>]
     member _.``addRootToConfig rejects a path that does not exist``() =
@@ -132,8 +132,8 @@ type WorktreeRootsConfigTests() =
             assertOk (addRootToConfig beta) "addRootToConfig should succeed"
             let roots = readWorktreeRootsConfig ()
             Assert.That(roots.Length, Is.EqualTo(2))
-            Assert.That(sameRoot roots.[0] alpha, Is.True)
-            Assert.That(sameRoot roots.[1] beta, Is.True))
+            Assert.That(sameRoot roots[0] alpha, Is.True)
+            Assert.That(sameRoot roots[1] beta, Is.True))
 
     [<Test>]
     member _.``addRootToConfig preserves unrelated config keys``() =
