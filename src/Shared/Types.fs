@@ -28,10 +28,11 @@ module BranchName =
 type BeadsSummary =
     { Open: int
       InProgress: int
+      Blocked: int
       Closed: int }
 
 module BeadsSummary =
-    let zero = { Open = 0; InProgress = 0; Closed = 0 }
+    let zero = { Open = 0; InProgress = 0; Blocked = 0; Closed = 0 }
 
 type CodingToolStatus =
     | Working
@@ -89,12 +90,68 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
+[<RequireQualifiedAccess>]
+type CanvasPosition =
+    | Left
+    | Right
+    | Top
+    | Bottom
+
+type CanvasDocKind =
+    | AgentDoc      // authored & owned by a session; interactive; file-driven
+    | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)
+
+module CanvasDocKind =
+    /// Classify a canvas doc by filename. System views are server-generated, data-driven docs
+    /// with no owner session; currently only the beads dashboard (beads.html) is one. This is the
+    /// single place to register future generated views (e.g. a CI/build view), keeping the
+    /// discriminator out of CanvasScanner and CanvasDocServer.
+    let classify (filename: string) : CanvasDocKind =
+        match filename.ToLowerInvariant() with
+        | "beads.html" -> SystemView
+        | _ -> AgentDoc
+
+type CanvasDoc =
+    { Filename: string
+      ContentHash: string
+      LastModified: DateTimeOffset
+      OwnerSessionId: string option
+      Kind: CanvasDocKind }
+
+/// Single source of truth for the canvas-session launch prompt, shared by the client
+/// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
+module CanvasPrompt =
+
+    /// Prompt handed to the coding tool to (re)start work on an existing canvas doc.
+    let continueWorking (worktreePath: string) (filename: string) =
+        // On-disk path of the canvas doc within the worktree. Forward slashes are used
+        // deliberately: they work on Windows, Linux and macOS, and src/Shared is
+        // Fable-compiled to JS so System.IO.Path.Combine is not available here.
+        $"Continue working on canvas doc: {worktreePath}/.agents/canvas/{filename}\n"
+        + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+
+type CanvasMessageRequest =
+    { WorktreePath: WorktreePath
+      Filename: string
+      Payload: string }
+
+[<RequireQualifiedAccess>]
+type CanvasMessageResult =
+    | Ok
+    | Error of string
+    | Queued
+
+type BridgeLiveness =
+    { IsAlive: bool
+      SessionId: string option }
+
 type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
     | CreatePr
     | FixTests
     | ConfigureTests
+    | CanvasSession of prompt: string
 
 type ActionRequest =
     { Path: WorktreePath
@@ -125,7 +182,8 @@ type WorktreeStatus =
       HasActiveSession: bool
       HasTestFailureLog: bool
       IsMainWorktree: bool
-      IsArchived: bool }
+      IsArchived: bool
+      CanvasDocs: CanvasDoc list }
 
 module WorktreeStatus =
     let [<Literal>] DetachedBranchName = "(detached)"
@@ -175,11 +233,17 @@ type DashboardResponse =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       EditorName: string
-      CollapsedRepos: Set<RepoId> }
+      CollapsedRepos: Set<RepoId>
+      CanvasPaneOpen: bool
+      CanvasPosition: CanvasPosition }
 
 type FixtureData =
     { Worktrees: DashboardResponse
       SyncStatus: Map<string, CardEvent list> }
+
+type ArchiveCanvasDocRequest =
+    { WorktreePath: WorktreePath
+      Filename: string }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
@@ -200,4 +264,11 @@ type IWorktreeApi =
       launchAction: ActionRequest -> Async<Result<unit, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
-      resumeSession: WorktreePath -> Async<Result<unit, string>> }
+      saveCanvasPaneOpen: bool -> Async<unit>
+      saveCanvasPosition: CanvasPosition -> Async<unit>
+      resumeSession: WorktreePath -> Async<Result<unit, string>>
+      sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
+      archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
+      saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
+      loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>>
+      getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>> }

@@ -1,0 +1,10 @@
+{
+  "name": "@treemon/canvas-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "extension.mjs",
+  "dependencies": {
+    "@github/copilot-sdk": "*"
+  }
+}

@@ -32,3 +32,5 @@ wwwroot/
 
 # Server runtime data
 data
+
+.agents/

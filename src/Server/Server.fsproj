@@ -30,11 +30,31 @@
     <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
+    <Compile Include="CanvasDocOwnership.fs" />
+    <Compile Include="CanvasBridge.fs" />
+    <Compile Include="BeadspaceTemplate.fs" />
+    <Compile Include="BeadspaceProvisioner.fs" />
+    <Compile Include="CanvasScanner.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="SyncEngine.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
+    <Compile Include="IdiomorphScript.fs" />
+    <Compile Include="CanvasDocServer.fs" />
     <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Single source of truth for the Beadspace dashboard HTML. Embedded so the
+         runtime (BeadspaceTemplate.fs) reads the same definition the E2E tests load
+         from disk; the two cannot drift. -->
+    <EmbeddedResource Include="BeadspaceTemplate.html">
+      <LogicalName>BeadspaceTemplate.html</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>

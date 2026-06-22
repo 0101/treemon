@@ -255,7 +255,8 @@ type NavigationArchiveTests() =
           HasActiveSession = false
           HasTestFailureLog = false
           IsMainWorktree = false
-          IsArchived = isArchived }
+          IsArchived = isArchived
+          CanvasDocs = [] }
 
     [<Test>]
     member _.``visibleFocusTargets excludes archived worktrees``() =
@@ -350,15 +351,15 @@ type ArchiveE2ETests() =
         $"""{{
             "Path":{{"WorktreePath":"Q:/test/{branch}"}},"Branch":"{branch}",
             "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
-            "Beads":{{"Open":0,"InProgress":0,"Closed":0}},
+            "Beads":{{"Open":0,"InProgress":0,"Blocked":0,"Closed":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
-            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false
+            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[]
         }}"""
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[]}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[],"CanvasPaneOpen":false,"CanvasPosition":"Right"}}"""
 
     let emptySyncStatus = "{}"
 

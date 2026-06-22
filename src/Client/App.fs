@@ -9,73 +9,15 @@ open Fable.Remoting.Client
 open Browser
 open Fable.Core.JsInterop
 open ActionButtons
-
-type Model =
-    { Repos: RepoModel list
-      IsLoading: bool
-      HasError: bool
-      SortMode: SortMode
-      IsCompact: bool
-      SchedulerEvents: CardEvent list
-      LatestByCategory: Map<string, CardEvent>
-      BranchEvents: Map<string, CardEvent list>
-      SyncPending: Set<string>
-      AppVersion: string option
-      EditorName: string
-      EyeDirection: float * float
-      FocusedElement: FocusTarget option
-      CreateModal: CreateWorktreeModal.ModalState
-      ConfirmModal: ConfirmModal.ConfirmModal
-      DeletedPaths: Set<string>
-      DeployBranch: string option
-      SystemMetrics: SystemMetrics option
-      ActionCooldowns: Set<WorktreePath>
-      LastActivityTime: float
-      ActivityLevel: ActivityLevel }
-
-type Msg =
-    | DataLoaded of DashboardResponse
-    | DataFailed of exn
-    | ToggleSort
-    | ToggleCompact
-    | ToggleCollapse of repoId: RepoId
-    | Tick of now: float
-    | OpenTerminal of WorktreePath
-    | OpenEditor of WorktreePath
-    | StartSync of path: WorktreePath * scopedKey: string
-    | SyncStarted of key: string * Result<unit, string>
-    | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of WorktreePath
-    | SyncTick
-    | ConfirmDeleteWorktree of scopedKey: string
-    | ConfirmArchiveWorktree of scopedKey: string
-    | ConfirmMsg of ConfirmModal.Msg
-    | SessionKilledForDelete of path: WorktreePath
-    | SessionKilledForArchive of path: WorktreePath
-    | DeleteCompleted of Result<unit, string>
-    | FocusSession of path: WorktreePath
-    | OpenNewTab of path: WorktreePath
-    | SessionResult of Result<unit, string>
-    | KeyPressed of key: string * hasModifier: bool
-    | SetFocus of FocusTarget option
-    | ArchiveMsg of ArchiveViews.Msg
-    | LaunchAction of path: WorktreePath * action: ActionKind
-    | LaunchActionResult of Result<unit, string>
-    | ClearActionCooldown of WorktreePath
-    | ResumeSession of WorktreePath
-    | ModalMsg of CreateWorktreeModal.Msg
-    | UserActivity of now: float
-    | NoOp
-
-let worktreeApi =
-    Remoting.createApi ()
-    |> Remoting.buildProxy<IWorktreeApi>
+open CanvasAwareness
+open CardViews
+open AppTypes
 
 let fetchWorktrees () =
-    Cmd.OfAsync.either worktreeApi.getWorktrees () DataLoaded DataFailed
+    Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
@@ -96,7 +38,6 @@ let init () =
       SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
-      EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
@@ -104,16 +45,10 @@ let init () =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
-      LastActivityTime = Fable.Core.JS.Constructors.Date.now ()
-      ActivityLevel = ActivityLevel.Active },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp) ]
-
-let rng = System.Random()
-
-let randomEyeDirection () =
-    let dx = rng.NextDouble() * 3.0 - 1.5
-    let dy = rng.NextDouble() * 2.0 - 1.0
-    (dx, dy)
+      Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
+      Mascot = MascotState.empty
+      Canvas = CanvasState.empty },
+    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
@@ -121,11 +56,6 @@ let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
         repos
         |> List.map (fun r ->
             { r with Worktrees = r.Worktrees |> List.filter (fun wt -> not (Set.contains (WorktreePath.value wt.Path) deleted)) })
-
-let findWorktree (scopedKey: string) (model: Model) =
-    model.Repos
-    |> List.tryPick (fun r ->
-        r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
 
 let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     let pathStr = WorktreePath.value path
@@ -144,12 +74,6 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
             DeletedPaths = markDeleted path model.DeletedPaths }
     { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
 
-let canResumeSession (wt: WorktreeStatus) =
-    not wt.HasActiveSession
-    && wt.LastUserMessage.IsSome
-    && wt.CodingTool <> Working
-    && wt.CodingTool <> WaitingForUser
-
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
 
@@ -160,25 +84,16 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
+    | Card scopedKey, "c" -> Some ToggleCanvasPane
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.bind (fun wt -> if not wt.IsMainWorktree then Some (ConfirmDeleteWorktree scopedKey) else None)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
 
-let idleThresholdMs = 180_000.0
-let deepIdleThresholdMs = 900_000.0
-
-let computeActivityLevel (lastActivityTime: float) (now: float) =
-    let elapsed = now - lastActivityTime
-
-    if elapsed < idleThresholdMs then ActivityLevel.Active
-    elif elapsed < deepIdleThresholdMs then ActivityLevel.Idle
-    else ActivityLevel.DeepIdle
-
 let update msg model =
     match msg with
-    | DataLoaded response ->
+    | DataLoaded (response, now) ->
         match model.AppVersion with
         | Some v when v <> response.AppVersion ->
             model, Cmd.ofEffect (fun _ -> Dom.window.location.reload ())
@@ -208,6 +123,47 @@ let update msg model =
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
+            let currentCanvasHashes = canvasHashesByScopedKey repos
+            let canvasEvents =
+                if isFirstLoad then model.Canvas.CanvasEvents
+                else
+                    let newEvents = detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    mergeCanvasEvents model.Canvas.CanvasEvents newEvents
+                    |> expireCanvasEvents now
+            let changedDocs =
+                if isFirstLoad then []
+                else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+            let now = now.ToUnixTimeMilliseconds() |> float
+            let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
+            // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
+            // dashboard) is server-generated and self-refreshing, so its data churn must not
+            // hijack focus; filter it out of the candidates before picking the most recent.
+            let agentChangedDocs =
+                changedDocs
+                |> List.filter (fun (scopedKey, filename) -> CanvasState.canvasDocKind repos scopedKey filename = Some AgentDoc)
+            let autoDisplayTarget =
+                if isIdle && not (List.isEmpty agentChangedDocs)
+                then findMostRecentChangedDoc repos agentChangedDocs
+                else None
+            // Delivery signal for a queued canvas message — see CanvasAwareness.clearWaitingOnDelivery.
+            // The clear is scoped to the queued message's target worktree: an unrelated worktree's doc
+            // change must not dismiss the banner (that would falsely report delivery). This is the
+            // success edge the wall-clock timer used to (wrongly) report as a failure.
+            let canvasSendState = clearWaitingOnDelivery model.Canvas.CanvasSendState agentChangedDocs
+            let canvasShowingDoc = model.Canvas.CanvasPaneOpen && Option.isSome (CanvasUpdate.activeVisibleDoc model)
+            let repos, autoExpanded =
+                match autoDisplayTarget with
+                | Some (scopedKey, _) when not canvasShowingDoc -> expandRepoOwning scopedKey repos
+                | _ -> repos, false
+            let autoDisplayCmd =
+                match autoDisplayTarget with
+                | Some (scopedKey, filename) when not canvasShowingDoc ->
+                    Cmd.batch [
+                        if not model.Canvas.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
+                        Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
+                        Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
+                    ]
+                | _ -> Cmd.none
             { model with
                 Repos = repos
                 IsLoading = false
@@ -216,12 +172,54 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
-                EyeDirection = randomEyeDirection ()
+                Mascot = { model.Mascot with EyeDirection = MascotState.randomEyeDirection () }
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
-                SystemMetrics = response.SystemMetrics }
-            |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement }),
-            Cmd.none
+                SystemMetrics = response.SystemMetrics
+                Canvas =
+                    { model.Canvas with
+                        CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
+                        CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
+                        PreviousCanvasHashes = currentCanvasHashes
+                        CanvasEvents = canvasEvents
+                        CanvasSendState = canvasSendState } }
+            |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
+            |> (fun m ->
+                if isFirstLoad then
+                    let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
+                    if seeded = m.Canvas.LastViewedHashes then m
+                    else { m with Canvas = { m.Canvas with LastViewedHashes = seeded } }
+                else m)
+            |> (fun updatedModel ->
+                let allPaths =
+                    repos
+                    |> List.collect _.Worktrees
+                    |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
+                    |> List.map (fun wt -> WorktreePath.value wt.Path)
+                let livenessCmd =
+                    if List.isEmpty allPaths then Cmd.none
+                    else Cmd.OfAsync.perform worktreeApi.Value.getBridgeLiveness allPaths BridgeLivenessLoaded
+                let markVisibleCmd =
+                    if updatedModel.Canvas.CanvasPaneOpen then CanvasUpdate.markVisibleDocCmd updatedModel
+                    else Cmd.none
+                let seedSaveCmd =
+                    if updatedModel.Canvas.LastViewedHashes <> model.Canvas.LastViewedHashes then
+                        Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.Canvas.LastViewedHashes (fun _ -> NoOp)
+                    else Cmd.none
+                let morphCmd =
+                    if not isFirstLoad && updatedModel.Canvas.CanvasPaneOpen then
+                        match CanvasUpdate.activeVisibleDoc updatedModel with
+                        | Some (scopedKey, filename) when CanvasState.canvasDocKind updatedModel.Repos scopedKey filename = Some AgentDoc ->
+                            let oldHash = model.Canvas.PreviousCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
+                            let newHash = currentCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
+                            match oldHash, newHash with
+                            | Some o, Some n when o <> n -> Cmd.ofMsg MorphActiveDoc
+                            | _ -> Cmd.none
+                        | _ -> Cmd.none
+                    else Cmd.none
+                let autoExpandSaveCmd =
+                    if autoExpanded then saveCollapsedReposCmd updatedModel.Repos else Cmd.none
+                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd; autoExpandSaveCmd ])
 
     | DataFailed _ ->
         { model with
@@ -256,46 +254,28 @@ let update msg model =
         let focusAdjusted =
             if isCollapsing then adjustFocusAfterCollapse repoId updatedModel.Repos updatedModel.FocusedElement
             else updatedModel.FocusedElement
-        let collapsedRepos =
-            updatedModel.Repos
-            |> List.filter _.IsCollapsed
-            |> List.map _.RepoId
         { updatedModel with FocusedElement = focusAdjusted },
-        Cmd.OfAsync.attempt worktreeApi.saveCollapsedRepos collapsedRepos (fun _ -> NoOp)
+        saveCollapsedReposCmd updatedModel.Repos
 
     | OpenTerminal path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEditor path ->
-        model, Cmd.OfAsync.attempt worktreeApi.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | Tick now ->
-        let newLevel = computeActivityLevel model.LastActivityTime now
+        // Tick stays in the root update because it also expires canvas events and drives the
+        // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
+        let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
+        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
 
-        let reportCmd =
-            if newLevel <> model.ActivityLevel then
-                Cmd.OfAsync.attempt worktreeApi.reportActivity newLevel (fun _ -> NoOp)
-            else
-                Cmd.none
-
-        { model with ActivityLevel = newLevel },
+        // A queued canvas message is honestly pending, not failed: it is delivered to the
+        // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
+        // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
+        // Idle in DataLoaded; absent that, it persists until the user dismisses it.
+        { model with Activity = activity; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
-    | UserActivity now ->
-        let wasActive = model.ActivityLevel = ActivityLevel.Active
-
-        let wakeUpCmd =
-            if not wasActive then
-                Cmd.batch [
-                    Cmd.ofMsg (Tick now)
-                    Cmd.OfAsync.attempt worktreeApi.reportActivity ActivityLevel.Active (fun _ -> NoOp)
-                ]
-            else
-                Cmd.none
-
-        { model with
-            LastActivityTime = now
-            ActivityLevel = ActivityLevel.Active },
-        wakeUpCmd
+    | UserActivity now -> ActivityUpdate.userActivity now model
 
     | StartSync (path, key) ->
         let syntheticEvent =
@@ -310,7 +290,7 @@ let update msg model =
         { model with
             SyncPending = model.SyncPending |> Set.add key
             BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.startSync path (fun r -> SyncStarted (key, r))
+        Cmd.OfAsync.perform worktreeApi.Value.startSync path (fun r -> SyncStarted (key, r))
 
     | SyncStarted (key, Ok _) ->
         { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
@@ -325,7 +305,7 @@ let update msg model =
         { model with BranchEvents = events }, Cmd.none
 
     | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+        model, Cmd.OfAsync.attempt worktreeApi.Value.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | SyncTick ->
         model, fetchSyncStatus ()
@@ -356,15 +336,15 @@ let update msg model =
                 |> Option.iter (fun el -> el?focus()))
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
-            Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+            Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
         | ConfirmModal.DeleteAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
                 | Ok () -> SessionKilledForDelete path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.killSession path (function
+            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
                 | Ok () -> SessionKilledForArchive path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -376,19 +356,21 @@ let update msg model =
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
-        Cmd.OfAsync.perform worktreeApi.deleteWorktree path DeleteCompleted
+        Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
 
     | SessionKilledForArchive path ->
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
 
     | FocusSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.focusSession path SessionResult
+        model, Cmd.OfAsync.perform worktreeApi.Value.focusSession path SessionResult
 
     | OpenNewTab path ->
-        model, Cmd.OfAsync.perform worktreeApi.openNewTab path SessionResult
+        model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.resumeSession path SessionResult
+        model, Cmd.OfAsync.perform worktreeApi.Value.resumeSession path SessionResult
+
+    | LaunchCanvasSession scopedKey -> CanvasUpdate.launchCanvasSession scopedKey model
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -402,7 +384,7 @@ let update msg model =
                     Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
             { model with ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.perform worktreeApi.launchAction { Path = path; Action = action } LaunchActionResult
+                Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = path; Action = action } LaunchActionResult
                 clearAfter
             ]
 
@@ -416,12 +398,12 @@ let update msg model =
         { model with FocusedElement = target }, Cmd.none
 
     | ArchiveMsg archiveMsg ->
-        let result, archiveCmd = ArchiveViews.update (lazy worktreeApi) archiveMsg
+        let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         model, Cmd.batch [ Cmd.map ArchiveMsg archiveCmd; refreshCmd ]
 
     | ModalMsg modalMsg ->
-        let result, modalCmd = CreateWorktreeModal.update (lazy worktreeApi) modalMsg model.CreateModal
+        let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
         let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
@@ -479,16 +461,75 @@ let update msg model =
                 | Some action -> model, Cmd.ofMsg action
                 | None -> model, Cmd.none
 
+    | ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model
+
+    | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
+
+    | SelectCanvasDoc (scopedKey, filename) -> CanvasUpdate.selectCanvasDoc scopedKey filename model
+
+    | FocusOverviewCard scopedKey ->
+        let openPane = not model.Canvas.CanvasPaneOpen
+        let repos, expanded = expandRepoOwning scopedKey model.Repos
+        { model with Repos = repos; FocusedElement = Some (Card scopedKey); Canvas = { model.Canvas with CanvasPaneOpen = true } },
+        Cmd.batch [
+            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            if expanded then saveCollapsedReposCmd repos
+        ]
+
+    | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
+
+    | ArchiveCanvasDoc (scopedKey, filename) -> CanvasUpdate.archiveCanvasDoc scopedKey filename model
+
+    | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
+
+    | NavigateCanvasDoc filename -> CanvasUpdate.navigateCanvasDoc filename model
+
+    | CanvasMessageReceived payload -> CanvasUpdate.canvasMessageReceived payload model
+
+    | CanvasSendResult (result, scopedKey) -> CanvasUpdate.canvasSendResult result scopedKey model
+
+    | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
+
+    | MarkDocViewed (scopedKey, filename) ->
+        let worktree = findWorktree scopedKey model
+        let currentHash =
+            worktree
+            |> Option.bind (fun wt ->
+                wt.CanvasDocs
+                |> List.tryFind (fun d -> d.Filename = filename)
+                |> Option.map _.ContentHash)
+        match worktree, currentHash with
+        | Some _, Some hash ->
+            let innerMap =
+                model.Canvas.LastViewedHashes
+                |> Map.tryFind scopedKey
+                |> Option.defaultValue Map.empty
+                |> Map.add filename hash
+            let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
+            { model with Canvas = { model.Canvas with LastViewedHashes = updatedHashes } },
+            Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
+        | _ -> model, Cmd.none
+
+    | LoadLastViewedHashes hashes ->
+        { model with Canvas = { model.Canvas with LastViewedHashes = hashes } }, Cmd.none
+
+    | BridgeLivenessLoaded liveness ->
+        { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none
+
+    | MorphActiveDoc -> CanvasUpdate.morphActiveDoc model
+
+    | MorphComplete -> CanvasUpdate.morphComplete model
+
     | NoOp -> model, Cmd.none
 
 let appSubscriptions (model: Model) : Sub<Msg> =
     let pollingIntervalMs =
-        match model.ActivityLevel with
+        match model.Activity.ActivityLevel with
         | ActivityLevel.Active | ActivityLevel.Idle -> 1000
         | ActivityLevel.DeepIdle -> 15000
 
     let activityLevelKey =
-        match model.ActivityLevel with
+        match model.Activity.ActivityLevel with
         | ActivityLevel.Active -> "active"
         | ActivityLevel.Idle -> "idle"
         | ActivityLevel.DeepIdle -> "deep-idle"
@@ -505,899 +546,15 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    let activityDetection (dispatch: Dispatch<Msg>) =
-        let mutable lastDispatchTime = Fable.Core.JS.Constructors.Date.now ()
-        let throttleMs = 5000.0
-
-        let handler =
-            fun (_: Browser.Types.Event) ->
-                let now = Fable.Core.JS.Constructors.Date.now ()
-                if now - lastDispatchTime >= throttleMs then
-                    lastDispatchTime <- now
-                    dispatch (UserActivity now)
-
-        let events = [| "mousemove"; "keydown"; "click"; "scroll" |]
-        events |> Array.iter (fun evt -> Dom.document.addEventListener (evt, handler))
-
-        { new System.IDisposable with
-            member _.Dispose() =
-                events |> Array.iter (fun evt -> Dom.document.removeEventListener (evt, handler)) }
-
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
-          [ "activity" ], activityDetection ]
+          [ "activity" ], ActivityUpdate.activityDetection
+          [ "canvas-messages" ], CanvasUpdate.messageListener ]
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
     else
         subs
-
-let relativeTime = Components.relativeTime
-
-let ctClassName =
-    function
-    | Working        -> "working"
-    | WaitingForUser -> "waiting"
-    | Done           -> "done"
-    | Idle           -> "idle"
-
-let ctTooltip =
-    function
-    | Working        -> "Working"
-    | WaitingForUser -> "Waiting for user"
-    | Done           -> "Done"
-    | Idle           -> "Idle"
-
-let isMerged (wt: WorktreeStatus) =
-    match wt.Pr with
-    | HasPr pr -> pr.IsMerged
-    | NoPr -> false
-
-let cardClassName (wt: WorktreeStatus) =
-    let ct = ctClassName wt.CodingTool
-    let session = if wt.HasActiveSession then " has-session" else ""
-    if isMerged wt then $"wt-card ct-{ct} merged{session}" else $"wt-card ct-{ct}{session}"
-
-let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Closed
-
-let segmentPct count total =
-    match total with
-    | 0 -> 0.0
-    | _ -> (float count * 100.0) / float total
-
-let beadsCounts (className: string) (b: BeadsSummary) =
-    Html.span [
-        prop.className className
-        prop.children [
-            Html.span [ prop.className "beads-open"; prop.text (string b.Open) ]
-            Html.span [ prop.className "beads-sep"; prop.text "/" ]
-            Html.span [ prop.className "beads-inprogress"; prop.text (string b.InProgress) ]
-            Html.span [ prop.className "beads-sep"; prop.text "/" ]
-            Html.span [ prop.className "beads-closed"; prop.text (string b.Closed) ]
-        ]
-    ]
-
-let beadsProgressBar (b: BeadsSummary) =
-    let total = beadsTotal b
-    Html.div [
-        prop.className "progress-bar"
-        prop.children [
-            Html.div [
-                prop.className "progress-segment seg-open"
-                prop.style [ style.width (length.percent (segmentPct b.Open total)) ]
-            ]
-            Html.div [
-                prop.className "progress-segment seg-inprogress"
-                prop.style [ style.width (length.percent (segmentPct b.InProgress total)) ]
-            ]
-            Html.div [
-                prop.className "progress-segment seg-closed"
-                prop.style [ style.width (length.percent (segmentPct b.Closed total)) ]
-            ]
-        ]
-    ]
-
-let mainBehindIndicator (baseBranch: string) (count: int) =
-    if count = 0 then
-        Html.span [
-            prop.className "main-behind up-to-date"
-            prop.text "up to date"
-        ]
-    else
-        Html.span [
-            prop.className (if count > 20 then "main-behind behind-warning" else "main-behind")
-            prop.text ($"{count} behind {baseBranch}")
-        ]
-
-let isBranchSyncing (events: CardEvent list) =
-    events |> List.exists (fun e -> e.Status = Some StepStatus.Running)
-
-let private providerDisplayName (provider: CodingToolProvider option) =
-    match provider with
-    | Some Claude -> "Claude"
-    | Some Copilot -> "Copilot"
-    | None -> "Coding tool"
-
-let syncButton dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
-    if isPending then
-        Html.button [
-            prop.className "sync-starting-btn"
-            prop.disabled true
-            yield! noFocusProps
-            prop.text "Sync starting"
-        ]
-    else
-        let syncing = isBranchSyncing branchEvents
-        let codingToolBusy = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
-        let disabled = syncing || codingToolBusy
-        if syncing then
-            Html.button [
-                prop.className "sync-cancel-btn"
-                yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (CancelSync wt.Path))
-                prop.text "Cancel"
-            ]
-        else
-            Html.button [
-                prop.className (if disabled then "sync-btn disabled" else "sync-btn")
-                prop.disabled disabled
-                yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (StartSync (wt.Path, scopedKey)))
-                prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else $"Sync with {baseBranch} (S)")
-                prop.text "Sync"
-            ]
-
-let mainBehindWithSync dispatch (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
-    Html.div [
-        prop.className "main-behind-row"
-        prop.children [
-            mainBehindIndicator baseBranch wt.MainBehindCount
-            if wt.MainBehindCount > 0 then
-                if wt.IsDirty then
-                    Html.span [
-                        prop.className "dirty-warning"
-                        prop.text "uncommitted changes"
-                    ]
-                else syncButton dispatch baseBranch wt branchEvents isPending scopedKey
-            Html.span [
-                prop.className "git-commit-msg"
-                prop.children [
-                    Html.text wt.LastCommitMessage
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
-                ]
-            ]
-        ]
-    ]
-
-let stepStatusClassName (status: StepStatus option) =
-    match status with
-    | Some StepStatus.Running -> "event-status running"
-    | Some StepStatus.Succeeded -> "event-status success"
-    | Some (StepStatus.Failed _) -> "event-status failed"
-    | Some StepStatus.Cancelled -> "event-status cancelled"
-    | Some StepStatus.NotConfigured -> "event-status not-configured"
-    | Some StepStatus.Pending -> "event-status"
-    | None -> "event-status"
-
-let stepStatusText (status: StepStatus option) =
-    match status with
-    | Some StepStatus.Running -> "running"
-    | Some StepStatus.Succeeded -> "success"
-    | Some (StepStatus.Failed msg) -> match msg with "" -> "failed" | _ -> $"failed: {msg}"
-    | Some StepStatus.Cancelled -> "cancelled"
-    | Some StepStatus.NotConfigured -> "not configured"
-    | _ -> ""
-
-let relativeEventTime (dt: System.DateTimeOffset) =
-    let diff = System.DateTimeOffset.Now - dt
-    match diff with
-    | d when d.TotalSeconds < 60.0 -> $"{int d.TotalSeconds |> max 0}s ago"
-    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
-    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
-    | d -> $"{int d.TotalDays}d ago"
-
-let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -> unit) option) (evt: CardEvent) =
-    let isTestFailure =
-        evt.Source = EventSource.Test && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
-    let isTestNotConfigured =
-        evt.Source = EventSource.Test && evt.Status = Some StepStatus.NotConfigured
-    let isClickable = (isTestFailure && onFixTests.IsSome) || (isTestNotConfigured && onConfigureTests.IsSome)
-    Html.div [
-        prop.className "event-entry"
-        prop.children [
-            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
-            Html.span [ prop.className "event-source"; prop.text evt.Source ]
-            Html.span [ prop.className "event-message"; prop.text evt.Message ]
-            match evt.Status with
-            | Some _ ->
-                Html.span [
-                    prop.className (
-                        if isClickable
-                        then stepStatusClassName evt.Status + " clickable"
-                        else stepStatusClassName evt.Status)
-                    prop.text (stepStatusText evt.Status)
-                    if isTestFailure then
-                        match onFixTests with
-                        | Some handler ->
-                            prop.title "Click to fix with coding tool"
-                            prop.onClick (fun e -> e.stopPropagation(); handler())
-                        | None -> ()
-                    elif isTestNotConfigured then
-                        match onConfigureTests with
-                        | Some handler ->
-                            prop.title "Click to configure test command"
-                            prop.onClick (fun e -> e.stopPropagation(); handler())
-                        | None -> ()
-                ]
-            | None -> Html.none
-        ]
-    ]
-
-let eventLog dispatch (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (hasTestFailureLog: bool) (events: CardEvent list) =
-    match events with
-    | [] -> Html.none
-    | evts ->
-        let onFixTests =
-            if not hasTestFailureLog || cooldowns.Contains wtPath then None
-            else Some (fun () -> dispatch (LaunchAction (wtPath, FixTests)))
-        let onConfigureTests =
-            if cooldowns.Contains wtPath then None
-            else Some (fun () -> dispatch (LaunchAction (wtPath, ConfigureTests)))
-        Html.div [
-            prop.className "event-log"
-            prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
-        ]
-
-let knownCategories =
-    [ "WorktreeList"; "GitRefresh"; "BeadsRefresh"; "CodingToolRefresh"; "PrFetch"; "GitFetch" ]
-
-let categoryDisplayName =
-    function
-    | "WorktreeList"   -> "Worktree \u2630"
-    | "GitRefresh"     -> "Git \u21BB"
-    | "BeadsRefresh"   -> "Beads \u21BB"
-    | "CodingToolRefresh" -> "Agent \u21BB"
-    | "PrFetch"        -> "PR \u2913"
-    | "GitFetch"       -> "Git \u2913"
-    | other            -> other
-
-let private lastSepIndex (s: string) =
-    max (s.LastIndexOf('/')) (s.LastIndexOf('\\'))
-
-let commonPathPrefix (paths: string list) =
-    match paths with
-    | [] -> ""
-    | [ single ] ->
-        match lastSepIndex single with
-        | -1 -> ""
-        | i -> single[..i]
-    | first :: rest ->
-        let prefixLen =
-            rest |> List.fold (fun len path ->
-                let maxLen = min len path.Length
-                let rec findMismatch i =
-                    if i >= maxLen then maxLen
-                    elif System.Char.ToLowerInvariant first[i] = System.Char.ToLowerInvariant path[i] then findMismatch (i + 1)
-                    else i
-                findMismatch 0) first.Length
-        let prefix = first[..prefixLen - 1]
-        match lastSepIndex prefix with
-        | -1 -> ""
-        | i -> prefix[..i]
-
-let stripPrefix (prefix: string) (target: string) =
-    if prefix.Length > 0 && target.Length >= prefix.Length
-       && target[..prefix.Length - 1].ToLowerInvariant() = prefix.ToLowerInvariant()
-    then target[prefix.Length..]
-    else target
-
-let statusOverviewRow (prefix: string) (latestBySource: Map<string, CardEvent>) (category: string) =
-    let label = categoryDisplayName category
-    match Map.tryFind category latestBySource with
-    | None ->
-        Html.div [
-            prop.className "status-row pending"
-            prop.children [
-                Html.span [ prop.className "status-category"; prop.text label ]
-                Html.span [ prop.className "status-target" ]
-                Html.span [ prop.className "status-duration" ]
-                Html.span [ prop.className "status-time" ]
-                Html.span [ prop.className "status-badge pending"; prop.text "pending" ]
-            ]
-        ]
-    | Some evt ->
-        let target = extractBranchName evt.Message |> Option.defaultValue "" |> stripPrefix prefix
-        Html.div [
-            prop.className "status-row"
-            prop.children [
-                Html.span [ prop.className "status-category"; prop.text label ]
-                Html.span [ prop.className "status-target"; prop.text target ]
-                match evt.Duration with
-                | Some d -> Html.span [ prop.className "status-duration"; prop.text $"%.1f{d.TotalSeconds}s" ]
-                | None -> Html.span [ prop.className "status-duration" ]
-                Html.span [ prop.className "status-time"; prop.text (relativeEventTime evt.Timestamp) ]
-                match evt.Status with
-                | Some _ ->
-                    Html.span [
-                        prop.className (stepStatusClassName evt.Status)
-                        prop.text (stepStatusText evt.Status)
-                    ]
-                | None -> Html.none
-            ]
-        ]
-
-let pinnedErrorEntry (prefix: string) (evt: CardEvent) =
-    Html.div [
-        prop.className "event-entry pinned-error"
-        prop.children [
-            Html.span [ prop.className "event-time"; prop.text (relativeEventTime evt.Timestamp) ]
-            Html.span [ prop.className "event-source"; prop.text evt.Source ]
-            Html.span [ prop.className "event-message"; prop.text (stripPrefix prefix evt.Message) ]
-            match evt.Status with
-            | Some _ ->
-                Html.span [
-                    prop.className (stepStatusClassName evt.Status)
-                    prop.text (stepStatusText evt.Status)
-                ]
-            | None -> Html.none
-        ]
-    ]
-
-let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCategory: Map<string, CardEvent>) =
-    let prefix = repos |> List.map (fun r -> RepoId.value r.RepoId) |> commonPathPrefix
-    let errors = pinnedErrors events
-    Html.div [
-        prop.className "scheduler-footer"
-        prop.children [
-            match errors with
-            | [] -> Html.none
-            | errs ->
-                Html.div [
-                    prop.className "pinned-errors"
-                    prop.children (errs |> List.map (pinnedErrorEntry prefix))
-                ]
-            Html.div [
-                prop.className "status-overview"
-                prop.children (knownCategories |> List.map (statusOverviewRow prefix latestByCategory))
-            ]
-        ]
-    ]
-
-let abbreviatePipelineName (repoName: string) (name: string) =
-    let stripped =
-        if name.Length >= repoName.Length && name.StartsWith(repoName, System.StringComparison.OrdinalIgnoreCase)
-        then name[repoName.Length..].TrimStart()
-        else name
-    if stripped.EndsWith(" - pr", System.StringComparison.OrdinalIgnoreCase)
-    then stripped[..stripped.Length-6].TrimEnd()
-    else stripped
-
-let buildBadge (repoName: string) (build: BuildInfo) =
-    let statusText =
-        match build.Status with
-        | Building -> "Building"
-        | Succeeded -> "Passed"
-        | Failed -> "Failed"
-        | PartiallySucceeded -> "Partial"
-        | Canceled -> "Canceled"
-    let abbreviated = abbreviatePipelineName repoName build.Name
-    let text =
-        match build.Failure with
-        | Some f -> $"{f.StepName}: {statusText}"
-        | None -> if abbreviated = "" then statusText else $"{abbreviated}: {statusText}"
-    let className =
-        match build.Status with
-        | Building -> "build-badge building"
-        | Succeeded -> "build-badge succeeded"
-        | Failed -> "build-badge failed"
-        | PartiallySucceeded -> "build-badge partial"
-        | Canceled -> "build-badge canceled"
-    let tooltip =
-        match build.Failure with
-        | Some f when f.Log.Length > 0 -> Some f.Log
-        | _ -> None
-    match build.Url with
-    | Some url ->
-        Interop.createElement "a" [
-            prop.className className
-            prop.text text
-            prop.href url
-            prop.target "_blank"
-            match tooltip with
-            | Some t -> prop.title t
-            | None -> ()
-        ]
-    | None ->
-        Html.span [
-            prop.className className
-            prop.text text
-            match tooltip with
-            | Some t -> prop.title t
-            | None -> ()
-        ]
-
-let terminalButton dispatch (wt: WorktreeStatus) =
-    let action = if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
-    let title = if wt.HasActiveSession then "Focus session window (Enter)" else "Open terminal (Enter)"
-    Html.button [
-        prop.className "terminal-btn"
-        prop.title title
-        yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch action)
-        prop.text ">"
-    ]
-
-let editorIcon =
-    Svg.svg [
-        svg.className "btn-icon"
-        svg.viewBox (0, 0, 16, 16)
-        svg.fill "currentColor"
-        svg.children [
-            Svg.path [ svg.d "M5.002 10L12 3l2 2-7 7H5z" ]
-            Svg.path [ svg.d "M1.094 0C.525 0 0 .503 0 1.063v13.874C0 15.498.525 16 1.094 16h10.812c.558 0 1.074-.485 1.094-1.031V8l-2 2v4H2V2h5l2 2 1.531-1.531L8.344.344A1.12 1.12 0 007.563 0z" ]
-            Svg.path [ svg.d "M14.19 1.011a.513.513 0 00-.364.152l-1.162 1.16 2.004 2.005 1.163-1.162a.514.514 0 000-.728l-1.277-1.275a.514.514 0 00-.364-.152z" ]
-        ]
-    ]
-
-let editorButton dispatch editorName (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "editor-btn"
-        prop.title $"Open in {editorName} (E)"
-        yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenEditor wt.Path))
-        prop.children [ editorIcon ]
-    ]
-
-let newTabButton dispatch (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "new-tab-btn"
-        prop.title "Open new tab in tracked window (+)"
-        yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (OpenNewTab wt.Path))
-        prop.text "+"
-    ]
-
-let resumeIcon =
-    Svg.svg [
-        svg.className "btn-icon"
-        svg.viewBox (0, 0, 48, 48)
-        svg.fill "currentColor"
-        svg.children [
-            Svg.path [ svg.d "M25.6,25.6,22.2,29,19,25.8l3.4-3.4a2,2,0,0,0-2.8-2.8L16.2,23l-1.3-1.3a1.9,1.9,0,0,0-2.8,0l-3,3a9.8,9.8,0,0,0-3,7,9.1,9.1,0,0,0,1.8,5.6L4.6,40.6a1.9,1.9,0,0,0,0,2.8,1.9,1.9,0,0,0,2.8,0l3.2-3.2a10.1,10.1,0,0,0,5.9,1.9,10.2,10.2,0,0,0,7.1-2.9l3-3a2,2,0,0,0,.6-1.4,1.7,1.7,0,0,0-.6-1.4L25,31.8l3.4-3.4a2,2,0,0,0-2.8-2.8Z" ]
-            Svg.path [ svg.d "M43.4,4.6a1.9,1.9,0,0,0-2.8,0L37.2,8a10,10,0,0,0-13,.9l-3,3a2,2,0,0,0-.6,1.4,1.7,1.7,0,0,0,.6,1.4L32.9,26.4a1.9,1.9,0,0,0,2.8,0l3-2.9a9.9,9.9,0,0,0,2.9-7.1A10.4,10.4,0,0,0,40,10.9l3.4-3.5A1.9,1.9,0,0,0,43.4,4.6Z" ]
-        ]
-    ]
-
-let resumeButton dispatch (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "resume-btn"
-        prop.title "Resume last session (R)"
-        yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (ResumeSession wt.Path))
-        prop.children [ resumeIcon ]
-    ]
-
-let binIcon =
-    Svg.svg [
-        svg.className "btn-icon"
-        svg.viewBox (0, 0, 24, 24)
-        svg.fill "none"
-        svg.stroke "currentColor"
-        svg.custom ("strokeWidth", "1.5")
-        svg.custom ("strokeLinecap", "round")
-        svg.children [
-            Svg.path [ svg.d "M20.5001 6H3.5" ]
-            Svg.path [ svg.d "M9.5 11L10 16" ]
-            Svg.path [ svg.d "M14.5 11L14 16" ]
-            Svg.path [
-                svg.d "M6.5 6C6.55588 6 6.58382 6 6.60915 5.99936C7.43259 5.97849 8.15902 5.45491 8.43922 4.68032C8.44784 4.65649 8.45667 4.62999 8.47434 4.57697L8.57143 4.28571C8.65431 4.03708 8.69575 3.91276 8.75071 3.8072C8.97001 3.38607 9.37574 3.09364 9.84461 3.01877C9.96213 3 10.0932 3 10.3553 3H13.6447C13.9068 3 14.0379 3 14.1554 3.01877C14.6243 3.09364 15.03 3.38607 15.2493 3.8072C15.3043 3.91276 15.3457 4.03708 15.4286 4.28571L15.5257 4.57697C15.5433 4.62992 15.5522 4.65651 15.5608 4.68032C15.841 5.45491 16.5674 5.97849 17.3909 5.99936C17.4162 6 17.4441 6 17.5 6"
-                svg.custom ("strokeLinecap", "butt")
-            ]
-            Svg.path [ svg.d "M18.3735 15.3991C18.1965 18.054 18.108 19.3815 17.243 20.1907C16.378 21 15.0476 21 12.3868 21H11.6134C8.9526 21 7.6222 21 6.75719 20.1907C5.89218 19.3815 5.80368 18.054 5.62669 15.3991L5.16675 8.5M18.8334 8.5L18.6334 11.5" ]
-        ]
-    ]
-
-let deleteButton dispatch scopedKey (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "delete-btn"
-        prop.title "Remove worktree (Del)"
-        yield! noFocusProps
-        prop.onClick (fun e ->
-            e.stopPropagation()
-            dispatch (ConfirmDeleteWorktree scopedKey))
-        prop.children [ binIcon ]
-    ]
-
-let archiveButton dispatch scopedKey (wt: WorktreeStatus) =
-    Html.button [
-        prop.className "archive-btn"
-        prop.title "Archive worktree (A)"
-        yield! noFocusProps
-        prop.onClick (fun e -> e.stopPropagation(); dispatch (ConfirmArchiveWorktree scopedKey))
-        prop.children [ ArchiveViews.archiveIcon ]
-    ]
-
-let conflictIcon =
-    Svg.svg [
-        svg.className "conflict-icon"
-        svg.viewBox (0, 0, 1920, 1920)
-        svg.custom ("role", "img")
-        svg.children [
-            Svg.title "Merge conflicts"
-            Svg.path [
-                svg.d "m1359.36 1279.51-79.85 79.85L960 1039.85l-319.398 319.51-79.85-79.85L880.152 960 560.753 640.602l79.85-79.85L960 880.152l319.51-319.398 79.85 79.85L1039.85 960l319.51 319.51ZM960 0C430.645 0 0 430.645 0 960s430.645 960 960 960 960-430.645 960-960S1489.355 0 960 0Z"
-                svg.custom ("fillRule", "evenodd")
-            ]
-        ]
-    ]
-
-let prActionButton dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (action: ActionKind) (title: string) (icon: ReactElement) =
-    let onCooldown = cooldowns.Contains wt.Path
-    Html.button [
-        prop.className (if onCooldown then "action-btn disabled" else "action-btn")
-        prop.disabled onCooldown
-        yield! noFocusProps
-        prop.title (if onCooldown then "Action already triggered" else title)
-        prop.onClick (fun e -> e.stopPropagation(); if not onCooldown then dispatch (LaunchAction (wt.Path, action)))
-        prop.children [ icon ]
-    ]
-
-let prBadgeContent dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
-    React.fragment [
-        if pr.IsMerged then
-            Interop.createElement "a" [
-                prop.className "pr-badge merged"
-                prop.title pr.Title
-                prop.href pr.Url
-                prop.target "_blank"
-                prop.text "Merged"
-            ]
-        else
-            Interop.createElement "a" [
-                prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
-                prop.title pr.Title
-                prop.href pr.Url
-                prop.target "_blank"
-                prop.children [
-                    Html.text $"PR #{pr.Id}"
-                    if pr.HasConflicts then conflictIcon
-                ]
-            ]
-            match pr.Comments with
-            | WithResolution (unresolved, total) when total > 0 ->
-                Html.span [
-                    prop.className (if unresolved = 0 then "thread-badge dimmed" else "thread-badge")
-                    prop.text ($"{unresolved}/{total} threads")
-                ]
-                if unresolved > 0 then
-                    prActionButton dispatch cooldowns wt (FixPr pr.Url) "Fix PR comments" commentIcon
-            | _ -> ()
-            yield! pr.Builds |> List.collect (fun build -> [
-                    buildBadge repoName build
-                    if build.Status = Failed then
-                        match build.Url with
-                        | Some url -> prActionButton dispatch cooldowns wt (FixBuild url) "Fix build" wrenchIcon
-                        | None -> ()
-                ])
-    ]
-
-let prSection dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
-    match wt.Pr with
-    | NoPr -> Html.none
-    | HasPr pr -> prBadgeContent dispatch cooldowns wt repoName pr
-
-let prRow dispatch (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) =
-    match wt.Pr, wt.Branch with
-    | NoPr, ("main" | "master") -> Html.none
-    | NoPr, _ ->
-        Html.div [
-            prop.className "pr-row"
-            prop.children [
-                prActionButton dispatch cooldowns wt CreatePr "Create PR" createPrIcon
-            ]
-        ]
-    | HasPr pr, _ ->
-        Html.div [
-            prop.className "pr-row"
-            prop.children [ prBadgeContent dispatch cooldowns wt repoName pr ]
-        ]
-
-let workMetricsView = Components.workMetricsView
-let workMetricsItems = Components.workMetricsItems
-let FitOrHide = Components.FitOrHide
-let cardTitle = Components.cardTitle
-
-let compactWorktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
-    let baseClass = cardClassName wt + " compact"
-    let className = if isFocused then baseClass + " focused" else baseClass
-    Html.div [
-        prop.key (WorktreePath.value wt.Path)
-        prop.className className
-        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
-        prop.children [
-            Html.div [
-                prop.className "card-header"
-                prop.children [
-                    Html.div [
-                        prop.className "header-info"
-                        prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                            Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
-                            FitOrHide (workMetricsItems wt.WorkMetrics)
-                        ]
-                    ]
-                    Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
-                    terminalButton dispatch wt
-                    if wt.HasActiveSession then newTabButton dispatch wt
-                    if canResumeSession wt then resumeButton dispatch wt
-                    editorButton dispatch editorName wt
-                    archiveButton dispatch scopedKey wt
-                    if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
-                ]
-            ]
-            Html.div [
-                prop.className "compact-detail"
-                prop.children [
-                    if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
-                    mainBehindIndicator baseBranch wt.MainBehindCount
-                    prSection dispatch cooldowns wt repoName
-                ]
-            ]
-        ]
-    ]
-
-let worktreeCard dispatch editorName (repoName: string) (baseBranch: string) (cooldowns: Set<WorktreePath>) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
-    let baseClass = cardClassName wt
-    let className = if isFocused then baseClass + " focused" else baseClass
-    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents))
-    let footerClass = if hasContent then "card-footer has-content" else "card-footer"
-    Html.div [
-        prop.key (WorktreePath.value wt.Path)
-        prop.className className
-        prop.onClick (fun _ -> dispatch (SetFocus (Some (Card scopedKey))))
-        prop.children [
-            Html.div [
-                prop.className "card-body"
-                prop.children [
-                    Html.div [
-                        prop.className "card-header"
-                        prop.children [
-                            Html.div [
-                                prop.className "header-info"
-                                prop.children [
-                                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
-                                    Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
-                                    FitOrHide (workMetricsItems wt.WorkMetrics)
-                                ]
-                            ]
-                            terminalButton dispatch wt
-                            if wt.HasActiveSession then newTabButton dispatch wt
-                            if canResumeSession wt then resumeButton dispatch wt
-                            editorButton dispatch editorName wt
-                            archiveButton dispatch scopedKey wt
-                            if not wt.IsMainWorktree then deleteButton dispatch scopedKey wt
-                        ]
-                    ]
-
-                    if beadsTotal wt.Beads > 0 then
-                        Html.div [
-                            prop.className "beads-row"
-                            prop.children [
-                                beadsCounts "beads-counts" wt.Beads
-                                beadsProgressBar wt.Beads
-                            ]
-                        ]
-
-                    mainBehindWithSync dispatch baseBranch wt branchEvents isPending scopedKey
-
-                    prRow dispatch cooldowns wt repoName
-                ]
-            ]
-
-            Html.div [
-                prop.className footerClass
-                prop.children [
-                    match wt.LastUserMessage with
-                    | Some (prompt, ts) ->
-                        Html.div [
-                            prop.className "user-prompt"
-                            prop.children [
-                                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                                Html.span [ prop.text prompt ]
-                            ]
-                        ]
-                    | None -> ()
-
-                    eventLog dispatch cooldowns wt.Path wt.HasTestFailureLog branchEvents
-                ]
-            ]
-        ]
-    ]
-
-let renderCard dispatch editorName isCompact (focusedElement: FocusTarget option) repoId repoName baseBranch (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) =
-    let scopedKey = WorktreePath.value wt.Path
-    let events = branchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
-    let isPending = syncPending |> Set.contains scopedKey
-    let isFocused = focusedElement = Some (Card scopedKey)
-    if isCompact then compactWorktreeCard dispatch editorName repoName baseBranch cooldowns scopedKey isFocused wt
-    else worktreeCard dispatch editorName repoName baseBranch cooldowns events isPending scopedKey isFocused wt
-
-let archiveSection dispatch = ArchiveViews.archiveSection (ArchiveMsg >> dispatch)
-
-let skeletonCard () =
-    Html.div [
-        prop.className "wt-card skeleton"
-        prop.children [
-            Html.div [
-                prop.className "card-header"
-                prop.children [
-                    Html.span [ prop.className "skeleton-dot" ]
-                    Html.span [ prop.className "skeleton-bar skeleton-branch" ]
-                ]
-            ]
-            Html.div [ prop.className "skeleton-bar skeleton-commit" ]
-            Html.div [ prop.className "skeleton-bar skeleton-beads" ]
-        ]
-    ]
-
-let skeletonGrid () =
-    Html.div [
-        prop.className "card-grid"
-        prop.children (List.init 6 (fun _ -> skeletonCard ()))
-    ]
-
-let sortLabel =
-    function
-    | ByName -> "A-Z"
-    | ByActivity -> "Recent"
-
-let viewEyeOpen (pupilColor: string) (activity: ActivityLevel) (dx: float, dy: float) =
-    Svg.svg [
-        svg.className "eye-logo"
-        svg.viewBox (-2, -2, 44, 24)
-        svg.children [
-            Svg.path [
-                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                svg.fill "#e8e8e8"
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.5
-            ]
-            Svg.g [
-                svg.className "eye-iris"
-                svg.custom ("transform", $"translate({dx}, {dy})")
-                svg.children [
-                    Svg.circle [
-                        svg.cx 20
-                        svg.cy 10
-                        svg.r 9
-                        svg.fill "#1a1b2e"
-                    ]
-                    Svg.circle [
-                        svg.cx 20
-                        svg.cy 10
-                        svg.r 6
-                        svg.fill "#56b6c2"
-                    ]
-                    Svg.circle [
-                        svg.cx 20
-                        svg.cy 10
-                        svg.r 3
-                        svg.fill pupilColor
-                    ]
-                ]
-            ]
-            Svg.circle [
-                svg.cx 23
-                svg.cy 5
-                svg.r 2
-                svg.fill "rgba(255, 255, 255, 0.8)"
-            ]
-            match activity with
-            | ActivityLevel.Idle ->
-                Svg.path [
-                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 4 20 5 Q10 4 2 10 Z"
-                    svg.fill "#b0b0b0"
-                ]
-                Svg.path [
-                    svg.d "M2 10 Q10 4 20 5 Q30 4 38 10"
-                    svg.fill "none"
-                    svg.stroke "#56b6c2"
-                    svg.strokeWidth 2.0
-                ]
-            | ActivityLevel.DeepIdle ->
-                Svg.path [
-                    svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 9 20 12 Q10 9 2 10 Z"
-                    svg.fill "#b0b0b0"
-                ]
-                Svg.path [
-                    svg.d "M2 10 Q10 9 20 12 Q30 9 38 10"
-                    svg.fill "none"
-                    svg.stroke "#56b6c2"
-                    svg.strokeWidth 2.0
-                ]
-            | ActivityLevel.Active -> ()
-        ]
-    ]
-
-let viewEyeRolledBack =
-    Svg.svg [
-        svg.className "eye-logo"
-        svg.viewBox (-2, -2, 44, 24)
-        svg.children [
-            Svg.defs [
-                Svg.clipPath [
-                    svg.id "eye-shape"
-                    svg.children [
-                        Svg.path [
-                            svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                        ]
-                    ]
-                ]
-            ]
-            Svg.path [
-                svg.d "M2 10 Q10 0 20 0 Q30 0 38 10 Q30 20 20 20 Q10 20 2 10 Z"
-                svg.fill "#e8e8e8"
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.5
-            ]
-            Svg.g [
-                svg.custom ("clipPath", "url(#eye-shape)")
-                svg.children [
-                    Svg.g [
-                        svg.custom ("transform", "translate(0, -9)")
-                        svg.children [
-                            Svg.circle [
-                                svg.cx 20
-                                svg.cy 10
-                                svg.r 9
-                                svg.fill "#1a1b2e"
-                            ]
-                            Svg.circle [
-                                svg.cx 20
-                                svg.cy 10
-                                svg.r 6
-                                svg.fill "#888"
-                            ]
-                            Svg.circle [
-                                svg.cx 20
-                                svg.cy 10
-                                svg.r 3
-                                svg.fill "#1a1b2e"
-                            ]
-                        ]
-                    ]
-                ]
-            ]
-            Svg.circle [
-                svg.cx 23
-                svg.cy 5
-                svg.r 2
-                svg.fill "rgba(255, 255, 255, 0.8)"
-            ]
-        ]
-    ]
-
-let viewEyeClosed =
-    Svg.svg [
-        svg.className "eye-logo eye-closed"
-        svg.viewBox (-2, -2, 44, 24)
-        svg.children [
-            Svg.path [
-                svg.d "M2 10 Q10 4 20 4 Q30 4 38 10 Q30 16 20 16 Q10 16 2 10 Z"
-                svg.fill "#e8e8e8"
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.5
-            ]
-            Svg.line [
-                svg.x1 4
-                svg.y1 10
-                svg.x2 36
-                svg.y2 10
-                svg.stroke "#56b6c2"
-                svg.strokeWidth 2.0
-            ]
-        ]
-    ]
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->
@@ -1413,85 +570,6 @@ let anyRepoReady (repos: RepoModel list) =
 
 let allWorktreesEmpty (repos: RepoModel list) =
     repos |> List.forall _.Worktrees.IsEmpty
-
-let providerIcon (provider: RepoProvider option) =
-    let icon viewBox (svgPath: string) =
-        Svg.svg [
-            svg.className "provider-icon"
-            svg.viewBox viewBox
-            svg.children [ Svg.path [ svg.d svgPath; svg.fill "currentColor" ] ]
-        ]
-
-    let githubPath = "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
-    let azdoPath = "M17 4v9.74l-4 3.28-6.2-2.26V17l-3.51-4.59 10.23.8V4.44zm-3.41.49L7.85 1v2.29L2.58 4.84 1 6.87v4.61l2.26 1V6.57z"
-
-    match provider with
-    | None | Some UnknownProvider -> Html.none
-    | Some(GitHubProvider url) ->
-        Html.a [
-            prop.className "provider-link"
-            prop.href url
-            prop.target "_blank"
-            prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 24, 24) githubPath ]
-        ]
-    | Some(AzDoProvider url) ->
-        Html.a [
-            prop.className "provider-link"
-            prop.href url
-            prop.target "_blank"
-            prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 18, 18) azdoPath ]
-        ]
-
-let repoSectionHeader dispatch (focusedElement: FocusTarget option) (repo: RepoModel) =
-    let arrow = if repo.IsCollapsed then "\u25B6" else "\u25BC"
-    let isFocused = focusedElement = Some (RepoHeader repo.RepoId)
-    let baseClass = if repo.IsCollapsed then "repo-header collapsed" else "repo-header"
-    let className = if isFocused then baseClass + " focused" else baseClass
-    Html.div [
-        prop.className className
-        prop.onClick (fun _ -> dispatch (ToggleCollapse repo.RepoId))
-        prop.children [
-            Html.span [ prop.className "collapse-arrow"; prop.text arrow ]
-            Html.span [ prop.className "repo-name"; prop.text repo.Name ]
-            providerIcon repo.Provider
-            if repo.BaseBranch <> "main" then
-                Html.span [ prop.className "deploy-branch"; prop.text repo.BaseBranch ]
-            if repo.IsCollapsed then
-                Html.span [
-                    prop.className "repo-ct-dots"
-                    prop.children (
-                        repo.Worktrees
-                        |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
-                ]
-            Html.button [
-                prop.className "create-wt-btn"
-                prop.title "Create worktree"
-                prop.onClick (fun e -> e.stopPropagation(); dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repo.RepoId)))
-                prop.text "+"
-            ]
-        ]
-    ]
-
-let repoSection dispatch editorName isCompact (focusedElement: FocusTarget option) (branchEvents: Map<string, CardEvent list>) (syncPending: Set<string>) (cooldowns: Set<WorktreePath>) (repo: RepoModel) =
-    Html.div [
-        prop.key (RepoId.value repo.RepoId)
-        prop.className "repo-section"
-        prop.children [
-            repoSectionHeader dispatch focusedElement repo
-            if not repo.IsCollapsed then
-                if not repo.IsReady && repo.Worktrees.IsEmpty then
-                    skeletonGrid ()
-                else
-                    Html.div [
-                        prop.className "card-grid"
-                        prop.children (repo.Worktrees |> List.map (renderCard dispatch editorName isCompact focusedElement (RepoId.value repo.RepoId) repo.Name repo.BaseBranch branchEvents syncPending cooldowns))
-                    ]
-                    archiveSection dispatch repo.ArchivedWorktrees
-        ]
-    ]
 
 let barColor (pct: float) =
     if pct >= 80.0 then "#f38ba8"
@@ -1555,11 +633,11 @@ let viewAppHeader model dispatch =
             Html.div [
                 prop.className "header-center"
                 prop.children [
-                    if model.HasError then viewEyeRolledBack
+                    if model.HasError then MascotView.viewEyeRolledBack ()
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
-                        viewEyeOpen pupilColor model.ActivityLevel model.EyeDirection
-                    else viewEyeClosed
+                        MascotView.viewEyeOpen pupilColor model.Activity.ActivityLevel model.Mascot.EyeDirection
+                    else MascotView.viewEyeClosed ()
                 ]
             ]
             Html.div [
@@ -1584,6 +662,21 @@ let viewAppHeader model dispatch =
                                 prop.onClick (fun _ -> dispatch ToggleCompact)
                                 prop.text "Compact"
                             ]
+                            Html.button [
+                                prop.className (if model.Canvas.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleCanvasPane)
+                                prop.title "Toggle canvas pane (C)"
+                                prop.children [
+                                    Html.text "Canvas"
+                                    let unviewedCount = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes |> Map.values |> Seq.sumBy List.length
+                                    if unviewedCount > 0 then
+                                        Html.span [
+                                            prop.className "canvas-badge"
+                                            prop.text (string unviewedCount)
+                                        ]
+                                ]
+                            ]
                         ]
                     ]
                 ]
@@ -1592,10 +685,52 @@ let viewAppHeader model dispatch =
     ]
 
 let view model dispatch =
-    React.fragment [
-        viewAppHeader model dispatch
+    let canvasPositionClass =
+        match model.Canvas.CanvasPosition with
+        | CanvasPosition.Left -> "canvas-left"
+        | CanvasPosition.Right -> "canvas-right"
+        | CanvasPosition.Top -> "canvas-top"
+        | CanvasPosition.Bottom -> "canvas-bottom"
+
+    let dashboardClass =
+        match model.Canvas.CanvasPaneOpen with
+        | true -> $"dashboard canvas-open {canvasPositionClass}"
+        | false -> "dashboard"
+
+    let layoutClass =
+        match model.Canvas.CanvasPaneOpen with
+        | true -> $"app-layout canvas-open {canvasPositionClass}"
+        | false -> "app-layout"
+
+    let cardProps: CardViewProps =
+        { EditorName = model.EditorName
+          IsCompact = model.IsCompact
+          FocusedElement = model.FocusedElement
+          BranchEvents = model.BranchEvents
+          SyncPending = model.SyncPending
+          ActionCooldowns = model.ActionCooldowns
+          CanvasEvents = model.Canvas.CanvasEvents
+          CanvasPaneOpen = model.Canvas.CanvasPaneOpen }
+
+    let cardCallbacks: CardCallbacks =
+        { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
+          ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
+          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+          OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
+          OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
+          OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
+          ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
+          DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
+          ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)
+          StartSync = fun path key -> dispatch (StartSync (path, key))
+          CancelSync = fun path -> dispatch (CancelSync path)
+          LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
+          OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
+          DispatchArchive = ArchiveMsg >> dispatch }
+
+    let dashboardEl =
         Html.div [
-            prop.className "dashboard"
+            prop.className dashboardClass
             prop.tabIndex 0
             prop.autoFocus true
             prop.onKeyDown (fun e ->
@@ -1616,20 +751,45 @@ let view model dispatch =
                 else
                     Html.div [
                         prop.className "repo-list"
-                        prop.children (model.Repos |> List.map (repoSection dispatch model.EditorName model.IsCompact model.FocusedElement model.BranchEvents model.SyncPending model.ActionCooldowns))
+                        prop.children (model.Repos |> List.map (repoSection cardProps cardCallbacks))
                     ]
 
-                schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
+                OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
                 CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
                 ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
             ]
         ]
+
+    let canvasEl =
+        CanvasView.view model dispatch
+
+    let children =
+        match model.Canvas.CanvasPosition with
+        | CanvasPosition.Left
+        | CanvasPosition.Top -> [ canvasEl; dashboardEl ]
+        | CanvasPosition.Right
+        | CanvasPosition.Bottom -> [ dashboardEl; canvasEl ]
+
+    React.fragment [
+        viewAppHeader model dispatch
+        Html.div [
+            prop.className layoutClass
+            prop.children children
+        ]
     ]
 
+// Elmish/React entry point. Guarded for Fable only: under the .NET test host
+// this top-level expression runs the whole app at module load (init()'s
+// JS Date.now + a React DOM mount), which throws inside App's static
+// constructor and takes down every test that merely references App's pure
+// helpers. Fable always defines FABLE_COMPILER, so the browser build is
+// byte-for-byte unchanged; only the unit-test (.NET) load path is affected.
+#if FABLE_COMPILER
 open Elmish.React
 
 Program.mkProgram init update view
 |> Program.withSubscription appSubscriptions
 |> Program.withReactSynchronous "app"
 |> Program.run
+#endif

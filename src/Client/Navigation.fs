@@ -8,6 +8,15 @@ type FocusTarget =
     | RepoHeader of RepoId
     | Card of path: string
 
+[<RequireQualifiedAccess>]
+type CanvasSendState =
+    // scopedKey identifies the target worktree the message was queued for, so the "Waiting for
+    // session…" banner can be cleared only by *that* worktree's session activity, never by an
+    // unrelated worktree's doc change.
+    | Idle
+    | Waiting of scopedKey: string
+    | Failed of message: string
+
 type RepoModel =
     { RepoId: RepoId
       Name: string
@@ -184,24 +193,26 @@ let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     | None -> ()
     | Some _ ->
         Dom.window?requestAnimationFrame(fun (_: float) ->
-            Dom.document.querySelector ".focused"
-            |> Option.ofObj
-            |> Option.iter (fun el ->
+            let dashboardEl = Dom.document.querySelector ".dashboard"
+            match Option.ofObj (Dom.document.querySelector ".focused"), Option.ofObj dashboardEl with
+            | None, _ | _, None -> ()
+            | Some el, Some container ->
                 let rect = el?getBoundingClientRect()
+                let containerRect = container?getBoundingClientRect()
                 let rectTop: float = rect?top
                 let rectBottom: float = rect?bottom
-                let viewH: float = Dom.window?innerHeight
-                let scrollY: float = Dom.window?scrollY
-                let elTop = rectTop + scrollY
-                let elBottom = rectBottom + scrollY
-                let docHeight: float = Dom.document.documentElement?scrollHeight
-                let scrollTo top = Dom.window?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
+                let containerTop: float = containerRect?top
+                let containerBottom: float = containerRect?bottom
+                let scrollTop: float = container?scrollTop
+                let containerHeight: float = container?clientHeight
+                let scrollHeight: float = container?scrollHeight
+                let scrollTo top = container?scrollTo(createObj [ "top" ==> top; "behavior" ==> "smooth" ])
                 match hint with
                 | ScrollToTop -> scrollTo 0
-                | ScrollToBottom -> scrollTo docHeight
-                | Normal when rectTop < headerOffset -> scrollTo (elTop - headerOffset)
-                | Normal when rectBottom > viewH - scrollPadding -> scrollTo (elBottom - viewH + scrollPadding)
-                | _ -> ()))
+                | ScrollToBottom -> scrollTo scrollHeight
+                | Normal when rectTop < containerTop + headerOffset -> scrollTo (scrollTop + rectTop - containerTop - headerOffset)
+                | Normal when rectBottom > containerBottom - scrollPadding -> scrollTo (scrollTop + rectBottom - containerBottom + scrollPadding)
+                | _ -> ())
 
 let navigateToFirst (repos: RepoModel list) =
     let targets = visibleFocusTargets repos
@@ -234,3 +245,13 @@ let adjustFocusForVisibility (repos: RepoModel list) (focusedElement: FocusTarge
             match targets with
             | [] -> None
             | _ -> Some targets.Head
+
+/// Expand the repo that owns the worktree at the given scoped key so its card becomes a visible
+/// focus target. Focusing a card inside a collapsed repo would otherwise get reset to the first
+/// dashboard item by adjustFocusForVisibility on the next refresh — closing the canvas pane.
+/// Returns the updated repos and whether a collapsed owner was expanded.
+let expandRepoOwning (scopedKey: string) (repos: RepoModel list) =
+    let owns (r: RepoModel) = r.Worktrees |> List.exists (fun wt -> WorktreePath.value wt.Path = scopedKey)
+    let expanded = repos |> List.exists (fun r -> r.IsCollapsed && owns r)
+    let updated = repos |> List.map (fun r -> if r.IsCollapsed && owns r then { r with IsCollapsed = false } else r)
+    updated, expanded

@@ -19,6 +19,7 @@
 - Loading skeleton on cold start until first worktree list completes
 - Fixed header bar with system metrics and deploy branch badge (see `docs/spec/fixed-header.md`)
 - Keyboard navigation: arrow keys move focus spatially across cards and repo headers (see `docs/spec/keyboard-navigation.md`)
+- Canvas pane: per-worktree interactive HTML documents for agent-to-user rich content (see `docs/spec/canvas-pane.md`)
 
 ### Multi-Repo
 
@@ -229,7 +230,12 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/SyncEngine.fs` | Branch sync pipeline, provider-aware conflict resolution |
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
-| `src/Client/App.fs` | Elmish MVU app, repo sections, card rendering |
+| `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
+| `src/Client/CardViews.fs` | Worktree card rendering (cards, action buttons, badges, PR/sync/event-log helpers, `repoSection`) via `CardViewProps`/`CardCallbacks` records |
+| `src/Client/OverviewViews.fs` | Status-overview row + scheduler footer rendering |
+| `src/Client/MascotState.fs` / `MascotView.fs` | Mascot eyes: gaze slice + eye SVG render (observes `ActivityLevel`) |
+| `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |
+| `src/Client/CanvasView.fs` | Canvas pane view wiring (`CanvasPane.view` callbacks/slices) |
 | `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
 | `src/Tests/fixtures/` | Captured AzDo, GitHub, Copilot, and Claude session data for offline parsing/replay tests |
 
@@ -261,3 +267,4 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
 - `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges
+- `docs/spec/canvas-pane.md` — interactive HTML docs in the canvas pane, including awareness, liveness, and bridge routing

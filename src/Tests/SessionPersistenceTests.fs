@@ -28,6 +28,10 @@ let private withTempDir (action: string -> unit) =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+// withTempDir mutates Environment.CurrentDirectory (shared process state) so it can write/read
+// data/sessions.json under a throwaway dir. Only safe because NUnit runs sequentially today;
+// mark NonParallelizable so enabling assembly parallelization can never race CWD across fixtures.
+[<NonParallelizable>]
 type PersistSessionsTests() =
 
     [<Test>]
@@ -125,6 +129,8 @@ type PersistSessionsTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+// withTempDir mutates the shared Environment.CurrentDirectory — see PersistSessionsTests.
+[<NonParallelizable>]
 type LoadSessionsTests() =
 
     [<Test>]
@@ -186,6 +192,8 @@ type LoadSessionsTests() =
 
 [<TestFixture>]
 [<Category("Local")>]
+// withTempDir mutates the shared Environment.CurrentDirectory — see PersistSessionsTests.
+[<NonParallelizable>]
 type RoundTripTests() =
 
     [<Test>]
@@ -261,6 +269,8 @@ type RoundTripTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+// withTempDir mutates the shared Environment.CurrentDirectory — see PersistSessionsTests.
+[<NonParallelizable>]
 type JsonFormatTests() =
 
     [<Test>]

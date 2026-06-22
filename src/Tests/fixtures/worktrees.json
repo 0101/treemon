@@ -10,7 +10,7 @@
             "Branch": "feature-active",
             "LastCommitMessage": "Add comprehensive input validation",
             "LastCommitTime": "2026-02-16T22:30:00+00:00",
-            "Beads": { "Open": 3, "InProgress": 2, "Closed": 5 },
+            "Beads": { "Open": 3, "InProgress": 2, "Blocked": 0, "Closed": 5 },
             "CodingTool": "Working",
             "CodingToolProvider": "Claude",
             "HasActiveSession": true,
@@ -44,14 +44,15 @@
               }
             },
             "MainBehindCount": 25,
-            "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 }
+            "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 },
+            "CanvasDocs": [{ "Filename": "e2e-test.html", "ContentHash": "fixture-abc123", "LastModified": "2026-01-15T10:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" }]
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-recent"},
             "Branch": "feature-recent",
             "LastCommitMessage": "Refactor data access layer for clarity",
             "LastCommitTime": "2026-02-16T22:00:00+00:00",
-            "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
+            "Beads": { "Open": 1, "InProgress": 1, "Blocked": 0, "Closed": 0 },
             "CodingTool": "WaitingForUser",
             "CodingToolProvider": "Claude",
             "LastUserMessage": ["Refactor the data access layer for better separation of concerns", "2026-02-16T21:00:00+00:00"],
@@ -75,37 +76,40 @@
               }
             },
             "MainBehindCount": 5,
-            "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 }
+            "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 },
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-idle"},
             "Branch": "feature-idle",
             "LastCommitMessage": "Complete logging improvements",
             "LastCommitTime": "2026-02-16T20:00:00+00:00",
-            "Beads": { "Open": 0, "InProgress": 0, "Closed": 3 },
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 3 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-stale"},
             "Branch": "feature-stale",
             "LastCommitMessage": "Initial experiment with caching",
             "LastCommitTime": "2026-02-10T08:00:00+00:00",
-            "Beads": { "Open": 1, "InProgress": 0, "Closed": 0 },
+            "Beads": { "Open": 1, "InProgress": 0, "Blocked": 0, "Closed": 0 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 42,
-            "IsDirty": true
+            "IsDirty": true,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-merged"},
             "Branch": "feature-merged",
             "LastCommitMessage": "Final cleanup before merge",
             "LastCommitTime": "2026-02-15T16:00:00+00:00",
-            "Beads": { "Open": 0, "InProgress": 0, "Closed": 8 },
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 8 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": {
@@ -127,14 +131,15 @@
                 "HasConflicts": false
               }
             },
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-draft"},
             "Branch": "feature-draft",
             "LastCommitMessage": "Wire up API endpoints for new feature",
             "LastCommitTime": "2026-02-16T21:00:00+00:00",
-            "Beads": { "Open": 5, "InProgress": 1, "Closed": 2 },
+            "Beads": { "Open": 5, "InProgress": 1, "Blocked": 0, "Closed": 2 },
             "CodingTool": "Working",
             "CodingToolProvider": "Claude",
             "HasActiveSession": true,
@@ -165,18 +170,36 @@
               }
             },
             "MainBehindCount": 2,
-            "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 }
+            "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 },
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/TestProject/feature-multidoc"},
+            "Branch": "feature-multidoc",
+            "LastCommitMessage": "Add multi-doc canvas artifacts",
+            "LastCommitTime": "2026-02-16T22:45:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Idle",
+            "CodingToolProvider": null,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": [
+              { "Filename": "overview.html", "ContentHash": "multi-hash-001", "LastModified": "2026-02-16T22:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
+              { "Filename": "details.html", "ContentHash": "multi-hash-002", "LastModified": "2026-02-16T22:10:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
+              { "Filename": "metrics.html", "ContentHash": "multi-hash-003", "LastModified": "2026-02-16T22:20:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" }
+            ]
           },
           {
             "Path": {"WorktreePath": "Q:/code/TestProject/feature-unknown"},
             "Branch": "feature-unknown",
             "LastCommitMessage": "Update configuration defaults",
             "LastCommitTime": "2026-02-16T18:00:00+00:00",
-            "Beads": { "Open": 2, "InProgress": 0, "Closed": 0 },
+            "Beads": { "Open": 2, "InProgress": 0, "Blocked": 0, "Closed": 0 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
-            "MainBehindCount": 10
+            "MainBehindCount": 10,
+            "CanvasDocs": []
           }
         ],
         "IsReady": true,
@@ -191,7 +214,7 @@
             "Branch": "test/add-health-endpoint",
             "LastCommitMessage": "Add CI workflow and contributing guide",
             "LastCommitTime": "2026-02-22T15:12:00+00:00",
-            "Beads": { "Open": 0, "InProgress": 0, "Closed": 0 },
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": {
@@ -216,14 +239,15 @@
                 "HasConflicts": false
               }
             },
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/treemon/test-add-editorconfig"},
             "Branch": "test/add-editorconfig",
             "LastCommitMessage": "Add editorconfig for consistent formatting",
             "LastCommitTime": "2026-02-22T15:10:00+00:00",
-            "Beads": { "Open": 0, "InProgress": 0, "Closed": 0 },
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": {
@@ -248,18 +272,24 @@
                 "HasConflicts": false
               }
             },
-            "MainBehindCount": 0
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           },
           {
             "Path": {"WorktreePath": "Q:/code/treemon/multirepo"},
             "Branch": "multirepo",
             "LastCommitMessage": "Multi-repo support implementation",
             "LastCommitTime": "2026-02-22T14:00:00+00:00",
-            "Beads": { "Open": 1, "InProgress": 1, "Closed": 0 },
+            "Beads": { "Open": 1, "InProgress": 1, "Blocked": 0, "Closed": 0 },
             "CodingTool": "Idle",
             "CodingToolProvider": null,
             "Pr": "NoPr",
-            "MainBehindCount": 3
+            "MainBehindCount": 3,
+            "CanvasDocs": [
+              { "Filename": "beads.html", "ContentHash": "treemon-beads-000", "LastModified": "2026-02-22T13:45:00+00:00", "OwnerSessionId": null, "Kind": "SystemView" },
+              { "Filename": "dashboard.html", "ContentHash": "treemon-hash-001", "LastModified": "2026-02-22T13:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
+              { "Filename": "status.html", "ContentHash": "treemon-hash-002", "LastModified": "2026-02-22T13:30:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" }
+            ]
           }
         ],
         "IsReady": true,
