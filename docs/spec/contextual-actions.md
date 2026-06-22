@@ -78,7 +78,8 @@ Action button rendering functions take `dispatch`, `wt: WorktreeStatus`, and con
 | `src/Shared/Types.fs` | Add `launchAction` to `IWorktreeApi` |
 | `src/Server/SessionManager.fs` | Extend `openNewTabInWindow` with optional command, add `LaunchAction` message |
 | `src/Server/WorktreeApi.fs` | Wire `launchAction` endpoint with provider-aware command construction |
-| `src/Client/App.fs` | Add `LaunchAction` msg, action button rendering functions, integrate into PR row and build badges |
+| `src/Client/App.fs` | Add `LaunchAction` msg + update arm |
+| `src/Client/CardViews.fs` | Action button rendering functions, integrated into PR row and build badges |
 | `src/Client/index.html` | CSS for action button styles |
 
 ## Related Specs
