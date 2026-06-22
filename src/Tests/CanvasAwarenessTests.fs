@@ -73,6 +73,7 @@ let private defaultModel : Model =
       DeletedPaths = Set.empty
       EditorName = "VS Code"
       ActionCooldowns = Set.empty
+      Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty }
 
@@ -328,13 +329,13 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Mascot = { defaultModel.Mascot with LastActivityTime = 0.0 }
+                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty; CanvasPaneOpen = false } }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0 // 120s since epoch — well past 60s idle threshold
-        let isIdle = jsNow - model.Mascot.LastActivityTime > MascotState.autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
@@ -351,13 +352,13 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Mascot = { defaultModel.Mascot with LastActivityTime = 0.0 }
+                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = previousHashes; CanvasPaneOpen = false } }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
-        let isIdle = jsNow - model.Mascot.LastActivityTime > MascotState.autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
@@ -375,11 +376,11 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Mascot = { defaultModel.Mascot with LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
+                Activity = { defaultModel.Activity with LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty } }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
-        let isIdle = jsNow - model.Mascot.LastActivityTime > MascotState.autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs
@@ -395,12 +396,12 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Mascot = { defaultModel.Mascot with LastActivityTime = 0.0 }
+                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
                 Canvas = { defaultModel.Canvas with PreviousCanvasHashes = currentHashes } }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
-        let isIdle = jsNow - model.Mascot.LastActivityTime > MascotState.autoDisplayIdleMs
+        let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
         let target =
             if isIdle && not (List.isEmpty changedDocs)
             then findMostRecentChangedDoc repos changedDocs

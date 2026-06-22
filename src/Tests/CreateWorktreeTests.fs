@@ -32,6 +32,7 @@ let private defaultModel : Model =
       DeletedPaths = Set.empty
       EditorName = "VS Code"
       ActionCooldowns = Set.empty
+      Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty }
 

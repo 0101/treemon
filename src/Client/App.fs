@@ -45,7 +45,8 @@ let init () =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
-      Mascot = { MascotState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
+      Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
+      Mascot = MascotState.empty
       Canvas = CanvasState.empty },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
@@ -133,7 +134,7 @@ let update msg model =
                 if isFirstLoad then []
                 else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
             let now = now.ToUnixTimeMilliseconds() |> float
-            let isIdle = now - model.Mascot.LastActivityTime > MascotState.autoDisplayIdleMs
+            let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
             // dashboard) is server-generated and self-refreshing, so its data churn must not
             // hijack focus; filter it out of the candidates before picking the most recent.
@@ -263,18 +264,18 @@ let update msg model =
 
     | Tick now ->
         // Tick stays in the root update because it also expires canvas events and drives the
-        // worktree/sync poll; only the mascot activity-recompute delegates to MascotUpdate.
-        let mascot, reportCmd = MascotUpdate.tickActivity now model.Mascot
+        // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
+        let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
         let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
 
         // A queued canvas message is honestly pending, not failed: it is delivered to the
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        { model with Mascot = mascot; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
+        { model with Activity = activity; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
-    | UserActivity now -> MascotUpdate.userActivity now model
+    | UserActivity now -> ActivityUpdate.userActivity now model
 
     | StartSync (path, key) ->
         let syntheticEvent =
@@ -523,12 +524,12 @@ let update msg model =
 
 let appSubscriptions (model: Model) : Sub<Msg> =
     let pollingIntervalMs =
-        match model.Mascot.ActivityLevel with
+        match model.Activity.ActivityLevel with
         | ActivityLevel.Active | ActivityLevel.Idle -> 1000
         | ActivityLevel.DeepIdle -> 15000
 
     let activityLevelKey =
-        match model.Mascot.ActivityLevel with
+        match model.Activity.ActivityLevel with
         | ActivityLevel.Active -> "active"
         | ActivityLevel.Idle -> "idle"
         | ActivityLevel.DeepIdle -> "deep-idle"
@@ -547,7 +548,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
 
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
-          [ "activity" ], MascotUpdate.activityDetection
+          [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener ]
 
     if hasSyncRunning model.BranchEvents then
@@ -635,7 +636,7 @@ let viewAppHeader model dispatch =
                     if model.HasError then MascotView.viewEyeRolledBack ()
                     elif hasAnyActive model.Repos then
                         let pupilColor = if hasAnyWaiting model.Repos then "#f9e2af" else "#1a1b2e"
-                        MascotView.viewEyeOpen pupilColor model.Mascot
+                        MascotView.viewEyeOpen pupilColor model.Activity.ActivityLevel model.Mascot.EyeDirection
                     else MascotView.viewEyeClosed ()
                 ]
             ]

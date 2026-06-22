@@ -32,6 +32,7 @@ type Model =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       ActionCooldowns: Set<WorktreePath>
+      Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState }
 

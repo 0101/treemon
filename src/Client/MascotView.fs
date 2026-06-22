@@ -1,20 +1,18 @@
 module MascotView
 
-// The mascot eye SVGs, extracted from `App.fs`. Pure render functions over the mascot's own
-// `MascotState` slice (gaze direction + activity level) so the eyes' view sits next to their
-// state and update (`MascotState.fs`/`MascotUpdate.fs`), mirroring the canvas slice. Compiled
-// before `AppTypes.fs`, so these depend only on `Shared`/`Feliz` and the `MascotState` record —
-// never on `Model`/`Msg`.
+// The mascot eye SVGs, extracted from `App.fs`. Pure render functions where gaze comes from
+// the mascot's `EyeDirection`, while the lid overlay comes from the observed `ActivityLevel`.
+// Compiled before `AppTypes.fs`, so these depend only on `Shared`/`Feliz` — never on `Model`/`Msg`.
 
 open Shared
 open Feliz
 
 /// Open, awake eye. `pupilColor` is derived by the header from worktree state (waiting vs not),
-/// so it stays a separate argument; gaze offset and the half/closed lid overlay come from the
-/// `MascotState` slice's `EyeDirection` and `ActivityLevel`.
-let viewEyeOpen (pupilColor: string) (mascot: MascotState.MascotState) =
-    let (dx, dy) = mascot.EyeDirection
-    let activity = mascot.ActivityLevel
+/// so it stays a separate argument; gaze offset comes from the mascot's `EyeDirection`, and the
+/// half/closed lid overlay comes from the observed `ActivityLevel`.
+let viewEyeOpen (pupilColor: string) (activityLevel: ActivityLevel) (eyeDirection: float * float) =
+    let (dx, dy) = eyeDirection
+    let activity = activityLevel
     Svg.svg [
         svg.className "eye-logo"
         svg.viewBox (-2, -2, 44, 24)
