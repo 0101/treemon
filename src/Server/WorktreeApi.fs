@@ -67,7 +67,11 @@ let readOnlyApi
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
-      getBridgeLiveness = fun _ -> async { return Map.empty } }
+      getBridgeLiveness = fun _ -> async { return Map.empty }
+      // Root management is unavailable in demo/fixture modes (roots stay []); getRoots is just empty.
+      addRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
+      removeRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
+      getRoots = fun () -> async { return [] } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -171,11 +175,21 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
         |> Map.tryFind path
         |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
 
+/// Directory holding the machine-level Treemon config (`config.json`), normally `~/.treemon`.
+/// The `TREEMON_CONFIG_DIR` override exists for test isolation: on Windows
+/// `Environment.GetFolderPath(UserProfile)` ignores the USERPROFILE/HOME env vars, so an
+/// in-process test can only redirect the config dir via this explicit override.
+let internal globalConfigDir () =
+    Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR")
+    |> Option.ofObj
+    |> Option.filter (fun d -> d <> "")
+    |> Option.defaultWith (fun () ->
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".treemon"))
+
 let private globalConfigPath () =
-    Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".treemon",
-        "config.json")
+    Path.Combine(globalConfigDir (), "config.json")
 
 let private withConfigDocument (defaultValue: 'a) (f: System.Text.Json.JsonElement -> 'a) : 'a =
     let path = globalConfigPath ()
@@ -209,6 +223,10 @@ let private readCollapsedRepos () : Set<RepoId> =
             |> Set.ofSeq
         | _ -> Set.empty)
 
+/// Serializes every write to the machine-level `config.json`. All global-config writers
+/// (collapsedRepos, canvas state, lastViewedHashes, worktreeRoots) funnel through
+/// `updateConfigAtPath`, so this lock makes the server the single serialized writer and stops
+/// concurrent read-modify-write cycles from clobbering each other's keys.
 let private globalConfigLock = obj ()
 
 let private tryParseJsonObject (text: string) : System.Text.Json.Nodes.JsonObject option =
@@ -261,6 +279,89 @@ let private writeCollapsedRepos (repos: RepoId list) =
     let repoArray =
         System.Text.Json.Nodes.JsonArray(repos |> List.map (fun (RepoId s) -> System.Text.Json.Nodes.JsonValue.Create(s) :> System.Text.Json.Nodes.JsonNode) |> List.toArray)
     updateGlobalConfig "collapsed repos" [ "collapsedRepos", repoArray :> System.Text.Json.Nodes.JsonNode ]
+
+/// Reads the machine-level set of watched worktree roots (`worktreeRoots` in `config.json`),
+/// distinguishing a MISSING key (`None`) from a present-but-empty list (`Some []`). The startup
+/// resolver depends on that distinction: an explicit `worktreeRoots:[]` means the user curated
+/// every root away, so it must NOT be treated like a fresh install and repopulated from CLI args
+/// or a stale orphan `roots.json`. A malformed (non-array) value is reported as `None` — absent —
+/// matching the original lenient behavior. `internal` so the resolver (`Program.fs`) shares it.
+let internal tryReadWorktreeRootsConfig () : string list option =
+    withConfigDocument None (fun root ->
+        match root.TryGetProperty("worktreeRoots") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some(el.GetString())
+                else None)
+            |> List.ofSeq
+            |> Some
+        | _ -> None)
+
+/// Flattens `tryReadWorktreeRootsConfig` to a plain list (missing key -> `[]`) for callers that
+/// don't need the missing-vs-empty distinction: the `getRoots` endpoint and the add/remove
+/// read-modify-write. `internal` so the startup resolver and the endpoint can share the reader.
+let internal readWorktreeRootsConfig () : string list =
+    tryReadWorktreeRootsConfig () |> Option.defaultValue []
+
+/// Persists the watched worktree roots through the locked, atomic single-writer path
+/// (`updateConfigAtPath`), leaving every other global-config key untouched. Returns the write
+/// outcome so the `addRoot`/`removeRoot` endpoints can surface a persistence failure to the CLI
+/// instead of reporting a false success. `internal` so the startup resolver can also write
+/// through this one helper.
+let internal writeWorktreeRoots (roots: string list) : Result<unit, string> =
+    let rootArray =
+        System.Text.Json.Nodes.JsonArray(
+            roots
+            |> List.map (fun r -> System.Text.Json.Nodes.JsonValue.Create(r) :> System.Text.Json.Nodes.JsonNode)
+            |> List.toArray)
+    updateConfigAtPath (globalConfigPath ()) [ "worktreeRoots", rootArray :> System.Text.Json.Nodes.JsonNode ]
+
+/// Canonical comparison form for a worktree root: absolute path with trailing separators
+/// trimmed. Total (never throws) so it is safe to fold over already-stored roots — a malformed
+/// stored entry falls back to its raw value rather than aborting the whole add/remove.
+let private canonicalRoot (path: string) =
+    try Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+    with _ -> path
+
+/// Normalizes a caller-supplied root path (absolute, trailing separators trimmed), surfacing a
+/// readable error for blank or malformed input so the CLI can report it.
+let private tryNormalizeRoot (path: string) : Result<string, string> =
+    if String.IsNullOrWhiteSpace path then Error "Path is empty."
+    else
+        try Ok(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+        with ex -> Error $"Invalid path '{path}': {ex.Message}"
+
+/// Adds a worktree root to the global config (restart-to-apply). Normalizes and verifies the
+/// path is an existing directory, then read-modify-writes the roots list via the locked
+/// single-writer helpers, surfacing a persistence failure rather than a false success. Adding an
+/// already-watched path is a no-op success. add/remove are driven by the (serialized)
+/// `tm add`/`tm remove` CLI, so the read-then-write is not contended in practice; the write
+/// itself is serialized by `globalConfigLock`.
+let internal addRootToConfig (path: string) : Result<unit, string> =
+    tryNormalizeRoot path
+    |> Result.bind (fun normalized ->
+        if not (Directory.Exists normalized) then
+            Error $"Path does not exist or is not a directory: {normalized}"
+        else
+            let existing = readWorktreeRootsConfig ()
+            if existing |> List.exists (fun r -> pathEquals (canonicalRoot r) normalized) then
+                Ok()
+            else
+                writeWorktreeRoots (existing @ [ normalized ]))
+
+/// Removes a worktree root from the global config (restart-to-apply). Does not require the path
+/// to still exist on disk (a deleted root is removable); reports an error when the path is not
+/// currently watched, and surfaces a persistence failure instead of a false success.
+let internal removeRootFromConfig (path: string) : Result<unit, string> =
+    tryNormalizeRoot path
+    |> Result.bind (fun normalized ->
+        let existing = readWorktreeRootsConfig ()
+        let remaining = existing |> List.filter (fun r -> not (pathEquals (canonicalRoot r) normalized))
+        if List.length remaining = List.length existing then
+            Error $"Not a watched root: {normalized}"
+        else
+            writeWorktreeRoots remaining)
 
 let private readCanvasPaneOpen () : bool =
     withConfigDocument false (fun root ->
@@ -759,4 +860,11 @@ let worktreeApi
                   archiveCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
-          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths } }
+          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
+          // Roots are managed restart-to-apply: persist to global config only (no scheduler
+          // message, no live-roots read). getWorktrees/createWorktree/path-validation keep using
+          // the `rootPaths` captured at startup above — correct, since roots only change across
+          // (re)starts (the treemon.ps1 add/remove shims trigger the restart).
+          addRoot = fun path -> async { return addRootToConfig path }
+          removeRoot = fun path -> async { return removeRootFromConfig path }
+          getRoots = fun () -> async { return readWorktreeRootsConfig () } }

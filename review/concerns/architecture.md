@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [gemini-3-pro-preview, gpt-5.3-codex, claude-opus-4.6]
+models: [gemini-3-pro-preview, gpt-5.3-codex, inherit]
 priority: standard
 ---
 # Architecture Reviewer

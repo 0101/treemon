@@ -83,3 +83,52 @@ type FormatPrTests() =
     member _.``HasPr draft and conflicts shows both flags``() =
         let result = formatPr (makePrInfo 3 "Draft conflict" true false true)
         Assert.That(result, Is.EqualTo("PR #3 [draft, conflicts]: Draft conflict"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FoldRootResultsTests() =
+
+    // Stub root op: fails for any path in failOn, succeeds otherwise. Lets us exercise the
+    // tri-state exit code (0 = all ok, 1 = all failed, 2 = partial) without a live server.
+    let stubOp (failOn: Set<string>) (path: string) : Async<Result<unit, string>> =
+        async { return (if failOn.Contains path then Error $"bad path: {path}" else Ok()) }
+
+    [<Test>]
+    member _.``all paths succeed returns 0``() =
+        let result = foldRootResults "Added" (stubOp Set.empty) [| "a"; "b"; "c" |]
+        Assert.That(result, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``single path success returns 0``() =
+        let result = foldRootResults "Added" (stubOp Set.empty) [| "a" |]
+        Assert.That(result, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``all paths fail returns 1``() =
+        let result = foldRootResults "Added" (stubOp (Set.ofList [ "a"; "b" ])) [| "a"; "b" |]
+        Assert.That(result, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``single path failure returns 1``() =
+        let result = foldRootResults "Removed" (stubOp (Set.ofList [ "a" ])) [| "a" |]
+        Assert.That(result, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``partial success (valid then invalid) returns 2``() =
+        // The exact regression: a [valid; invalid] batch persists the valid root but
+        // must still signal "something changed" (2) so treemon.ps1 restarts to apply it.
+        let result = foldRootResults "Added" (stubOp (Set.ofList [ "invalid" ])) [| "valid"; "invalid" |]
+        Assert.That(result, Is.EqualTo(2))
+
+    [<Test>]
+    member _.``partial success (invalid then valid) returns 2``() =
+        // Order independence: failure first must not mask the later success.
+        let result = foldRootResults "Added" (stubOp (Set.ofList [ "invalid" ])) [| "invalid"; "valid" |]
+        Assert.That(result, Is.EqualTo(2))
+
+    [<Test>]
+    member _.``empty batch returns 0``() =
+        // Degenerate (CLI arity is OneOrMore, so unreachable in practice): no failures → 0.
+        let result = foldRootResults "Added" (stubOp Set.empty) [||]
+        Assert.That(result, Is.EqualTo(0))
