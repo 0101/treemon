@@ -38,6 +38,7 @@ its own worktree. This file is the entry point; detailed designs live in their o
 | 3 | **Canvas roadmap items** — follow-on canvas-pane enhancements | `docs/spec/future/canvas-roadmap.md` | Idea |
 | 4 | **Process: guard against spec drift** — a lightweight check (or review rule) that flags `Key Files` references to moved/renamed modules so docs can't silently rot after refactors | — | Idea |
 | 5 | **Survey other large modules** — apply the same view/state/update extraction lens to the next-largest files (server-side `RefreshScheduler.fs`, `WorktreeApi.fs`, etc.) if they mix concerns | — | Idea (needs investigation) |
+| 6 | **Remoting CSRF / Origin hardening** — pipeline-level Origin/Referer (and optional custom-header) check so a cross-origin browser page can't drive the unauthenticated loopback Fable.Remoting API (covers the dangerous pre-existing process-launching endpoints, not just watched-roots) | `docs/spec/future/remoting-csrf-hardening.md` | Idea (from focused-review) |
 
 > Add new candidates here as they surface (often from focused-review findings). Keep the list
 > honest: remove ones that turn out not to be worth it, and record why in the relevant spec.
