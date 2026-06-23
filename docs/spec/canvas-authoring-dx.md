@@ -70,23 +70,24 @@ A tiny script injected **alongside `bridgeScript` (AgentDoc only)** exposes
 
 An injected handler (**AgentDoc only**, alongside the bridge) installs `window.onerror` and an
 `unhandledrejection` listener that forward doc-side JS errors to the parent as a
-`{ action: 'canvas-doc-error', doc, message, source, line, col }` message — where `doc` is the
-emitting doc's filename, embedded as a constant when the per-doc overlay is served. The pane surfaces
+`{ action: 'canvas-doc-error', wt, doc, message, source, line, col }` message — where `doc` is the
+emitting doc's filename (embedded as a constant when the per-doc overlay is served) and `wt` is the
+emitting worktree (read in-iframe from `location.pathname`, mirroring the bridge heartbeat). The pane surfaces
 them as a **non-blocking, dismissible banner**, reusing the existing `canvas-error-banner` visual
 pattern (`src/Client/CanvasPane.fs`) but driven by a **distinct source** — doc JS errors, separate
 from the message-delivery failures already shown via `CanvasSendState.Failed`.
 
 - The banner must never cover doc content and must be dismissible.
 - The banner is **doc-scoped**: the stored error is stamped with the doc that **emitted** it — its
-  filename rides along in the message `doc` field and is validated against the focused worktree's
-  docs (like `isKnownCanvasDoc`) before being stored — and the pane shows the banner **only while
-  that same doc is focused**, so navigating away — by tab (`SelectDoc`), card, or keyboard focus —
-  never shows a stale error over a different doc (nor over the overview). Stamping with the emitter
-  (not the doc visible when the message is *processed*) is what keeps an async error from a
+  worktree and filename ride along in the message `wt`/`doc` fields and are validated against that
+  **emitting worktree's** docs (`isKnownCanvasDoc`) before being stored — and the pane shows the banner
+  **only while that same doc is focused**, so navigating away — by tab (`SelectDoc`), card, or keyboard
+  focus — never shows a stale error over a different doc (nor over the overview). Stamping with the
+  emitter (not the doc visible when the message is *processed*) is what keeps an async error from a
   hidden/background iframe — visited docs stay mounted and keep running JS — attributed to the doc
-  that actually threw, and immune to a tab switch racing the Elmish message. An error whose `doc` is
-  not a known doc of the focused worktree is dropped. `SelectDoc` additionally clears it so a tab
-  switch (and switching back) never re-shows it. It reappears only if a doc throws again.
+  that actually threw, and immune to a tab **or worktree** switch racing the Elmish message. An error
+  whose `wt`/`doc` is not a known doc of that worktree is dropped. `SelectDoc` additionally clears it so
+  a tab switch (and switching back) never re-shows it. It reappears only if a doc throws again.
 - **Acceptance:** a doc that throws on load shows the error text in a banner, and the pane (tabs,
   position controls, other docs) keeps working.
 
@@ -115,36 +116,39 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
 ### Server injection — `src/Server/CanvasDocServer.fs`
 - **Base CSS reset:** extend the `baseStyle` string literal. Wrap every reset selector in
   `:where(...)` (zero specificity), no `!important`, so doc rules and the `SystemView` template's
-  own element rules always win the cascade despite the reset being injected after them at
-  `</head>`. Still injected for both kinds via `buildInjection`.
+  own `body`-selector rules win the cascade despite the reset being injected after them at `</head>`.
+  This per-property override holds only for rules on the element selector itself (e.g. `body{…}`,
+  specificity 0,0,1) — a box property the `SystemView` template zeroes through a *universal*
+  `*{margin:0;padding:0}` reset (also 0,0,0) would lose the source-order tiebreak to the later
+  `:where(body){padding:1rem}`, so `BeadspaceTemplate.html` resets margin/padding on its `body`
+  selector directly. Still injected for both kinds via `buildInjection`.
 - **`canvasSend`:** add a new injected script constant (mirroring `bridgeScript`'s IIFE style) and
   append it in the `AgentDoc` arm of `buildInjection` only. Implement the size check with the same
   metric the client uses — `JSON.stringify({ action, ...payload }).length` compared against
   `64_000` — so the helper never blocks a payload the client would accept nor passes one it would
   drop.
 - **Error overlay:** add a new injected script *function* (AgentDoc arm) installing `window.onerror`
-  + `unhandledrejection` → `postMessage({ action: 'canvas-doc-error', doc, ... }, '*')`. The overlay
+  + `unhandledrejection` → `postMessage({ action: 'canvas-doc-error', wt, doc, ... }, '*')`. The overlay
   is served per-doc, so `buildInjection (kind) (filename)` threads the served filename in and the
-  overlay embeds it (JSON-serialized to a safe, HTML-escaped JS string) as the `doc` field, giving
-  the error its emitter identity.
+  overlay embeds it (JSON-serialized to a safe, HTML-escaped JS string) as the `doc` field; `wt` is
+  read in-iframe from `location.pathname` (mirroring the bridge heartbeat). Together they give the
+  error its full emitter identity (worktree + filename).
 - Keep `MaxPayloadBytes` as the single source of truth for the cap; reference its value in the
   injected helper (literal kept in sync with `CanvasPane.fs`).
 
 ### Client — `src/Client/CanvasPane.fs` + `src/Client/Components.fs`
 - **Doc-error banner:** add model state for the latest doc error — a record **stamped with the doc
   that emitted it** (`DocJsError { ScopedKey; Filename; Message }`, not a bare `Some message`). The
-  `canvas-doc-error` handler reads the `doc` filename from the message and dispatches
-  `CanvasDocError (filename, message)`; the reducer stamps it with the **focused worktree's**
-  scopedKey only after validating that filename names a real doc of it (`isKnownCanvasDoc`),
-  otherwise drops it. This attributes a hidden/background iframe's async error to the doc that threw
-  (not the active tab) and is immune to a tab switch racing the queued message — the filename is
-  captured at receipt, not re-derived at process time. (Only the *filename* dimension is carried in
-  the message; the worktree dimension is still focus-derived. The lone residual misattribution — a
-  background doc of worktree A throwing, the user switching to worktree B before the queued message
-  is processed, and B happening to own a same-named doc — is accepted: it is astronomically narrow,
-  self-heals (auto-hide on navigation, newest-error-wins), and is strictly better than the prior
-  unconditional stamp-on-active-tab. Threading the emitter's worktree too would close it but is out
-  of scope and risks path-normalization false-drops.) Add a dismiss action and a
+  `canvas-doc-error` handler reads **both** the emitting worktree (`wt`) and doc filename (`doc`) from
+  the message and dispatches the 3-tuple `CanvasDocError (scopedKey, filename, message)`; the reducer
+  stamps it with the **emitter's** scopedKey only after validating that filename names a real doc of
+  *that* worktree (`isKnownCanvasDoc model scopedKey filename`), otherwise drops it. This attributes a
+  hidden/background iframe's async error to the doc that threw (not the active tab) and is immune to a
+  tab **or worktree** switch racing the queued message — both dimensions are captured at receipt, not
+  re-derived at process time. Carrying the emitter's worktree (not just the filename) **closes** the
+  cross-worktree misattribution outright: a background doc of worktree A throwing while the user
+  switches to worktree B that owns a same-named doc still stamps A's scopedKey, so the banner surfaces
+  only when A's doc is re-focused, never over B. Add a dismiss action and a
   `canvas-doc-error-banner` element next to the existing `errorBanner`, reusing the banner/dismiss CSS
   classes (add a doc-error class if a distinct accent is wanted). Wire the dismiss callback through
   `CanvasPaneCallbacks`; the listener's own callbacks (`Dispatch`/`SelectDoc`/`OnMorphComplete`/
