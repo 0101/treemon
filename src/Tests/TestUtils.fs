@@ -124,9 +124,30 @@ let withTempCwd (action: unit -> unit) =
         Environment.CurrentDirectory <- original
         try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
+/// Run `action` with the machine-level Treemon config dir redirected to a throwaway temp dir via
+/// the TREEMON_CONFIG_DIR override, then restore the previous value and delete the dir. Required,
+/// not merely convenient: on Windows Environment.GetFolderPath(UserProfile) ignores USERPROFILE/HOME,
+/// so the override is the only way to keep in-process config tests (the global read/write helpers and
+/// the orphan roots.json lookup) off the real ~/.treemon. `prefix` names the temp dir for debugging,
+/// mirroring withTempFile. TREEMON_CONFIG_DIR is process-global, so callers must stay non-parallel.
+let withTempConfigDir (prefix: string) (action: string -> unit) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    let original = Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR")
+    Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", tempDir)
+
+    try
+        action tempDir
+    finally
+        Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", original)
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
+
 let runAsync (a: Async<'T>) =
     Async.RunSynchronously(a, timeout = 30_000)
 
+/// Asserts a `Result<unit, string>` is `Ok`, prefixing `message` to the surfaced error on failure.
+/// Prefer this over `Is.EqualTo(Ok())`: the literal's error type infers as `obj`, so NUnit's
+/// structural compare never matches the actual `Result<unit, string>` even when both are `Ok ()`.
 let assertOk (result: Result<unit, string>) (message: string) =
     match result with
     | Ok() -> ()
