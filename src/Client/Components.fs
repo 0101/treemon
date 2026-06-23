@@ -27,6 +27,33 @@ let cardTitle (wt: WorktreeStatus) =
     if wt.Branch = WorktreeStatus.DetachedBranchName then WorktreePath.displayName wt.Path
     else wt.Branch
 
+let stepStatusClassName (status: StepStatus option) =
+    match status with
+    | Some StepStatus.Running -> "event-status running"
+    | Some StepStatus.Succeeded -> "event-status success"
+    | Some (StepStatus.Failed _) -> "event-status failed"
+    | Some StepStatus.Cancelled -> "event-status cancelled"
+    | Some StepStatus.NotConfigured -> "event-status not-configured"
+    | Some StepStatus.Pending -> "event-status"
+    | None -> "event-status"
+
+let stepStatusText (status: StepStatus option) =
+    match status with
+    | Some StepStatus.Running -> "running"
+    | Some StepStatus.Succeeded -> "success"
+    | Some (StepStatus.Failed msg) -> match msg with "" -> "failed" | _ -> $"failed: {msg}"
+    | Some StepStatus.Cancelled -> "cancelled"
+    | Some StepStatus.NotConfigured -> "not configured"
+    | _ -> ""
+
+let relativeEventTime (dt: System.DateTimeOffset) =
+    let diff = System.DateTimeOffset.Now - dt
+    match diff with
+    | d when d.TotalSeconds < 60.0 -> $"{int d.TotalSeconds |> max 0}s ago"
+    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
+    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
+    | d -> $"{int d.TotalDays}d ago"
+
 // ResizeObserver interop
 [<Emit("new ResizeObserver($0)")>]
 let private createResizeObserver (callback: obj -> unit) : obj = jsNative

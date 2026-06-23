@@ -47,11 +47,11 @@ When transitioning from Idle/DeepIdle → Active, the client immediately dispatc
 
 New `ActivityLevel` DU: `Active | Idle | DeepIdle`. New `reportActivity: ActivityLevel -> Async<unit>` method on `IWorktreeApi`.
 
-### Client-Side (`src/Client/App.fs`)
+### Client-Side (`src/Client/ActivityState.fs` + `ActivityUpdate.fs`)
 
-Elmish subscription registers DOM event listeners (mousemove, keydown, click, scroll). Throttled to dispatch `UserActivity` at most once per 5s — the throttle uses a mutable timestamp inside the subscription closure (Elmish's designated impure boundary, same pattern as `setInterval`). The Model stays fully immutable with `LastActivityTime: float` and `ActivityLevel: ActivityLevel`.
+The `activityDetection` Elmish subscription registers DOM event listeners (mousemove, keydown, click, scroll). Throttled to dispatch `UserActivity` at most once per 5s — the throttle uses a mutable timestamp inside the subscription closure (Elmish's designated impure boundary, same pattern as `setInterval`). The state is the immutable `ActivityState` slice (`ActivityState.fs`) — `LastActivityTime: float` and `ActivityLevel: ActivityLevel` — nested on the Model as `Model.Activity`; the subscription and the `Tick`/`UserActivity` arm bodies live in `ActivityUpdate.fs` (both extracted from `App.fs`).
 
-`computeActivityLevel` is a pure function: compares `Date.now() - lastActivity` against 3min/15min thresholds.
+`ActivityState.computeActivityLevel` is a pure function: compares `Date.now() - lastActivity` against 3min/15min thresholds.
 
 `pollingSubscription` includes activity level in its key so Elmish tears down and recreates the interval on transitions. Active/Idle = 1s, DeepIdle = 15s.
 

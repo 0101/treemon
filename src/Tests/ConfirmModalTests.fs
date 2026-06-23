@@ -53,15 +53,14 @@ let private defaultModel : Model =
       AppVersion = Some "1.0"
       DeployBranch = None
       SystemMetrics = None
-      EyeDirection = (0.0, 0.0)
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
       ActionCooldowns = Set.empty
-      LastActivityTime = 0.0
-      ActivityLevel = ActivityLevel.Active
+      Activity = ActivityState.empty
+      Mascot = MascotState.empty
       Canvas = CanvasState.empty }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
