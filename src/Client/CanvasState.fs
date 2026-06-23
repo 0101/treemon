@@ -2,6 +2,7 @@ module CanvasState
 
 open Shared
 open Navigation
+open CanvasTypes
 open CanvasAwareness
 open Elmish
 
@@ -17,6 +18,14 @@ type CanvasState =
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasSendState: CanvasSendState
+      // Latest doc-side JS error from a focused AgentDoc's iframe, stamped with the doc that EMITTED
+      // it — its filename is carried in the postMessage and validated against the focused worktree's
+      // docs (DocJsError). The banner is shown only while that same doc is focused (CanvasPane gates
+      // on it), so navigating to another doc/card auto-hides a stale error — doc-scoped without a
+      // clear in every focus reducer. SelectCanvasDoc additionally clears it so a tab switch (and
+      // switch back) never re-shows it. Distinct from CanvasSendState.Failed, which models
+      // pane→session message-delivery failures.
+      DocError: DocJsError option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// Initial canvas state: pane closed on the right, all maps empty, send state idle.
@@ -30,6 +39,7 @@ let empty : CanvasState =
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
       CanvasSendState = CanvasSendState.Idle
+      DocError = None
       BridgeLiveness = Map.empty }
 
 let [<Literal>] private MaxLiveIframes = 3

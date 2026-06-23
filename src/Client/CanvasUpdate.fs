@@ -9,6 +9,7 @@ module CanvasUpdate
 
 open Shared
 open Navigation
+open CanvasTypes
 open Elmish
 open Browser
 open AppTypes
@@ -63,6 +64,10 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     { model with
         Canvas =
             { model.Canvas with
+                // Doc-scoped error: a tab switch must never carry a stale error from the doc we're
+                // leaving into the one we're showing, so clear it here (it reappears only if the new
+                // doc throws again).
+                DocError = None
                 ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
                 VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
     Cmd.batch [
@@ -180,6 +185,28 @@ let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (model: M
 let dismissCanvasMessageError (model: Model) =
     { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
 
+/// Record a doc-side JS error (window.onerror / unhandledrejection) forwarded from an AgentDoc
+/// iframe. `scopedKey` and `filename` are the EMITTING worktree + doc, carried in the postMessage
+/// `wt`/`doc` fields and threaded through the listener, so the error is stamped with the doc that
+/// actually threw — independent of the active tab. This matters because visited docs stay mounted as
+/// hidden iframes and keep running JS, so an async error from a hidden doc (even in a non-focused
+/// worktree) must not be attributed to the focused tab (focused-review A-02, C-06). The emitter is
+/// validated against that worktree's docs (isKnownCanvasDoc) before being stored, so a stale/forged
+/// identity — e.g. from an archived doc — can never raise a banner. The stamp drives doc-scoped
+/// display: the banner shows only while that doc stays focused; navigating to another doc/card hides
+/// it (the view gates on the stamp). Kept separate from CanvasSendState so the doc-error and
+/// message-delivery banners never overwrite each other; the newest error wins. If the emitter is not
+/// a known doc of a known worktree, the error is dropped. (Arrival is already logged in
+/// CanvasPane.messageListener.)
+let canvasDocError (scopedKey: string) (filename: string) (message: string) (model: Model) =
+    if isKnownCanvasDoc model scopedKey filename then
+        { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
+    else
+        model, Cmd.none
+
+let dismissCanvasDocError (model: Model) =
+    { model with Canvas = { model.Canvas with DocError = None } }, Cmd.none
+
 let morphActiveDoc (model: Model) =
     model,
     Cmd.ofEffect (fun _ ->
@@ -192,4 +219,8 @@ let morphComplete (model: Model) =
     model, markVisibleDocCmd model
 
 let messageListener (dispatch: Dispatch<Msg>) =
-    CanvasPane.messageListener (CanvasMessageReceived >> dispatch) (NavigateCanvasDoc >> dispatch) (fun () -> dispatch MorphComplete)
+    CanvasPane.messageListener
+        { Dispatch = CanvasMessageReceived >> dispatch
+          SelectDoc = NavigateCanvasDoc >> dispatch
+          OnMorphComplete = fun () -> dispatch MorphComplete
+          OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message)) }

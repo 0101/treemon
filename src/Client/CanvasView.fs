@@ -71,6 +71,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveCanvasDoc
           DismissError = (fun () -> dispatch DismissCanvasMessageError)
+          DismissDocError = (fun () -> dispatch DismissCanvasDocError)
           LaunchSession = launchCanvasSession }
 
-    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks

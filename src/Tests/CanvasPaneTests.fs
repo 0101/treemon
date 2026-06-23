@@ -405,13 +405,14 @@ type CanvasPaneTests() =
             let! tabCount = tabs.CountAsync()
             Assert.That(tabCount, Is.EqualTo(3), "Tab bar should have one button per canvas doc (3 docs in fixture)")
 
-            // Verify tab labels match filenames (without .html extension)
+            // Verify tab labels match filenames (without .html extension). Each AgentDoc tab also
+            // appends a compact last-modified age, so the label is a prefix of the tab's text.
             let! tab0Text = tabs.Nth(0).TextContentAsync()
             let! tab1Text = tabs.Nth(1).TextContentAsync()
             let! tab2Text = tabs.Nth(2).TextContentAsync()
-            Assert.That(tab0Text, Is.EqualTo("overview"), "First tab should be 'overview'")
-            Assert.That(tab1Text, Is.EqualTo("details"), "Second tab should be 'details'")
-            Assert.That(tab2Text, Is.EqualTo("metrics"), "Third tab should be 'metrics'")
+            Assert.That(tab0Text, Does.StartWith("overview"), "First tab should be 'overview'")
+            Assert.That(tab1Text, Does.StartWith("details"), "Second tab should be 'details'")
+            Assert.That(tab2Text, Does.StartWith("metrics"), "Third tab should be 'metrics'")
         }
 
     [<Test>]
@@ -450,7 +451,7 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Single-doc worktree shows header bar but no tabs``() =
+    member this.``Single-doc worktree shows a labeled tab with a compact age``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! ensureCanvasPaneOpen this.Page
@@ -464,10 +465,20 @@ type CanvasPaneTests() =
             let! tabBarCount = tabBarEl.CountAsync()
             Assert.That(tabBarCount, Is.EqualTo(1), "Header bar should always render")
 
-            // But no tab buttons for single-doc worktree
+            // The lone AgentDoc now gets its own labeled tab button (no more bare-iframe suppression).
             let tabs = canvasTabs this.Page
             let! tabCount = tabs.CountAsync()
-            Assert.That(tabCount, Is.EqualTo(0), "Single-doc worktree should not show doc tabs")
+            Assert.That(tabCount, Is.EqualTo(1), "Single-doc worktree should show a tab button for its one doc")
+
+            let! tabText = tabs.First.TextContentAsync()
+            Assert.That(tabText, Does.Contain("e2e-test"), "The single tab should be labeled with the doc filename (without .html)")
+
+            // And it shows the file's compact last-modified age (now / Nm / Nh / Nd).
+            let age = this.Page.Locator(".canvas-pane .canvas-tab .canvas-tab-age")
+            let! ageCount = age.CountAsync()
+            Assert.That(ageCount, Is.EqualTo(1), "The AgentDoc tab should render a compact age element")
+            let! ageText = age.First.TextContentAsync()
+            Assert.That(ageText, Does.Match("^(now|\\d+[mhd])$"), $"Age '{ageText}' should be a compact relative time (now/Nm/Nh/Nd)")
         }
 
     // ── Empty Canvas Overview ───────────────────────────────────────────
