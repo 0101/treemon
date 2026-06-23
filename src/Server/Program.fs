@@ -172,18 +172,27 @@ let private deleteOrphanRoots () =
         with ex ->
             Log.log "Startup" $"Failed to delete orphan roots.json: {ex.Message}"
 
+/// Outcome of resolving the effective worktree roots at startup: the resolved set plus whether the
+/// boundary should persist it (first-time migration into the global config) and consume the orphan
+/// `roots.json`. A pure decision — the caller (`persistResolvedRoots`) performs the write/delete.
+type internal RootsResolution =
+    { Roots: string list
+      /// First-time persist: the `worktreeRoots` key is absent and the resolved set is non-empty.
+      PersistRoots: bool
+      /// Resolved set came from the orphan `roots.json` — delete it after a successful persist.
+      ConsumeOrphan: bool }
+
 /// Resolves the effective worktree roots at startup by priority:
 ///   1. roots passed as CLI args (used by `dev`/tests; preserves current arg behavior),
 ///   2. else `worktreeRoots` from the global `config.json` (a PRESENT key, even an explicit empty
 ///      list, wins here — the user may have curated every root away),
 ///   3. else (the key is ABSENT) a one-time import of the orphan `roots.json`.
-/// When `config.json` has no `worktreeRoots` KEY yet, the resolved set is persisted so an
-/// arg-provided or migrated set becomes the durable source of truth. A present key (even
-/// `worktreeRoots:[]`) is left untouched, so CLI args act as an ephemeral override and an explicit
-/// empty is never repopulated on restart. An orphan-sourced set is deleted only after that persist
-/// succeeds — never before — so a failed write can't drop the migration. Demo/fixture modes never
-/// call this; their roots stay `[]`.
-let internal resolveWorktreeRoots (cliRoots: string list) : string list =
+/// Pure/read-only: it only reads config + orphan state and decides the resolved set, whether a
+/// first-time persist is needed, and whether the orphan should be consumed — it performs no writes
+/// or deletes, so the resolution decision is unit-testable without mutating the filesystem.
+/// `persistResolvedRoots` applies those effects at the boundary. Demo/fixture modes never call this;
+/// their roots stay `[]`.
+let internal resolveWorktreeRoots (cliRoots: string list) : RootsResolution =
     // `None` = the `worktreeRoots` key is absent (fresh install / pre-migration); `Some roots` =
     // the key is present (possibly an explicit empty list). Gating migration on KEY ABSENCE — not
     // `List.isEmpty` — is what stops an explicit `worktreeRoots:[]` from being resurrected by a
@@ -200,15 +209,21 @@ let internal resolveWorktreeRoots (cliRoots: string list) : string list =
                 let orphanRoots = readOrphanRoots ()
                 orphanRoots, not (List.isEmpty orphanRoots)
 
-    if not configHasKey && not (List.isEmpty resolved) then
-        match WorktreeApi.writeWorktreeRoots resolved with
+    { Roots = resolved
+      PersistRoots = not configHasKey && not (List.isEmpty resolved)
+      ConsumeOrphan = cameFromOrphan }
+
+/// Boundary effect for `resolveWorktreeRoots`: persists a first-time-resolved root set into the
+/// global config and deletes the migrated orphan `roots.json` only after that write succeeds (so a
+/// failed write can never drop the migration). A no-op when the resolution needs no persistence.
+let internal persistResolvedRoots (resolution: RootsResolution) =
+    if resolution.PersistRoots then
+        match WorktreeApi.writeWorktreeRoots resolution.Roots with
         | Ok () ->
-            Log.log "Startup" $"Persisted {List.length resolved} worktree root(s) to global config"
-            if cameFromOrphan then deleteOrphanRoots ()
+            Log.log "Startup" $"Persisted {List.length resolution.Roots} worktree root(s) to global config"
+            if resolution.ConsumeOrphan then deleteOrphanRoots ()
         | Error msg ->
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
-
-    resolved
 
 [<EntryPoint>]
 let main args =
@@ -218,11 +233,17 @@ let main args =
 
     Log.init ()
 
-    // Effective roots: CLI args > global config > orphan import (persisted first-time). Demo and
-    // fixture modes bypass resolution entirely — they serve synthetic data, so roots stay [].
+    // Effective roots: CLI args > global config > orphan import (persisted first-time). Resolution
+    // is a pure decision; `persistResolvedRoots` applies the first-time persist + orphan cleanup at
+    // this startup boundary. Demo and fixture modes bypass resolution entirely — they serve
+    // synthetic data, so roots stay [].
     let worktreeRoots =
-        if config.Demo || config.TestFixtures.IsSome then []
-        else resolveWorktreeRoots config.WorktreeRoots
+        if config.Demo || config.TestFixtures.IsSome then
+            []
+        else
+            let resolution = resolveWorktreeRoots config.WorktreeRoots
+            persistResolvedRoots resolution
+            resolution.Roots
 
     worktreeRoots |> List.iter (fun root -> Log.log "Startup" $"Worktree root: {root}")
     Log.log "Startup" $"Server URL: {serverUrl}"

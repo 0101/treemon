@@ -61,9 +61,13 @@ type ServerStartupResolutionTests() =
     member _.``resolveWorktreeRoots persists CLI args when config has no roots``() =
         withTempConfigDir "treemon-startup-test" (fun _ ->
             let cliRoots = [ @"C:\code\one"; @"C:\code\two" ]
-            let resolved = resolveWorktreeRoots cliRoots
-            Assert.That(resolved, Is.EqualTo(cliRoots))
-            // First-time persistence: the arg-provided set becomes the durable source of truth.
+            let resolution = resolveWorktreeRoots cliRoots
+            Assert.That(resolution.Roots, Is.EqualTo(cliRoots))
+            // First-time persist decision: the arg-provided set should become the durable source.
+            Assert.That(resolution.PersistRoots, Is.True)
+            Assert.That(resolution.ConsumeOrphan, Is.False)
+            // Applying the resolution at the boundary writes it to the global config.
+            persistResolvedRoots resolution
             Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.EqualTo(cliRoots)))
 
     [<Test>]
@@ -74,10 +78,13 @@ type ServerStartupResolutionTests() =
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
 
-            let resolved = resolveWorktreeRoots [ @"C:\code\arg" ]
+            let resolution = resolveWorktreeRoots [ @"C:\code\arg" ]
             // CLI args win for this run...
-            Assert.That(resolved, Is.EqualTo([ @"C:\code\arg" ]))
-            // ...but a populated config is an ephemeral override, not clobbered.
+            Assert.That(resolution.Roots, Is.EqualTo([ @"C:\code\arg" ]))
+            // ...and because the config key is present, this is not a first-time persist.
+            Assert.That(resolution.PersistRoots, Is.False)
+            persistResolvedRoots resolution
+            // ...so a populated config is an ephemeral override, not clobbered.
             Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.EqualTo(configured)))
 
     [<Test>]
@@ -88,8 +95,9 @@ type ServerStartupResolutionTests() =
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
 
-            let resolved = resolveWorktreeRoots []
-            Assert.That(resolved, Is.EqualTo(configured)))
+            let resolution = resolveWorktreeRoots []
+            Assert.That(resolution.Roots, Is.EqualTo(configured))
+            Assert.That(resolution.PersistRoots, Is.False))
 
     [<Test>]
     member _.``resolveWorktreeRoots imports orphan roots.json then persists and deletes it``() =
@@ -97,19 +105,28 @@ type ServerStartupResolutionTests() =
             let orphanRoots = [ @"C:\code\orphan-a"; @"C:\code\orphan-b" ]
             writeOrphan tempDir orphanRoots
 
-            let resolved = resolveWorktreeRoots []
+            let resolution = resolveWorktreeRoots []
 
-            Assert.That(resolved, Is.EqualTo(orphanRoots))
+            Assert.That(resolution.Roots, Is.EqualTo(orphanRoots))
+            Assert.That(resolution.PersistRoots, Is.True)
+            Assert.That(resolution.ConsumeOrphan, Is.True)
+            // Resolution is pure: the orphan is still on disk until the boundary applies it.
+            Assert.That(File.Exists(Path.Combine(tempDir, "roots.json")), Is.True)
+
+            persistResolvedRoots resolution
+
             // Migrated set persisted into the global config...
             Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.EqualTo(orphanRoots))
-            // ...and the orphan file is consumed (read-then-delete).
+            // ...and the orphan file is consumed (deleted) only after a successful persist.
             Assert.That(File.Exists(Path.Combine(tempDir, "roots.json")), Is.False))
 
     [<Test>]
     member _.``resolveWorktreeRoots returns empty when no args, no config, no orphan``() =
         withTempConfigDir "treemon-startup-test" (fun _ ->
-            let resolved = resolveWorktreeRoots []
-            Assert.That(resolved, Is.Empty)
+            let resolution = resolveWorktreeRoots []
+            Assert.That(resolution.Roots, Is.Empty)
+            Assert.That(resolution.PersistRoots, Is.False)
+            persistResolvedRoots resolution
             // Nothing to persist, so the config stays absent/empty.
             Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.Empty))
 
@@ -128,10 +145,13 @@ type ServerStartupResolutionTests() =
             // A stale orphan roots.json from a legacy upgrade still lingers on disk.
             writeOrphan tempDir [ @"C:\code\removed-a"; @"C:\code\removed-b" ]
 
-            let resolved = resolveWorktreeRoots []
+            let resolution = resolveWorktreeRoots []
 
             // The orphan must NOT resurrect the removed roots for this run...
-            Assert.That(resolved, Is.Empty)
+            Assert.That(resolution.Roots, Is.Empty)
+            // ...and a present (empty) key means no first-time persist...
+            Assert.That(resolution.PersistRoots, Is.False)
+            persistResolvedRoots resolution
             // ...the explicit empty config is preserved (present key, still empty — not None, not
             // repopulated with the orphan's roots)...
             match Server.WorktreeApi.tryReadWorktreeRootsConfig () with
@@ -147,10 +167,12 @@ type ServerStartupResolutionTests() =
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
 
-            let resolved = resolveWorktreeRoots [ @"C:\code\arg" ]
+            let resolution = resolveWorktreeRoots [ @"C:\code\arg" ]
 
             // CLI args still win for THIS run (ephemeral override)...
-            Assert.That(resolved, Is.EqualTo([ @"C:\code\arg" ]))
+            Assert.That(resolution.Roots, Is.EqualTo([ @"C:\code\arg" ]))
+            Assert.That(resolution.PersistRoots, Is.False)
+            persistResolvedRoots resolution
             // ...but the explicit empty config is not clobbered, so a restart with no args stays empty.
             match Server.WorktreeApi.tryReadWorktreeRootsConfig () with
             | Some [] -> ()

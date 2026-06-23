@@ -44,28 +44,48 @@ if (-not $Command) {
     exit 0
 }
 
-function Read-LegacyRoots {
-    # One-time migration of the legacy PowerShell-managed .treemon.config.
-    # Reads its WorktreeRoots and returns them (or @()). Does NOT delete the file —
-    # Start-ProductionServer removes it only after the server has actually started
-    # (and thus persisted the roots into ~/.treemon/config.json), so a publish/start
-    # failure can't lose the roots.
-    if (-not (Test-Path $ConfigFile)) { return @() }
+function Get-LegacyConfig {
+    # Parses the legacy .treemon.config and extracts its watched roots, accepting BOTH the current
+    # plural `WorktreeRoots` array and the pre-multi-repo singular `WorktreeRoot` string (older
+    # versions wrote the singular key). Returns a result object { Parsed; Roots } so callers can tell
+    # a parse failure (Parsed=$false) apart from a successfully-parsed file that simply declares no
+    # roots (Parsed=$true, empty Roots) — a distinction PowerShell's empty-array collapse erases if
+    # you signal it through the return value. The object property keeps Roots a real array.
+    if (-not (Test-Path $ConfigFile)) {
+        return [pscustomobject]@{ Parsed = $true; Roots = @() }
+    }
 
-    $roots = @()
     try {
         $config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
-        if ($config.PSObject.Properties.Name -contains "WorktreeRoots") {
-            $roots = @($config.WorktreeRoots | Where-Object { $_ })
-        }
     } catch {
-        Write-Host "Warning: could not parse legacy .treemon.config; it will be removed after the server starts" -ForegroundColor Yellow
+        return [pscustomobject]@{ Parsed = $false; Roots = @() }
     }
 
-    if ($roots.Count -gt 0) {
+    $roots = @()
+    if ($config.PSObject.Properties.Name -contains "WorktreeRoots") {
+        $roots = @($config.WorktreeRoots | Where-Object { $_ })
+    } elseif ($config.PSObject.Properties.Name -contains "WorktreeRoot") {
+        $roots = @($config.WorktreeRoot | Where-Object { $_ })
+    }
+    return [pscustomobject]@{ Parsed = $true; Roots = @($roots) }
+}
+
+function Read-LegacyRoots {
+    # One-time migration of the legacy PowerShell-managed .treemon.config. Returns its roots (or
+    # @()). Does NOT delete the file — Start-ProductionServer removes it only after the server has
+    # started (and thus persisted the roots into ~/.treemon/config.json) AND only when every root it
+    # declared was actually migrated, so a publish/start failure or an unrecognized config can't
+    # silently lose roots.
+    $legacy = Get-LegacyConfig
+    if (-not $legacy.Parsed) {
+        Write-Host "Warning: could not parse legacy .treemon.config; leaving it in place to avoid data loss" -ForegroundColor Yellow
+        return @()
+    }
+
+    if ($legacy.Roots.Count -gt 0) {
         Write-Host "Migrating worktree roots from .treemon.config into global config" -ForegroundColor Gray
     }
-    return @($roots)
+    return @($legacy.Roots)
 }
 
 function Invoke-Tm([string[]]$TmArgs) {
@@ -201,10 +221,26 @@ function Start-ProductionServer([string[]]$Roots) {
         exit 1
     }
 
-    # Server is up — it has resolved+persisted its roots into the global config, so the
-    # legacy .treemon.config (if any) is now safe to retire. Removing it only after a
-    # confirmed start means a publish/start failure never loses the migrated roots.
-    if (Test-Path $ConfigFile) { Remove-Item $ConfigFile -ErrorAction SilentlyContinue }
+    # Server is up — it has resolved+persisted its effective roots into the global config. Retire
+    # the legacy .treemon.config only when it is SAFE: every root it declared was actually migrated
+    # (handed to the server). A file we couldn't parse, or one whose roots we didn't migrate (e.g. an
+    # explicit-path start that ignored it), is preserved with a warning so we never silently destroy
+    # unmigrated roots. Deleting only after a confirmed start also means a publish/start failure
+    # never loses the migrated roots.
+    if (Test-Path $ConfigFile) {
+        $legacy = Get-LegacyConfig
+        if (-not $legacy.Parsed) {
+            Write-Host "Warning: .treemon.config could not be parsed; leaving it in place to avoid data loss" -ForegroundColor Yellow
+        } else {
+            $migrated = @($effectiveRoots | ForEach-Object { $_.TrimEnd('\', '/').ToLowerInvariant() })
+            $unmigrated = @($legacy.Roots | Where-Object { $_.TrimEnd('\', '/').ToLowerInvariant() -notin $migrated })
+            if ($unmigrated.Count -eq 0) {
+                Remove-Item $ConfigFile -ErrorAction SilentlyContinue
+            } else {
+                Write-Host "Warning: .treemon.config has roots that were not migrated ($($unmigrated -join ', ')); leaving it in place to avoid data loss" -ForegroundColor Yellow
+            }
+        }
+    }
 
     Write-Host "Production server started (PID: $($process.Id))" -ForegroundColor Green
     if ($effectiveRoots.Count -gt 0) {
