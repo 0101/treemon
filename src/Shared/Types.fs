@@ -271,4 +271,7 @@ type IWorktreeApi =
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
       saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
       loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>>
-      getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>> }
+      getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>>
+      addRoot: string -> Async<Result<unit, string>>
+      removeRoot: string -> Async<Result<unit, string>>
+      getRoots: unit -> Async<string list> }

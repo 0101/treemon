@@ -47,6 +47,8 @@ npm install
 
 Open http://localhost:5000 — install as a PWA from the browser for a native app experience.
 
+The roots you pass to `start` are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so afterwards `start`, `restart`, and `dev` no longer need a path — omit it to use the saved roots. Manage roots live with the `tm` CLI (`tm add`, `tm remove`, `tm roots`) or the `.\treemon.ps1 add`/`remove` shims; changes apply on the next server restart.
+
 ### Managing the server
 
 ```powershell
@@ -79,6 +81,9 @@ tm launch --path C:\code\my-project --fix-tests             # fix failing tests
 tm launch --path C:\code\my-project --create-pr             # create a pull request
 tm new --repo C:\code\my-project --branch feature/foo      # create worktree
 tm worktrees                                                 # list all worktrees
+tm add C:\code\my-project                                   # watch a root (applies on next server restart)
+tm remove C:\code\my-project                                # stop watching a root
+tm roots                                                     # list watched roots
 ```
 
 All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also run `.\tm.ps1` directly from the repo root without installing.
