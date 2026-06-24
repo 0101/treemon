@@ -5,13 +5,23 @@ open Feliz
 open Fable.Core
 open Fable.Core.JsInterop
 
-let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
+/// Shared time-bucketing ladder for relativeTime / relativeTimeCompact: the same four thresholds and
+/// the same int truncation, parameterised only by the sub-minute label and the per-bucket suffix.
+let private formatTimeDelta (subMinute: string) (suffix: string) (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
     let diff = now - dt
     match diff with
-    | d when d.TotalMinutes < 1.0 -> "just now"
-    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
-    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
-    | d -> $"{int d.TotalDays}d ago"
+    | d when d.TotalMinutes < 1.0 -> subMinute
+    | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m{suffix}"
+    | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h{suffix}"
+    | d -> $"{int d.TotalDays}d{suffix}"
+
+let relativeTime (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
+    formatTimeDelta "just now" " ago" now dt
+
+/// Compact sibling of relativeTime for tight UI like the canvas tab strip: renders
+/// "now"/"3m"/"2h"/"2d" (sub-minute is "now", not "just now", and the buckets carry no " ago" suffix).
+let relativeTimeCompact (now: System.DateTimeOffset) (dt: System.DateTimeOffset) =
+    formatTimeDelta "now" "" now dt
 
 let cardTitle (wt: WorktreeStatus) =
     if wt.Branch = WorktreeStatus.DetachedBranchName then WorktreePath.displayName wt.Path

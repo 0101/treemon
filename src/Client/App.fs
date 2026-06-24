@@ -490,6 +490,10 @@ let update msg model =
 
     | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
 
+    | CanvasDocError (scopedKey, filename, message) -> CanvasUpdate.canvasDocError scopedKey filename message model
+
+    | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
+
     | MarkDocViewed (scopedKey, filename) ->
         let worktree = findWorktree scopedKey model
         let currentHash =

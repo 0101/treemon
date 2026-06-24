@@ -8,15 +8,6 @@ type FocusTarget =
     | RepoHeader of RepoId
     | Card of path: string
 
-[<RequireQualifiedAccess>]
-type CanvasSendState =
-    // scopedKey identifies the target worktree the message was queued for, so the "Waiting for
-    // session…" banner can be cleared only by *that* worktree's session activity, never by an
-    // unrelated worktree's doc change.
-    | Idle
-    | Waiting of scopedKey: string
-    | Failed of message: string
-
 type RepoModel =
     { RepoId: RepoId
       Name: string

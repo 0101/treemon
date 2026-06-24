@@ -2,6 +2,7 @@ module CanvasAwareness
 
 open Shared
 open Navigation
+open CanvasTypes
 
 type CanvasEventKind = NewDoc | UpdatedDoc
 
