@@ -124,7 +124,7 @@ let mainRef (upstreamRemote: string) (baseBranch: string) = $"{upstreamRemote}/{
 
 let fetchUpstream (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
     async {
-        let! _ = runGit repoRoot $"fetch {upstreamRemote} {baseBranch}"
+        let! _ = runGit repoRoot $"fetch {upstreamRemote} -- {baseBranch}"
         do! tryFastForwardMain repoRoot baseBranch (mainRef upstreamRemote baseBranch)
     }
 
@@ -329,7 +329,7 @@ let branchSortKey (baseBranch: string) (name: string) =
     | n when n.StartsWith("dev") -> (3, name)
     | _ -> (4, name)
 
-let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9._/-]+$")
+let private validBranchNamePattern = System.Text.RegularExpressions.Regex(@"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
 
 let validateBranchName (branchName: string) =
     if validBranchNamePattern.IsMatch(branchName) then
@@ -368,7 +368,7 @@ let resolveBaseRef (repoRoot: string) (upstreamRemote: string) (baseBranch: stri
 /// worktree creation must not depend on the network.
 let private fetchBaseBranch (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
     async {
-        let! _ = runGit repoRoot $"fetch {upstreamRemote} {baseBranch}"
+        let! _ = runGit repoRoot $"fetch {upstreamRemote} -- {baseBranch}"
         return ()
     }
 
@@ -385,13 +385,15 @@ let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: str
     let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" \"{baseRef}\""
     "git", arguments, worktreePath
 
-let private legacyForkScriptWarning (repoRoot: string) =
-    let scriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
-
-    if File.Exists(Path.Combine(repoRoot, scriptName)) then
+let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
+    if exists then
         Some $"'{scriptName}' is no longer used — Treemon now creates worktrees itself. Move any setup steps into 'post-fork.ps1'/'post-fork.sh'."
     else
         None
+
+/// Generous timeout for the post-fork setup hook — it runs `npm install` and
+/// `bd init`, which can far exceed the short default used for quick git probes.
+let private postForkTimeoutMs = 10 * 60 * 1000
 
 /// Runs an optional `post-fork` setup script inside the freshly created worktree,
 /// passing the worktree path, the source repo root, the base ref and the branch
@@ -410,12 +412,12 @@ let private runPostFork (repoRoot: string) (worktreePath: string) (baseRef: stri
                 if isWindows then "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
                 else "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
 
-            let! result = ProcessRunner.runResult "PostFork" fileName arguments (Some worktreePath)
+            let! result = ProcessRunner.runResultWithTimeout postForkTimeoutMs "PostFork" fileName arguments (Some worktreePath)
 
             return
                 match result with
                 | Ok _ -> None
-                | Error msg -> Some $"Worktree created, but '{scriptName}' failed: {msg}"
+                | Error msg -> Some $"Worktree created, but '{scriptName}' setup failed: {msg}. Dependencies may be incomplete — re-run setup in the worktree."
     }
 
 /// Creates a new worktree, forking `branchName` from `baseBranch`. Treemon owns
@@ -438,5 +440,8 @@ let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) 
 
         let! postForkWarning = runPostFork repoRoot worktreePath baseRef name
 
-        return List.choose id [ legacyForkScriptWarning repoRoot; postForkWarning ]
+        let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
+        let legacyScriptExists = File.Exists(Path.Combine(repoRoot, legacyScriptName))
+
+        return List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists; postForkWarning ]
     }

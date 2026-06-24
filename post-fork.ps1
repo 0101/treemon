@@ -19,7 +19,10 @@ $ErrorActionPreference = "Stop"
 
 Set-Location $WorktreePath
 
-function New-RepoSymlink {
+# Directory junctions (not symbolic links) so this works without elevation or
+# Developer Mode — important because Treemon spawns this hook from the server
+# process, where no one is present to approve a UAC prompt.
+function New-RepoJunction {
     param([string]$Name)
 
     $target = Join-Path $SourceRoot $Name
@@ -28,25 +31,17 @@ function New-RepoSymlink {
         return
     }
 
-    Write-Host "Creating $Name symlink..."
+    Write-Host "Creating $Name junction..."
     try {
-        New-Item -ItemType SymbolicLink -Path $Name -Target $target -ErrorAction Stop | Out-Null
-        Write-Host "  Symlink created successfully."
+        New-Item -ItemType Junction -Path $Name -Target $target -ErrorAction Stop | Out-Null
+        Write-Host "  Junction created successfully."
     } catch {
-        Write-Host "  Symlink creation failed (needs admin). Requesting elevation..."
-        $escapedDest = (Join-Path $WorktreePath $Name) -replace "'", "''"
-        $escapedTarget = $target -replace "'", "''"
-        Start-Process pwsh -Verb RunAs -Wait -ArgumentList "-NoProfile", "-Command", "New-Item -ItemType SymbolicLink -Path '$escapedDest' -Target '$escapedTarget'"
-        if (Test-Path $Name) {
-            Write-Host "  Symlink created with elevation."
-        } else {
-            Write-Host "  Warning: Failed to create '$Name' symlink. Copy manually or enable developer mode."
-        }
+        Write-Host "  Warning: Failed to create '$Name' junction: $($_.Exception.Message). Create it manually if needed."
     }
 }
 
-New-RepoSymlink ".claude"
-New-RepoSymlink "data"
+New-RepoJunction ".claude"
+New-RepoJunction "data"
 
 if (Get-Command bd -ErrorAction SilentlyContinue) {
     Write-Host "Initializing beads..."

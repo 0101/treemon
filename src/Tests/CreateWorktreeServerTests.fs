@@ -5,55 +5,7 @@ open System.IO
 open System.Runtime.InteropServices
 open NUnit.Framework
 open Server.GitWorktree
-
-// ─── git test helpers ───
-
-let private runGitProc (workingDir: string) (args: string) =
-    let psi =
-        Diagnostics.ProcessStartInfo(
-            "git",
-            args,
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        )
-
-    use proc = Diagnostics.Process.Start(psi)
-    let stdout = proc.StandardOutput.ReadToEnd()
-    proc.StandardError.ReadToEnd() |> ignore
-    proc.WaitForExit()
-    proc.ExitCode, stdout.Trim()
-
-let private gitAssert (workingDir: string) (args: string) =
-    let exitCode, _ = runGitProc workingDir args
-    Assert.That(exitCode, Is.EqualTo(0), $"git {args} failed (exit {exitCode})")
-
-let private gitOut (workingDir: string) (args: string) =
-    let _, stdout = runGitProc workingDir args
-    stdout
-
-/// Creates a fresh repo with a single commit and a `main` branch checked out.
-let private initRepoOnMain (repoDir: string) =
-    Directory.CreateDirectory(repoDir) |> ignore
-    gitAssert repoDir "init"
-    gitAssert repoDir "config user.name test"
-    gitAssert repoDir "config user.email test@test.com"
-    gitAssert repoDir "commit --allow-empty -m init"
-    gitAssert repoDir "branch -M main"
-
-/// Creates a `repo` on main with a bare `origin` remote that has `main` pushed,
-/// so both a local `main` and `refs/remotes/origin/main` exist.
-let private initRepoWithOrigin (tempDir: string) =
-    let repoDir = Path.Combine(tempDir, "repo")
-    let originDir = Path.Combine(tempDir, "origin.git")
-    initRepoOnMain repoDir
-    Directory.CreateDirectory(originDir) |> ignore
-    gitAssert originDir "init --bare"
-    gitAssert repoDir $"remote add origin \"{originDir}\""
-    gitAssert repoDir "push origin main"
-    repoDir, originDir
+open Tests.GitTestHelpers
 
 
 // ─── resolveWorktreeCommand: pure command construction ───
