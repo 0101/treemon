@@ -2,10 +2,16 @@ module CanvasPane
 
 open Shared
 open Navigation
+open CanvasTypes
 open Feliz
 open Browser
 
 let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
+// Doc→pane message size cap, in UTF-16 code units (JS String.length): the listener below drops a
+// message when JSON.stringify(me.data).length exceeds this. The injected window.canvasSend helper
+// enforces the SAME cap doc-side (var MAX=64000 in canvasSendScript, src/Server/CanvasDocServer.fs)
+// so its accept/drop verdict matches this check — keep the two literals in sync if you change this
+// value (CanvasDocServerTests pins the helper's copy).
 let [<Literal>] private MaxPayloadBytes = 64_000
 
 let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
@@ -145,15 +151,17 @@ type CanvasPaneCallbacks =
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
       DismissError: unit -> unit
+      DismissDocError: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
     let { SetPosition = setPosition
           SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
           DismissError = dismissError
+          DismissDocError = dismissDocError
           LaunchSession = launchSession } = callbacks
     let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
         Html.button [
@@ -223,6 +231,32 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             ]
         | _ -> Html.none
 
+    // Doc-side JS error banner — a distinct source from CanvasSendState.Failed (which is a
+    // pane→session *delivery* failure). Rendered as a normal flex child of the column-layout pane
+    // (never absolutely positioned), so it pushes the iframe down instead of covering doc content.
+    // Doc-scoped: shown ONLY when the stored error's stamp matches the currently focused doc, so a
+    // stale error from a doc you navigated away from (tab, card, or keyboard focus) is never shown
+    // over a different doc — and never over the overview (focusedDoc = None).
+    let docErrorBanner =
+        match docError, focusedDoc with
+        | Some err, Some (wt, doc) when WorktreePath.value wt.Path = err.ScopedKey && doc.Filename = err.Filename ->
+            Html.div [
+                prop.className "canvas-doc-error-banner"
+                prop.children [
+                    Html.span [
+                        prop.className "canvas-doc-error-text"
+                        prop.title err.Message
+                        prop.text $"Doc error: {err.Message}"
+                    ]
+                    Html.button [
+                        prop.className "canvas-doc-error-dismiss"
+                        prop.onClick (fun _ -> dismissDocError ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        | _ -> Html.none
+
     let waitingBanner =
         match sendState with
         | CanvasSendState.Waiting _ ->
@@ -244,10 +278,9 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         | Some (wt, doc) ->
             let isFocusedDocAlive = isDocAlive bridgeLiveness doc
             // The SystemView (beads) entry gets a distinct affordance pinned to the far left of the
-            // strip; AgentDocs keep the normal tab treatment. The strip also renders for a lone
-            // SystemView so its beads-count badge stays visible, while a lone AgentDoc still shows
-            // no tabs (its iframe fills the pane).
-            let hasSystemView = wt.CanvasDocs |> List.exists (fun d -> d.Kind = SystemView)
+            // strip; AgentDocs keep the normal tab treatment. The strip always renders the active
+            // doc's tab — including a lone AgentDoc (so it gets a labeled tab instead of a bare
+            // iframe) and a lone SystemView (so its beads-count badge stays visible).
             let agentTab (d: CanvasDoc) =
                 let isActive = d.Filename = doc.Filename
                 let isViewed = not (Set.contains d.Filename unviewedFilenames)
@@ -263,17 +296,24 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                     prop.children [
                         livenessDotFor bridgeLiveness d
                         Html.text (d.Filename.Replace(".html", ""))
+                        // On-disk freshness of the authored file, refreshed on the pane's existing
+                        // render cadence. Scoped to AgentDoc tabs (a SystemView is server-generated
+                        // and carries no authored-file age).
+                        Html.span [
+                            prop.className "canvas-tab-age"
+                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
+                        ]
                     ]
                 ]
+            // Always render the active doc's tab — no lone-AgentDoc suppression — while preserving
+            // the SystemView-first ordering (so the beads "BD" tab stays pinned left when present).
             let tabs =
-                if wt.CanvasDocs.Length > 1 || hasSystemView then
-                    wt.CanvasDocs
-                    |> List.sortBy (fun d -> match d.Kind with SystemView -> 0 | AgentDoc -> 1)
-                    |> List.map (fun d ->
-                        match d.Kind with
-                        | SystemView -> systemViewTab wt (d.Filename = doc.Filename) selectDoc d
-                        | AgentDoc -> agentTab d)
-                else []
+                wt.CanvasDocs
+                |> List.sortBy (fun d -> match d.Kind with SystemView -> 0 | AgentDoc -> 1)
+                |> List.map (fun d ->
+                    match d.Kind with
+                    | SystemView -> systemViewTab wt (d.Filename = doc.Filename) selectDoc d
+                    | AgentDoc -> agentTab d)
             // Render iframes for all visited docs; active is visible, others are hidden.
             // Ensure the active doc is always included even if not yet in visitedDocs.
             let docsToRender =
@@ -297,6 +337,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             React.fragment [
                 headerBar tabs (Some doc) (doc.Kind = AgentDoc && not isFocusedDocAlive)
                 errorBanner
+                docErrorBanner
                 waitingBanner
                 yield! iframes
             ]
@@ -304,6 +345,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
             React.fragment [
                 headerBar [] None false
                 errorBanner
+                docErrorBanner
                 waitingBanner
                 overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
             ]
@@ -318,29 +360,82 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
         prop.children [ content ]
     ]
 
-let messageListener (dispatch: string -> unit) (selectDoc: string -> unit) (onMorphComplete: unit -> unit) =
+/// Callbacks the pane-internal `messageListener` raises for each recognized doc→pane message.
+/// Grouped into a record (mirroring CanvasPaneCallbacks) so they are passed by name: Dispatch and
+/// SelectDoc both share the type `string -> unit`, so positional passing let a silent argument
+/// transposition compile and surface only at runtime.
+type MessageListenerCallbacks =
+    { /// Forward an unrecognized (normal) doc payload on to the session.
+      Dispatch: string -> unit
+      /// Switch the active tab to the named doc (navigate-canvas-doc).
+      SelectDoc: string -> unit
+      /// The active doc finished an idiomorph (morph-complete).
+      OnMorphComplete: unit -> unit
+      /// A doc-side JS error arrived: (emitting worktree scopedKey, emitting filename, display message).
+      OnDocError: string -> string -> string -> unit }
+
+let messageListener (callbacks: MessageListenerCallbacks) =
+    let { Dispatch = dispatch
+          SelectDoc = selectDoc
+          OnMorphComplete = onMorphComplete
+          OnDocError = onDocError } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
             if me.origin = CanvasOrigin
                && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
             then
+                // True when THIS message came from a mounted-but-HIDDEN canvas iframe (a visited doc that
+                // stays mounted and keeps running JS) rather than the active one. The origin check above
+                // already proves the sender is a canvas doc iframe, so a hidden-iframe match means a
+                // background/co-resident doc is posting. Session forwarding and navigate-canvas-doc honor
+                // only the active doc, so such a message is dropped — a hidden doc can't inject a payload
+                // (or force a tab switch) attributed to the active doc's owner session. The per-doc error
+                // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
+                let isFromHiddenCanvasIframe () =
+                    Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe:not(.canvas-iframe-active)'), function(f){return f.contentWindow === $0.source})"
                 let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                 if action = "navigate-canvas-doc" then
                     match Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename" |> Option.ofObj with
                     | Some filename when filename <> "" ->
-                        Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
-                        selectDoc filename
+                        if isFromHiddenCanvasIframe () then
+                            Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: from a hidden background doc iframe"
+                        else
+                            Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
+                            selectDoc filename
                     | _ -> ()
                 elif action = "morph-complete" then
                     Fable.Core.JS.console.log "[canvas] morph-complete received"
                     onMorphComplete ()
+                elif action = "canvas-doc-error" then
+                    // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
+                    // in the doc-error banner, never forwarded to the session like a normal payload.
+                    // The `wt`/`doc` fields are the emitting worktree + filename, so the reducer stamps
+                    // the error with the doc that threw (not the active tab); they are re-validated
+                    // against that worktree's docs there. wt/message/line/col cross an untrusted '*'
+                    // boundary, so each field is read with a null-safe String() coercion and the display
+                    // string "msg (line N:C)" is assembled here in F#.
+                    let scopedKey = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.wt==='string'?$0.wt:''"
+                    let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.doc==='string'?$0.doc:''"
+                    let rawMessage = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.message==null?'Unknown error':String($0.message)"
+                    let line = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.line==null?'':String($0.line)"
+                    let col = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.col==null?'':String($0.col)"
+                    let body = if rawMessage.Length > 500 then rawMessage.Substring(0, 500) else rawMessage
+                    let message =
+                        if line = "" then body
+                        elif col = "" then $"{body} (line {line})"
+                        else $"{body} (line {line}:{col})"
+                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received from {scopedKey}/{filename}: {message}")
+                    onDocError scopedKey filename message
                 else
                     let payload = Fable.Core.JS.JSON.stringify me.data
                     Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
-                    if payload.Length <= MaxPayloadBytes
-                    then dispatch payload
-                    else Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
+                    if isFromHiddenCanvasIframe () then
+                        Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: from a hidden background doc iframe (action={action})")
+                    elif payload.Length <= MaxPayloadBytes then
+                        dispatch payload
+                    else
+                        Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
 
     Dom.window.addEventListener ("message", handler)
 

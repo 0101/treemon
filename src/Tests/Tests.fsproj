@@ -27,6 +27,7 @@
     <Compile Include="CreateWorktreeTests.fs" />
     <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
+    <Compile Include="ComponentsTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />
@@ -45,6 +46,7 @@
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPaneTests.fs" />
+    <Compile Include="CanvasAuthoringDxE2ETests.fs" />
     <Compile Include="CanvasPhase4Tests.fs" />
     <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />

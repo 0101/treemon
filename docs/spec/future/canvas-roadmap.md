@@ -79,6 +79,33 @@ Playwright coverage that each bundled template renders and its interactions work
 `src/Tests/BeadspaceCanvasTests.fs`, which uses Playwright **route interception** to serve a
 template + mock data from disk (self-contained, no live server — runs in CI under `Category=E2E`).
 
+## Phase 8 — Pane UX
+
+Goal: polish the canvas pane chrome itself (independent of doc authoring/templates).
+
+### Always-visible doc tab with last-modified age — effort S
+
+Two tightly-coupled tab-bar tweaks that ship together:
+
+1. **Always render the doc tab — even for a single doc.** Today `CanvasPane.fs` (the `tabs`
+   binding, ~line 269) only renders tabs when `wt.CanvasDocs.Length > 1 || hasSystemView`,
+   so a lone **AgentDoc** shows *no* tab and its iframe fills the pane (a lone SystemView
+   already renders, to keep its beads badge). Change the condition so the active doc's tab
+   always renders.
+
+2. **Show the doc's on-disk freshness inside the tab.** Render a compact relative age next to
+   the tab label from `doc.LastModified` (already on `CanvasDoc`, `Types.fs:117`) — e.g.
+   `3m`, `2d`. A `relativeTime` formatter already exists (`Components.fs:8`) but emits the
+   `"3m ago"` long form; add/adapt a **compact** variant (`3m`, `2h`, `2d`, no `" ago"`) for
+   the tab. The age recomputes on the pane's existing render cadence (the dashboard already
+   calls `relativeTime` with `System.DateTimeOffset.Now` per render).
+
+- Scope the age to **AgentDoc** tabs (consistent with the AgentDoc-only liveness dot); the
+  SystemView "BD" badge is data-driven and carries no authored-file age.
+- Acceptance: a worktree with a single canvas doc shows its tab button (not a bare iframe),
+  and each AgentDoc tab shows a compact age label reflecting the file's `LastModified`
+  (e.g. `3m`, `2d`) that updates as the pane re-renders.
+
 ## Considered but not carried forward
 
 Recorded so future readers know these were evaluated, not missed.

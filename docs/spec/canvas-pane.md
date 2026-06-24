@@ -56,7 +56,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - Open or closed state persists in global config.
 - Position selector supports left, right, top, and bottom docking, and the selected position persists.
 - The pane is scoped to the focused worktree. If that worktree has docs, the pane shows its active doc.
-- Worktrees with multiple docs show tab buttons. A single `AgentDoc` skips the tab bar; a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible.
+- Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` now gets a labeled tab (with a compact last-modified age) instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. (See also `docs/spec/canvas-authoring-dx.md`.)
 - Selecting a tab marks that doc viewed.
 - Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.

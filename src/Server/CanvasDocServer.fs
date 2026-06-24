@@ -206,7 +206,20 @@ let private bridgeScript =
       "})()</script>" ]
     |> String.concat ""
 
-let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}</style>"
+/// Scrollbar styling + a small dark-theme base reset, injected for BOTH doc kinds at the </head>
+/// slot (handleCanvasRequest). Because the injection lands AFTER any <head> styles the doc/template
+/// already declares, an equal-specificity element rule here would win the source-order tiebreak and
+/// stomp the doc. So every reset selector is wrapped in :where(...) — carrying ZERO specificity like
+/// the universal `*` scrollbar rule — and no rule uses !important. Then any real doc rule (even a
+/// bare body{}) and the SystemView template's own body-SELECTOR rules (e.g. BeadspaceTemplate.html's
+/// body{background:var(--bg-deep);margin:0;padding:0}, specificity 0,0,1) override the reset
+/// (specificity 0,0,0) regardless of source order. The override is per-property and only via a rule on
+/// the `body` selector: a box property the template zeroes through the universal `*{margin:0;padding:0}`
+/// reset (also 0,0,0) would otherwise LOSE the source-order tiebreak to this later-injected
+/// :where(body){padding:1rem}, so the template resets margin/padding on `body` directly to keep its
+/// padding:0. Literal colours mirror the app theme (Catppuccin --bg-deep /
+/// --text-primary / --accent) since a plain doc never defines those CSS variables.
+let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}:where(body){background:#1e1e2e;color:#cdd6f4;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;line-height:1.5;margin:0;padding:1rem}:where(h1,h2,h3,h4,h5,h6){line-height:1.25;margin:1.2em 0 .6em}:where(a){color:#cba6f7;text-decoration:none}:where(a:hover){text-decoration:underline}:where(code,kbd,samp,pre){font-family:'Consolas','Courier New',monospace}:where(code){background:#313244;padding:.1em .3em;border-radius:4px;font-size:.9em}:where(pre){background:#181825;padding:1em;border-radius:6px;overflow:auto}:where(pre code){background:none;padding:0;font-size:inherit}:where(table){border-collapse:collapse}:where(th,td){border:1px solid #45475a;padding:.4em .6em;text-align:left}:where(th){background:#313244}</style>"
 
 /// Intercepts in-doc link clicks: same-origin .html links become navigate-canvas-doc messages
 /// (tab switch), everything else opens in a new tab. The target filename is taken from a.pathname
@@ -217,16 +230,100 @@ let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,9
 /// with .html.
 let private linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=(a.pathname||h).split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
 
+/// window.canvasSend(action, payload): the first-class doc→pane message helper, injected in the
+/// AgentDoc arm only (a SystemView is server-generated and posts nothing, so it never gets the
+/// helper). It wraps the existing FLAT message contract the pane already handles —
+/// canvasSend('navigate-canvas-doc',{filename}) posts {action:'navigate-canvas-doc', filename} via
+/// window.parent.postMessage(...,'*'), identical in effect to a hand-rolled postMessage.
+///
+/// The explicit `action` argument ALWAYS wins: payload is merged FIRST and {action} is applied OVER
+/// it (Object.assign({},payload,{action:action})), so a payload that carries its own `action` key
+/// can't silently override the caller's action — canvasSend('navigate-canvas-doc',{action:'x',...})
+/// still posts (and size-checks) {action:'navigate-canvas-doc',...}, not {action:'x',...}. Applying
+/// {action} last is load-bearing; do NOT flip it back to Object.assign({action:action},payload).
+///
+/// The size guard mirrors the client EXACTLY. CanvasPane.fs computes JSON.stringify(me.data).length
+/// — where me.data IS the posted {action,...payload} object and .length is UTF-16 code units (the JS
+/// String.length) — and DROPS the message when that exceeds MaxPayloadBytes (the "postMessage
+/// DROPPED: payload too large" path). The helper measures the identical metric on the identical
+/// object (var size=JSON.stringify(msg).length) and refuses to post when size>MAX, so the doc-side
+/// verdict equals the client's drop decision — accept iff length<=cap, drop iff length>cap — but the
+/// author gets an immediate doc-side console.error instead of a silent client-side drop. The cap is
+/// applied uniformly to every action; the navigate/morph payloads the client special-cases ahead of
+/// its size check are tiny, so the uniform guard never diverges in practice. UTF-8 byte length is
+/// deliberately NOT used: it would disagree with the client's String.length check and could block a
+/// payload the client accepts (or pass one it drops). The 64000 literal mirrors MaxPayloadBytes in
+/// src/Client/CanvasPane.fs and is kept in sync by hand (CanvasDocServerTests pins the two together).
+let private canvasSendScript =
+    [ "<script>(function(){"
+      "var MAX=64000;"
+      "window.canvasSend=function(action,payload){"
+      "var msg=Object.assign({},payload,{action:action});"
+      "var size=JSON.stringify(msg).length;"
+      "if(size>MAX){"
+      "console.error('[canvas] canvasSend DROPPED: '+action+' message too large ('+size+' > '+MAX+' UTF-16 code units); not sent');"
+      "return false}"
+      "window.parent.postMessage(msg,'*');"
+      "return true}"
+      "})()</script>" ]
+    |> String.concat ""
+
+/// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
+/// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
+/// unhandledrejection listener and forwards each doc-side failure to the pane as the FLAT
+/// {action:'canvas-doc-error', wt, doc, message, source, line, col} message the client surfaces in a
+/// non-blocking, dismissible banner (src/Client/CanvasPane.fs). window.onerror's
+/// (message, source, lineno, colno, error) signature maps 1:1 onto that payload; error.message is
+/// preferred when present (the author's bare "boom" over the host's "Uncaught Error: boom"), else
+/// the raw message string. Any window.onerror a <head> script installed before this </head>
+/// injection is chained (prev.apply) so the overlay never silently swallows a doc's own handler, and
+/// nothing is suppressed (no `return true`) so the native console error still reaches the author. The
+/// postMessage is wrapped in try/catch so a throw inside the error path can never re-enter onerror
+/// and spin an error loop. unhandledrejection reports reason.message (or String(reason)) with no
+/// source/line/col, matching the same flat shape.
+///
+/// The `wt` and `doc` fields carry THIS doc's emitting identity — the worktree (derived in-iframe from
+/// location.pathname, mirroring the bridge heartbeat) and the filename (the overlay is served per-doc).
+/// The pane stamps the error from `wt`+`doc`, so it attributes the failure to the doc that actually
+/// threw — independent of the active tab. Visited docs stay mounted as hidden iframes and keep running
+/// JS, so an async error from a hidden/background doc (even in a different worktree) is no longer
+/// misattributed to whatever tab is focused when the message is processed (focused-review A-02, C-06).
+/// The reducer re-validates `wt`+`doc` against that worktree's docs before showing a banner, so a
+/// stale/forged identity can't surface one.
+let private errorOverlayScript (filename: string) =
+    // JsonSerializer.Serialize yields a properly-escaped, HTML-safe JS string literal (e.g.
+    // "status.html"; <,>,& and quotes are \uXXXX-escaped so a crafted filename can neither close the
+    // <script> nor break out of the string), safe to splice straight into the injected source.
+    let docLiteral = JsonSerializer.Serialize(filename)
+    [ "<script>(function(){"
+      $"var DOC={docLiteral};"
+      "var WT=decodeURIComponent(location.pathname.substring(1,location.pathname.lastIndexOf('/')));"
+      "function report(message,source,line,col){"
+      "try{window.parent.postMessage({action:'canvas-doc-error',wt:WT,doc:DOC,message:String(message),source:source||'',line:(line==null?null:line),col:(col==null?null:col)},'*')}catch(e){}}"
+      "var prev=window.onerror;"
+      "window.onerror=function(message,source,line,col,error){"
+      "report((error&&error.message)||message,source,line,col);"
+      "return prev?prev.apply(this,arguments):false};"
+      "window.addEventListener('unhandledrejection',function(e){"
+      "var r=e&&e.reason;"
+      "report((r&&r.message)||String(r),'',null,null)})"
+      "})()</script>" ]
+    |> String.concat ""
+
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat and the idiomorph runtime + morph controller. SystemViews (e.g. the beads dashboard)
-/// are server-generated and data-driven with no owner session: they drive their own refresh and
-/// must never morph (a morph would stomp the live, JS-rendered dashboard back to the empty
-/// template shell), and nothing routes session→doc messages to them, so those three are omitted.
-let buildInjection (kind: CanvasDocKind) : string =
+/// heartbeat, the window.canvasSend helper, the JS error overlay, and the idiomorph runtime +
+/// morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
+/// doc-side error carries its own identity (the emitter), letting the pane attribute it correctly
+/// even when other docs are mounted as hidden iframes. It is unused for SystemViews (no overlay).
+/// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
+/// session: they drive their own refresh and must never morph (a morph would stomp the live,
+/// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
+/// them, and they post nothing back — so the bridge, canvasSend, and morph pieces are all omitted.
+let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> baseStyle + linkInterceptor
-    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -275,13 +372,21 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
             | Ok resolvedPath ->
                 let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                 let html = System.Text.Encoding.UTF8.GetString(rawBytes)
-                let injection = buildInjection (CanvasDocKind.classify filename)
+                let injection = buildInjection (CanvasDocKind.classify filename) filename
                 let injected =
                     if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
                     then html.Replace("</head>", injection + "</head>", System.StringComparison.OrdinalIgnoreCase)
                     else injection + html
                 ctx.Response.ContentType <- "text/html; charset=utf-8"
                 ctx.Response.Headers["Cache-Control"] <- "no-cache"
+                // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames
+                // docs cross-origin (loopback, with dev/prod ports that vary), so a port-wildcard
+                // loopback allowlist permits the pane while blocking any public page from framing a doc
+                // and harvesting its iframe→parent postMessages (canvasSend input, doc-error text). CSP
+                // frame-ancestors is the modern successor to X-Frame-Options, which is deliberately NOT
+                // set: its only cross-origin option is DENY/SAMEORIGIN, which would also block the
+                // legitimate cross-origin pane.
+                ctx.Response.Headers["Content-Security-Policy"] <- "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
                 do! ctx.Response.WriteAsync(injected)
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
