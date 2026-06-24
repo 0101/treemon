@@ -35,7 +35,7 @@ let private startSmokeServerProc (configDir: string) (args: string) =
     // Isolate the smoke server's machine-level config dir. Startup root-resolution now persists
     // the resolved worktreeRoots into config.json when it has none yet, so without this override a
     // normal-mode smoke run would write the developer's real ~/.treemon. Point it at a caller-owned
-    // throwaway dir instead (WorktreeApi.globalConfigDir honors TREEMON_CONFIG_DIR); the fixture
+    // throwaway dir instead (GlobalConfig.globalConfigDir honors TREEMON_CONFIG_DIR); the fixture
     // deletes it in teardown.
     psi.EnvironmentVariables["TREEMON_CONFIG_DIR"] <- configDir
 
