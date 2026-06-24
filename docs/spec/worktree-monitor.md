@@ -225,7 +225,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, work metrics |
-| `src/Server/WorktreeApi.fs` | API implementation, `DashboardResponse` assembly |
+| `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
+| `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/SyncEngine.fs` | Branch sync pipeline, provider-aware conflict resolution |
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
