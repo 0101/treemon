@@ -200,10 +200,10 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
             ]
             Html.div [
                 prop.className "modal-body"
-                prop.children [
-                    for message in messages ->
-                        Html.div [ prop.className "modal-warning-message"; prop.text message ]
-                ]
+                prop.children (
+                    messages
+                    |> List.map (fun message ->
+                        Html.div [ prop.className "modal-warning-message"; prop.text message ]))
             ]
             Html.div [
                 prop.className "modal-footer"
