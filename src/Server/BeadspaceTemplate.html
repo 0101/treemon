@@ -212,7 +212,6 @@ body {
 .copy-id-btn.copied { color: var(--status-closed); opacity: 1; }
 .copy-id-btn.copied .copy-icon { display: none; }
 .copy-id-btn.copied .check-icon { display: block; }
-.copy-id-btn.copy-failed { color: var(--status-blocked); opacity: 1; }
 
 .issues-table .col-title {
     font-weight: 500;
@@ -470,32 +469,9 @@ function esc(str) {
     return el.innerHTML;
 }
 
-function fallbackCopy(text) {
-    return new Promise(function(resolve, reject) {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly', '');
-        ta.style.position = 'absolute';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        try {
-            ta.select();
-            var ok = document.execCommand('copy');
-            ok ? resolve() : reject(new Error('execCommand failed'));
-        } catch (e) {
-            reject(e);
-        } finally {
-            if (ta.parentNode) document.body.removeChild(ta);
-        }
-    });
-}
-
 function copyTextToClipboard(text) {
     var safe = String(text).replace(/[\u0000-\u001F\u007F]/g, '');
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        return navigator.clipboard.writeText(safe).catch(function() { return fallbackCopy(safe); });
-    }
-    return fallbackCopy(safe);
+    return navigator.clipboard.writeText(safe);
 }
 
 var COPY_ICON_SVG = '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
@@ -511,13 +487,9 @@ function createCopyIdButton(id) {
     btn.addEventListener('click', function(e) {
         e.stopPropagation();
         copyTextToClipboard(id).then(function() {
-            btn.classList.remove('copy-failed');
             btn.classList.add('copied');
             btn.title = 'Copied!';
             setTimeout(function() { btn.classList.remove('copied'); btn.title = 'Copy ID'; }, 1200);
-        }).catch(function() {
-            btn.classList.add('copy-failed');
-            setTimeout(function() { btn.classList.remove('copy-failed'); }, 1200);
         });
     });
     return btn;
