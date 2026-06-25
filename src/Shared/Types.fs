@@ -166,6 +166,10 @@ type CreateWorktreeRequest =
       BranchName: BranchName
       BaseBranch: BranchName }
 
+/// Non-fatal advisories surfaced after a worktree is created (e.g. a legacy fork
+/// script is present, or the post-fork setup hook failed). Empty means a clean create.
+type CreateWorktreeWarnings = string list
+
 type WorktreeStatus =
     { Path: WorktreePath
       Branch: string
@@ -259,7 +263,7 @@ type IWorktreeApi =
       archiveWorktree: WorktreePath -> Async<Result<unit, string>>
       unarchiveWorktree: WorktreePath -> Async<Result<unit, string>>
       getBranches: string -> Async<string list>
-      createWorktree: CreateWorktreeRequest -> Async<Result<unit, string>>
+      createWorktree: CreateWorktreeRequest -> Async<Result<CreateWorktreeWarnings, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
       launchAction: ActionRequest -> Async<Result<unit, string>>
       reportActivity: ActivityLevel -> Async<unit>
