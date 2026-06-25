@@ -183,7 +183,36 @@ body {
     font-size: 0.6875rem;
     color: var(--text-muted);
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
 }
+
+.copy-id-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    flex-shrink: 0;
+    transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.issues-table tr.issue-table-row:hover .copy-id-btn { opacity: 1; }
+.copy-id-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.copy-id-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
+.copy-id-btn svg { width: 0.875rem; height: 0.875rem; display: block; }
+.copy-id-btn .check-icon { display: none; }
+.copy-id-btn.copied { color: var(--status-closed); opacity: 1; }
+.copy-id-btn.copied .copy-icon { display: none; }
+.copy-id-btn.copied .check-icon { display: block; }
+.copy-id-btn.copy-failed { color: var(--status-blocked); opacity: 1; }
 
 .issues-table .col-title {
     font-weight: 500;
@@ -407,6 +436,8 @@ body {
         margin-bottom: 0.125rem;
     }
 
+    .copy-id-btn { opacity: 1; }
+
     .issues-table .col-title {
         white-space: normal;
         max-width: none;
@@ -437,6 +468,59 @@ function esc(str) {
     var el = document.createElement('span');
     el.textContent = str || '';
     return el.innerHTML;
+}
+
+function fallbackCopy(text) {
+    return new Promise(function(resolve, reject) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        try {
+            ta.select();
+            var ok = document.execCommand('copy');
+            ok ? resolve() : reject(new Error('execCommand failed'));
+        } catch (e) {
+            reject(e);
+        } finally {
+            if (ta.parentNode) document.body.removeChild(ta);
+        }
+    });
+}
+
+function copyTextToClipboard(text) {
+    var safe = String(text).replace(/[\u0000-\u001F\u007F]/g, '');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(safe).catch(function() { return fallbackCopy(safe); });
+    }
+    return fallbackCopy(safe);
+}
+
+var COPY_ICON_SVG = '<svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+var CHECK_ICON_SVG = '<svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+function createCopyIdButton(id) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-id-btn';
+    btn.title = 'Copy ID';
+    btn.setAttribute('aria-label', 'Copy issue ID');
+    btn.innerHTML = COPY_ICON_SVG + CHECK_ICON_SVG;
+    btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        copyTextToClipboard(id).then(function() {
+            btn.classList.remove('copy-failed');
+            btn.classList.add('copied');
+            btn.title = 'Copied!';
+            setTimeout(function() { btn.classList.remove('copied'); btn.title = 'Copy ID'; }, 1200);
+        }).catch(function() {
+            btn.classList.add('copy-failed');
+            setTimeout(function() { btn.classList.remove('copy-failed'); }, 1200);
+        });
+    });
+    return btn;
 }
 
 function daysAgo(dateStr) {
@@ -628,7 +712,11 @@ function renderIssuesTable() {
 
         var tdId = document.createElement('td');
         tdId.className = 'col-id';
-        tdId.textContent = i.id;
+        var idText = document.createElement('span');
+        idText.className = 'id-text';
+        idText.textContent = i.id;
+        tdId.appendChild(idText);
+        tdId.appendChild(createCopyIdButton(i.id));
         tr.appendChild(tdId);
 
         var tdPri = document.createElement('td');

@@ -330,6 +330,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                         prop.className (if isActive then "canvas-iframe canvas-iframe-active" else "canvas-iframe")
                         prop.src (iframeSrc wt d)
                         prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups")
+                        prop.custom ("allow", "clipboard-write")
                         prop.style [
                             if not isActive then style.display.none
                         ]
