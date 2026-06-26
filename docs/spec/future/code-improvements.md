@@ -51,7 +51,7 @@ its own worktree. This file is the entry point; detailed designs live in their o
   `worktreeRoots` semantics, plus the canvas / collapsed-repos / last-viewed-hashes / editor
   accessors) out of `WorktreeApi.fs` (870 → 614 L) into `src/Server/GlobalConfig.fs`, leaving the
   API module with just `IWorktreeApi` wiring + `DashboardResponse` assembly. Behavior-preserving;
-  see `docs/spec/global-config-store.md`.
+  see `docs/spec/worktree-monitor.md` (Configuration Store).
 - **App.fs view extraction** — `src/Client/App.fs` 1861 → 795 lines. Extracted
   `OverviewViews.fs`, `CardViews.fs` (with `CardViewProps`/`CardCallbacks` records),
   `MascotState.fs`/`MascotView.fs`, and `CanvasView.fs`; flat `Msg` + single `update`

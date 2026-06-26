@@ -30,6 +30,14 @@
 - Scheduler picks most-overdue task globally across all repos
 - Branch events scoped by `{repoId}/{branch}` to prevent cross-repo collisions
 
+### Configuration Store
+
+Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` is the sole owner of that file — a single JSON store fronted by typed accessors, with these invariants:
+
+- **Single serialized writer, atomic on disk.** Every mutation funnels through one in-process lock and writes via a temp-file-then-replace; no write bypasses the lock, so concurrent updates can't interleave or leave a partially written file.
+- **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
+- **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), canvas pane open/position, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
+
 ### Worktree Identification
 
 - All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
@@ -263,6 +271,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 - Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
+- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the per-worktree `.treemon.json` (`testCommand`, `baseBranch`, `upstreamRemote`) are deliberately separate stores in separate modules, named so the machine-vs-worktree scope is obvious and the two never collide.
 
 ## Related Specs
 
