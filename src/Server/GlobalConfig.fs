@@ -75,7 +75,7 @@ let internal updateConfigAtPath (configPath: string) (updates: (string * System.
     lock globalConfigLock (fun () ->
         try
             let dir = Path.GetDirectoryName(configPath)
-            if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+            if not (String.IsNullOrEmpty dir) && not (Directory.Exists dir) then Directory.CreateDirectory dir |> ignore
 
             let root =
                 if not (File.Exists(configPath)) then
