@@ -307,3 +307,57 @@ type BeadspaceCanvasTests() =
             let! tableCount = this.Page.Locator(".issues-table").CountAsync()
             Assert.That(tableCount, Is.EqualTo(1), "Issues table should still be rendered after refresh")
         }
+
+    // ── Copy ID Button ───────────────────────────────────────────────────
+
+    [<Test>]
+    member this.``Each issue row has a copy-ID button``() =
+        task {
+            let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
+            do! allChip.ClickAsync()
+            let! rowCount = this.Page.Locator(".issue-table-row").CountAsync()
+            let! btnCount = this.Page.Locator(".issue-table-row .copy-id-btn").CountAsync()
+            Assert.That(rowCount, Is.GreaterThan(0), "There should be issue rows to test")
+            Assert.That(btnCount, Is.EqualTo(rowCount), "Every issue row should have exactly one copy-ID button")
+        }
+
+    [<Test>]
+    member this.``Clicking copy button copies ID without expanding detail panel``() =
+        task {
+            do! this.Context.GrantPermissionsAsync([| "clipboard-read"; "clipboard-write" |])
+
+            let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
+            do! allChip.ClickAsync()
+
+            let firstRow = this.Page.Locator(".issue-table-row").First
+            let! expectedId = firstRow.GetAttributeAsync("data-issue-id")
+
+            let copyBtn = firstRow.Locator(".copy-id-btn")
+            do! copyBtn.ClickAsync()
+
+            // Detail panel must NOT expand — the button stops propagation
+            let! expandedCount = this.Page.Locator(".detail-panel.expanded").CountAsync()
+            Assert.That(expandedCount, Is.EqualTo(0), "Clicking the copy button should not expand the detail panel")
+
+            // Web-first assertion: auto-retries and passes on first match, so the page's
+            // 1200ms timer clearing the .copied class can't fail an already-satisfied check.
+            let copiedBtn = firstRow.Locator(".copy-id-btn.copied")
+            do! Assertions.Expect(copiedBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 3000.0f))
+
+            // Best-effort: clipboard content matches the row id
+            let! clip = this.Page.EvaluateAsync<string>("() => navigator.clipboard.readText()")
+            Assert.That(clip, Is.EqualTo(expectedId), "Clipboard should contain the copied issue ID")
+        }
+
+    [<Test>]
+    member this.``Clicking row body still expands detail panel``() =
+        task {
+            let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
+            do! allChip.ClickAsync()
+            let firstRow = this.Page.Locator(".issue-table-row").First
+            do! firstRow.Locator(".col-title").ClickAsync()
+            let detailPanel = this.Page.Locator(".detail-panel.expanded")
+            do! detailPanel.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = detailPanel.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Clicking the row body should still expand the detail panel")
+        }
