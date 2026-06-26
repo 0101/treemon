@@ -195,7 +195,7 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
             prop.className "canvas-size-group"
             prop.children [
                 sizeButton CanvasSize.Ratio1To1 "1:1" "Canvas same size as dashboard"
-                sizeButton CanvasSize.Ratio2To1 "2:1" "Make the canvas twice the dashboard"
+                sizeButton CanvasSize.Ratio2To1 "2:1" "Make the canvas twice the size of the dashboard"
             ]
         ]
 
