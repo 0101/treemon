@@ -17,6 +17,7 @@ type ModalState =
     | Open of CreateWorktreeForm
     | Creating of RepoId
     | CreateError of repoId: RepoId * message: string
+    | CreateWarning of repoId: RepoId * messages: string list
 
 type Msg =
     | OpenCreateWorktree of RepoId
@@ -24,7 +25,7 @@ type Msg =
     | SetNewWorktreeName of string
     | SetBaseBranch of string
     | SubmitCreateWorktree
-    | CreateWorktreeCompleted of Result<unit, string>
+    | CreateWorktreeCompleted of Result<string list, string>
     | CloseCreateModal
 
 let repoId =
@@ -34,6 +35,7 @@ let repoId =
     | Open form -> Some form.RepoId
     | Creating repoId -> Some repoId
     | CreateError (repoId, _) -> Some repoId
+    | CreateWarning (repoId, _) -> Some repoId
 
 let isOpen =
     function
@@ -49,54 +51,44 @@ let private just modal =
     { Modal = modal; RestoredFocus = None; RefreshWorktrees = false }, Cmd.none
 
 let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResult * Cmd<Msg> =
-    match msg with
-    | OpenCreateWorktree rid ->
+    match msg, modal with
+    | OpenCreateWorktree rid, _ ->
         { Modal = LoadingBranches rid; RestoredFocus = None; RefreshWorktrees = false },
         Cmd.OfAsync.either api.Value.getBranches (RepoId.value rid) (Ok >> BranchesLoaded) (Error >> BranchesLoaded)
 
-    | BranchesLoaded (Ok branches) ->
-        match modal with
-        | LoadingBranches rid ->
-            let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
-            just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch })
-        | _ -> just modal
+    | BranchesLoaded (Ok branches), LoadingBranches rid ->
+        let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
+        just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch })
+    | BranchesLoaded (Ok _), _ -> just modal
 
-    | BranchesLoaded (Error _) ->
-        match modal with
-        | LoadingBranches rid -> just (CreateError (rid, "Failed to load branches"))
-        | _ -> just modal
+    | BranchesLoaded (Error _), LoadingBranches rid -> just (CreateError (rid, "Failed to load branches"))
+    | BranchesLoaded (Error _), _ -> just modal
 
-    | SetNewWorktreeName name ->
-        match modal with
-        | Open form -> just (Open { form with Name = name })
-        | _ -> just modal
+    | SetNewWorktreeName name, Open form -> just (Open { form with Name = name })
+    | SetNewWorktreeName _, _ -> just modal
 
-    | SetBaseBranch branch ->
-        match modal with
-        | Open form -> just (Open { form with BaseBranch = branch })
-        | _ -> just modal
+    | SetBaseBranch branch, Open form -> just (Open { form with BaseBranch = branch })
+    | SetBaseBranch _, _ -> just modal
 
-    | SubmitCreateWorktree ->
-        match modal with
-        | Open form when form.Name.Trim().Length > 0 ->
-            let request: CreateWorktreeRequest =
-                { RepoId = RepoId.value form.RepoId
-                  BranchName = BranchName.create (form.Name.Trim())
-                  BaseBranch = BranchName.create form.BaseBranch }
-            { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
-            Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
-        | _ -> just modal
+    | SubmitCreateWorktree, Open form when form.Name.Trim().Length > 0 ->
+        let request: CreateWorktreeRequest =
+            { RepoId = RepoId.value form.RepoId
+              BranchName = BranchName.create (form.Name.Trim())
+              BaseBranch = BranchName.create form.BaseBranch }
+        { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
+        Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
+    | SubmitCreateWorktree, _ -> just modal
 
-    | CreateWorktreeCompleted (Ok _) ->
+    | CreateWorktreeCompleted (Ok warnings), Creating rid when not (List.isEmpty warnings) ->
+        { Modal = CreateWarning (rid, warnings); RestoredFocus = None; RefreshWorktrees = true }, Cmd.none
+    | CreateWorktreeCompleted (Ok _), _ ->
         let restored = repoId modal |> Option.map RepoHeader
         { Modal = Closed; RestoredFocus = restored; RefreshWorktrees = true }, Cmd.none
 
-    | CreateWorktreeCompleted (Error errorMsg) ->
-        match modal with
-        | Creating rid -> just (CreateError (rid, errorMsg))
-        | _ -> just modal
+    | CreateWorktreeCompleted (Error errorMsg), Creating rid -> just (CreateError (rid, errorMsg))
+    | CreateWorktreeCompleted (Error _), _ -> just modal
 
-    | CloseCreateModal ->
+    | CloseCreateModal, _ ->
         let restored = repoId modal |> Option.map RepoHeader
         { Modal = Closed; RestoredFocus = restored; RefreshWorktrees = false }, Cmd.none
 
@@ -187,6 +179,31 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                 prop.children [
                     Html.div [ prop.className "modal-error-message"; prop.text message ]
                 ]
+            ]
+            Html.div [
+                prop.className "modal-footer"
+                prop.children [
+                    Html.button [
+                        prop.className "modal-btn cancel"
+                        prop.onClick (fun _ -> dispatch CloseCreateModal)
+                        prop.text "Close"
+                    ]
+                ]
+            ]
+        ]
+
+    | CreateWarning (_, messages) ->
+        modalOverlay dispatch true [
+            Html.div [
+                prop.className "modal-header warning"
+                prop.text "Worktree created — with warnings"
+            ]
+            Html.div [
+                prop.className "modal-body"
+                prop.children (
+                    messages
+                    |> List.map (fun message ->
+                        Html.div [ prop.className "modal-warning-message"; prop.text message ]))
             ]
             Html.div [
                 prop.className "modal-footer"

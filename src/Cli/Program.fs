@@ -164,14 +164,18 @@ let launchCmd =
 let newCmd =
     let handler (repo: string, branch: string, baseBranch: string, port: int option) =
         withPort port (fun port ->
-            runApi
-                port
-                (fun api ->
-                    api.createWorktree
-                        { RepoId = repo
-                          BranchName = BranchName.create branch
-                          BaseBranch = BranchName.create baseBranch })
-                $"Worktree created for branch '%s{branch}'")
+            tryCallServer port (fun api ->
+                let request =
+                    { RepoId = repo
+                      BranchName = BranchName.create branch
+                      BaseBranch = BranchName.create baseBranch }
+
+                match api.createWorktree request |> Async.RunSynchronously with
+                | Ok warnings ->
+                    printfn $"✓ Worktree created for branch '%s{branch}'"
+                    warnings |> List.iter (fun w -> eprintfn $"⚠ %s{w}")
+                    0
+                | Error e -> eprintfn $"Error: %s{e}"; 1))
 
     command "new" {
         description "Create a new worktree"

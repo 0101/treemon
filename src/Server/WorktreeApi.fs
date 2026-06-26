@@ -363,7 +363,7 @@ let worktreeApi
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
-            createWorktree = fun _ -> async { return Ok() } }
+            createWorktree = fun _ -> async { return Ok [] } }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
@@ -505,18 +505,9 @@ let worktreeApi
                       |> Map.tryFind repoId
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-
-                  let! wt =
-                      state.Repos
-                      |> Map.tryFind repoId
-                      |> Option.bind (fun repo ->
-                          repo.WorktreeList
-                          |> List.tryFind (fun wt -> wt.Branch = Some (BranchName.value req.BaseBranch)))
-                      |> Result.requireSome $"No worktree found for branch '{BranchName.value req.BaseBranch}'"
-
-                  do! GitWorktree.createWorktree root wt.Path (BranchName.value req.BranchName)
+                  let! warnings = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                  return warnings
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
