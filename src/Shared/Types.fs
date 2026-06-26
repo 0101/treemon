@@ -97,6 +97,14 @@ type CanvasPosition =
     | Top
     | Bottom
 
+/// Relative size of the canvas pane vs the dashboard when the pane is open.
+/// Ratio1To1 (default) splits the layout evenly; Ratio2To1 gives the canvas
+/// twice the dashboard's share.
+[<RequireQualifiedAccess>]
+type CanvasSize =
+    | Ratio1To1
+    | Ratio2To1
+
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)
@@ -239,7 +247,8 @@ type DashboardResponse =
       EditorName: string
       CollapsedRepos: Set<RepoId>
       CanvasPaneOpen: bool
-      CanvasPosition: CanvasPosition }
+      CanvasPosition: CanvasPosition
+      CanvasSize: CanvasSize }
 
 type FixtureData =
     { Worktrees: DashboardResponse
@@ -270,6 +279,7 @@ type IWorktreeApi =
       saveCollapsedRepos: RepoId list -> Async<unit>
       saveCanvasPaneOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
+      saveCanvasSize: CanvasSize -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>

@@ -55,6 +55,10 @@ let setCanvasPosition (position: CanvasPosition) (model: Model) =
     { model with Canvas = { model.Canvas with CanvasPosition = position } },
     Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPosition position (fun _ -> NoOp)
 
+let setCanvasSize (size: CanvasSize) (model: Model) =
+    { model with Canvas = { model.Canvas with CanvasSize = size } },
+    Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasSize size (fun _ -> NoOp)
+
 let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let wasAlreadyVisited =
         model.Canvas.VisitedCanvasDocs

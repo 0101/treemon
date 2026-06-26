@@ -180,6 +180,7 @@ let update msg model =
                     { model.Canvas with
                         CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
                         CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
+                        CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
                         PreviousCanvasHashes = currentCanvasHashes
                         CanvasEvents = canvasEvents
                         CanvasSendState = canvasSendState } }
@@ -465,6 +466,8 @@ let update msg model =
 
     | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
 
+    | SetCanvasSize size -> CanvasUpdate.setCanvasSize size model
+
     | SelectCanvasDoc (scopedKey, filename) -> CanvasUpdate.selectCanvasDoc scopedKey filename model
 
     | FocusOverviewCard scopedKey ->
@@ -696,6 +699,11 @@ let view model dispatch =
         | CanvasPosition.Top -> "canvas-top"
         | CanvasPosition.Bottom -> "canvas-bottom"
 
+    let canvasSizeClass =
+        match model.Canvas.CanvasSize with
+        | CanvasSize.Ratio1To1 -> "canvas-size-1to1"
+        | CanvasSize.Ratio2To1 -> "canvas-size-2to1"
+
     let dashboardClass =
         match model.Canvas.CanvasPaneOpen with
         | true -> $"dashboard canvas-open {canvasPositionClass}"
@@ -703,7 +711,7 @@ let view model dispatch =
 
     let layoutClass =
         match model.Canvas.CanvasPaneOpen with
-        | true -> $"app-layout canvas-open {canvasPositionClass}"
+        | true -> $"app-layout canvas-open {canvasPositionClass} {canvasSizeClass}"
         | false -> "app-layout"
 
     let cardProps: CardViewProps =

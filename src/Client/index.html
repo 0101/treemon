@@ -462,6 +462,12 @@
         .app-layout.canvas-bottom > .canvas-pane.open {
             flex: 0 0 50%;
         }
+        .app-layout.canvas-size-2to1.canvas-left > .canvas-pane.open,
+        .app-layout.canvas-size-2to1.canvas-right > .canvas-pane.open,
+        .app-layout.canvas-size-2to1.canvas-top > .canvas-pane.open,
+        .app-layout.canvas-size-2to1.canvas-bottom > .canvas-pane.open {
+            flex: 0 0 66.667%;
+        }
         .app-layout.canvas-right > .canvas-pane { border-left: 1px solid #313244; }
         .app-layout.canvas-left > .canvas-pane { border-right: 1px solid #313244; }
         .app-layout.canvas-top > .canvas-pane { border-bottom: 1px solid #313244; }
@@ -483,6 +489,11 @@
             min-width: 0;
         }
         .canvas-pos-group {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+        .canvas-size-group {
             display: flex;
             gap: 4px;
             flex-shrink: 0;
@@ -513,15 +524,15 @@
             opacity: 0.6;
         }
         .canvas-launch-btn:hover { color: #a6e3a1; border-color: #a6e3a1; opacity: 1; }
-        .canvas-pos-btn {
+        .canvas-pos-btn, .canvas-size-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
             padding: 2px 8px; font-size: 0.85em; cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
             line-height: 1.4; opacity: 0.4;
         }
-        .canvas-pos-btn:hover { background: #45475a; border-color: #585b70; opacity: 1; }
-        .canvas-pos-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; opacity: 0.4; }
-        .canvas-pos-btn.active:hover { opacity: 1; }
+        .canvas-pos-btn:hover, .canvas-size-btn:hover { background: #45475a; border-color: #585b70; opacity: 1; }
+        .canvas-pos-btn.active, .canvas-size-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; opacity: 0.4; }
+        .canvas-pos-btn.active:hover, .canvas-size-btn.active:hover { opacity: 1; }
         .canvas-error-banner {
             display: flex; align-items: center; justify-content: space-between;
             background: #3a1e2a; color: #f38ba8; padding: 4px 12px;
