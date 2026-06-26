@@ -37,14 +37,21 @@ its own worktree. This file is the entry point; detailed designs live in their o
 | 2 | **Port management** — centralize/derive the dev/prod/canvas/vite port assignments | `docs/spec/future/port-management.md` | Idea |
 | 3 | **Canvas roadmap items** — follow-on canvas-pane enhancements | `docs/spec/future/canvas-roadmap.md` | Idea |
 | 4 | **Process: guard against spec drift** — a lightweight check (or review rule) that flags `Key Files` references to moved/renamed modules so docs can't silently rot after refactors | — | Idea |
-| 5 | **Survey other large modules** — apply the same view/state/update extraction lens to the next-largest files (server-side `RefreshScheduler.fs`, `WorktreeApi.fs`, etc.) if they mix concerns | — | Idea (needs investigation) |
+| 5 | **Survey other large modules** — *investigated.* The two largest production modules are `WorktreeApi.fs` (870 L) and `RefreshScheduler.fs` (741 L); both mix concerns. Concrete splits broken out as #8 below (and #7, the `GlobalConfig` extract, now *Done*). (Strict-FP smells are already clean: no stray `let mutable`/loops/`null` in production; `Dictionary` only at cache/registry boundaries.) | — | Done (survey) |
 | 6 | **Remoting CSRF / Origin hardening** — pipeline-level Origin/Referer (and optional custom-header) check so a cross-origin browser page can't drive the unauthenticated loopback Fable.Remoting API (covers the dangerous pre-existing process-launching endpoints, not just watched-roots) | `docs/spec/future/remoting-csrf-hardening.md` | Idea (from focused-review) |
+| 8 | **Split `RefreshScheduler.fs`** — the scheduler module also carries the `DashboardState`/`StateMsg`/`processMessage` state slice (~190 L) and an embedded `CanvasWatchers` filesystem-watcher module (~110 L). Lift one or both out of the scheduling loop into their own files (vertical-slice seam, like canvas/mascot/activity). Behavior-preserving but heavier ripple (26 refs to `RefreshScheduler.DashboardState`/`StateMsg`/`PerRepoState` in `WorktreeApi.fs`). | — | Idea (from survey) |
 
 > Add new candidates here as they surface (often from focused-review findings). Keep the list
 > honest: remove ones that turn out not to be worth it, and record why in the relevant spec.
 
 ## Done
 
+- **`GlobalConfig` store extraction** — lifted the machine-level `~/.treemon/config.json`
+  read/modify/write (single-writer lock, atomic temp-file replace, missing-vs-empty
+  `worktreeRoots` semantics, plus the canvas / collapsed-repos / last-viewed-hashes / editor
+  accessors) out of `WorktreeApi.fs` (870 → 614 L) into `src/Server/GlobalConfig.fs`, leaving the
+  API module with just `IWorktreeApi` wiring + `DashboardResponse` assembly. Behavior-preserving;
+  see `docs/spec/worktree-monitor.md` (Configuration Store).
 - **App.fs view extraction** — `src/Client/App.fs` 1861 → 795 lines. Extracted
   `OverviewViews.fs`, `CardViews.fs` (with `CardViewProps`/`CardCallbacks` records),
   `MascotState.fs`/`MascotView.fs`, and `CanvasView.fs`; flat `Msg` + single `update`

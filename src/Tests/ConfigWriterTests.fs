@@ -5,7 +5,7 @@ open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
 open NUnit.Framework
-open Server.WorktreeApi
+open Server.GlobalConfig
 open Tests.TestUtils
 
 let private withTempDir (action: string -> unit) =
