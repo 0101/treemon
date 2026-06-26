@@ -358,7 +358,8 @@ let private baseDashboard: DashboardResponse =
       EditorName = "VS Code"
       CollapsedRepos = Set.empty
       CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right }
+      CanvasPosition = CanvasPosition.Right
+      CanvasSize = CanvasSize.Ratio1To1 }
 
 let private baseFixture: FixtureData =
     { Worktrees = baseDashboard

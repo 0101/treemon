@@ -70,6 +70,7 @@ type Msg =
     | UserActivity of now: float
     | ToggleCanvasPane
     | SetCanvasPosition of CanvasPosition
+    | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
     | OpenCanvasDoc of scopedKey: string * filename: string

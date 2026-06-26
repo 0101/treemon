@@ -146,6 +146,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
 /// silent argument transposition compile and surface only at runtime.
 type CanvasPaneCallbacks =
     { SetPosition: CanvasPosition -> unit
+      SetSize: CanvasSize -> unit
       SelectDoc: string -> unit
       OnOverviewClick: string -> unit
       OnOverviewDocClick: string -> string -> unit
@@ -154,8 +155,9 @@ type CanvasPaneCallbacks =
       DismissDocError: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
     let { SetPosition = setPosition
+          SetSize = setSize
           SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
@@ -163,13 +165,16 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
           DismissError = dismissError
           DismissDocError = dismissDocError
           LaunchSession = launchSession } = callbacks
-    let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
+    let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
-            prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
-            prop.onClick (fun _ -> setPosition canvasPosition)
+            prop.className (if isActive then $"{baseClass} active" else baseClass)
+            prop.onClick (fun _ -> onClick ())
             prop.title title
             prop.text label
         ]
+
+    let positionButton (canvasPosition: CanvasPosition) label title =
+        toggleButton "canvas-pos-btn" (canvasPosition = position) (fun () -> setPosition canvasPosition) label title
 
     let positionButtons =
         Html.div [
@@ -179,6 +184,18 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                 positionButton CanvasPosition.Right "◨" "Dock right"
                 positionButton CanvasPosition.Top "⬒" "Dock top"
                 positionButton CanvasPosition.Bottom "⬓" "Dock bottom"
+            ]
+        ]
+
+    let sizeButton (canvasSize: CanvasSize) label title =
+        toggleButton "canvas-size-btn" (canvasSize = size) (fun () -> setSize canvasSize) label title
+
+    let sizeButtons =
+        Html.div [
+            prop.className "canvas-size-group"
+            prop.children [
+                sizeButton CanvasSize.Ratio1To1 "1:1" "Canvas same size as dashboard"
+                sizeButton CanvasSize.Ratio2To1 "2:1" "Make the canvas twice the size of the dashboard"
             ]
         ]
 
@@ -209,6 +226,7 @@ let view (isOpen: bool) (position: CanvasPosition) (focusedDoc: (WorktreeStatus 
                                 prop.children [ ArchiveViews.archiveIcon ]
                             ]
                         | _ -> ()
+                        sizeButtons
                         positionButtons
                     ]
                 ]
