@@ -165,13 +165,16 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
           DismissError = dismissError
           DismissDocError = dismissDocError
           LaunchSession = launchSession } = callbacks
-    let positionButton (canvasPosition: CanvasPosition) (label: string) (title: string) =
+    let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
-            prop.className (if canvasPosition = position then "canvas-pos-btn active" else "canvas-pos-btn")
-            prop.onClick (fun _ -> setPosition canvasPosition)
+            prop.className (if isActive then $"{baseClass} active" else baseClass)
+            prop.onClick (fun _ -> onClick ())
             prop.title title
             prop.text label
         ]
+
+    let positionButton (canvasPosition: CanvasPosition) label title =
+        toggleButton "canvas-pos-btn" (canvasPosition = position) (fun () -> setPosition canvasPosition) label title
 
     let positionButtons =
         Html.div [
@@ -184,13 +187,8 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
             ]
         ]
 
-    let sizeButton (canvasSize: CanvasSize) (label: string) (title: string) =
-        Html.button [
-            prop.className (if canvasSize = size then "canvas-size-btn active" else "canvas-size-btn")
-            prop.onClick (fun _ -> setSize canvasSize)
-            prop.title title
-            prop.text label
-        ]
+    let sizeButton (canvasSize: CanvasSize) label title =
+        toggleButton "canvas-size-btn" (canvasSize = size) (fun () -> setSize canvasSize) label title
 
     let sizeButtons =
         Html.div [
