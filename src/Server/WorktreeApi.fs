@@ -189,7 +189,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
+        let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
 
         let repos =
             state.Repos

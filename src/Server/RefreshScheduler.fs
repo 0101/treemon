@@ -518,7 +518,7 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let! state = agent.PostAndAsyncReply(GetState)
         let archivedBranchSets = readArchivedBranchSets rootPaths
         let archivedPaths = resolveArchivedPaths archivedBranchSets state.Repos
-        let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
+        let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
         let ignoredPaths = resolveIgnoredPaths ignorePredicate state.Repos
         let filters = { Archived = archivedPaths; Ignored = ignoredPaths }
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
@@ -694,7 +694,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
-            let ignorePredicate = TreemonConfig.readIgnoreWorktreePatterns () |> TreemonConfig.buildIgnorePredicate
+            let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
             let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
             let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
             let now = DateTimeOffset.UtcNow

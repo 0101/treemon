@@ -2,6 +2,7 @@ module Server.GlobalConfig
 
 open System
 open System.IO
+open System.Text.RegularExpressions
 open Shared
 open Shared.PathUtils
 
@@ -52,6 +53,33 @@ let internal readCollapsedRepos () : Set<RepoId> =
                 else None)
             |> Set.ofSeq
         | _ -> Set.empty)
+
+/// Reads `ignoreWorktreePatterns` from the machine-level config — the regexes for worktrees the
+/// dashboard should hide. Lives here so all global-config reads share the one
+/// `TREEMON_CONFIG_DIR`-aware path.
+let readIgnoreWorktreePatterns () : string list =
+    withConfigDocument [] (fun root ->
+        match root.TryGetProperty("ignoreWorktreePatterns") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
+                else None)
+            |> Seq.toList
+        | _ -> [])
+
+let buildIgnorePredicate (patterns: string list) : string -> bool =
+    let regexes =
+        patterns
+        |> List.filter (not << String.IsNullOrWhiteSpace)
+        |> List.choose (fun pattern ->
+            try Some (Regex($"^(?:{pattern})$", RegexOptions.Compiled))
+            with :? ArgumentException ->
+                Log.log "Config" $"Invalid ignore worktree pattern: '{pattern}'"
+                None)
+    match regexes with
+    | [] -> fun _ -> false
+    | _ -> fun value -> regexes |> List.exists _.IsMatch(value)
 
 /// Serializes every write to the machine-level `config.json`. All global-config writers
 /// (collapsedRepos, canvas state, lastViewedHashes, worktreeRoots) funnel through
@@ -205,14 +233,13 @@ let internal writeCanvasPaneOpen (isOpen: bool) =
 
 let internal readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->
-        match root.TryGetProperty("canvasPosition") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String ->
-            match prop.GetString() with
-            | "left" -> CanvasPosition.Left
-            | "right" -> CanvasPosition.Right
-            | "top" -> CanvasPosition.Top
-            | "bottom" -> CanvasPosition.Bottom
-            | _ -> CanvasPosition.Right
+        let found, prop = root.TryGetProperty("canvasPosition")
+        let s = if found && prop.ValueKind = System.Text.Json.JsonValueKind.String then prop.GetString() else ""
+        match found, s with
+        | true, "left" -> CanvasPosition.Left
+        | true, "right" -> CanvasPosition.Right
+        | true, "top" -> CanvasPosition.Top
+        | true, "bottom" -> CanvasPosition.Bottom
         | _ -> CanvasPosition.Right)
 
 let internal writeCanvasPosition (position: CanvasPosition) =
@@ -226,11 +253,10 @@ let internal writeCanvasPosition (position: CanvasPosition) =
 
 let internal readCanvasSize () : CanvasSize =
     withConfigDocument CanvasSize.Ratio1To1 (fun root ->
-        match root.TryGetProperty("canvasSize") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String ->
-            match prop.GetString() with
-            | "2to1" -> CanvasSize.Ratio2To1
-            | _ -> CanvasSize.Ratio1To1
+        let found, prop = root.TryGetProperty("canvasSize")
+        let s = if found && prop.ValueKind = System.Text.Json.JsonValueKind.String then prop.GetString() else ""
+        match found, s with
+        | true, "2to1" -> CanvasSize.Ratio2To1
         | _ -> CanvasSize.Ratio1To1)
 
 let internal writeCanvasSize (size: CanvasSize) =
