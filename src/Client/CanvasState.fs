@@ -12,6 +12,7 @@ open Elmish
 type CanvasState =
     { CanvasPaneOpen: bool
       CanvasPosition: CanvasPosition
+      CanvasSize: CanvasSize
       ActiveCanvasDoc: Map<string, string>
       VisitedCanvasDocs: Map<string, string list>
       LastViewedHashes: Map<string, Map<string, string>>
@@ -33,6 +34,7 @@ type CanvasState =
 let empty : CanvasState =
     { CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
+      CanvasSize = CanvasSize.Ratio1To1
       ActiveCanvasDoc = Map.empty
       VisitedCanvasDocs = Map.empty
       LastViewedHashes = Map.empty

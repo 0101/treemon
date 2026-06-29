@@ -224,6 +224,22 @@ let internal writeCanvasPosition (position: CanvasPosition) =
         | CanvasPosition.Bottom -> "bottom"
     updateGlobalConfig "canvas position" [ "canvasPosition", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
+let internal readCanvasSize () : CanvasSize =
+    withConfigDocument CanvasSize.Ratio1To1 (fun root ->
+        match root.TryGetProperty("canvasSize") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String ->
+            match prop.GetString() with
+            | "2to1" -> CanvasSize.Ratio2To1
+            | _ -> CanvasSize.Ratio1To1
+        | _ -> CanvasSize.Ratio1To1)
+
+let internal writeCanvasSize (size: CanvasSize) =
+    let value =
+        match size with
+        | CanvasSize.Ratio1To1 -> "1to1"
+        | CanvasSize.Ratio2To1 -> "2to1"
+    updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
+
 let internal readLastViewedHashes () : Map<string, Map<string, string>> =
     withConfigDocument Map.empty (fun root ->
         match root.TryGetProperty("lastViewedHashes") with

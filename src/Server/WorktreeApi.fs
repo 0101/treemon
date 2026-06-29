@@ -63,6 +63,7 @@ let readOnlyApi
       saveCollapsedRepos = fun _ -> async { return () }
       saveCanvasPaneOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
+      saveCanvasSize = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
@@ -225,7 +226,8 @@ let getWorktrees
               EditorName = getEditorConfig () |> snd
               CollapsedRepos = readCollapsedRepos ()
               CanvasPaneOpen = readCanvasPaneOpen ()
-              CanvasPosition = readCanvasPosition () }
+              CanvasPosition = readCanvasPosition ()
+              CanvasSize = readCanvasSize () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -359,7 +361,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -531,6 +533,7 @@ let worktreeApi
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
           saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
+          saveCanvasSize = fun size -> async { writeCanvasSize size }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {

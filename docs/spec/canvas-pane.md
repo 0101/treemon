@@ -55,6 +55,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The pane opens and closes from the header Canvas button and the `C` key.
 - Open or closed state persists in global config.
 - Position selector supports left, right, top, and bottom docking, and the selected position persists.
+- Size selector supports 1:1 (default) and 2:1 — at 2:1 the open pane takes two-thirds of the layout instead of half — and the selected size persists in global config.
 - The pane is scoped to the focused worktree. If that worktree has docs, the pane shows its active doc.
 - Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` now gets a labeled tab (with a compact last-modified age) instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. (See also `docs/spec/canvas-authoring-dx.md`.)
 - Selecting a tab marks that doc viewed.
