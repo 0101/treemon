@@ -41,6 +41,11 @@ let private styleBlock (injection: string) =
 // ── Item 2: injected window.canvasSend helper markers ─────────────────────────
 let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
 
+// ── Injected window.canvasExpand expand-in-place helper markers ───────────────
+let private canvasExpandMarker = "window.canvasExpand=" // unique to canvasExpandScript
+let private expandActionMarker = "'expand-section'"     // the action canvasExpand posts (skill + client contract)
+let private spinnerMarker = "canvas-spinner"            // the themed spinner the helper swaps the button for
+
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
 
@@ -164,6 +169,43 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(canvasSendMarker),
                     "A system view is server-generated and posts nothing, so canvasSend is omitted")
+
+    // ── Injected window.canvasExpand(button, sectionId) helper ────────────────
+    // canvasExpand swaps the clicked button for a themed spinner and posts the flat
+    // {action:'expand-section', section, doc} request to the owning session, so the agent rewrites
+    // the doc in place. It calls canvasSend, so like canvasSend it is AgentDoc-only — a SystemView
+    // has no owner session to receive the request and posts nothing.
+
+    [<Test>]
+    member _.``AgentDoc injection includes the canvasExpand helper and its spinner``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(canvasExpandMarker),
+                    "Agent docs get the window.canvasExpand(button,sectionId) expand-in-place helper")
+        Assert.That(injection, Does.Contain(spinnerMarker),
+                    "canvasExpand ships the .canvas-spinner style it swaps the clicked button for")
+
+    [<Test>]
+    member _.``the canvasExpand helper posts the expand-section action``() =
+        // The action string is the contract shared with the client forwarder (CanvasPane.fs forwards
+        // any non-built-in action to the owning session) and the authoring skill (SKILL.md). If this
+        // marker changes, the skill's documented {action:'expand-section'} message must change too.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(expandActionMarker),
+                    "canvasExpand must post action 'expand-section' (the doc→agent expand contract)")
+
+    [<Test>]
+    member _.``the canvasExpand helper swaps the button only after canvasSend posts``() =
+        // The button→spinner swap is guarded on canvasSend returning true, so a dropped message never
+        // strands a spinner with no agent on the other end.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain("if(!window.canvasSend('expand-section'"),
+                    "canvasExpand must call canvasSend and bail (no spinner swap) when it returns false")
+
+    [<Test>]
+    member _.``SystemView injection omits the canvasExpand helper``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Not.Contain(canvasExpandMarker),
+                    "A system view has no owner session to expand into, so canvasExpand is omitted")
 
     [<Test>]
     member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =

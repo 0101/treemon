@@ -58,6 +58,29 @@ The message shape is flat: `canvasSend('navigate-canvas-doc', { filename })` pos
 window.parent.postMessage({ action: 'my-action', payload: 'data' }, '*');
 ```
 
+### Expand a section in place
+
+When a section's full detail is expensive to produce up front — a long log, a deep dive, a breakdown you must **generate on demand** — render a short summary plus an **Expand** button instead of pre-baking everything. Use the injected **`canvasExpand(button, sectionId)`** helper:
+
+```html
+<section data-section="build-log">
+  <h3>Build log</h3>
+  <p>42 steps, 0 errors. <button onclick="canvasExpand(this, 'build-log')">Show details</button></p>
+</section>
+```
+
+On click the helper swaps the button for a themed spinner (immediate feedback in the pane) and posts `{ action: 'expand-section', section: 'build-log', doc: '<this-file>.html' }` to your session. It fills in `doc` automatically, so you always know which file to edit. Give each expandable block a **stable `sectionId`** (e.g. its `data-section` value) that you can find again in the file.
+
+**When that message arrives, do NOT answer in the terminal — edit the doc.** You receive it as a turn like `[canvas] {"action":"expand-section","section":"build-log","doc":"build-status.html"}`. Open `.agents/canvas/<doc>` with the **edit** tool and replace that section's summary + button with the real expanded content, in place. Treemon morphs the pane, so your content appears exactly where the button (now a spinner) was — leave other sections' buttons untouched. Don't restate the expansion in chat; the canvas *is* the surface. The spinner is transient — your edit replaces it, so you never manage it yourself.
+
+**Already have the content?** Don't round-trip the agent for content you can render now — use a native collapsible instead, and reserve `canvasExpand` for expansions only the agent can produce (run a command, read more files, summarize on demand):
+
+```html
+<details><summary>Show details</summary> …pre-rendered detail… </details>
+```
+
+If `canvasExpand` isn't available, the raw contract is the same flat message — `window.parent.postMessage({ action: 'expand-section', section: 'build-log', doc: 'build-status.html' }, '*')` — handled identically.
+
 ### Don't block the conversation when the doc collects the answer
 
 If the canvas doc itself gathers the user's input — choices, a form, buttons, a comment box — **do not** also call `ask_user` (or any other blocking prompt). The doc's `canvasSend` reply *is* the channel for the answer. Calling `ask_user` at the same time pops a separate blocking modal, freezes the session, and prevents the user from responding through the doc you just built.

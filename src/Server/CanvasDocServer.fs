@@ -279,6 +279,31 @@ let private canvasSendScript =
       "})()</script>" ]
     |> String.concat ""
 
+/// window.canvasExpand(button, sectionId): the doc→agent "expand this section in place" helper plus
+/// its spinner style, injected in the AgentDoc arm only (it calls window.canvasSend, and only an
+/// AgentDoc has an owner session to receive the request). On click it (1) sends the flat
+/// {action:'expand-section', section, doc} message — `doc` is THIS doc's filename (the last
+/// location.pathname segment, decoded), so the owning agent knows which .agents/canvas/<doc> file to
+/// edit — and (2) swaps the triggering button for a themed spinner, giving the user immediate in-pane
+/// feedback while the agent works. The agent replaces the button with the real expanded content;
+/// Treemon's content-change morph then swaps the spinner for that content, in place where the button
+/// was. The button is swapped ONLY after canvasSend actually posts (returns true), so a dropped
+/// message (e.g. oversized — unreachable here, but defensive) never strands a spinner with no agent on
+/// the other end. The spinner is drawn with currentColor + a CSS keyframe so it stays on-theme without
+/// depending on any doc-defined variable; `.canvas-spinner` is a normal-specificity utility class an
+/// author can still override. Injected after canvasSendScript (the helper it calls).
+let private canvasExpandScript =
+    "<style>@keyframes canvas-spin{to{transform:rotate(360deg)}}.canvas-spinner{display:inline-flex;align-items:center;gap:.5em;color:inherit}.canvas-spinner::before{content:\"\";width:1em;height:1em;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:canvas-spin .6s linear infinite;opacity:.85}</style>"
+    + ([ "<script>(function(){"
+         "window.canvasExpand=function(btn,section){"
+         "if(!section)return false;"
+         "var doc=decodeURIComponent((location.pathname.split('/').pop())||'');"
+         "if(!window.canvasSend('expand-section',{section:section,doc:doc}))return false;"
+         "if(btn){var s=document.createElement('span');s.className='canvas-spinner';s.setAttribute('role','status');s.textContent='Expanding…';btn.replaceWith(s)}"
+         "return true}"
+         "})()</script>" ]
+       |> String.concat "")
+
 /// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
 /// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
 /// unhandledrejection listener and forwards each doc-side failure to the pane as the FLAT
@@ -323,8 +348,8 @@ let private errorOverlayScript (filename: string) =
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, the JS error overlay, and the idiomorph runtime +
-/// morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
+/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper, the JS
+/// error overlay, and the idiomorph runtime + morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
 /// doc-side error carries its own identity (the emitter), letting the pane attribute it correctly
 /// even when other docs are mounted as hidden iframes. It is unused for SystemViews (no overlay).
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
@@ -334,7 +359,7 @@ let private errorOverlayScript (filename: string) =
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> baseStyle + linkInterceptor
-    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
