@@ -234,8 +234,11 @@ type DemoModeTests() =
             TestContext.Out.WriteLine(
                 $"Initial state - working: {initialWorking}, waiting: {initialWaiting}, done: {initialDone}")
 
-            // Wait for a state transition (up to 12s = full cycle + buffer)
-            let deadline = DateTime.UtcNow.AddSeconds(12.0)
+            // The demo loops every 24s (12 frames x 2s); the only coding-tool dot that toggles is
+            // the auth card (Done <-> Working), which stays in one state for up to 14s across the
+            // cycle wrap. Wait a full cycle plus buffer so the opposite state is observed no matter
+            // which phase the page loaded in.
+            let deadline = DateTime.UtcNow.AddSeconds(26.0)
             let mutable transitioned = false
 
             while DateTime.UtcNow < deadline && not transitioned do

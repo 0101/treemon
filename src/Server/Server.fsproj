@@ -18,6 +18,7 @@
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />
     <Compile Include="SessionManager.fs" />
+    <Compile Include="GlobalConfig.fs" />
     <Compile Include="TreemonConfig.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="BeadsStatus.fs" />
