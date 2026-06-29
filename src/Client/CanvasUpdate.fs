@@ -208,6 +208,21 @@ let canvasDocError (scopedKey: string) (filename: string) (message: string) (mod
     else
         model, Cmd.none
 
+/// A canvas doc posted a message with no top-level string `action`, so CanvasPane could not route it
+/// and surfaced it here instead of dropping it silently (the focused-review regression). Unlike
+/// canvasDocError, a malformed message carries no self-identifying wt/doc fields, so it is attributed
+/// to the active *visible* doc — which is, by definition, a known doc of a known worktree, satisfying
+/// the same banner invariants canvasDocError relies on. With no active visible doc there is nothing to
+/// attribute it to, so it is dropped. (Arrival + keys are already logged in CanvasPane.messageListener.)
+let canvasMalformedDocMessage (keys: string) (model: Model) =
+    match activeVisibleDoc model with
+    | Some (scopedKey, filename) ->
+        let message =
+            "This canvas doc sent a message with no \"action\" field, so Treemon ignored it. "
+            + "The doc may be out of date — try regenerating it."
+        { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
+    | None -> model, Cmd.none
+
 let dismissCanvasDocError (model: Model) =
     { model with Canvas = { model.Canvas with DocError = None } }, Cmd.none
 
@@ -227,4 +242,5 @@ let messageListener (dispatch: Dispatch<Msg>) =
         { Dispatch = CanvasMessageReceived >> dispatch
           SelectDoc = NavigateCanvasDoc >> dispatch
           OnMorphComplete = fun () -> dispatch MorphComplete
-          OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message)) }
+          OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message))
+          OnMalformedMessage = fun keys -> dispatch (CanvasMalformedDocMessage keys) }

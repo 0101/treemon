@@ -495,6 +495,8 @@ let update msg model =
 
     | CanvasDocError (scopedKey, filename, message) -> CanvasUpdate.canvasDocError scopedKey filename message model
 
+    | CanvasMalformedDocMessage keys -> CanvasUpdate.canvasMalformedDocMessage keys model
+
     | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
 
     | MarkDocViewed (scopedKey, filename) ->

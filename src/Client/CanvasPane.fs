@@ -400,18 +400,22 @@ type MessageListenerCallbacks =
       /// The active doc finished an idiomorph (morph-complete).
       OnMorphComplete: unit -> unit
       /// A doc-side JS error arrived: (emitting worktree scopedKey, emitting filename, display message).
-      OnDocError: string -> string -> string -> unit }
+      OnDocError: string -> string -> string -> unit
+      /// A canvas-origin object message arrived with no top-level string `action`, from the active
+      /// (non-hidden) doc — surfaced instead of silently dropped. Carries the message's top-level keys.
+      OnMalformedMessage: string -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
           SelectDoc = selectDoc
           OnMorphComplete = onMorphComplete
-          OnDocError = onDocError } = callbacks
+          OnDocError = onDocError
+          OnMalformedMessage = onMalformedMessage } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
             if me.origin = CanvasOrigin
-               && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object' && typeof $0.action === 'string'"
+               && Fable.Core.JsInterop.emitJsExpr<bool> me.data "$0 != null && typeof $0 === 'object'"
             then
                 // True when THIS message came from a mounted-but-HIDDEN canvas iframe (a visited doc that
                 // stays mounted and keeps running JS) rather than the active one. The origin check above
@@ -422,48 +426,58 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                 // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
                 let isFromHiddenCanvasIframe () =
                     Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe:not(.canvas-iframe-active)'), function(f){return f.contentWindow === $0.source})"
-                let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
-                if action = "navigate-canvas-doc" then
-                    match Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename" |> Option.ofObj with
-                    | Some filename when filename <> "" ->
-                        if isFromHiddenCanvasIframe () then
-                            Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: from a hidden background doc iframe"
-                        else
-                            Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
-                            selectDoc filename
-                    | _ -> ()
-                elif action = "morph-complete" then
-                    Fable.Core.JS.console.log "[canvas] morph-complete received"
-                    onMorphComplete ()
-                elif action = "canvas-doc-error" then
-                    // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
-                    // in the doc-error banner, never forwarded to the session like a normal payload.
-                    // The `wt`/`doc` fields are the emitting worktree + filename, so the reducer stamps
-                    // the error with the doc that threw (not the active tab); they are re-validated
-                    // against that worktree's docs there. wt/message/line/col cross an untrusted '*'
-                    // boundary, so each field is read with a null-safe String() coercion and the display
-                    // string "msg (line N:C)" is assembled here in F#.
-                    let scopedKey = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.wt==='string'?$0.wt:''"
-                    let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.doc==='string'?$0.doc:''"
-                    let rawMessage = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.message==null?'Unknown error':String($0.message)"
-                    let line = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.line==null?'':String($0.line)"
-                    let col = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.col==null?'':String($0.col)"
-                    let body = if rawMessage.Length > 500 then rawMessage.Substring(0, 500) else rawMessage
-                    let message =
-                        if line = "" then body
-                        elif col = "" then $"{body} (line {line})"
-                        else $"{body} (line {line}:{col})"
-                    Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received from {scopedKey}/{filename}: {message}")
-                    onDocError scopedKey filename message
-                else
-                    let payload = Fable.Core.JS.JSON.stringify me.data
-                    Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
-                    if isFromHiddenCanvasIframe () then
-                        Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: from a hidden background doc iframe (action={action})")
-                    elif payload.Length <= MaxPayloadBytes then
-                        dispatch payload
+                if Fable.Core.JsInterop.emitJsExpr<bool> me.data "typeof $0.action === 'string'" then
+                    let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
+                    if action = "navigate-canvas-doc" then
+                        match Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename" |> Option.ofObj with
+                        | Some filename when filename <> "" ->
+                            if isFromHiddenCanvasIframe () then
+                                Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: from a hidden background doc iframe"
+                            else
+                                Fable.Core.JS.console.log ($"[canvas] navigate-canvas-doc: filename={filename}")
+                                selectDoc filename
+                        | _ -> ()
+                    elif action = "morph-complete" then
+                        Fable.Core.JS.console.log "[canvas] morph-complete received"
+                        onMorphComplete ()
+                    elif action = "canvas-doc-error" then
+                        // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
+                        // in the doc-error banner, never forwarded to the session like a normal payload.
+                        // The `wt`/`doc` fields are the emitting worktree + filename, so the reducer stamps
+                        // the error with the doc that threw (not the active tab); they are re-validated
+                        // against that worktree's docs there. wt/message/line/col cross an untrusted '*'
+                        // boundary, so each field is read with a null-safe String() coercion and the display
+                        // string "msg (line N:C)" is assembled here in F#.
+                        let scopedKey = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.wt==='string'?$0.wt:''"
+                        let filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "typeof $0.doc==='string'?$0.doc:''"
+                        let rawMessage = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.message==null?'Unknown error':String($0.message)"
+                        let line = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.line==null?'':String($0.line)"
+                        let col = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.col==null?'':String($0.col)"
+                        let body = if rawMessage.Length > 500 then rawMessage.Substring(0, 500) else rawMessage
+                        let message =
+                            if line = "" then body
+                            elif col = "" then $"{body} (line {line})"
+                            else $"{body} (line {line}:{col})"
+                        Fable.Core.JS.console.warn ($"[canvas] canvas-doc-error received from {scopedKey}/{filename}: {message}")
+                        onDocError scopedKey filename message
                     else
-                        Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
+                        let payload = Fable.Core.JS.JSON.stringify me.data
+                        Fable.Core.JS.console.log ($"[canvas] postMessage received: origin={me.origin}, action={action}, payload length={payload.Length}")
+                        if isFromHiddenCanvasIframe () then
+                            Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: from a hidden background doc iframe (action={action})")
+                        elif payload.Length <= MaxPayloadBytes then
+                            dispatch payload
+                        else
+                            Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
+                elif not (isFromHiddenCanvasIframe ()) then
+                    // Canvas-origin, valid object, but NO top-level string `action` — the focused-review
+                    // regression. Previously the combined gate made the whole `if` false and the message
+                    // vanished with no log/banner. Surface it (banner + warn) only for the active doc; a
+                    // hidden background iframe must stay silent so the banner only ever shows for the doc
+                    // the user is looking at. Other origins are already filtered out by the outer guard.
+                    let keys = Fable.Core.JsInterop.emitJsExpr<string> me.data "Object.keys($0).join(', ')"
+                    Fable.Core.JS.console.warn ($"[canvas] message ignored: no 'action' field (keys: {keys})")
+                    onMalformedMessage keys
 
     Dom.window.addEventListener ("message", handler)
 
