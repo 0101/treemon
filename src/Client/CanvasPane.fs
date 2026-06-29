@@ -65,6 +65,14 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
     $"{CanvasOrigin}/{encodedPath}/{encodedFilename}"
 
+/// Open the doc as a standalone top-level page in a normal browser tab (the same URL the iframe
+/// loads). In the pane the doc lives inside a height:100% internal-scroll iframe, which defeats
+/// full-page screenshots; as a top-level page it scrolls naturally so the whole doc can be
+/// captured (e.g. Edge's "Capture full page"). From an installed PWA this opens the user's
+/// default browser, which is exactly where the screenshot tooling works.
+let openDocInBrowserTab (wt: WorktreeStatus) (doc: CanvasDoc) : unit =
+    Fable.Core.JsInterop.emitJsExpr (iframeSrc wt doc) "window.open($0,'_blank','noopener')"
+
 let private latestDocModified (wt: WorktreeStatus) =
     wt.CanvasDocs
     |> List.map _.LastModified
@@ -310,7 +318,8 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 Html.button [
                     prop.className cls
                     prop.onClick (fun _ -> selectDoc d.Filename)
-                    prop.title d.Filename
+                    prop.onDoubleClick (fun _ -> openDocInBrowserTab wt d)
+                    prop.title $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
                     prop.children [
                         livenessDotFor bridgeLiveness d
                         Html.text (d.Filename.Replace(".html", ""))
