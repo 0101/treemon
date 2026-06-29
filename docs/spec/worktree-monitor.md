@@ -161,7 +161,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 
 ### Demo Mode
 
-`treemon.ps1 demo` launches the server with `--demo` flag, cycling through pre-built `FixtureData` frames (~10s loop) that cover all dashboard features. No client changes — same poll-based rendering. See `src/Server/DemoFixture.fs`.
+`treemon.ps1 demo` launches the server with `--demo` flag, cycling through pre-built `FixtureData` frames (~24s loop) that cover all dashboard features. No client changes — same poll-based rendering. See `src/Server/DemoFixture.fs`.
 
 ### Resilience
 
