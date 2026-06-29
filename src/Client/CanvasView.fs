@@ -66,6 +66,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
 
     let canvasCallbacks: CanvasPane.CanvasPaneCallbacks =
         { SetPosition = SetCanvasPosition >> dispatch
+          SetSize = SetCanvasSize >> dispatch
           SelectDoc = selectCanvasDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
@@ -74,4 +75,4 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           DismissDocError = (fun () -> dispatch DismissCanvasDocError)
           LaunchSession = launchCanvasSession }
 
-    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition model.Canvas.CanvasSize (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks

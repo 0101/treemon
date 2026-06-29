@@ -62,6 +62,7 @@ let readOnlyApi
       saveCollapsedRepos = fun _ -> async { return () }
       saveCanvasPaneOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
+      saveCanvasSize = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
@@ -394,6 +395,22 @@ let private writeCanvasPosition (position: CanvasPosition) =
         | CanvasPosition.Bottom -> "bottom"
     updateGlobalConfig "canvas position" [ "canvasPosition", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
+let private readCanvasSize () : CanvasSize =
+    withConfigDocument CanvasSize.Ratio1To1 (fun root ->
+        match root.TryGetProperty("canvasSize") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String ->
+            match prop.GetString() with
+            | "2to1" -> CanvasSize.Ratio2To1
+            | _ -> CanvasSize.Ratio1To1
+        | _ -> CanvasSize.Ratio1To1)
+
+let private writeCanvasSize (size: CanvasSize) =
+    let value =
+        match size with
+        | CanvasSize.Ratio1To1 -> "1to1"
+        | CanvasSize.Ratio2To1 -> "2to1"
+    updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
+
 let private readLastViewedHashes () : Map<string, Map<string, string>> =
     withConfigDocument Map.empty (fun root ->
         match root.TryGetProperty("lastViewedHashes") with
@@ -481,7 +498,8 @@ let getWorktrees
               EditorName = getEditorConfig () |> snd
               CollapsedRepos = readCollapsedRepos ()
               CanvasPaneOpen = readCanvasPaneOpen ()
-              CanvasPosition = readCanvasPosition () }
+              CanvasPosition = readCanvasPosition ()
+              CanvasSize = readCanvasSize () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -615,7 +633,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -787,6 +805,7 @@ let worktreeApi
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
           saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
+          saveCanvasSize = fun size -> async { writeCanvasSize size }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {
