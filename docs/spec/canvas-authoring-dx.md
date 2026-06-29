@@ -26,9 +26,30 @@ chosen by `buildInjection` (`src/Server/CanvasDocServer.fs`):
 
 ### 1. Base dark-theme CSS reset (Phase 6.1)
 
-`baseStyle` grows from scrollbar-only CSS to a small **zero-specificity** base reset: dark
-background/foreground, system font stack, and sensible defaults for `body`, headings, code,
-tables, and links — injected for **both** doc kinds (same slot as today).
+`baseStyle` grows from scrollbar-only CSS to an opinionated **zero-specificity** dark-theme
+typographic base, injected for **both** doc kinds (same slot as today). Beyond the dark
+background/foreground and system font stack it bakes in a small, *grounded* reading baseline so a
+plain doc looks good with no authored CSS — and so agents stop hand-rolling (and drifting on) the
+same boilerplate:
+
+- **Readable body** — 16px / `line-height:1.6` (WCAG 1.4.12 requires content to survive `1.5`),
+  with consistent vertical rhythm (uniform block spacing, headings set close to the content they
+  introduce with more space above than below) and headings slightly brighter than body for contrast.
+- **Type scale** — a 1.25 "Major Third" heading scale (`h1` 2rem, `h2` 1.5rem, `h3` 1.25rem,
+  `h4` 1.1rem) so hierarchy reads from size + weight + margin, not borders.
+- **Measure** — `p`/`li`/`blockquote` capped at ~70ch (Bringhurst's 45–75ch), on text elements
+  only so tables and dashboard layouts stay full-width.
+- **Design tokens** — the app palette (`--bg-*`, `--border`, `--text-*`, `--accent`, `--status-*`),
+  mirrored from `BeadspaceTemplate.html`, exposed via `:where(:root)` so docs reference
+  `var(--text-muted)` etc. instead of reinventing a palette (`--text-muted` is nudged lighter than
+  the dashboard's `#6c7086` to clear AA contrast on long-form text).
+- **Quiet defaults that steer away from boxes** — tables get a header underline + row separators
+  (no full gridlines), `<blockquote>` is a light border-left callout, and form controls
+  (`button`/`textarea`/`input`/`select`) are themed so the common "collect input" doc needs no
+  control CSS.
+
+The `SKILL.md` styling guidance teaches authors to lean on this base (whitespace + type) rather than
+wrapping every section in a bordered card.
 
 - Defaults must be overridable: a doc that sets its own styles wins. The reset is injected at the
   `</head>` point (`CanvasDocServer.handleCanvasRequest`) — i.e. **after** any `<head>` styles the
@@ -114,14 +135,16 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
 ## Technical Approach
 
 ### Server injection — `src/Server/CanvasDocServer.fs`
-- **Base CSS reset:** extend the `baseStyle` string literal. Wrap every reset selector in
-  `:where(...)` (zero specificity), no `!important`, so doc rules and the `SystemView` template's
-  own `body`-selector rules win the cascade despite the reset being injected after them at `</head>`.
-  This per-property override holds only for rules on the element selector itself (e.g. `body{…}`,
-  specificity 0,0,1) — a box property the `SystemView` template zeroes through a *universal*
-  `*{margin:0;padding:0}` reset (also 0,0,0) would lose the source-order tiebreak to the later
-  `:where(body){padding:1rem}`, so `BeadspaceTemplate.html` resets margin/padding on its `body`
-  selector directly. Still injected for both kinds via `buildInjection`.
+- **Base CSS reset:** extend the `baseStyle` string literal — the typographic base, the type scale,
+  the ~70ch measure, the `:where(:root)` design tokens, and the quiet table/blockquote/form-control
+  defaults. Wrap every selector (including `:root`) in `:where(...)` (zero specificity), no
+  `!important`, so doc rules and the `SystemView` template's own element-selector rules win the
+  cascade despite the reset being injected after them at `</head>`. This per-property override holds
+  only for rules on the element selector itself (e.g. `body{…}`, specificity 0,0,1) — a box property
+  the `SystemView` template zeroes through a *universal* `*{margin:0;padding:0}` reset (also 0,0,0)
+  would lose the source-order tiebreak to the later `:where(body){padding:1.5rem}`, so
+  `BeadspaceTemplate.html` resets margin/padding on its `body` selector directly. Still injected for
+  both kinds via `buildInjection`.
 - **`canvasSend`:** add a new injected script constant (mirroring `bridgeScript`'s IIFE style) and
   append it in the `AgentDoc` arm of `buildInjection` only. Implement the size check with the same
   metric the client uses — `JSON.stringify({ action, ...payload }).length` compared against

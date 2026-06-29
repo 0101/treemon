@@ -54,11 +54,31 @@ type CanvasInjectionThemeE2ETests() =
 
             let! bg = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
             let! color = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).color")
-            // Injected reset paints :where(body){background:#1e1e2e;color:#cdd6f4}
+            // Injected reset paints :where(body){background:var(--bg-deep);color:var(--text-primary)},
+            // resolving via the :where(:root) tokens to #1e1e2e / #cdd6f4.
             Assert.That(bg, Is.EqualTo("rgb(30, 30, 46)"), $"body background must be the dark reset #1e1e2e (was {bg})")
             Assert.That(bg, Is.Not.EqualTo("rgb(255, 255, 255)"), "body must NOT be default white")
             Assert.That(bg, Is.Not.EqualTo("rgba(0, 0, 0, 0)"), "body must NOT be transparent")
             Assert.That(color, Is.EqualTo("rgb(205, 214, 244)"), $"text colour must be the light reset #cdd6f4 for readability (was {color})")
+        }
+
+    [<Test>]
+    member this.``Item 1: the base bakes in a readable type scale and measure (typography over boxes)``() =
+        task {
+            let doc = "<!doctype html><html><head><title>typo</title></head><body><h1>Title</h1><p id=p>Body copy long enough to need a measure cap for comfortable reading across the pane.</p></body></html>"
+            let served = injectInto AgentDoc "typo.html" doc
+            do! this.ServeAndGoto "**/typo.html" "http://127.0.0.1:5002/wt/typo.html" served
+
+            let! bodyFont = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).fontSize")
+            let! bodyLine = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).lineHeight")
+            let! h1Font = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontSize")
+            let! pMaxWidth = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.getElementById('p')).maxWidth")
+            // 16px / line-height 1.6 base + a 1.25 "Major Third" scale (h1 = 2rem = 32px) + a ~70ch
+            // measure on text, so a plain doc reads via type and whitespace rather than boxes.
+            Assert.That(bodyFont, Is.EqualTo("16px"), $"body should default to a readable 16px (was {bodyFont})")
+            Assert.That(bodyLine, Is.EqualTo("25.6px"), $"body line-height should be 1.6x = 25.6px (was {bodyLine})")
+            Assert.That(h1Font, Is.EqualTo("32px"), $"h1 should be 2rem = 32px from the type scale (was {h1Font})")
+            Assert.That(pMaxWidth, Is.Not.EqualTo("none"), $"paragraphs should be capped to a readable measure, not full-width (was {pMaxWidth})")
         }
 
     [<Test>]
@@ -94,8 +114,8 @@ type CanvasInjectionThemeE2ETests() =
             Assert.That(bg, Is.EqualTo("rgb(30, 30, 46)"), $"SystemView body must stay var(--bg-deep) #1e1e2e (was {bg})")
 
             // The body box reset must survive too: the template zeroes padding on its `body` selector
-            // directly, so the injected zero-specificity :where(body){padding:1rem} (which would win the
-            // source-order tiebreak against the universal *{padding:0}) can't add a 1rem gap.
+            // directly, so the injected zero-specificity :where(body){padding:1.5rem} (which would win the
+            // source-order tiebreak against the universal *{padding:0}) can't add a gap.
             let! padding = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).padding")
             Assert.That(padding, Is.EqualTo("0px"), $"SystemView body padding must stay 0 under the reset (was {padding})")
         }
