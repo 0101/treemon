@@ -34,7 +34,7 @@ same boilerplate:
 
 - **Readable body** — 16px / `line-height:1.6` (WCAG 1.4.12 requires content to survive `1.5`),
   with consistent vertical rhythm (uniform block spacing, headings set close to the content they
-  introduce with more space above than below) and headings slightly brighter than body for contrast.
+  introduce with more space above than below).
 - **Type scale** — a 1.25 "Major Third" heading scale (`h1` 2rem, `h2` 1.5rem, `h3` 1.25rem,
   `h4` 1.1rem) so hierarchy reads from size + weight + margin, not borders.
 - **Measure** — `p`/`li`/`blockquote` capped at ~70ch (Bringhurst's 45–75ch), on text elements

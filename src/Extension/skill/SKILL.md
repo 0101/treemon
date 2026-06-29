@@ -31,7 +31,7 @@ Docs read best when hierarchy comes from **size, weight, and spacing** rather th
 
 - Lead with headings and short paragraphs and let the margins do the separating — you don't need a bordered card around every section.
 - Use `var(--text-muted)` (or a `<small>`) for secondary text instead of boxing it off.
-- Reserve a visible container for genuinely set-apart content — a single callout, a code block, the input form. A semantic `<blockquote>` is pre-styled as a light, non-boxy callout.
+- Reserve a visible container for genuinely set-apart content — a single callout, a code block, the input form. A semantic `<blockquote>` is pre-styled as a light, non-boxy callout. **A diagram is a good place for a box:** wrapping an SVG/figure in a subtle panel (`var(--bg-surface)`, some padding, a little radius) grounds it and fixes the floating-in-space look — boxes aren't banned, just don't put one around *everything*.
 - Keep tables to the default quiet style; resist a border around every cell.
 - Use the tokens for accents (`--accent`, `--status-*`) so docs stay consistent with the rest of Treemon.
 
