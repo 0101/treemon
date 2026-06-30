@@ -222,8 +222,8 @@ let private bridgeScript =
 /// :where(body){padding:2rem}, so the template resets margin/padding on `body` directly to keep its
 /// padding:0. The design tokens are likewise wrapped in :where(:root) so a doc's own :root{--x} wins.
 ///
-/// Values are grounded, not invented: 16px / line-height 1.6 (WCAG 1.4.12 requires surviving 1.5);
-/// a 1.25 "Major Third" modular type scale (h1 2rem / h2 1.5rem / h3 1.25rem); a ~70ch measure on
+/// Values are grounded, not invented: 15px / line-height 1.55 (WCAG 1.4.12 requires surviving 1.5);
+/// a hand-tuned serif type scale (h1 1.85rem / h2 1.35rem / h3 1.12rem / h4 1rem); a ~70ch measure on
 /// text elements (Bringhurst, 45–75ch). Tokens mirror the app palette (BeadspaceTemplate.html) — names
 /// and values — except --text-muted is nudged lighter (#9399b2 vs the dashboard's denser #6c7086) to
 /// clear WCAG AA contrast on long-form reading — so docs reference var(--text-muted)/var(--accent)/…

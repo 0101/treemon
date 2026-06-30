@@ -36,7 +36,7 @@ same boilerplate:
   with consistent vertical rhythm (uniform block spacing, headings set close to the content they
   introduce with more space above than below).
 - **Type scale** — serif headings (`ui-serif`) at weight 500 (`h1` 1.85rem, `h2` 1.35rem, `h3` 1.12rem,
-  `h4` 1.05rem) so hierarchy reads from size, the serif/sans contrast, and margin, not borders.
+  `h4` 1rem) so hierarchy reads from size, the serif/sans contrast, and margin, not borders.
 - **Measure** — `p`/`li`/`blockquote` capped at ~70ch (Bringhurst's 45–75ch), on text elements
   only so tables and dashboard layouts stay full-width.
 - **Design tokens** — the app palette (`--bg-*`, `--border`, `--text-*`, `--accent`, `--status-*`),
@@ -142,7 +142,7 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
   cascade despite the reset being injected after them at `</head>`. This per-property override holds
   only for rules on the element selector itself (e.g. `body{…}`, specificity 0,0,1) — a box property
   the `SystemView` template zeroes through a *universal* `*{margin:0;padding:0}` reset (also 0,0,0)
-  would lose the source-order tiebreak to the later `:where(body){padding:1.5rem}`, so
+  would lose the source-order tiebreak to the later `:where(body){padding:2rem 2.25rem}`, so
   `BeadspaceTemplate.html` resets margin/padding on its `body` selector directly. Still injected for
   both kinds via `buildInjection`.
 - **`canvasSend`:** add a new injected script constant (mirroring `bridgeScript`'s IIFE style) and

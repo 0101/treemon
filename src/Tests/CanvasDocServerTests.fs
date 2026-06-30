@@ -101,8 +101,8 @@ type BuildInjectionTests() =
     [<Test>]
     member _.``the base reset bakes in design tokens, a type scale, and a readable measure``() =
         // Beyond dark colours the base steers plain docs toward typography over boxes: a :where(:root)
-        // token palette (so docs stop reinventing one), a 1.25 Major Third heading scale (hierarchy
-        // from size, not borders), and a ~70ch measure on text elements (readable line length).
+        // token palette (so docs stop reinventing one), a serif heading scale (h1 1.85rem / h2 1.35rem
+        // / h3 1.12rem — hierarchy from size, not borders), and a ~70ch measure on text elements (readable line length).
         [ SystemView; AgentDoc ]
         |> List.iter (fun kind ->
             let injection = buildInjection kind "status.html"

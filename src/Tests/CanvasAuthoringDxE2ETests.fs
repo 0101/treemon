@@ -118,7 +118,7 @@ type CanvasInjectionThemeE2ETests() =
             Assert.That(bg, Is.EqualTo("rgb(30, 30, 46)"), $"SystemView body must stay var(--bg-deep) #1e1e2e (was {bg})")
 
             // The body box reset must survive too: the template zeroes padding on its `body` selector
-            // directly, so the injected zero-specificity :where(body){padding:1.5rem} (which would win the
+            // directly, so the injected zero-specificity :where(body){padding:2rem 2.25rem} (which would win the
             // source-order tiebreak against the universal *{padding:0}) can't add a gap.
             let! padding = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).padding")
             Assert.That(padding, Is.EqualTo("0px"), $"SystemView body padding must stay 0 under the reset (was {padding})")
