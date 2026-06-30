@@ -13,27 +13,34 @@ Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files 
 
 ## Styling
 
-Canvas docs are displayed in a dark-themed IDE. Use self-contained inline CSS (no external stylesheets). Recommended base styles:
+Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a typographic base into every doc** — so most docs need little or no CSS of their own. Out of the box you get:
 
-```css
-body {
-  background: #1e1e2e;
-  color: #cdd6f4;
-  font-family: system-ui, -apple-system, sans-serif;
-  margin: 0;
-  padding: 16px;
-}
-a { color: #89b4fa; }
-button {
-  background: #45475a;
-  color: #cdd6f4;
-  border: 1px solid #585b70;
-  border-radius: 4px;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-button:hover { background: #585b70; }
-```
+- Dark theme, system font, a readable **15px / line-height 1.55** body, and a serif heading scale (`h1`…`h4`).
+- A comfortable line length (~70ch) on paragraphs and list items.
+- Quiet tables (header underline + row separators, no heavy gridlines), styled `code`/`pre`, links, scrollbars, and themed form controls (`button`, `textarea`, `input`, `select`).
+- Design tokens as CSS variables — reuse these instead of inventing colors:
+  `--bg-deep` `--bg-surface` `--bg-elevated` `--border` `--border-bright`
+  `--text-primary` `--text-secondary` `--text-muted` `--accent`
+  `--status-wip` `--status-blocked` `--status-closed`
+
+Your own rules always win (the base is zero-specificity), so override anything freely — but you rarely need to redeclare `body`, headings, `code`, tables, or buttons.
+
+### Aim for whitespace and type, not boxes
+
+Docs read best when hierarchy comes from **size, weight, and spacing** rather than borders and filled panels. A few gentle nudges:
+
+- Lead with headings and short paragraphs and let the margins do the separating — you don't need a bordered card around every section.
+- Nest headings by **structure, not size**: go `h1` → `h2` → `h3` in order and don't skip a level (no `h1` followed straight by `h3`). The base already sizes each level, so you never need to jump levels just to get a smaller-looking heading — pick the level that reflects the outline, and let the type scale handle the size.
+- Use `var(--text-muted)` (or a `<small>`) for secondary text instead of boxing it off.
+- Reserve a visible container for genuinely set-apart content — a single callout, a code block, the input form. A semantic `<blockquote>` is pre-styled as a light, non-boxy callout. **A diagram is a good place for a box:** wrapping an SVG/figure in a subtle panel (`var(--bg-surface)`, some padding, a little radius) grounds it and fixes the floating-in-space look — boxes aren't banned, just don't put one around *everything*.
+- Keep tables to the default quiet style; resist a border around every cell.
+- Use the tokens for accents (`--accent`, `--status-*`) so docs stay consistent with the rest of Treemon.
+
+If you do set your own colors, match the dark theme — the tokens above are the palette.
+
+### Use the visual medium
+
+A canvas doc can do what markdown can't — so when a concept is visual, *show* it. Lean on real HTML/SVG: a small inline `<svg>` for a flow, timeline, or state diagram; a table for comparisons; nested lists for hierarchy. A wall of paragraphs that would read the same as a `.md` file is a missed opportunity — a diagram or a labelled flow usually explains a pipeline, schedule, or decision far faster than prose.
 
 ## Interactivity
 
@@ -79,46 +86,19 @@ Users can archive docs to `.agents/canvas/archive/`. Don't rely on canvas docs f
 
 ## Minimal template
 
+The base theme already styles `body`, headings, and the form controls, so an input-collecting doc can be tiny — no `<style>` block needed:
+
 ```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<style>
-  body {
-    background: #1e1e2e;
-    color: #cdd6f4;
-    font-family: system-ui, -apple-system, sans-serif;
-    margin: 0;
-    padding: 16px;
-  }
-  textarea {
-    width: 100%;
-    min-height: 80px;
-    background: #313244;
-    color: #cdd6f4;
-    border: 1px solid #585b70;
-    border-radius: 4px;
-    padding: 8px;
-    resize: vertical;
-    box-sizing: border-box;
-  }
-  button {
-    margin-top: 8px;
-    background: #45475a;
-    color: #cdd6f4;
-    border: 1px solid #585b70;
-    border-radius: 4px;
-    padding: 6px 16px;
-    cursor: pointer;
-  }
-  button:hover { background: #585b70; }
-</style>
 </head>
 <body>
-  <h3>Comment</h3>
+  <h1>Comment</h1>
+  <p><small>Share a quick note — it comes straight back to the agent.</small></p>
   <textarea id="msg" placeholder="Type a message..."></textarea>
-  <button onclick="send()">Send</button>
+  <p><button onclick="send()">Send</button></p>
   <script>
     function send() {
       const text = document.getElementById('msg').value.trim();
@@ -131,3 +111,5 @@ Users can archive docs to `.agents/canvas/archive/`. Don't rely on canvas docs f
 </body>
 </html>
 ```
+
+Reach for extra CSS only when a doc genuinely needs it (a custom layout, an accent) — and prefer the injected tokens and whitespace over new boxes.
