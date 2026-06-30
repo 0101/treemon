@@ -1041,7 +1041,7 @@ type ResolveIgnoredPathsTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feature/abc" ] ]
             |> Map.ofList
 
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feature/.*" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "feature/.*" ]
         let result = resolveIgnoredPaths predicate repos
 
         let ignored = result |> Map.find (RepoId "Repo1")
@@ -1054,7 +1054,7 @@ type ResolveIgnoredPathsTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/archive-foo" "feature/abc" ] ]
             |> Map.ofList
 
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "archive-.*" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "archive-.*" ]
         let result = resolveIgnoredPaths predicate repos
 
         let ignored = result |> Map.find (RepoId "Repo1")
@@ -1069,7 +1069,7 @@ type ResolveIgnoredPathsTests() =
                 KnownPaths = Set.ofList [ "/r1/detached" ] }
         let repos = [ RepoId "Repo1", repo ] |> Map.ofList
 
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "detached" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "detached" ]
         let result = resolveIgnoredPaths predicate repos
 
         let ignored = result |> Map.find (RepoId "Repo1")
@@ -1083,7 +1083,7 @@ type ResolveIgnoredPathsTests() =
                 KnownPaths = Set.ofList [ "/r1/detached" ] }
         let repos = [ RepoId "Repo1", repo ] |> Map.ofList
 
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "archive-.*" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "archive-.*" ]
         let result = resolveIgnoredPaths predicate repos
 
         let ignored = result |> Map.find (RepoId "Repo1")
@@ -1095,7 +1095,7 @@ type ResolveIgnoredPathsTests() =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
             |> Map.ofList
 
-        let predicate = Server.TreemonConfig.buildIgnorePredicate []
+        let predicate = Server.GlobalConfig.buildIgnorePredicate []
         let result = resolveIgnoredPaths predicate repos
 
         let ignored = result |> Map.find (RepoId "Repo1")
@@ -1109,13 +1109,13 @@ type BuildIgnorePredicateTests() =
 
     [<Test>]
     member _.``Empty patterns matches nothing``() =
-        let predicate = Server.TreemonConfig.buildIgnorePredicate []
+        let predicate = Server.GlobalConfig.buildIgnorePredicate []
         Assert.That(predicate "main", Is.False)
         Assert.That(predicate "feature/abc", Is.False)
 
     [<Test>]
     member _.``Regex pattern matches values``() =
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feature/.*"; "hotfix/.*" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "feature/.*"; "hotfix/.*" ]
         Assert.That(predicate "feature/abc", Is.True)
         Assert.That(predicate "hotfix/urgent", Is.True)
         Assert.That(predicate "main", Is.False)
@@ -1123,19 +1123,19 @@ type BuildIgnorePredicateTests() =
 
     [<Test>]
     member _.``Pattern is anchored``() =
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "feat" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "feat" ]
         Assert.That(predicate "feat", Is.True)
         Assert.That(predicate "feature", Is.False)
         Assert.That(predicate "my-feat", Is.False)
 
     [<Test>]
     member _.``Invalid regex is skipped``() =
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ "[invalid"; "main" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ "[invalid"; "main" ]
         Assert.That(predicate "main", Is.True)
 
     [<Test>]
     member _.``Whitespace-only patterns are skipped``() =
-        let predicate = Server.TreemonConfig.buildIgnorePredicate [ ""; "  "; "main" ]
+        let predicate = Server.GlobalConfig.buildIgnorePredicate [ ""; "  "; "main" ]
         Assert.That(predicate "main", Is.True)
         Assert.That(predicate "", Is.False)
 

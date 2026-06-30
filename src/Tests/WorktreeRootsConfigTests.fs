@@ -4,7 +4,7 @@ open System
 open System.IO
 open System.Text.Json
 open NUnit.Framework
-open Server.WorktreeApi
+open Server.GlobalConfig
 open Tests.TestUtils
 
 /// Compares two roots the way the endpoints do: absolute, trailing separators trimmed,

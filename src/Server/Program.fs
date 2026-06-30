@@ -138,7 +138,7 @@ let private buildRemotingHandler (api: IWorktreeApi) =
 /// Path of the orphan `roots.json` under the (TREEMON_CONFIG_DIR-aware) global config dir. The
 /// file is a stale migration artifact read by nothing per the config investigation.
 let private orphanRootsPath () =
-    System.IO.Path.Combine(WorktreeApi.globalConfigDir (), "roots.json")
+    System.IO.Path.Combine(GlobalConfig.globalConfigDir (), "roots.json")
 
 /// Reads the orphan `roots.json` (schema `{ "WorktreeRoots": [...] }`), returning its roots or
 /// `[]` when absent/unreadable. Pure read — the file is deleted only after its roots are durably
@@ -197,7 +197,7 @@ let internal resolveWorktreeRoots (cliRoots: string list) : RootsResolution =
     // the key is present (possibly an explicit empty list). Gating migration on KEY ABSENCE — not
     // `List.isEmpty` — is what stops an explicit `worktreeRoots:[]` from being resurrected by a
     // stale orphan `roots.json` or overwritten by CLI args on restart.
-    let configRoots = WorktreeApi.tryReadWorktreeRootsConfig ()
+    let configRoots = GlobalConfig.tryReadWorktreeRootsConfig ()
     let configHasKey = Option.isSome configRoots
 
     let resolved, cameFromOrphan =
@@ -218,7 +218,7 @@ let internal resolveWorktreeRoots (cliRoots: string list) : RootsResolution =
 /// failed write can never drop the migration). A no-op when the resolution needs no persistence.
 let internal persistResolvedRoots (resolution: RootsResolution) =
     if resolution.PersistRoots then
-        match WorktreeApi.writeWorktreeRoots resolution.Roots with
+        match GlobalConfig.writeWorktreeRoots resolution.Roots with
         | Ok () ->
             Log.log "Startup" $"Persisted {List.length resolution.Roots} worktree root(s) to global config"
             if resolution.ConsumeOrphan then deleteOrphanRoots ()

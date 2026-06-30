@@ -68,13 +68,13 @@ type ServerStartupResolutionTests() =
             Assert.That(resolution.ConsumeOrphan, Is.False)
             // Applying the resolution at the boundary writes it to the global config.
             persistResolvedRoots resolution
-            Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.EqualTo(cliRoots)))
+            Assert.That(Server.GlobalConfig.readWorktreeRootsConfig (), Is.EqualTo(cliRoots)))
 
     [<Test>]
     member _.``resolveWorktreeRoots prefers CLI args but does not overwrite a populated config``() =
         withTempConfigDir "treemon-startup-test" (fun _ ->
             let configured = [ @"C:\code\configured" ]
-            match Server.WorktreeApi.writeWorktreeRoots configured with
+            match Server.GlobalConfig.writeWorktreeRoots configured with
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
 
@@ -85,13 +85,13 @@ type ServerStartupResolutionTests() =
             Assert.That(resolution.PersistRoots, Is.False)
             persistResolvedRoots resolution
             // ...so a populated config is an ephemeral override, not clobbered.
-            Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.EqualTo(configured)))
+            Assert.That(Server.GlobalConfig.readWorktreeRootsConfig (), Is.EqualTo(configured)))
 
     [<Test>]
     member _.``resolveWorktreeRoots reads global config when no CLI args``() =
         withTempConfigDir "treemon-startup-test" (fun _ ->
             let configured = [ @"C:\code\x"; @"C:\code\y" ]
-            match Server.WorktreeApi.writeWorktreeRoots configured with
+            match Server.GlobalConfig.writeWorktreeRoots configured with
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
 
@@ -116,7 +116,7 @@ type ServerStartupResolutionTests() =
             persistResolvedRoots resolution
 
             // Migrated set persisted into the global config...
-            Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.EqualTo(orphanRoots))
+            Assert.That(Server.GlobalConfig.readWorktreeRootsConfig (), Is.EqualTo(orphanRoots))
             // ...and the orphan file is consumed (deleted) only after a successful persist.
             Assert.That(File.Exists(Path.Combine(tempDir, "roots.json")), Is.False))
 
@@ -128,7 +128,7 @@ type ServerStartupResolutionTests() =
             Assert.That(resolution.PersistRoots, Is.False)
             persistResolvedRoots resolution
             // Nothing to persist, so the config stays absent/empty.
-            Assert.That(Server.WorktreeApi.readWorktreeRootsConfig (), Is.Empty))
+            Assert.That(Server.GlobalConfig.readWorktreeRootsConfig (), Is.Empty))
 
     // ----- Regression (tm-config-audit-rf1): an explicit `worktreeRoots:[]` must stay empty -----
     // The bug: readWorktreeRootsConfig() returned [] for BOTH a missing key and a present-but-empty
@@ -139,7 +139,7 @@ type ServerStartupResolutionTests() =
     member _.``resolveWorktreeRoots leaves an explicit empty config empty despite an orphan roots.json``() =
         withTempConfigDir "treemon-startup-test" (fun tempDir ->
             // The user removed every root: the key is PRESENT but empty (not absent).
-            match Server.WorktreeApi.writeWorktreeRoots [] with
+            match Server.GlobalConfig.writeWorktreeRoots [] with
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
             // A stale orphan roots.json from a legacy upgrade still lingers on disk.
@@ -154,7 +154,7 @@ type ServerStartupResolutionTests() =
             persistResolvedRoots resolution
             // ...the explicit empty config is preserved (present key, still empty — not None, not
             // repopulated with the orphan's roots)...
-            match Server.WorktreeApi.tryReadWorktreeRootsConfig () with
+            match Server.GlobalConfig.tryReadWorktreeRootsConfig () with
             | Some [] -> ()
             | other -> Assert.Fail $"expected the config to stay an explicit empty (Some []), got %A{other}"
             // ...and the unconsumed orphan is left untouched (it is only migrated when the key is absent).
@@ -163,7 +163,7 @@ type ServerStartupResolutionTests() =
     [<Test>]
     member _.``resolveWorktreeRoots does not persist CLI args over an explicit empty config``() =
         withTempConfigDir "treemon-startup-test" (fun _ ->
-            match Server.WorktreeApi.writeWorktreeRoots [] with
+            match Server.GlobalConfig.writeWorktreeRoots [] with
             | Ok () -> ()
             | Error msg -> Assert.Fail $"setup write failed: {msg}"
 
@@ -174,6 +174,6 @@ type ServerStartupResolutionTests() =
             Assert.That(resolution.PersistRoots, Is.False)
             persistResolvedRoots resolution
             // ...but the explicit empty config is not clobbered, so a restart with no args stays empty.
-            match Server.WorktreeApi.tryReadWorktreeRootsConfig () with
+            match Server.GlobalConfig.tryReadWorktreeRootsConfig () with
             | Some [] -> ()
             | other -> Assert.Fail $"expected the config to stay an explicit empty (Some []), got %A{other}")
