@@ -865,11 +865,10 @@ type DocErrorTests() =
 
 // A canvas doc that posts a message with no top-level string `action` cannot be routed by
 // CanvasPane (there is no action to switch on), so the listener surfaces it here instead of dropping
-// it silently — the focused-review regression, whose template posted {ids, button, text, run_id}
-// with no `action` and every click vanished. The malformed message carries no self-identifying
-// wt/doc fields, so the reducer attributes the banner to the active *visible* doc (a known doc of a
-// known worktree by construction). With no active visible doc there is nothing to attribute it to,
-// so it is dropped — and it never touches the unrelated message-delivery state.
+// it silently. The malformed message carries no self-identifying wt/doc fields, so the reducer
+// attributes the banner to the active *visible* doc (a known doc of a known worktree by construction).
+// With no active visible doc there is nothing to attribute it to, so it is dropped — and it never
+// touches the unrelated message-delivery state.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -886,7 +885,7 @@ type MalformedDocMessageTests() =
     [<Test>]
     member _.``CanvasMalformedDocMessage raises the doc-error banner on the active visible doc``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let updated = tryUpdateModel (CanvasMalformedDocMessage "ids, button, text, run_id") model
+        let updated = tryUpdateModel CanvasMalformedDocMessage model
         match updated.Canvas.DocError with
         | Some err ->
             Assert.That(err.ScopedKey, Is.EqualTo("r/feat"),
@@ -904,14 +903,14 @@ type MalformedDocMessageTests() =
         // so the banner is stamped with the doc the user is actually looking at.
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
         let model = { baseModel with Canvas = { baseModel.Canvas with ActiveCanvasDoc = Map.ofList [ "r/feat", "b.html" ] } }
-        let updated = tryUpdateModel (CanvasMalformedDocMessage "ids") model
+        let updated = tryUpdateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.DocError |> Option.map _.Filename, Is.EqualTo(Some "b.html"),
             "The banner is attributed to the active doc (b.html), not the worktree's first doc (a.html)")
 
     [<Test>]
     member _.``CanvasMalformedDocMessage is dropped when there is no active visible doc``() =
         // No focused card → activeVisibleDoc = None → nothing to attribute the banner to.
-        let updated = tryUpdateModel (CanvasMalformedDocMessage "ids, button") defaultModel
+        let updated = tryUpdateModel CanvasMalformedDocMessage defaultModel
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "With no active visible doc the malformed message has nothing to attribute it to, so no banner is raised")
 
@@ -919,7 +918,7 @@ type MalformedDocMessageTests() =
     member _.``CanvasMalformedDocMessage does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
         let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
-        let updated = tryUpdateModel (CanvasMalformedDocMessage "ids") model
+        let updated = tryUpdateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Surfacing a malformed message must not overwrite unrelated message-delivery state")
         Assert.That(updated.Canvas.DocError |> Option.isSome, Is.True,

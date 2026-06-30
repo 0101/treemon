@@ -401,9 +401,9 @@ type MessageListenerCallbacks =
       OnMorphComplete: unit -> unit
       /// A doc-side JS error arrived: (emitting worktree scopedKey, emitting filename, display message).
       OnDocError: string -> string -> string -> unit
-      /// A canvas-origin object message arrived with no top-level string `action`, from the active
-      /// (non-hidden) doc — surfaced instead of silently dropped. Carries the message's top-level keys.
-      OnMalformedMessage: string -> unit }
+      /// A canvas-origin object message arrived with no usable top-level string `action`, from the
+      /// active (non-hidden) doc — surfaced instead of silently dropped.
+      OnMalformedMessage: unit -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
@@ -470,14 +470,13 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                         else
                             Fable.Core.JS.console.warn ($"[canvas] postMessage DROPPED: payload too large ({payload.Length} > {MaxPayloadBytes})")
                 elif not (isFromHiddenCanvasIframe ()) then
-                    // Canvas-origin, valid object, but NO top-level string `action` — the focused-review
-                    // regression. Previously the combined gate made the whole `if` false and the message
-                    // vanished with no log/banner. Surface it (banner + warn) only for the active doc; a
-                    // hidden background iframe must stay silent so the banner only ever shows for the doc
-                    // the user is looking at. Other origins are already filtered out by the outer guard.
+                    // Canvas-origin, valid object, but no usable top-level string `action`. Surface it
+                    // (banner + warn) only for the active doc; a hidden background iframe must stay silent
+                    // so the banner only ever shows for the doc the user is looking at. Other origins are
+                    // already filtered out by the outer guard.
                     let keys = Fable.Core.JsInterop.emitJsExpr<string> me.data "Object.keys($0).join(', ')"
-                    Fable.Core.JS.console.warn ($"[canvas] message ignored: no 'action' field (keys: {keys})")
-                    onMalformedMessage keys
+                    Fable.Core.JS.console.warn ($"[canvas] message ignored: no usable string 'action' (keys: {keys})")
+                    onMalformedMessage ()
 
     Dom.window.addEventListener ("message", handler)
 

@@ -248,9 +248,6 @@ type CanvasAuthoringDxPaneE2ETests() =
     [<Test>]
     member this.``a doc message with no top-level 'action' field surfaces the dismissible doc-error banner``() =
         task {
-            // The focused-review regression: a real doc posted {ids, button, text, run_id} with NO
-            // string `action`, so the pane could not route it. Pre-fix the combined origin+action gate
-            // made the whole `if` false and the message vanished with no banner/log. It must now surface.
             do! this.RouteDocs "window.parent.postMessage({ids:['a'],button:'run',text:'x',run_id:7},'*');"
             do! this.OpenMultiDocPane()
 
@@ -270,8 +267,6 @@ type CanvasAuthoringDxPaneE2ETests() =
     [<Test>]
     member this.``a well-formed doc message (string action) still routes and raises no malformed banner``() =
         task {
-            // No regression: a handled action (navigate-canvas-doc) still switches the tab and must
-            // NOT trip the new missing-`action` branch.
             do! this.RouteDocs "window.parent.postMessage({action:'navigate-canvas-doc',filename:'details.html'},'*');"
             do! this.OpenMultiDocPane()
 
