@@ -337,23 +337,21 @@ type EnqueueTests() =
 type DrainQueueTests() =
 
     [<Test>]
-    member _.``Register drains queue — subsequent sendMessage returns Queued not from old queue``() =
+    member _.``Register drains the queued owner-unknown message out of the queue``() =
         let path = uniquePath "drain-basic"
 
-        // Enqueue a message (no bridge registered)
+        // Enqueue a message while no bridge is registered.
         let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "queued-msg" }
-        sendMessage req |> Async.RunSynchronously |> ignore
+        Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
 
-        // Register bridge — this triggers drainQueue (HTTP will fail silently)
+        // Registering a bridge triggers drainQueue. The queued message has no known owner, so the
+        // registering bridge may drain it: it is removed from the queue (the unreachable URL just
+        // makes the async POST fail silently — it is not re-queued).
         registerSession path "http://127.0.0.1:1/inject" None
 
-        // After drain, sending another message should go to the bridge (not queue)
-        // Since the bridge URL is unreachable, it will return Error, not Queued
-        let req2 = { WorktreePath = WorktreePath path; Filename = ""; Payload = "new-msg" }
-        let result = sendMessage req2 |> Async.RunSynchronously
-
-        Assert.That(result, Is.Not.EqualTo(CanvasMessageResult.Queued),
-            "After registration, messages should attempt delivery, not queue")
+        // The queue is now empty: a subsequent anonymous poll drains nothing.
+        Assert.That(drainPending path, Is.Empty,
+            "drainQueue on register must consume the queued owner-unknown message")
 
     [<Test>]
     member _.``Register with no queued messages works without error``() =
@@ -579,16 +577,37 @@ type OwnerRoutingTests() =
                 "Owner offline must queue, never deliver to a co-located non-owner"))
 
     [<Test>]
-    member _.``No owner with exactly one live session attempts delivery (back-compat)``() =
-        // No attribution -> no owner. One live session with an unreachable URL: single-session
-        // back-compat delivers to it (POST attempted -> Error), proving it does not queue.
+    member _.``No owner with one live session queues (single-session fallback removed)``() =
+        // No attribution -> no owner. A single live session is NOT the doc's author (there is
+        // none). The old single-session back-compat path delivered to it — Bug B: an unowned
+        // doc's reply leaking into an unrelated co-located session. Routing now queues instead.
+        // The URL is unreachable, so a wrong delivery would POST -> Error, never Queued.
         let path = uniquePath "own-single"
         registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "solo"))
 
         let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "lonely.html"; Payload = "p1" })
 
-        Assert.That(result, Is.Not.EqualTo(CanvasMessageResult.Queued),
-            "A single live session with no owner should attempt delivery, not queue")
+        Assert.That(result, Is.EqualTo(CanvasMessageResult.Queued),
+            "An unowned doc with one live non-author session must queue, not deliver")
+
+    [<Test>]
+    member _.``Unowned doc never delivers to a co-located non-author (Bug B regression)``() =
+        // Direct Bug B guard: an unowned doc with exactly one live, *reachable* session must not
+        // hand that session the message. A real sink proves the non-author receives nothing.
+        let ports = getFreeTcpPorts 1
+        use nonAuthorSink = new HttpSink(ports[0])
+        nonAuthorSink.Start()
+
+        let path = uniquePath "own-single-sink"
+        registerSession path nonAuthorSink.Url (Some(uniqueSid "solo"))
+
+        let result = runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "lonely.html"; Payload = "p1" })
+
+        Assert.That(result, Is.EqualTo(CanvasMessageResult.Queued),
+            "Unowned doc must queue, not deliver to a co-located non-author")
+        Thread.Sleep 250 // allow any (incorrect) async POST to land before asserting absence
+        Assert.That(nonAuthorSink.Bodies, Is.Empty,
+            "The co-located non-author session must never receive an unowned doc's message")
 
     [<Test>]
     member _.``No owner with multiple live sessions queues (ambiguous)``() =
@@ -857,11 +876,11 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
             Assert.That(lA2.Bodies, Is.EqualTo([ "p3" ]), "Step3: owner A re-register drains p3 to A (message not lost)")
             Assert.That(lB.Bodies, Is.Empty, "Step3: B still never received p3"))
 
-    // Step 4: doc c.html has NO declared owner and exactly one live session (B). Single-session
-    // back-compat must DELIVER it to L_B (FAIL if Queued/dropped). isSessionAlive is time-based, so
-    // "only B live" means exactly one session is registered for the worktree.
+    // Step 4: doc c.html has NO declared owner and exactly one live session (B). The single-session
+    // back-compat fallback is gone (it misrouted unowned docs into co-located non-authors — Bug B),
+    // so the message must QUEUE and L_B (a non-author) must receive nothing.
     [<Test>]
-    member _.``gbjq Step 4 - no-owner doc with exactly one live session delivers to it (single-session back-compat)``() =
+    member _.``gbjq Step 4 - no-owner doc with one live session queues, never delivers to the non-author``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 1
             use lB = new HttpSink(ports[0])
@@ -870,9 +889,10 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
             let w = uniquePath "gbjq4"
             let sidB = uniqueSid "B"
 
-            // Only B is registered/live; c.html is never attributed -> no owner.
+            // Only B is registered/live; c.html is never attributed -> no owner. B did not author it.
             registerSession w lB.Url (Some sidB)
 
             let r4 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "c.html"; Payload = "p4" })
-            Assert.That(r4, Is.EqualTo(CanvasMessageResult.Ok), "Step4: no owner + exactly one live session -> delivered (FAIL if Queued)")
-            Assert.That(lB.Bodies, Is.EqualTo([ "p4" ]), "Step4: c.html delivered to the lone live session L_B"))
+            Assert.That(r4, Is.EqualTo(CanvasMessageResult.Queued), "Step4: no owner -> Queued, never delivered to a non-author")
+            Thread.Sleep 250 // let any (incorrect) delivery POST land before asserting absence
+            Assert.That(lB.Bodies, Is.Empty, "Step4: the lone non-author session L_B must receive nothing"))

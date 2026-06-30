@@ -9,7 +9,7 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 1. **Treemon mode (unchanged)**: Extension registers with Treemon, heartbeats; canvas docs display in the Treemon canvas pane as today.
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
-   - After the agent writes a canvas file, injects `additionalContext` via `onPostToolUse` with the serving URL.
+   - After the agent writes a canvas file, sends the serving URL to the session via `session.send()` (the native runtime no longer supports SDK hook callbacks, so `additionalContext` can't be injected from a tool event).
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
 3. **Same HTML, same API**: Canvas docs use `window.parent.postMessage(...)` in both modes. The transport shim intercepts self-posted messages in top-level browser windows and forwards via HTTP. Zero agent-side changes.
 4. **Agent controls UX**: The agent decides whether to open the browser or output a ctrl+clickable URL.
@@ -49,9 +49,16 @@ Browser-mode docs receive two scripts injected before `</head>`:
 - **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
 - **Content-polling reload** — polls `/canvas/:filename/hash` every 3s and reloads the page when the hash changes.
 
-### `onPostToolUse` Hook
+### Canvas-write detection (session events)
 
-Registered via `joinSession({ hooks: { onPostToolUse } })` (hooks must be nested under the `hooks` key per the SDK `SessionHooks` contract). Detects file creates/edits targeting `.agents/canvas/*.html` and returns `additionalContext` with the serving URL + instructions for the agent.
+The native runtime no longer supports SDK hook callbacks (`joinSession({ hooks })` fails the
+internal `session.resume`), so canvas writes are observed via **session events** instead of the old
+`onPostToolUse` hook. The extension calls `joinSession()` (no hooks) and subscribes with
+`session.on("tool.execution_start", …)` / `session.on("tool.execution_complete", …)`. The completion
+event carries neither the tool name nor its arguments, so a create/edit of a `.agents/canvas/*.html`
+path is captured from the **start** event (keyed by `toolCallId`) and acted on once the matching
+completion reports success. In browser mode the extension then sends the serving URL to the session
+via `session.send()`; in Treemon mode it declares ownership instead.
 
 ### Path Security
 
@@ -59,7 +66,7 @@ Registered via `joinSession({ hooks: { onPostToolUse } })` (hooks must be nested
 
 ## Decisions
 
-- **Hook-driven, not file-watcher**: `onPostToolUse` detects writes instead of `fs.watch`. Simpler, no OS-specific edge cases.
+- **Event-driven, not file-watcher**: `session.on("tool.execution_*")` detects writes instead of `fs.watch`. Simpler, no OS-specific edge cases. (Was `onPostToolUse`; the native runtime dropped SDK hook callbacks, so detection moved to session events.)
 - **No auto-open**: Agent opens browser or outputs URL. Extension stays simple.
 - **Content polling over SSE**: 3s polling is simpler than SSE and adequate for agent file writes.
 - **Detect once at startup**: v1 does not switch modes mid-session. If Treemon starts later, it won't be detected until the extension restarts.

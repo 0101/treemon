@@ -48,8 +48,12 @@ The bridge registry is keyed by **`sessionId`**, not worktree path, so multiple 
 
 1. Resolve `owner = CanvasDocOwnership.getOwner worktree filename`.
 2. Owner has a live registry entry → POST to that session's `InjectUrl` (on HTTP failure, fall through to queue).
-3. Owner offline/gone, **or** no owner and not exactly one live session → enqueue (`Queued`).
-4. No owner **and** exactly one live session for the worktree → deliver to it (single-session back-compat).
+3. Owner offline/gone → enqueue (`Queued`); never fall back to a non-owner.
+4. No declared owner → enqueue (`Queued`). The former "exactly one live session" single-session
+   fallback is **removed**: now that authoring sessions declare ownership explicitly, an unowned doc
+   has no identifiable recipient, so handing the message to whatever co-located session happens to be
+   live misroutes it (e.g. a focused-review reply into an unrelated session). The send/resume flow
+   (`WorktreeApi.sendCanvasMessage`) then starts or continues a session to collect the queued message.
 
 A doc's message is **never** delivered to a non-owner session in the same worktree.
 
@@ -90,7 +94,7 @@ drain is out of scope.)
 | 1 | Ownership attribution trigger | **Explicit declaration** from the authoring session's extension (`POST /api/canvas/attribute`); file-watcher inference kept only as a single-session fallback |
 | 1b | Bridge registry keying | Keyed by **`sessionId`** (was worktree path) — multiple sessions per worktree coexist |
 | 1b-i | `None`/blank sessionId | A blank/whitespace sessionId is normalized to `None`, so it can't become a sticky, unroutable owner; `None`-sessionId registrations share one per-worktree fallback slot and never clobber an identified session. |
-| 1c | Delivery routing | Route by doc **owner** sessionId; fall back to the single live session, else queue; never cross-route to a non-owner |
+| 1c | Delivery routing | Route by doc **owner** sessionId; with no declared owner, queue (the single-session fallback is removed — never deliver to a co-located non-author); never cross-route to a non-owner |
 | 1c-i | Queue/drain ownership | Each `QueuedMessage` carries its resolved owner; `drainQueue` (on register) and `drainPending` (anonymous poll) deliver only when the owner is unknown or matches the drainer, re-queuing the rest (TTL preserved) |
 | 1d | sessionId source | Extension **stamps its own** sessionId; the agent only sends the filename |
 | 2 | Persistence format | JSON file `data/canvas-owners.json` — matches `data/sessions.json` pattern |
