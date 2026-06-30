@@ -15,7 +15,7 @@ Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files 
 
 Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a typographic base into every doc** — so most docs need little or no CSS of their own. Out of the box you get:
 
-- Dark theme, system font, a readable **16px / line-height 1.6** body, and a heading scale (`h1`…`h4`).
+- Dark theme, system font, a readable **15px / line-height 1.55** body, and a serif heading scale (`h1`…`h4`).
 - A comfortable line length (~70ch) on paragraphs and list items.
 - Quiet tables (header underline + row separators, no heavy gridlines), styled `code`/`pre`, links, scrollbars, and themed form controls (`button`, `textarea`, `input`, `select`).
 - Design tokens as CSS variables — reuse these instead of inventing colors:
@@ -30,6 +30,7 @@ Your own rules always win (the base is zero-specificity), so override anything f
 Docs read best when hierarchy comes from **size, weight, and spacing** rather than borders and filled panels. A few gentle nudges:
 
 - Lead with headings and short paragraphs and let the margins do the separating — you don't need a bordered card around every section.
+- Nest headings by **structure, not size**: go `h1` → `h2` → `h3` in order and don't skip a level (no `h1` followed straight by `h3`). The base already sizes each level, so you never need to jump levels just to get a smaller-looking heading — pick the level that reflects the outline, and let the type scale handle the size.
 - Use `var(--text-muted)` (or a `<small>`) for secondary text instead of boxing it off.
 - Reserve a visible container for genuinely set-apart content — a single callout, a code block, the input form. A semantic `<blockquote>` is pre-styled as a light, non-boxy callout. **A diagram is a good place for a box:** wrapping an SVG/figure in a subtle panel (`var(--bg-surface)`, some padding, a little radius) grounds it and fixes the floating-in-space look — boxes aren't banned, just don't put one around *everything*.
 - Keep tables to the default quiet style; resist a border around every cell.
@@ -94,7 +95,7 @@ The base theme already styles `body`, headings, and the form controls, so an inp
 <meta charset="UTF-8">
 </head>
 <body>
-  <h3>Comment</h3>
+  <h1>Comment</h1>
   <p><small>Share a quick note — it comes straight back to the agent.</small></p>
   <textarea id="msg" placeholder="Type a message..."></textarea>
   <p><button onclick="send()">Send</button></p>

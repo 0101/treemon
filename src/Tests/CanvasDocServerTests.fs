@@ -20,7 +20,7 @@ let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wr
 let private resetDarkBgMarker = "#1e1e2e"      // the dark background the reset paints on a plain doc
 // The base also steers plain docs toward typography over boxes (grounded, not invented):
 let private resetTokenMarker = "--text-muted:#9399b2"          // app design tokens, via :where(:root)
-let private resetTypeScaleMarker = ":where(h1){font-size:2rem"  // 1.25 "Major Third" heading scale
+let private resetTypeScaleMarker = ":where(h1){font-size:1.85rem"  // serif heading scale
 let private resetMeasureMarker = "max-width:70ch"               // Bringhurst ~45–75ch measure
 
 // Element-name selectors that, if they appeared *bare* (name directly followed by `{`), would carry

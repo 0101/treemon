@@ -73,11 +73,15 @@ type CanvasInjectionThemeE2ETests() =
             let! bodyLine = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).lineHeight")
             let! h1Font = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontSize")
             let! pMaxWidth = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.getElementById('p')).maxWidth")
-            // 16px / line-height 1.6 base + a 1.25 "Major Third" scale (h1 = 2rem = 32px) + a ~70ch
-            // measure on text, so a plain doc reads via type and whitespace rather than boxes.
-            Assert.That(bodyFont, Is.EqualTo("16px"), $"body should default to a readable 16px (was {bodyFont})")
-            Assert.That(bodyLine, Is.EqualTo("25.6px"), $"body line-height should be 1.6x = 25.6px (was {bodyLine})")
-            Assert.That(h1Font, Is.EqualTo("32px"), $"h1 should be 2rem = 32px from the type scale (was {h1Font})")
+            let! h1Family = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontFamily")
+            let! h1Weight = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontWeight")
+            // 15px / line-height 1.55 base + serif headings at weight 500 (h1 = 1.85rem = 29.6px) + a
+            // ~70ch measure on text, so a plain doc reads via type and whitespace rather than boxes.
+            Assert.That(bodyFont, Is.EqualTo("15px"), $"body should default to a readable 15px (was {bodyFont})")
+            Assert.That(bodyLine, Is.EqualTo("23.25px"), $"body line-height should be 1.55x = 23.25px (was {bodyLine})")
+            Assert.That(h1Font, Is.EqualTo("29.6px"), $"h1 should be 1.85rem = 29.6px from the type scale (was {h1Font})")
+            Assert.That(h1Family.ToLower(), Does.Contain("serif"), $"headings should use the serif stack (was {h1Family})")
+            Assert.That(h1Weight, Is.EqualTo("500"), $"headings should not be bold — weight 500 (was {h1Weight})")
             Assert.That(pMaxWidth, Is.Not.EqualTo("none"), $"paragraphs should be capped to a readable measure, not full-width (was {pMaxWidth})")
         }
 

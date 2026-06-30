@@ -32,11 +32,11 @@ background/foreground and system font stack it bakes in a small, *grounded* read
 plain doc looks good with no authored CSS — and so agents stop hand-rolling (and drifting on) the
 same boilerplate:
 
-- **Readable body** — 16px / `line-height:1.6` (WCAG 1.4.12 requires content to survive `1.5`),
+- **Readable body** — 15px / `line-height:1.55` (WCAG 1.4.12 requires content to survive `1.5`),
   with consistent vertical rhythm (uniform block spacing, headings set close to the content they
   introduce with more space above than below).
-- **Type scale** — a 1.25 "Major Third" heading scale (`h1` 2rem, `h2` 1.5rem, `h3` 1.25rem,
-  `h4` 1.1rem) so hierarchy reads from size + weight + margin, not borders.
+- **Type scale** — serif headings (`ui-serif`) at weight 500 (`h1` 1.85rem, `h2` 1.35rem, `h3` 1.12rem,
+  `h4` 1.05rem) so hierarchy reads from size, the serif/sans contrast, and margin, not borders.
 - **Measure** — `p`/`li`/`blockquote` capped at ~70ch (Bringhurst's 45–75ch), on text elements
   only so tables and dashboard layouts stay full-width.
 - **Design tokens** — the app palette (`--bg-*`, `--border`, `--text-*`, `--accent`, `--status-*`),
