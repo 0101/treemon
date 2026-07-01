@@ -1,9 +1,14 @@
-# Canvas Roadmap (Future Work)
+# Canvas Roadmap
 
-Status: **Future / Deferred** — captured from the now-stale `.agents/canvas/roadmap.html`
-after the canvas pane feature shipped. This lists canvas work **not yet implemented**.
+Status: **Phases 6 & 8 SHIPPED — Phase 7 deferred.** Captured from the now-stale
+`.agents/canvas/roadmap.html` after the canvas pane feature shipped. Phase 6 (Authoring DX) and
+Phase 8 (Pane UX) have since shipped (see `docs/spec/canvas-authoring-dx.md`); the Phase 6.1 base
+reset was then extended further by the canvas **style-guidance** work — a grounded typographic base,
+design tokens, and box-averse defaults (see that item below). **Phase 7 (Templates & Ecosystem) is
+the only unimplemented phase.**
 
 Full feature spec: `docs/spec/canvas-pane.md`. Beads dashboard: `docs/spec/beadspace-canvas.md`.
+Authoring DX + Pane UX detail: `docs/spec/canvas-authoring-dx.md`.
 
 ## Baseline — what already ships
 
@@ -16,28 +21,37 @@ Every served canvas doc is rewritten at the `</head>` injection point in
 
 | Doc kind | Injected today |
 |---|---|
-| `SystemView` (e.g. beads) | `baseStyle` (scrollbar CSS only) + link interceptor |
-| `AgentDoc` | the above + bridge heartbeat + idiomorph runtime + morph controller |
+| `SystemView` (e.g. beads) | `baseStyle` (scrollbar + dark-theme typographic base: 15px/1.55 body, serif heading scale (h1 1.85rem), ~70ch measure, `:where(:root)` design tokens, quiet table/blockquote/form-control defaults) + link interceptor |
+| `AgentDoc` | the above + bridge heartbeat + `canvasSend` helper + JS error overlay + idiomorph runtime + morph controller |
 
-The items below extend that injection (Phase 6) and the authoring ecosystem (Phase 7).
+Phases 6 and 8 below have shipped (the table already reflects them); Phase 7 (the authoring
+ecosystem) is the remaining work.
 
-## Phase 6 — Canvas Doc Authoring DX
+## Phase 6 — Canvas Doc Authoring DX — ✅ SHIPPED
 
-Goal: lower the bar for agents and users to create effective canvas docs. Today every doc needs
-~30 lines of CSS boilerplate to match the dark theme and hand-rolled `window.parent.postMessage`
-calls to talk back to the pane.
+Implemented in `docs/spec/canvas-authoring-dx.md`. The goal was to lower the bar to author an
+effective canvas doc — it previously needed ~30 lines of CSS boilerplate to match the dark theme and
+hand-rolled `window.parent.postMessage` calls to talk back to the pane. All three items below
+shipped; their descriptions are retained as historical context.
 
-### Base dark-theme CSS reset injection — effort S
+### Base dark-theme CSS reset injection — effort S — ✅ SHIPPED (and extended)
 
-Extend `baseStyle` in `CanvasDocServer.fs` from scrollbar-only CSS to a small base reset:
-dark background/foreground, system font stack, sensible defaults for `body`, headings, code,
-tables, and links — so a doc renders on-theme with zero boilerplate.
+**Shipped**, then extended by the canvas **style-guidance** work into an opinionated, *grounded*
+typographic base (not just a reset): 15px / line-height 1.55 (WCAG 1.4.12), a serif heading scale
+(h1 1.85rem / h2 1.35rem / h3 1.12rem), a ~70ch reading measure (Bringhurst), `:where(:root)` design tokens mirroring
+`BeadspaceTemplate.html`, and box-averse defaults (quiet tables, a semantic `blockquote` callout,
+themed form controls). Paired with `SKILL.md` guidance steering authors toward whitespace + type
+over boxes. Everything is `:where()`-wrapped (zero specificity) so a doc's own rules still win.
 
-- Inject for both doc kinds (same slot as today's `baseStyle`).
-- Must be overridable: a doc that sets its own styles wins (inject low-specificity defaults, no `!important`).
-- Acceptance: a canvas doc with `<body>plain text</body>` renders dark-themed and readable.
+Original scope (for context): extend `baseStyle` in `CanvasDocServer.fs` from scrollbar-only CSS to a
+small base reset — dark background/foreground, system font stack, sensible defaults for `body`,
+headings, code, tables, and links — so a doc renders on-theme with zero boilerplate.
 
-### Injected `window.canvasSend(action, payload)` helper — effort S
+- Injected for both doc kinds (same slot as today's `baseStyle`). ✅
+- Overridable: a doc that sets its own styles wins (zero-specificity defaults, no `!important`). ✅
+- Acceptance: a canvas doc with `<body>plain text</body>` renders dark-themed and readable. ✅
+
+### Injected `window.canvasSend(action, payload)` helper — effort S — ✅ SHIPPED
 
 Inject a tiny helper (alongside `bridgeScript`, AgentDoc only) exposing
 `window.canvasSend(action, payload)` that wraps the `window.parent.postMessage({ action, ... }, '*')`
@@ -47,7 +61,7 @@ contract, with payload-size validation matching the client cap (`MaxPayloadBytes
 - Update `SKILL.md` to teach `canvasSend` as the primary API (keep raw postMessage as the fallback contract).
 - Acceptance: a doc calls `canvasSend('navigate-canvas-doc', { filename })` and the pane reacts identically to the raw message.
 
-### JS error overlay — effort M
+### JS error overlay — effort M — ✅ SHIPPED
 
 Inject an `window.onerror` / `unhandledrejection` handler (AgentDoc) that forwards doc-side JS
 errors to the parent as a `canvas-doc-error` message; the client surfaces them as a **non-blocking
@@ -57,16 +71,18 @@ banner** in the pane, reusing the persistent canvas-error-banner pattern already
 - Banner is dismissible and must never cover the doc content.
 - Acceptance: a doc that throws on load shows the error text in a banner without breaking the pane.
 
-## Phase 7 — Templates & Ecosystem
+## Phase 7 — Templates & Ecosystem — ⏳ NOT STARTED (the remaining work)
 
-Goal: standardize the canvas-doc look and make scaffolding trivial. Agents already produce decent
-HTML; templates raise the floor and the consistency. Lower priority than Phase 6.
+Goal: standardize the canvas-doc look and make scaffolding trivial. With Phase 6's typographic base,
+design tokens, and `SKILL.md` style guidance now shipped, the floor is already higher — templates
+would build on that foundation for consistency and a fast start. This is the only unimplemented phase.
 
 ### Bundled reference templates — effort M
 
 Ship a small set of theme-matched templates (e.g. planning, review, design, decision-matrix),
-modeled on the existing `src/Server/BeadspaceTemplate.html` precedent. Each demonstrates the
-injected base theme and `canvasSend` (Phase 6) so it works with no extra boilerplate.
+modeled on the existing `src/Server/BeadspaceTemplate.html` precedent. Each should exemplify the
+shipped base — the injected typographic theme, the `:where(:root)` design tokens, `canvasSend`, and
+the whitespace-over-boxes guidance — so it works with no extra boilerplate.
 
 ### Template picker / scaffold command — effort S
 
@@ -79,11 +95,12 @@ Playwright coverage that each bundled template renders and its interactions work
 `src/Tests/BeadspaceCanvasTests.fs`, which uses Playwright **route interception** to serve a
 template + mock data from disk (self-contained, no live server — runs in CI under `Category=E2E`).
 
-## Phase 8 — Pane UX
+## Phase 8 — Pane UX — ✅ SHIPPED
 
+Implemented in `docs/spec/canvas-authoring-dx.md` (Pane UX section); description retained as context.
 Goal: polish the canvas pane chrome itself (independent of doc authoring/templates).
 
-### Always-visible doc tab with last-modified age — effort S
+### Always-visible doc tab with last-modified age — effort S — ✅ SHIPPED
 
 Two tightly-coupled tab-bar tweaks that ship together:
 
@@ -129,7 +146,9 @@ Recorded so future readers know these were evaluated, not missed.
 
 ## Open questions
 
-From the roadmap's feedback prompts — worth answering before picking up this work:
+From the roadmap's feedback prompts:
 
-- Phase 6: which authoring pain point hurts most (CSS boilerplate, postMessage ergonomics, or debugging)?
+- ~~Phase 6: which authoring pain point hurts most (CSS boilerplate, postMessage ergonomics, or
+  debugging)?~~ **Resolved by shipping all three:** boilerplate → the typographic base + tokens +
+  style guidance; postMessage ergonomics → `canvasSend`; debugging → the JS error overlay/banner.
 - Phase 7: which template types would actually get used?
