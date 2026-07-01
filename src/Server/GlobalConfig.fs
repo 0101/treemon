@@ -281,10 +281,17 @@ type CanvasShareConfig =
 /// operator must supply.
 let defaultCanvasShareConfig = { Container = "canvas-shared"; DefaultExpiryDays = 90 }
 
+/// Upper bound (10 years) on a configured `defaultExpiryDays`. A larger — or non-positive — value is
+/// treated as absent and falls back to the default, keeping the SAS expiry *bounded* (spec Decision
+/// #3) and guaranteeing `DateTimeOffset.UtcNow.AddDays(DefaultExpiryDays)` at publish can never
+/// overflow `DateTimeOffset` (year 9999 is ~2.9M days out) and orphan an already-uploaded blob.
+let internal maxCanvasShareExpiryDays = 3650
+
 /// Reads the `canvasShare` config section, falling back to `defaultCanvasShareConfig` for a missing
-/// section or field. A blank `container` or a non-positive `defaultExpiryDays` is treated as absent
-/// (a non-positive expiry would mint an already-dead link), so a partial or typo'd section still
-/// yields a working config rather than a broken one.
+/// section or field. A blank `container`, or a `defaultExpiryDays` outside `1 .. maxCanvasShareExpiryDays`,
+/// is treated as absent (a non-positive expiry would mint an already-dead link; an unbounded one would
+/// overflow `AddDays` at publish and orphan the blob), so a partial or typo'd section still yields a
+/// working config rather than a broken one.
 let internal readCanvasShareConfig () : CanvasShareConfig =
     withConfigDocument defaultCanvasShareConfig (fun root ->
         match root.TryGetProperty("canvasShare") with
@@ -298,7 +305,7 @@ let internal readCanvasShareConfig () : CanvasShareConfig =
                 match section.TryGetProperty("defaultExpiryDays") with
                 | true, e when e.ValueKind = System.Text.Json.JsonValueKind.Number ->
                     match e.TryGetInt32() with
-                    | true, n when n > 0 -> n
+                    | true, n when n > 0 && n <= maxCanvasShareExpiryDays -> n
                     | _ -> defaultCanvasShareConfig.DefaultExpiryDays
                 | _ -> defaultCanvasShareConfig.DefaultExpiryDays
             { Container = container; DefaultExpiryDays = expiryDays }

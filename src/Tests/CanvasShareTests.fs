@@ -151,6 +151,20 @@ type CanvasShareConfigTests() =
             Assert.That(readCanvasShareConfig().DefaultExpiryDays,
                         Is.EqualTo(defaultCanvasShareConfig.DefaultExpiryDays)))
 
+    [<Test>]
+    member _.``readCanvasShareConfig ignores an out-of-range expiry (would overflow AddDays at publish)``() =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            // Int32.MaxValue days overflows DateTimeOffset.AddDays; clamp back to the default instead.
+            seed dir """{ "canvasShare": { "defaultExpiryDays": 2147483647 } }"""
+            Assert.That(readCanvasShareConfig().DefaultExpiryDays,
+                        Is.EqualTo(defaultCanvasShareConfig.DefaultExpiryDays)))
+
+    [<Test>]
+    member _.``readCanvasShareConfig accepts the maximum bounded expiry``() =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            seed dir """{ "canvasShare": { "defaultExpiryDays": 3650 } }"""
+            Assert.That(readCanvasShareConfig().DefaultExpiryDays, Is.EqualTo(maxCanvasShareExpiryDays)))
+
 
 // ── unconfigured / secret handling (touches env var: non-parallel) ─────────────
 

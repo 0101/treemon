@@ -133,6 +133,8 @@ let publish (filename: string) (html: string) : Async<Result<string, string>> =
                 let! _ =
                     blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
                     |> Async.AwaitTask
+                // DefaultExpiryDays is clamped to [1, maxCanvasShareExpiryDays] by readCanvasShareConfig,
+                // so AddDays can't overflow DateTimeOffset (year 9999) and orphan the blob just uploaded.
                 let expiresOn = DateTimeOffset.UtcNow.AddDays(float config.DefaultExpiryDays)
                 let sasUri = blobClient.GenerateSasUri(buildSasBuilder config.Container blob expiresOn)
                 return sasUri.ToString()

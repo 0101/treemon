@@ -91,7 +91,8 @@ banner never claims a copy that did not happen (Decision #10).
 
 - The share backend is configured in the machine-level Treemon config (`~/.treemon/config.json`,
   read via `GlobalConfig`): a `canvasShare` section with `container` and `defaultExpiryDays`
-  (default `90`).
+  (default `90`; **bounded to `1–3650` days** — a value outside that range falls back to the default,
+  keeping the SAS expiry bounded per Decision #3 and preventing a `DateTimeOffset` overflow at publish).
 - The Azure **credential is a secret** and is read from the `AZURE_STORAGE_CONNECTION_STRING`
   environment variable (preferred), not the JSON file. Config may also name the account; the secret
   stays in the env var.
