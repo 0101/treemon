@@ -334,6 +334,133 @@ type ReadBaseBranchTests() =
         Assert.That(result, Is.EqualTo("main"))
 
 
+// ─── TreemonConfig: readDefaultSkill ───
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReadDefaultSkillTests() =
+
+    let mutable tempDir = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-test-{Guid.NewGuid()}")
+        Directory.CreateDirectory(tempDir) |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        if Directory.Exists(tempDir) then
+            Directory.Delete(tempDir, recursive = true)
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate when file does not exist``() =
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate when file has no defaultSkill field``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["a"] }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns configured value``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "review" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("review"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate for empty string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate for whitespace-only string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "   " }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate for malformed JSON``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """not valid json""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate when defaultSkill is not a string``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": 42 }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns investigate when defaultSkill is null``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": null }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("investigate"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns unknown skill value as-is (no validation)``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "not-a-real-skill" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("not-a-real-skill"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns value with spaces as-is (no validation)``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "odd value" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("odd value"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns dash-prefixed value as-is (no validation)``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "--all" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("--all"))
+
+    [<Test>]
+    member _.``readDefaultSkill coexists with other fields``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["old"], "defaultSkill": "review", "baseBranch": "dev" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("review"))
+
+        let branch = readBaseBranch tempDir
+        Assert.That(branch, Is.EqualTo("dev"), "Other fields should still be readable")
+
+
 // ─── Git command construction: mainRef, fetch, merge targets ───
 
 [<TestFixture>]
