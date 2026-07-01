@@ -141,3 +141,59 @@ type ActionPromptTests() =
     member _.``None provider falls back to Copilot for FixPr``() =
         let result = actionPrompt None (FixPr "https://example.com/pr/1")
         Assert.That(result, Is.EqualTo("use pr skill with https://example.com/pr/1"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SkillInvocationTests() =
+
+    [<Test>]
+    member _.``Copilot wraps arg as natural-language skill invocation``() =
+        let result = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "why is the build slow"
+        Assert.That(result, Is.EqualTo("use investigate skill with why is the build slow"))
+
+    [<Test>]
+    member _.``Claude wraps arg as slash command``() =
+        let result = skillInvocation (Some CodingToolProvider.Claude) "investigate" "why is the build slow"
+        Assert.That(result, Is.EqualTo("/investigate why is the build slow"))
+
+    [<Test>]
+    member _.``None provider falls back to Copilot``() =
+        let result = skillInvocation None "investigate" "trace the memory leak"
+        Assert.That(result, Is.EqualTo("use investigate skill with trace the memory leak"))
+
+    [<Test>]
+    member _.``multi-line arg is preserved verbatim``() =
+        let arg = "first line\nsecond line"
+        let result = skillInvocation (Some CodingToolProvider.Copilot) "investigate" arg
+        Assert.That(result, Is.EqualTo("use investigate skill with first line\nsecond line"))
+
+    // Locks the refactor's byte-identical guarantee: actionPrompt's FixPr/FixBuild
+    // cases must delegate to skillInvocation with the "pr"/"fix-build" skill names.
+    [<Test>]
+    member _.``matches actionPrompt FixPr for Copilot``() =
+        let url = "https://github.com/org/repo/pull/7"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Copilot) "pr" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Copilot) (FixPr url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+    [<Test>]
+    member _.``matches actionPrompt FixPr for Claude``() =
+        let url = "https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Claude) "pr" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Claude) (FixPr url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+    [<Test>]
+    member _.``matches actionPrompt FixBuild for Copilot``() =
+        let url = "https://dev.azure.com/org/proj/_build/results?buildId=123"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Copilot) "fix-build" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Copilot) (FixBuild url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+    [<Test>]
+    member _.``matches actionPrompt FixBuild for Claude``() =
+        let url = "https://dev.azure.com/org/proj/_build/results?buildId=123"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Claude) "fix-build" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Claude) (FixBuild url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
