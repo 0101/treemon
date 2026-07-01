@@ -1002,6 +1002,21 @@ type FocusRetargetTests() =
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
             "the doc stays unviewed (badge preserved) until the pane actually shows it")
 
+    [<Test>]
+    member _.``SetFocusNoRetarget focuses the card without retargeting or marking viewed (idle path)``() =
+        // The idle auto-display path opens the pane, focuses the card, then selects its OWN target
+        // doc. It must use the no-retarget focus set so it never re-enters the active-user retarget —
+        // otherwise (pane already open) the retarget would mark mostRecentUnviewedDoc viewed before
+        // the intended doc is shown (finding F1). Pane open + b.html unviewed is exactly that state.
+        let model = modelWithUnviewed true None
+        let updated, cmd = update (SetFocusNoRetarget (Some (Card "r/feat"))) model
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "r/feat")),
+            "the focus is still applied")
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "the sticky active doc is untouched — the idle path selects its own target via SelectCanvasDoc")
+        Assert.That(dispatchedMsgs cmd, Is.Empty,
+            "no MarkDocViewed/morph — SetFocusNoRetarget must not re-enter the retarget")
+
 
 // A canvas doc that posts a message with no top-level string `action` cannot be routed by
 // CanvasPane (there is no action to switch on), so the listener surfaces it here instead of dropping

@@ -160,7 +160,7 @@ let update msg model =
                 | Some (scopedKey, filename) when not canvasShowingDoc ->
                     Cmd.batch [
                         if not model.Canvas.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
-                        Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
+                        Cmd.ofMsg (SetFocusNoRetarget (Some (Card scopedKey)))
                         Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
                     ]
                 | _ -> Cmd.none
@@ -396,8 +396,10 @@ let update msg model =
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
 
     | SetFocus target ->
-        { model with FocusedElement = target }
-        |> CanvasUpdate.retargetActiveDocOnFocus model.FocusedElement
+        CanvasUpdate.applyFocus true target model
+
+    | SetFocusNoRetarget target ->
+        CanvasUpdate.applyFocus false target model
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
@@ -444,22 +446,19 @@ let update msg model =
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
             let retargetedModel, retargetCmd =
-                { model with FocusedElement = newFocus }
-                |> CanvasUpdate.retargetActiveDocOnFocus model.FocusedElement
+                CanvasUpdate.applyFocus true newFocus model
             retargetedModel,
             Cmd.batch [ actionCmd; retargetCmd; scrollToFocus scrollHint newFocus ]
         | "Home" ->
             let newFocus = navigateToFirst model.Repos
             let retargetedModel, retargetCmd =
-                { model with FocusedElement = newFocus }
-                |> CanvasUpdate.retargetActiveDocOnFocus model.FocusedElement
+                CanvasUpdate.applyFocus true newFocus model
             retargetedModel,
             Cmd.batch [ retargetCmd; scrollToFocus ScrollToTop newFocus ]
         | "End" ->
             let newFocus = navigateToLast model.Repos
             let retargetedModel, retargetCmd =
-                { model with FocusedElement = newFocus }
-                |> CanvasUpdate.retargetActiveDocOnFocus model.FocusedElement
+                CanvasUpdate.applyFocus true newFocus model
             retargetedModel,
             Cmd.batch [ retargetCmd; scrollToFocus ScrollToBottom newFocus ]
         | _ when hasModifier ->
@@ -484,8 +483,8 @@ let update msg model =
         let openPane = not model.Canvas.CanvasPaneOpen
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         let retargetedModel, retargetCmd =
-            { model with Repos = repos; FocusedElement = Some (Card scopedKey); Canvas = { model.Canvas with CanvasPaneOpen = true } }
-            |> CanvasUpdate.retargetActiveDocOnFocus model.FocusedElement
+            { model with Repos = repos; Canvas = { model.Canvas with CanvasPaneOpen = true } }
+            |> CanvasUpdate.applyFocus true (Some (Card scopedKey))
         retargetedModel,
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
