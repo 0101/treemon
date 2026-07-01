@@ -15,6 +15,8 @@ open Shared
 [<Category("Fast")>]
 type ReadUpstreamRemoteTests() =
 
+    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
+    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
     let mutable tempDir = ""
 
     [<SetUp>]
@@ -160,6 +162,8 @@ type ReadUpstreamRemoteTests() =
 [<Category("Fast")>]
 type ReadBaseBranchTests() =
 
+    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
+    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
     let mutable tempDir = ""
 
     [<SetUp>]
@@ -341,6 +345,8 @@ type ReadBaseBranchTests() =
 [<Category("Fast")>]
 type ReadDefaultSkillTests() =
 
+    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
+    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
     let mutable tempDir = ""
 
     [<SetUp>]

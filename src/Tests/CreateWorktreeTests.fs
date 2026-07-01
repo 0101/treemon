@@ -210,35 +210,12 @@ type FormStateTests() =
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
-    member _.``SetNewWorktreeName preserves other form fields``() =
-        let model, _ = update (ModalMsg (Modal.SetNewWorktreeName "my-feature")) openModel
-
-        match model.CreateModal with
-        | Modal.Open form ->
-            Assert.That(form.BaseBranch, Is.EqualTo("main"))
-            Assert.That(form.RepoId, Is.EqualTo(testRepoId))
-            Assert.That(form.Branches, Is.EqualTo([ "main"; "develop" ]))
-        | other ->
-            Assert.Fail($"Expected Open but got {other}")
-
-    [<Test>]
     member _.``SetBaseBranch updates BaseBranch in Open form``() =
         let model, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) openModel
 
         match model.CreateModal with
         | Modal.Open form ->
             Assert.That(form.BaseBranch, Is.EqualTo("develop"))
-        | other ->
-            Assert.Fail($"Expected Open but got {other}")
-
-    [<Test>]
-    member _.``SetBaseBranch preserves other form fields``() =
-        let model, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) openModel
-
-        match model.CreateModal with
-        | Modal.Open form ->
-            Assert.That(form.Name, Is.EqualTo(""))
-            Assert.That(form.RepoId, Is.EqualTo(testRepoId))
         | other ->
             Assert.Fail($"Expected Open but got {other}")
 
@@ -291,18 +268,6 @@ type FormStateTests() =
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
-    member _.``SetPrompt preserves other form fields``() =
-        let model, _ = update (ModalMsg (Modal.SetPrompt "investigate the flaky test")) openModel
-
-        match model.CreateModal with
-        | Modal.Open form ->
-            Assert.That(form.Name, Is.EqualTo(""))
-            Assert.That(form.BaseBranch, Is.EqualTo("main"))
-            Assert.That(form.RepoId, Is.EqualTo(testRepoId))
-        | other ->
-            Assert.Fail($"Expected Open but got {other}")
-
-    [<Test>]
     member _.``SetPrompt ignored when modal is Closed``() =
         let model, _ = update (ModalMsg (Modal.SetPrompt "test")) defaultModel
 
@@ -314,12 +279,6 @@ type FormStateTests() =
         let model, _ = update (ModalMsg (Modal.SetPrompt "test")) creating
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Creating testRepoId))
-
-    [<Test>]
-    member _.``SetPrompt produces no command``() =
-        let _, cmd = update (ModalMsg (Modal.SetPrompt "test")) openModel
-
-        Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``Multiple SetNewWorktreeName calls update correctly``() =

@@ -185,6 +185,21 @@ may span newlines — the arg reaches the tool intact. Verified by design; exerc
   `None` there; the create path must read `.treemon.json` directly. Kept as a direct read (comment
   strengthened to say so) rather than extracting a shared helper — there is no second caller to
   deduplicate and no current bug, so a helper would add indirection without removing duplication.
+- **Test-hygiene follow-up (review F2-F6, task `tm-quicklaunch-fx2`)**: The `zero-value-tests` rule
+  over-fired on this test-heavy diff (see the report's Rule Quality Notes), so judgement was applied
+  rather than acting on every finding. **Acted:** removed the three `preserves other form fields`
+  tests (F#'s `{ r with x = v }` copy-update is a language guarantee) and the redundant `SetPrompt
+  produces no command` test (command production is shared through the `just` helper, already covered
+  by the pre-existing `SetNewWorktreeName`/`SetBaseBranch` siblings) in `CreateWorktreeTests.fs`;
+  added the immutability-rule-required justifying comment to the three NUnit `let mutable tempDir`
+  fixtures in `UpstreamRemoteTests.fs` (a shared base fixture was weighed but rejected — it would
+  churn dozens of `member`/closure references for a low-priority nit). **Consciously deferred (F3,
+  F6):** the `SetPrompt ignored when Closed`/`ignored when Creating` pair (both hit the same
+  `| SetPrompt _, _` wildcard arm) and the `readDefaultSkill coexists with other fields` test were
+  left as-is. Both are the newest instance of a repo-wide symmetric pattern; the reviewer marked them
+  optional and warned against fixing only the diff-local case, and the family-wide alternative would
+  churn untouched pre-existing tests for negligible benefit while the symmetric test matrices carry
+  documentation value.
 
 ## Key Files
 
