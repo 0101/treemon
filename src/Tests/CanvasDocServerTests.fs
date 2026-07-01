@@ -202,6 +202,15 @@ type BuildInjectionTests() =
                     "canvasExpand must call canvasSend and bail (no spinner swap) when it returns false")
 
     [<Test>]
+    member _.``the canvasExpand helper rejects a sectionId outside [A-Za-z0-9_-]``() =
+        // Hardening: doc content may embed untrusted external data (branch names, PR titles, command
+        // output). Constraining `section` to a slug charset before posting stops a crafted sectionId
+        // from smuggling instruction-shaped text into the owning agent's forwarded [canvas] turn.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain("/^[A-Za-z0-9_-]+$/.test(section)"),
+                    "canvasExpand must validate section against [A-Za-z0-9_-] and drop anything else")
+
+    [<Test>]
     member _.``SystemView injection omits the canvasExpand helper``() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(canvasExpandMarker),
