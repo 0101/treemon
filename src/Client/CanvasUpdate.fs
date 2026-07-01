@@ -145,7 +145,6 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
         model, Cmd.none
 
-// ── Canvas doc sharing (client) ─────────────────────────────────────────────────────────────────
 // The share success/error handling + the rich-link clipboard payload. The server publishes the doc
 // and returns a CanvasShareResult { Url; Title }; on Ok the client copies BOTH clipboard formats and
 // raises the success banner, on Error it reuses the delivery error banner.

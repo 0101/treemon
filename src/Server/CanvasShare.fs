@@ -25,8 +25,6 @@ open Azure.Storage.Sas
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
 
-// ── pure: blob naming ────────────────────────────────────────────────────────
-
 /// Base62 alphabet (digits + upper + lower) for the unguessable blob prefix — URL-safe, and with no
 /// `/` so it can't muddle the `<prefix>/<filename>` split.
 let private base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -54,8 +52,6 @@ let internal leafName (filename: string) : string =
 let internal blobName (prefix: string) (filename: string) : string =
     $"{prefix}/{leafName filename}"
 
-// ── pure: SAS grant ──────────────────────────────────────────────────────────
-
 /// Builds the per-doc SAS grant: blob-scoped (`sr=b`, `Resource = "b"`), read-only (`sp=r`),
 /// https-only (`spr=https`), expiring at `expiresOn`. Pure — it holds NO key and touches no network
 /// (the account key is applied later by `BlobClient.GenerateSasUri`), so the exact least-privilege
@@ -68,8 +64,6 @@ let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: 
         BlobName = blob,
         Resource = "b",
         Protocol = SasProtocol.Https)
-
-// ── impure: publish ──────────────────────────────────────────────────────────
 
 /// The Azure credential secret. Read ONLY from the environment (never the JSON config), so the key
 /// stays out of any file; blank/unset ⇒ `None` (⇒ "not configured"). Never logged.
