@@ -122,7 +122,11 @@ banner never claims a copy that did not happen (Decision #10).
   `BlobContainerClient` (private), `UploadBlobAsync(randomPrefix/filename, html)` with
   `BlobHttpHeaders.ContentType = "text/html"`, then `BlobClient.GenerateSasUri(BlobSasBuilder with
   BlobSasPermissions.Read, ExpiresOn = now + expiry, Protocol = Https)`. Backend reads config +
-  `AZURE_STORAGE_CONNECTION_STRING`. Random prefix is a high-entropy base62 id. Add the
+  `AZURE_STORAGE_CONNECTION_STRING`. Random prefix is a high-entropy base62 id. The container is
+  created on demand — `CreateIfNotExists(PublicAccessType.None)`, placed *after* the
+  `CanGenerateSasUri` gate (so a SAS-only credential is still refused offline before any I/O) and
+  inside the existing `try` (so a create failure reuses the same `RequestFailedException` handler) —
+  so a fresh account works on first publish without a manual container-create step (F13). Add the
   `Azure.Storage.Blobs` package to `Server.fsproj`.
 - **Server wiring** (`src/Server/WorktreeApi.fs`): `shareCanvasDocImpl` =
   `validateCanvasPath → read file → CanvasExport.buildStaticHtml → CanvasShare.publish → Result`,
@@ -158,6 +162,15 @@ cannot set account policy:
 - **Lifecycle cleanup** (Decision #9): the management policy below deletes shared blobs after the
   expiry window so expired-link content does not linger at rest (privacy) and storage does not
   accumulate (cost).
+
+> **The container itself needs no manual step.** The app creates the private
+> `canvasShare.container` (default `canvas-shared`) on demand on first publish, via
+> `CreateIfNotExists(PublicAccessType.None)` in `CanvasShare.publish` — a *data-plane* operation
+> covered by the `AZURE_STORAGE_CONNECTION_STRING` account key (the same key that signs the SAS), so
+> a fresh account/subscription works without a manual `az storage container create`. The call is
+> idempotent (a no-op once the container exists) and keeps anonymous access off at the container
+> level, complementing the account-level toggle above. Only the two ARM settings above require the
+> `az login` account.
 
 The lifecycle rule is committed at `scripts/canvas-share-lifecycle-policy.json`:
 

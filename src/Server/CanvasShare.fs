@@ -91,7 +91,8 @@ let private tryContainerClient (connStr: string) (container: string) : BlobConta
 
 /// Publish an already-exported standalone HTML doc; return a per-doc read-only SAS URL string.
 ///
-/// Uploads `html` to the PRIVATE container at `<random-prefix>/<filename>` with
+/// Uploads `html` to the PRIVATE container (created on first use if absent) at
+/// `<random-prefix>/<filename>` with
 /// `Content-Type: text/html`, then mints a blob-scoped read-only https SAS expiring in the config's
 /// `DefaultExpiryDays` days and returns its absolute URL. Returns `Error` (never throws) when the
 /// backend is unconfigured, when the connection string cannot sign a SAS (a non-account-key
@@ -117,6 +118,14 @@ let publish (filename: string) (html: string) : Async<Result<string, string>> =
             if not blobClient.CanGenerateSasUri then
                 return! Error "Canvas sharing needs an account-key connection string so a read-only link can be signed."
             else
+                // Create the PRIVATE container on demand (idempotent) so a fresh account/subscription
+                // works on first publish — the SDK never auto-creates it, and a missing container
+                // otherwise fails the upload with 404 ContainerNotFound. PublicAccessType.None keeps
+                // anonymous access off at the container level (Decision #4). Placed AFTER the
+                // CanGenerateSasUri gate so a SAS-only credential is still refused offline before any
+                // I/O, and inside the existing try so a create failure (e.g. a key lacking create
+                // permission) surfaces via the same RequestFailedException handler — no new error path.
+                let! _ = containerClient.CreateIfNotExistsAsync(PublicAccessType.None) |> Async.AwaitTask
                 // charset is declared so non-ASCII doc content isn't mojibaked when the blob is
                 // opened standalone (the export injects no <meta charset>).
                 let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
