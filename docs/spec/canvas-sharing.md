@@ -51,8 +51,11 @@ two pieces a standalone copy needs, and nothing else.
 ### Publishing & secrecy (Azure Blob)
 
 - The exported HTML is uploaded to a **private** container under an **unguessable prefix + the doc's
-  real filename** (`<random-id>/<filename>`), with `Content-Type: text/html`. The real filename is
-  kept so the recipient sees a meaningful page/tab title.
+  real filename** (`<random-id>/<filename>`), with `Content-Type: text/html; charset=utf-8` (the
+  charset is declared explicitly — the export injects no `<meta charset>`, so a standalone non-ASCII
+  doc would otherwise risk mojibake; a `Content-Type` check should therefore match the `text/html`
+  prefix, not exact-equal). The real filename is kept so the recipient sees a meaningful page/tab
+  title.
 - The storage account has **anonymous blob access disabled**, so a bare blob URL is denied
   (`409 PublicAccessNotPermitted`) — the **only** way in is the signed link.
 - The link is a **per-doc, blob-scoped, read-only SAS** (`sr=b`, `sp=r`, `spr=https`) with an
