@@ -121,9 +121,12 @@ type CreateWorktreeIntegrationTests() =
         gitAssert repoDir "checkout -b canvas-review-report"
 
         let result = createWorktree repoDir "main" "resolve-model-slugs" |> Async.RunSynchronously
-        Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
-
         let newWt = Path.Combine(tempDir, "tm-resolve-model-slugs")
+
+        match result with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok r -> Assert.That(r.WorktreePath, Is.EqualTo(newWt), "createWorktree should return the new worktree path")
+
         Assert.That(Directory.Exists(newWt), Is.True, "new worktree should be created as a sibling of the repo")
         Assert.That(gitOut newWt "rev-parse --abbrev-ref HEAD", Is.EqualTo("resolve-model-slugs"))
         Assert.That(gitOut newWt "rev-parse HEAD", Is.EqualTo(gitOut repoDir "rev-parse main"), "forked from main's tip")
@@ -191,9 +194,9 @@ type CreateWorktreeIntegrationTests() =
 
         match createWorktree repoDir "main" "with-legacy" |> Async.RunSynchronously with
         | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
-        | Ok warnings ->
+        | Ok result ->
             Assert.That(Directory.Exists(Path.Combine(tempDir, "tm-with-legacy")), Is.True, "worktree should still be created")
-            Assert.That(warnings |> List.exists _.Contains("no longer used"), Is.True, $"Expected a legacy-fork-script warning but got: {warnings}")
+            Assert.That(result.Warnings |> List.exists _.Contains("no longer used"), Is.True, $"Expected a legacy-fork-script warning but got: {result.Warnings}")
 
     [<Test>]
     member _.``runs the post-fork script inside the new worktree``() =
@@ -229,6 +232,6 @@ type CreateWorktreeIntegrationTests() =
 
         match createWorktree repoDir "main" "postfork-fails" |> Async.RunSynchronously with
         | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
-        | Ok warnings ->
+        | Ok result ->
             Assert.That(Directory.Exists(Path.Combine(tempDir, "tm-postfork-fails")), Is.True, "worktree should still be created")
-            Assert.That(warnings |> List.exists _.Contains("setup failed"), Is.True, $"Expected a post-fork failure warning but got: {warnings}")
+            Assert.That(result.Warnings |> List.exists _.Contains("setup failed"), Is.True, $"Expected a post-fork failure warning but got: {result.Warnings}")

@@ -507,9 +507,9 @@ let worktreeApi
                       |> Map.tryFind repoId
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
-                  let! warnings = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
+                  let! result = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
-                  return warnings
+                  return result.Warnings
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
