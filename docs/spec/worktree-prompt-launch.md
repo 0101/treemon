@@ -168,6 +168,23 @@ may span newlines — the arg reaches the tool intact. Verified by design; exerc
   require a structured warning type (today it is a flat `string list`).
 - **Wording unified on `with`**: matches the existing `actionPrompt` house style; a one-line change if
   `for:` is preferred later.
+- **CSRF hardening of the remoting surface (review F7)**: `createWorktree`'s auto-launch turns the
+  auth-less, CSRF-token-less Fable.Remoting API into an agent-execution sink reachable by a
+  preflight-free cross-origin `text/plain` POST (Fable.Remoting.Server 5.42 does not enforce a
+  content type). Hardened systemically — not with a `createWorktree`-only patch — via one Giraffe
+  guard (`Server.HttpSecurity.csrfGuard`) composed **before** the remoting handler in `Program.fs`:
+  a state-changing (non GET/HEAD/OPTIONS) request whose `Origin` (else `Referer`) is **present and
+  not loopback** is rejected `403`; a **missing** one is allowed so the non-browser Cli (sends
+  neither header) and the same-origin SPA (loopback origin) keep working. Kestrel binds
+  localhost-only, so this closes the browser cross-origin vector. Content-type enforcement was
+  weighed as defense-in-depth but **not** added: the Origin check already blocks the vector, and
+  coupling to the clients' exact content-type risks breaking the Cli. The loopback decision is a
+  pure, unit-tested function (`isSameOriginRequest`).
+- **Create-path provider read is deliberately NOT `resolveProvider` (review F8)**: a just-created
+  worktree is not yet in the scheduler's KnownPaths/CodingToolData, so `resolveProvider` returns
+  `None` there; the create path must read `.treemon.json` directly. Kept as a direct read (comment
+  strengthened to say so) rather than extracting a shared helper — there is no second caller to
+  deduplicate and no current bug, so a helper would add indirection without removing duplication.
 
 ## Key Files
 
@@ -179,11 +196,14 @@ may span newlines — the arg reaches the tool intact. Verified by design; exerc
 | `src/Server/TreemonConfig.fs` | Add `readDefaultSkill` (reads config, default `investigate`; no validation) |
 | `src/Server/SessionManager.fs` | Escape single quotes in `buildScript` `nativePath` |
 | `src/Server/WorktreeApi.fs` | Orchestrate guarded fire-and-forget launch in `createWorktree` |
+| `src/Server/HttpSecurity.fs` | New: `csrfGuard` + pure loopback-origin decision (review F7) |
+| `src/Server/Program.fs` | Compose `HttpSecurity.csrfGuard` before the remoting handler (review F7) |
 | `src/Client/CreateWorktreeModal.fs` | `Prompt` field, `SetPrompt` msg, textarea, request wiring |
 | `src/Client/index.html` | CSS for `.modal-textarea` |
 | `src/Tests/CreateWorktreeServerTests.fs` | Update `createWorktree` return-type call sites |
 | `src/Tests/CreateWorktreeTests.fs` | `SetPrompt` update tests + `SubmitCreateWorktree` prompt→request mapping tests (capturing fake `IWorktreeApi`) |
 | `src/Tests/CommandBuilderTests.fs` | Add `skillInvocation` coverage (existing `actionPrompt` stay green) |
+| `src/Tests/HttpSecurityTests.fs` | New: unit tests for the loopback same-origin / allow decision (review F7) |
 
 ## Related Specs
 

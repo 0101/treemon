@@ -311,7 +311,12 @@ let main args =
         choose (
             canvasAgentRoutes
             @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
-                remotingApi ])
+                // CSRF hardening: the Fable.Remoting surface has no auth/CSRF token and does not
+                // enforce a content type, so a cross-origin page could POST to state-changing
+                // methods (e.g. createWorktree, which auto-launches a coding agent). The guard
+                // rejects state-changing requests with a non-loopback Origin/Referer; a missing one
+                // is allowed so the non-browser Cli and same-origin SPA keep working.
+                HttpSecurity.csrfGuard >=> remotingApi ])
 
     let app =
         application {

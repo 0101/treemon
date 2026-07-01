@@ -42,6 +42,7 @@
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="IdiomorphScript.fs" />
     <Compile Include="CanvasDocServer.fs" />
+    <Compile Include="HttpSecurity.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

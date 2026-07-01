@@ -517,9 +517,12 @@ let worktreeApi
                   match req.Prompt with
                   | Some prompt when not (String.IsNullOrWhiteSpace prompt) ->
                       let newPath = result.WorktreePath
-                      // Provider is read from the new worktree first (its .treemon.json exists once
-                      // create returns) because it can differ from the root working copy; the skill
-                      // falls back to the root config.
+                      // Provider is read directly from .treemon.json — the new worktree first (its
+                      // config exists once create returns and can differ from the root working
+                      // copy), then the root as fallback. This intentionally does NOT go through
+                      // resolveProvider (the scheduler-state routing the other launch sites use): a
+                      // just-created worktree is not yet in KnownPaths/CodingToolData, so
+                      // resolveProvider would return None here. Keep this a direct config read.
                       let provider =
                           CodingToolStatus.readConfiguredProvider newPath
                           |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
