@@ -36,9 +36,17 @@ two pieces a standalone copy needs, and nothing else.
 - Inject a **no-op `window.canvasSend`** so author buttons that call it do nothing (instead of
   throwing `ReferenceError`). Raw `window.parent.postMessage` already degrades to a harmless
   self-post in a top-level window.
-- Inject **none** of: bridge heartbeat, idiomorph runtime, morph controller, error overlay.
+- Inject **none** of: bridge heartbeat, idiomorph runtime, morph controller, error overlay — nor the
+  **link interceptor**. The interceptor turns same-origin `.html` link clicks into
+  `navigate-canvas-doc` tab-switch messages to the pane; a standalone published copy has no pane, so
+  it is pane-coupling machinery like the others. Omitting it means sibling-`.html` links no longer
+  switch tabs — they fall back to the browser's default navigation, which resolves to a sibling blob
+  URL *without* the SAS token and so fails (`403`); they are **non-functional**, consistent with
+  sharing a *single self-contained doc* (Decision #8). External links keep their default behavior.
 - Injection lands at `</head>` (case-insensitive), mirroring `CanvasDocServer.handleCanvasRequest`;
-  if there is no `</head>`, prepend.
+  if there is no `</head>`, prepend. The two share one helper (`CanvasExport.injectAtHead`, which
+  `CanvasDocServer.handleCanvasRequest` now calls) so live-served and published placement cannot
+  drift.
 
 ### Publishing & secrecy (Azure Blob)
 
@@ -89,10 +97,16 @@ not matter.
   `IWorktreeApi.shareCanvasDoc : ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>`.
   The server returns the title (it extracts it from the HTML) so the client can build the rich
   clipboard link without re-parsing.
-- **Static export** (extend `src/Server/CanvasDocServer.fs` `buildInjection` with a `StaticExport`
-  arm, or a sibling `src/Server/CanvasExport.fs`): reuse the existing `baseStyle`, add a no-op
-  `canvasSend`, and a pure `extractTitle (html) : string option` (+ `prettifyFilename`). Keep the
-  transform a pure string→string function for unit testing.
+- **Static export** (new `src/Server/CanvasExport.fs`, chosen over a third `buildInjection` arm so
+  the downstream `shareCanvasDocImpl` in `WorktreeApi.fs` — which compiles *before*
+  `CanvasDocServer.fs` — can call it): `buildStaticHtml : string -> string` re-injects the base theme
+  + a no-op `canvasSend` (and nothing else) at `</head>`. The shared `baseStyle` is **relocated**
+  from `CanvasDocServer.fs` into this dependency-free module (single source of truth; `buildInjection`
+  now references `CanvasExport.baseStyle`), and the `</head>` placement is a shared
+  `injectAtHead` both call. Also exposes `extractTitle (html) : string option`, `prettifyFilename`,
+  and `resolveTitle html filename` (the `<title>`→prettified-filename fallback the server returns as
+  `CanvasShareResult.Title`). Every function is a pure `string→string`/`string option` for unit
+  testing.
 - **Publish backend** (`src/Server/CanvasShare.fs`, new): use `Azure.Storage.Blobs` —
   `BlobContainerClient` (private), `UploadBlobAsync(randomPrefix/filename, html)` with
   `BlobHttpHeaders.ContentType = "text/html"`, then `BlobClient.GenerateSasUri(BlobSasBuilder with

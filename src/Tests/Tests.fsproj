@@ -55,6 +55,7 @@
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
+    <Compile Include="CanvasExportTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
