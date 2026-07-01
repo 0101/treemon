@@ -533,7 +533,15 @@ let update msg model =
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
-        { model with Canvas = { model.Canvas with LastViewedHashes = hashes } }, Cmd.none
+        // Merge the server's saved hashes with a seed of the currently-known docs rather than
+        // overwriting. `loadLastViewedHashes` races with the first `DataLoaded` seeding in `init`;
+        // a plain overwrite with an empty/partial server map (e.g. a fresh install) wipes that seed
+        // when it arrives last, making already-present docs look unviewed. `seedLastViewedHashes`
+        // keeps every server value (so genuine updates still register as unviewed) and only fills in
+        // current docs the server does not know, so the outcome is the same regardless of arrival
+        // order. Repos may still be empty here (this message can win the race) — then `DataLoaded`'s
+        // own first-load seeding covers the docs.
+        { model with Canvas = { model.Canvas with LastViewedHashes = seedLastViewedHashes model.Repos hashes } }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->
         { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none

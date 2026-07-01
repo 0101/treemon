@@ -1078,3 +1078,37 @@ type MalformedDocMessageTests() =
             "Surfacing a malformed message must not overwrite unrelated message-delivery state")
         Assert.That(updated.Canvas.DocError |> Option.isSome, Is.True,
             "The banner is still raised alongside the untouched send state")
+
+
+// ── LoadLastViewedHashes merge (init-race safety) ────────────────────
+// loadLastViewedHashes races the first DataLoaded seeding in init. The handler must MERGE the
+// server hashes with a seed of the currently-known docs, not overwrite — otherwise an empty/partial
+// server map arriving last wipes the seed, making already-present docs look unviewed (which the
+// focus retarget would then act on). These guard that already-present docs stay viewed while genuine
+// server-recorded updates still register as unviewed.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LoadLastViewedHashesTests() =
+
+    [<Test>]
+    member _.``an empty server map does not wipe the seed for already-present docs``() =
+        // Simulates LoadLastViewedHashes arriving AFTER DataLoaded seeded the docs, with a fresh
+        // server that has no saved hashes. The docs must stay viewed, not become unviewed.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
+        let seeded = { defaultModel with Repos = repos; Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+        let updated = tryUpdateModel (LoadLastViewedHashes Map.empty) seeded
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes, Is.Empty,
+            "an empty server map must not make a seeded, already-present doc look unviewed")
+
+    [<Test>]
+    member _.``a server-recorded stale hash still registers the doc as unviewed``() =
+        // The doc is now at h2 but the server last saw h1 (updated while away) → stays unviewed.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h2" ] ] ]
+        let model = { defaultModel with Repos = repos }
+        let updated = tryUpdateModel (LoadLastViewedHashes (Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ])) model
+        Assert.That(updated.Canvas.LastViewedHashes["r/feat"]["a.html"], Is.EqualTo("h1"),
+            "the server value is kept (not overwritten by the current hash), so the update still registers")
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
+            "a doc updated since the server last saw it must remain unviewed")

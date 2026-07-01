@@ -89,8 +89,9 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
 /// already focused (preserves a manual in-worktree tab choice) or nothing is unviewed (keeps the
 /// sticky selection). When the pane is open the doc is actually shown, so route through
 /// `selectCanvasDoc` (sets the active doc, marks it viewed, morphs a revisited iframe); when the pane
-/// is closed only set the active doc silently — it is not displayed yet, so it must not be marked
-/// viewed, but becomes the doc shown when the pane is next opened. Callers that must NOT steal the doc
+/// is closed set the active doc without marking it viewed (it is not displayed yet) — it also enters
+/// `VisitedCanvasDocs` (via `touchVisitedDoc`) so its iframe is mounted, subject to the LRU cap, and
+/// it becomes the doc shown when the pane is next opened. Callers that must NOT steal the doc
 /// — the idle auto-display sequence, which opens the pane then selects its own target — pass
 /// `retarget = false`, which just applies the focus. The old focus is read from `model.FocusedElement`
 /// internally, so callers pass only the new focus and cannot misuse a separate previous-focus arg.
