@@ -134,6 +134,61 @@ not matter.
   `navigator.clipboard.write([new ClipboardItem({ "text/html": …, "text/plain": … })])` and show a
   success banner; on `Error`, reuse the error banner. Button styling in `index.html`.
 
+## Storage Account Setup
+
+One-time, **local-only** provisioning of the private account, run by an operator with `az login` to
+the dev subscription (never from CI). Both settings below are **control-plane / ARM** operations, so
+they use the logged-in account — **not** the `AZURE_STORAGE_CONNECTION_STRING` data-plane key, which
+cannot set account policy:
+
+- **Anonymous access disabled** (Decision #4):
+  `az storage account update -n <account> -g <rg> --allow-blob-public-access false` — a bare blob URL
+  is then denied, so the per-doc SAS is the only way in.
+- **Lifecycle cleanup** (Decision #9): the management policy below deletes shared blobs after the
+  expiry window so expired-link content does not linger at rest (privacy) and storage does not
+  accumulate (cost).
+
+The lifecycle rule is committed at `scripts/canvas-share-lifecycle-policy.json`:
+
+```json
+{
+  "rules": [
+    {
+      "name": "expire-shared-canvas-docs",
+      "enabled": true,
+      "type": "Lifecycle",
+      "definition": {
+        "filters": { "blobTypes": [ "blockBlob" ], "prefixMatch": [ "canvas-shared/" ] },
+        "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 90 } } }
+      }
+    }
+  ]
+}
+```
+
+Two invariants keep it correct:
+
+- **Container-scoped:** a lifecycle `prefixMatch` string must begin with the container name, so
+  `"canvas-shared/"` targets **only** the canvas-share container (`canvasShare.container`, default
+  `canvas-shared`) — no other blob in the account is ever deleted. If the container is renamed in
+  config, change the prefix to match.
+- **Window matches expiry:** `daysAfterModificationGreaterThan` (`90`) mirrors `defaultExpiryDays`.
+  Published blobs are write-once, so *modification* time equals *share* time; the daily lifecycle run
+  (≈1-day granularity) therefore deletes a blob ~0–1 day *after* its SAS link has already expired —
+  never while the link is live. If an operator raises `defaultExpiryDays`, raise this to match (or to
+  the largest expiry in use).
+
+Apply the policy, then confirm the rule is present on the account:
+
+```bash
+az storage account management-policy create \
+  --account-name <account> --resource-group <rg> \
+  --policy @scripts/canvas-share-lifecycle-policy.json
+
+az storage account management-policy show \
+  --account-name <account> --resource-group <rg>
+```
+
 ## Decisions
 
 | # | Decision | Choice & rationale |
@@ -146,7 +201,7 @@ not matter.
 | 6 | Strip vs inject | The on-disk file is already script-free; the export **re-injects** base theme + no-op `canvasSend` and nothing else — a **third `buildInjection` mode**, not a stripping pass. |
 | 7 | Clipboard | Write **`text/html` titled `<a>` + `text/plain` URL**; every app self-selects. URL length is cosmetic. Title from doc `<title>`, fallback prettified filename. |
 | 8 | Scope | **Single self-contained doc** in v1. Multi-doc link bundles, custom-domain short URLs, and redirect-indirection (stable link → freshly-minted short-lived SAS) are deferred. |
-| 9 | Blob lifecycle | **Auto-delete via an Azure storage lifecycle policy** — blobs older than the expiry window (default 90 days) are removed, so a doc's content does not linger at rest after its link is dead (privacy) and storage does not accumulate (cost). Runs daily (≈1-day granularity); immediate per-doc revoke is still a blob delete. |
+| 9 | Blob lifecycle | **Auto-delete via an Azure storage lifecycle policy** — blobs older than the expiry window (default 90 days) are removed, so a doc's content does not linger at rest after its link is dead (privacy) and storage does not accumulate (cost). Runs daily (≈1-day granularity); immediate per-doc revoke is still a blob delete. Rule JSON + apply/verify commands live in **Storage Account Setup** (`scripts/canvas-share-lifecycle-policy.json`). |
 | 10 | Client banner state | Two **mutually-exclusive** banners: share **failure reuses** the existing dismissible error banner (`CanvasSendState.Failed`), success uses a **new** dismissible `ShareNotice` (`Shared — link copied`). Each result arm clears the other channel — the `Ok` arm clears a stale `Failed`, the `Error` arm clears a stale `ShareNotice` — so a red + green stack can never render (a fail→retry→succeed flow is common). A live `Waiting` banner is independent and is preserved. Invariant locked by `ShareCanvasDocResultTests`. |
 
 ## Key Files
@@ -157,6 +212,7 @@ not matter.
 | `src/Server/CanvasDocServer.fs` or new `src/Server/CanvasExport.fs` | `StaticExport` transform: base theme + no-op `canvasSend`; `extractTitle` / `prettifyFilename` |
 | `src/Server/CanvasShare.fs` (new) | Azure Blob upload + per-doc read-only SAS; reads config + `AZURE_STORAGE_CONNECTION_STRING` |
 | `src/Server/Server.fsproj` | Add `Azure.Storage.Blobs` package reference |
+| `scripts/canvas-share-lifecycle-policy.json` (new) | Storage lifecycle rule — deletes canvas-share blobs older than the expiry window (see **Storage Account Setup**) |
 | `src/Server/WorktreeApi.fs` | `shareCanvasDocImpl` + live wiring (`withValidatedPath`) + demo-mode stub |
 | `src/Server/GlobalConfig.fs` | Reads the `canvasShare` config section (`container`, `defaultExpiryDays`) |
 | `src/Client/CanvasPane.fs` | Share button (AgentDoc-only) + `ShareDoc` callback + success banner |
@@ -176,8 +232,9 @@ not matter.
   formats → paste a titled link into a rich app) is confirmed **manually**: browser clipboard
   automation is permission-gated and flaky, so it is not automated. Its constituent parts (payload
   builder, button gating, published-doc render) are covered above.
-- The **lifecycle cleanup policy** is confirmed at setup level (its rule is present on the account);
-  the actual age-based deletion (≥ expiry window) is not run-time testable and is not automated.
+- The **lifecycle cleanup policy** is confirmed at setup level — its rule is present on the account
+  via `az storage account management-policy show` (see **Storage Account Setup**); the actual
+  age-based deletion (≥ expiry window) is not run-time testable and is not automated.
 
 ## Related Specs
 
