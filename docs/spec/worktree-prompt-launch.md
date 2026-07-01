@@ -182,6 +182,7 @@ may span newlines — the arg reaches the tool intact. Verified by design; exerc
 | `src/Client/CreateWorktreeModal.fs` | `Prompt` field, `SetPrompt` msg, textarea, request wiring |
 | `src/Client/index.html` | CSS for `.modal-textarea` |
 | `src/Tests/CreateWorktreeServerTests.fs` | Update `createWorktree` return-type call sites |
+| `src/Tests/CreateWorktreeTests.fs` | `SetPrompt` update tests + `SubmitCreateWorktree` prompt→request mapping tests (capturing fake `IWorktreeApi`) |
 | `src/Tests/CommandBuilderTests.fs` | Add `skillInvocation` coverage (existing `actionPrompt` stay green) |
 
 ## Related Specs
