@@ -594,6 +594,9 @@ type OwnerRoutingTests() =
     member _.``Unowned doc never delivers to a co-located non-author (Bug B regression)``() =
         // Direct Bug B guard: an unowned doc with exactly one live, *reachable* session must not
         // hand that session the message. A real sink proves the non-author receives nothing.
+        // Scope: this guards the *send* path (`sendMessage` queues instead of delivering). An
+        // already-queued owner-unknown message may still drain best-effort to a co-located session
+        // by design — see `Register drains the queued owner-unknown message` in DrainQueueTests.
         let ports = getFreeTcpPorts 1
         use nonAuthorSink = new HttpSink(ports[0])
         nonAuthorSink.Start()

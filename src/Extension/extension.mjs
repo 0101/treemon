@@ -223,11 +223,15 @@ async function declareOwnership(worktreePath, filename, sessionId) {
     });
     if (!res.ok) {
       log(`ownership declaration failed for ${filename}: ${res.status} ${res.statusText}`);
-      return;
+      return { ok: false, error: `Treemon returned ${res.status} ${res.statusText}` };
     }
-    log(`declared ownership: ${filename} → ${sessionId}`);
+    const outcome = await res.json().catch(() => ({}));
+    const attributed = outcome?.attributed === true;
+    log(`declared ownership: ${filename} → ${sessionId} (attributed=${attributed})`);
+    return { ok: true, attributed };
   } catch (err) {
     log(`could not declare ownership for ${filename}: ${err.message}`);
+    return { ok: false, error: err.message };
   }
 }
 
@@ -291,6 +295,10 @@ function canvasFilenameFromArgs(toolArgs) {
 // serve the doc locally and hand the session a clickable URL via session.send (events cannot inject
 // tool-result context the way the old onPostToolUse hook did).
 async function handleCanvasWrite(session, state, filename) {
+  if (!isValidCanvasFilename(filename)) {
+    log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
+    return;
+  }
   if (!state.browserMode) {
     if (state.sessionId) {
       await declareOwnership(state.worktreePath, filename, state.sessionId);
@@ -311,10 +319,13 @@ async function handleCanvasWrite(session, state, filename) {
 // The native runtime no longer supports SDK hook callbacks (joinSession({ hooks }) fails the
 // session.resume), so canvas writes are observed via session events instead. tool.execution_complete
 // carries neither the tool name nor its arguments, so the write is captured from tool.execution_start
-// (keyed by toolCallId) and acted on once the matching completion reports success. Returns an
-// unsubscribe that detaches both listeners.
-function watchCanvasWrites(session, state) {
+// (keyed by toolCallId) and acted on once the matching completion reports success. Listeners are
+// subscribed immediately after joinSession so writes during startup aren't missed; completed writes
+// are buffered until `activate` supplies the handler (state is only valid after Object.freeze).
+function watchCanvasWrites(session) {
   const pendingByToolCallId = new Map();
+  const bufferedWrites = [];
+  let onCanvasWrite = (filename) => bufferedWrites.push(filename);
 
   const unsubscribeStart = session.on("tool.execution_start", (event) => {
     const data = event?.data;
@@ -330,22 +341,78 @@ function watchCanvasWrites(session, state) {
     if (filename === undefined) return;
     pendingByToolCallId.delete(data.toolCallId);
     if (!data.success) return;
-    void handleCanvasWrite(session, state, filename);
+    onCanvasWrite(filename);
   });
 
-  return () => {
+  const stop = () => {
     unsubscribeStart();
     unsubscribeComplete();
   };
+
+  // Switch from buffering to live handling and flush writes captured during startup.
+  const activate = (handler) => {
+    onCanvasWrite = handler;
+    bufferedWrites.splice(0).forEach(handler);
+  };
+
+  return { stop, activate };
 }
 
 const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
-// No hooks: the native runtime rejects SDK hook callbacks on resume. Tool observation is wired
-// after startup via watchCanvasWrites (session events).
-const session = await joinSession();
+
+// Explicit ownership tool the agent can call on demand — for a doc produced by a script or
+// another tool (no create/edit event fired to auto-declare), or one whose messages are reaching
+// the wrong session. It stamps THIS session's id, so the agent only supplies the filename.
+const takeOwnershipTool = {
+  name: "canvas_take_ownership",
+  description:
+    "Declare THIS session as the owner of a canvas doc under .agents/canvas/, so replies from that doc route back to this session. Use it when a canvas doc was produced by a script or another tool (so no create/edit event declared ownership), or when a doc's messages are reaching the wrong session. Pass the doc's filename, e.g. \"review.html\".",
+  parameters: {
+    type: "object",
+    properties: {
+      filename: {
+        type: "string",
+        description:
+          "The canvas doc's filename under .agents/canvas/ (e.g. \"review.html\"). A full path is accepted; only the filename is used.",
+      },
+    },
+    required: ["filename"],
+  },
+  skipPermission: true,
+  handler: async ({ filename }) => {
+    const name = String(filename ?? "").split(/[\\/]/).pop();
+    if (!isValidCanvasFilename(name)) {
+      throw new Error(`Not a valid canvas filename: ${JSON.stringify(filename)} (expected e.g. "review.html").`);
+    }
+    if (!extensionState.sessionId) {
+      throw new Error("This session has no id yet; cannot declare ownership.");
+    }
+    const result = await declareOwnership(extensionState.worktreePath, name, extensionState.sessionId);
+    if (!result.ok) {
+      throw new Error(`Ownership declaration failed: ${result.error}`);
+    }
+    if (!result.attributed) {
+      throw new Error(`Treemon is not monitoring this worktree, so ownership was not recorded for ${name}.`);
+    }
+    return `This session now owns "${name}" — replies from that canvas doc will route here.`;
+  },
+};
+
+// No hooks: the native runtime rejects SDK hook callbacks on resume. Canvas writes are observed via
+// session events (watchCanvasWrites), subscribed immediately below so startup writes aren't missed.
+// Tools are registered at join; if a resumed session rejects tool registration (experimental API),
+// fall back to a plain join so the extension still loads — ownership auto-declaration is unaffected.
+let session;
+try {
+  session = await joinSession({ tools: [takeOwnershipTool] });
+} catch (err) {
+  log(`joinSession with tools failed (${err?.message ?? err}); retrying without tools`);
+  session = await joinSession();
+}
 const sessionId = session.sessionId;
 extensionState.sessionId = sessionId;
+const canvasWrites = watchCanvasWrites(session);
 
 const { server, port } = await startHttpServer(session, extensionState);
 extensionState.port = port;
@@ -355,7 +422,8 @@ const browserMode = !registered.reachable || !registered.monitored;
 extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
-const stopWatchingCanvasWrites = watchCanvasWrites(session, extensionState);
+// State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
+canvasWrites.activate((filename) => handleCanvasWrite(session, extensionState, filename));
 
 if (browserMode) {
   const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";
@@ -367,7 +435,7 @@ if (browserMode) {
 const stopHeartbeat = browserMode ? () => {} : startHeartbeat(worktreePath, injectUrl, sessionId);
 
 const cleanup = () => {
-  stopWatchingCanvasWrites();
+  canvasWrites.stop();
   stopHeartbeat();
   server.close();
 };

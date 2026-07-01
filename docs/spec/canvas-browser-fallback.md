@@ -73,6 +73,6 @@ via `session.send()`; in Treemon mode it declares ownership instead.
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — mode detection, HTTP serving, hook, message endpoint
+- `src/Extension/extension.mjs` — mode detection, HTTP serving, session-event canvas-write watcher, message endpoint
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback
