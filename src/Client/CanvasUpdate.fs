@@ -192,14 +192,22 @@ let buildClipboardPayload (result: CanvasShareResult) (filename: string) : Clipb
     { Html = $"<a href=\"{htmlEscape result.Url}\">{htmlEscape title}</a>"
       Text = result.Url }
 
-/// Fire-and-forget effect that writes BOTH clipboard formats at once via the async Clipboard API —
-/// one `ClipboardItem` carrying a `text/html` and a `text/plain` Blob so every paste target
-/// self-selects the format it understands. A rejected write (e.g. a revoked permission) is logged,
-/// not surfaced: the share itself already succeeded and its banner is what the user sees.
+/// Effect that writes BOTH clipboard formats at once via the async Clipboard API — one `ClipboardItem`
+/// carrying a `text/html` and a `text/plain` Blob so every paste target self-selects the format it
+/// understands — and routes the write's *actual* outcome back into the update as `ClipboardWriteResult`.
+/// The write is async and can be rejected (browsers gate `navigator.clipboard.write` behind transient
+/// user activation / an active document, both of which can be lost across the share network round-trip;
+/// the permission may be revoked; or the API/`ClipboardItem` may be unavailable, which throws
+/// synchronously). Every one of those paths dispatches an `Error` so the success banner can correct its
+/// "link copied" claim instead of lying (F6). `payload.Text` is the raw SAS URL, threaded into the
+/// result so a failed copy can still surface a manually-copyable link.
 let private writeClipboardCmd (payload: ClipboardPayload) : Cmd<Msg> =
-    Cmd.ofEffect (fun _ ->
-        Fable.Core.JsInterop.emitJsExpr (payload.Html, payload.Text)
-            "navigator.clipboard.write([new ClipboardItem({'text/html': new Blob([$0], {type: 'text/html'}), 'text/plain': new Blob([$1], {type: 'text/plain'})})]).catch(function(e){ console.error('[canvas] clipboard write failed', e) })")
+    Cmd.ofEffect (fun dispatch ->
+        let url = payload.Text
+        let onCopied () = dispatch (ClipboardWriteResult (url, Ok ()))
+        let onFailed (e: string) = dispatch (ClipboardWriteResult (url, Error e))
+        Fable.Core.JsInterop.emitJsExpr (payload.Html, payload.Text, onCopied, onFailed)
+            "try{navigator.clipboard.write([new ClipboardItem({'text/html': new Blob([$0], {type: 'text/html'}), 'text/plain': new Blob([$1], {type: 'text/plain'})})]).then(function(){ $2() }).catch(function(e){ console.error('[canvas] clipboard write failed', e); $3(String(e)) })}catch(e){ console.error('[canvas] clipboard write failed', e); $3(String(e)) }")
 
 let shareCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     match findWorktree scopedKey model with
@@ -222,16 +230,19 @@ let preserveWaitingOnShareFailure (sendState: CanvasSendState) (message: string)
 let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<CanvasShareResult, string>) (model: Model) =
     match result with
     | Ok shareResult ->
-        // Copy the rich link + plain URL, then raise the success banner (what the user sees). The
-        // clipboard write is a separate fire-and-forget effect with its own error handling. Clear any
-        // stale delivery *error* (from a prior failed share or message send) so the red error banner
-        // can't linger beside the green success one — mirroring how the Error arm clears a stale
-        // success notice; a live Waiting banner is an independent fact and is left untouched.
+        // The share itself succeeded, but the rich-link clipboard write is async and can still be
+        // rejected (transient activation / an active document — both can be lost across the share
+        // round-trip), so DON'T claim "link copied" here: that would lie if the write later fails.
+        // Clear any stale delivery *error* (from a prior failed share or message send) so the red error
+        // banner can't linger beside the coming success banner — mirroring how the Error arm clears a
+        // stale success notice — and clear any stale ShareNotice; the real banner (copied vs "copy it
+        // manually") is raised by ClipboardWriteResult once the write settles (F6). A live Waiting
+        // banner is an independent fact and is left untouched.
         let clearedSendState =
             match model.Canvas.CanvasSendState with
             | CanvasSendState.Failed _ -> CanvasSendState.Idle
             | other -> other
-        { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = Some "Shared — link copied" } },
+        { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = None } },
         writeClipboardCmd (buildClipboardPayload shareResult filename)
     | Error msg ->
         // Raise the existing dismissible delivery-error banner and clear any stale success notice so
@@ -240,6 +251,22 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
         // must never be reported as a share failure (Decision #10 banner-XOR model).
         Fable.Core.JS.console.error ($"Share canvas doc error ({scopedKey}/{filename}):", msg)
         { model with Canvas = { model.Canvas with CanvasSendState = preserveWaitingOnShareFailure model.Canvas.CanvasSendState msg; ShareNotice = None } }, Cmd.none
+
+/// Banner text for a *settled* clipboard write after a successful share (Decision #10). A landed write
+/// confirms the copy ("Shared — link copied"); a rejected write drops the false "copied" claim, tells
+/// the user the link is ready, and surfaces the raw SAS URL as selectable text so they can still copy
+/// it by hand. Pure so the copied-vs-manual text is unit-testable without a browser clipboard.
+let clipboardResultNotice (url: string) (outcome: Result<unit, string>) : string =
+    match outcome with
+    | Ok () -> "Shared — link copied"
+    | Error _ -> $"Shared — link ready, copy it manually: {url}"
+
+/// Route the async clipboard write's real outcome into the success banner so it reflects whether the
+/// rich link was actually copied (see `writeClipboardCmd`; F6 / Decision #10). Pure — the rejection is
+/// already logged in `writeClipboardCmd`'s `.catch`, so this arm only sets the banner and can be driven
+/// through `update` in tests (both arms), unlike the Fable-interop-throwing share `Error` arm.
+let clipboardWriteResult (url: string) (outcome: Result<unit, string>) (model: Model) =
+    { model with Canvas = { model.Canvas with ShareNotice = Some (clipboardResultNotice url outcome) } }, Cmd.none
 
 let dismissShareNotice (model: Model) =
     { model with Canvas = { model.Canvas with ShareNotice = None } }, Cmd.none

@@ -80,6 +80,13 @@ The title is the doc's `<title>`, falling back to a prettified filename
 (`build-status.html` → `Build status`). Because the URL is hidden behind the title, its length does
 not matter.
 
+The clipboard write is async and its outcome is **routed back into the update** (`ClipboardWriteResult`)
+rather than being fire-and-forget: the success banner confirms `Shared — link copied` only once the
+write actually lands, and a rejected write (transient activation lost across the share round-trip, a
+revoked permission, or an unsupported API — the last throws synchronously and is caught) is corrected
+to `Shared — link ready, copy it manually: <url>` with the raw SAS URL shown as selectable text. The
+banner never claims a copy that did not happen (Decision #10).
+
 ### Configuration
 
 - The share backend is configured in the machine-level Treemon config (`~/.treemon/config.json`,
@@ -129,10 +136,13 @@ not matter.
   alters `<title>`.
 - **Client** (`src/Client/CanvasPane.fs`, `CanvasUpdate.fs`, `index.html`): a Share button in
   `headerBar` (AgentDoc-only, beside Archive) raising a new `ShareDoc` callback in
-  `CanvasPaneCallbacks`; `ShareCanvasDoc` / `ShareCanvasDocResult` update arms in `CanvasUpdate.fs`;
-  on `Ok { Url; Title }`, write the two clipboard formats with
-  `navigator.clipboard.write([new ClipboardItem({ "text/html": …, "text/plain": … })])` and show a
-  success banner; on `Error`, reuse the error banner. Button styling in `index.html`.
+  `CanvasPaneCallbacks`; `ShareCanvasDoc` / `ShareCanvasDocResult` / `ClipboardWriteResult` update arms
+  in `CanvasUpdate.fs`; on `Ok { Url; Title }`, write the two clipboard formats with
+  `navigator.clipboard.write([new ClipboardItem({ "text/html": …, "text/plain": … })])` and dispatch
+  `ClipboardWriteResult` from its `then`/`catch` (and a synchronous `try/catch` for an unavailable API)
+  so the success banner reflects the write's real outcome — copied vs. "copy it manually: `<url>`"
+  (F6) — instead of unconditionally claiming a copy; on `Error`, reuse the error banner. Button styling
+  in `index.html`.
 
 ## Storage Account Setup
 
@@ -202,7 +212,7 @@ az storage account management-policy show \
 | 7 | Clipboard | Write **`text/html` titled `<a>` + `text/plain` URL**; every app self-selects. URL length is cosmetic. Title from doc `<title>`, fallback prettified filename. |
 | 8 | Scope | **Single self-contained doc** in v1. Multi-doc link bundles, custom-domain short URLs, and redirect-indirection (stable link → freshly-minted short-lived SAS) are deferred. |
 | 9 | Blob lifecycle | **Auto-delete via an Azure storage lifecycle policy** — blobs older than the expiry window (default 90 days) are removed, so a doc's content does not linger at rest after its link is dead (privacy) and storage does not accumulate (cost). Runs daily (≈1-day granularity); immediate per-doc revoke is still a blob delete. Rule JSON + apply/verify commands live in **Storage Account Setup** (`scripts/canvas-share-lifecycle-policy.json`). |
-| 10 | Client banner state | Two **mutually-exclusive** banners: share **failure reuses** the existing dismissible error banner (`CanvasSendState.Failed`), success uses a **new** dismissible `ShareNotice` (`Shared — link copied`). Each result arm clears the other channel — the `Ok` arm clears a stale `Failed`, the `Error` arm clears a stale `ShareNotice` — so a red + green stack can never render (a fail→retry→succeed flow is common). A live `Waiting` banner is independent and is preserved. Invariant locked by `ShareCanvasDocResultTests`. |
+| 10 | Client banner state | Two **mutually-exclusive** banners: share **failure reuses** the existing dismissible error banner (`CanvasSendState.Failed`), success uses a **new** dismissible `ShareNotice`. The success banner reflects the **actual clipboard-write outcome**, not merely that the share succeeded: because `navigator.clipboard.write` is async and can be rejected (transient user activation / an active document — both can be lost across the share network round-trip — a revoked permission, or an unavailable API), the `Ok` share arm does **not** pre-claim a copy. It clears the stale channels and fires the write, then a `ClipboardWriteResult` arm raises `Shared — link copied` on a landed write or `Shared — link ready, copy it manually: <url>` on a rejected one (the raw SAS URL is surfaced as selectable text so a failed copy is still recoverable). Each result arm clears the other channel — the `Ok` arm clears a stale `Failed`, the `Error` arm clears a stale `ShareNotice` — so a red + green stack can never render (a fail→retry→succeed flow is common). A live `Waiting` banner is independent and is preserved. Invariant locked by `ShareCanvasDocResultTests`. |
 
 ## Key Files
 
@@ -216,7 +226,7 @@ az storage account management-policy show \
 | `src/Server/WorktreeApi.fs` | `shareCanvasDocImpl` + live wiring (`withValidatedPath`) + demo-mode stub |
 | `src/Server/GlobalConfig.fs` | Reads the `canvasShare` config section (`container`, `defaultExpiryDays`) |
 | `src/Client/CanvasPane.fs` | Share button (AgentDoc-only) + `ShareDoc` callback + success banner |
-| `src/Client/CanvasUpdate.fs` | `ShareCanvasDoc` / `ShareCanvasDocResult` arms + dual-format clipboard write |
+| `src/Client/CanvasUpdate.fs` | `ShareCanvasDoc` / `ShareCanvasDocResult` / `ClipboardWriteResult` arms + dual-format clipboard write (outcome-routed banner) |
 | `src/Client/index.html` | Share button styling |
 | `src/Tests/*` | Static-export transform tests, publish-backend tests (Azurite), clipboard payload test, Share-button AgentDoc-gating unit test (mirrors the archive-button SystemView-gating test) |
 

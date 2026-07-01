@@ -863,13 +863,15 @@ type DocErrorTests() =
             "Switching tabs clears the stored error so it can never re-show when you switch back")
 
 
-// ── ShareCanvasDocResult banner state (client share feature) ─────────
-// The Ok arm raises the green "Shared — link copied" success banner (and copies the rich link). The
-// success and the red delivery-error banner must never show together, so Ok also clears a stale
-// Failed send-state (from a prior failed share or message send) while leaving an independent Waiting
-// banner intact. The Ok arm is exercised directly through `update`; the Error arm calls
+// ── ShareCanvasDocResult + ClipboardWriteResult banner state (client share feature) ─────────
+// A successful share does NOT immediately claim "link copied": the Ok arm clears a stale Failed
+// send-state (so the red delivery-error and green success banners never stack) plus any stale notice,
+// then defers the banner to the async clipboard write. ClipboardWriteResult routes that write's real
+// outcome back in — Ok → "Shared — link copied", Error → a "copy it manually: <url>" correction (F6)
+// — and is pure, so both outcomes drive straight through `update`. The share Error arm calls
 // Fable.Core.JS.console.error (dummy code that throws under .NET), so its send-state transition is
-// extracted into the pure preserveWaitingOnShareFailure helper and locked here instead.
+// extracted into the pure preserveWaitingOnShareFailure helper and locked here instead. A live Waiting
+// banner is independent and survives both a share success and a share failure.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -883,22 +885,49 @@ type ShareCanvasDocResultTests() =
         { defaultModel with Canvas = { defaultModel.Canvas with CanvasSendState = state } }
 
     [<Test>]
-    member _.``Ok raises the success banner``() =
+    member _.``Ok defers the banner — it does not claim a copy before the write settles (F6)``() =
+        // The share succeeded but the async clipboard write hasn't settled, so the Ok arm must NOT
+        // pre-emptively claim "link copied" (that would lie if the write is later rejected). It clears
+        // any stale notice and defers the banner to ClipboardWriteResult.
         let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState CanvasSendState.Idle)
-        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
+            "The 'link copied' banner must wait for the clipboard write's actual outcome (F6)")
 
     [<Test>]
     member _.``Ok clears a stale Failed send-state so the error and success banners never stack``() =
         let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Failed "earlier failure"))
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle),
             "A prior delivery error must be cleared on a successful share (no red + green banner at once)")
-        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
+            "The success banner is deferred to the clipboard write; nothing is claimed yet")
 
     [<Test>]
     member _.``Ok preserves an independent Waiting send-state``() =
         let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Waiting "r/feat"))
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "A live 'waiting for session' banner is an independent fact and must survive a share")
+
+    // F6: the "link copied" banner reflects the async clipboard write's ACTUAL outcome, routed back
+    // through ClipboardWriteResult. A landed write confirms the copy; a rejected write (transient
+    // activation / focus lost across the share round-trip, revoked permission, or an unsupported
+    // clipboard API) drops the false claim and surfaces the raw URL for a manual copy. This arm is pure
+    // (the rejection is logged in writeClipboardCmd's .catch), so — unlike the share Error arm — both
+    // outcomes can be driven straight through `update`.
+    [<Test>]
+    member _.``ClipboardWriteResult Ok raises the 'link copied' banner``() =
+        let updated, _ = update (ClipboardWriteResult (shareResult.Url, Ok ())) defaultModel
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+
+    [<Test>]
+    member _.``ClipboardWriteResult Error corrects the claim and surfaces the link for a manual copy (F6)``() =
+        let updated, _ = update (ClipboardWriteResult (shareResult.Url, Error "NotAllowedError")) defaultModel
+        match updated.Canvas.ShareNotice with
+        | Some notice ->
+            Assert.That(notice, Does.Not.Contain("link copied"),
+                "A rejected clipboard write must NOT claim the link was copied (F6)")
+            Assert.That(notice, Does.Contain(shareResult.Url),
+                "The raw SAS URL must be surfaced so the user can copy it manually")
+        | None -> Assert.Fail("A settled clipboard write must still raise the share banner")
 
     // The Error arm can't be driven through `update` (its direct Fable.Core.JS.console.error throws
     // under .NET), so its send-state transition lives in the pure preserveWaitingOnShareFailure helper
