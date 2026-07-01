@@ -45,9 +45,12 @@ let private encodeCommand (command: string) =
     Convert.ToBase64String(bytes)
 
 let private buildScript (nativePath: string) (command: string option) =
+    // Double embedded single quotes so a path containing ' cannot break out of the
+    // single-quoted PowerShell string literal (or inject). Central to every launch path.
+    let escapedPath = nativePath.Replace("'", "''")
     match command with
-    | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
-    | None -> $"Set-Location '{nativePath}'"
+    | Some cmd -> $"Set-Location '{escapedPath}'; {cmd}"
+    | None -> $"Set-Location '{escapedPath}'"
 
 let private waitForExitAsync (proc: Process) (timeoutMs: int) =
     async {
