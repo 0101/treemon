@@ -180,6 +180,16 @@ may span newlines — the arg reaches the tool intact. Verified by design; exerc
   weighed as defense-in-depth but **not** added: the Origin check already blocks the vector, and
   coupling to the clients' exact content-type risks breaking the Cli. The loopback decision is a
   pure, unit-tested function (`isSameOriginRequest`).
+- **CSRF guard extended to the canvas POST routes (follow-up `tm-quicklaunch-9io`)**: F7 fronted
+  only the remoting handler; the state-changing `POST /api/canvas/register` and
+  `/api/canvas/attribute` routes (`canvasAgentRoutes` in `Program.fs`) were a separate, unguarded
+  cross-origin surface — and `attribute`'s owner sessionId flows into a coding-agent `--resume`
+  launch. The **same** `HttpSecurity.csrfGuard` is now composed after each route's `POST` filter and
+  before its handler (`POST` filters first, so the guard only ever evaluates the state-changing
+  request it protects). The canvas-bridge is a non-browser Node client whose `fetch` sends no
+  Origin/Referer (verified empirically), so the guard's missing-header carve-out leaves it working;
+  a cross-origin browser POST is rejected `403`. Verified end-to-end on a fixtures server: no-Origin
+  (bridge) and loopback-Origin (SPA) POSTs to both routes → `200`; cross-origin Origin → `403`.
 - **Create-path provider read is deliberately NOT `resolveProvider` (review F8)**: a just-created
   worktree is not yet in the scheduler's KnownPaths/CodingToolData, so `resolveProvider` returns
   `None` there; the create path must read `.treemon.json` directly. Kept as a direct read (comment
@@ -212,7 +222,7 @@ may span newlines — the arg reaches the tool intact. Verified by design; exerc
 | `src/Server/SessionManager.fs` | Escape single quotes in `buildScript` `nativePath` |
 | `src/Server/WorktreeApi.fs` | Orchestrate guarded fire-and-forget launch in `createWorktree` |
 | `src/Server/HttpSecurity.fs` | New: `csrfGuard` + pure loopback-origin decision (review F7) |
-| `src/Server/Program.fs` | Compose `HttpSecurity.csrfGuard` before the remoting handler (review F7) |
+| `src/Server/Program.fs` | Compose `HttpSecurity.csrfGuard` before the remoting handler (F7) and before the canvas register/attribute POST routes (follow-up `9io`) |
 | `src/Client/CreateWorktreeModal.fs` | `Prompt` field, `SetPrompt` msg, textarea, request wiring |
 | `src/Client/index.html` | CSS for `.modal-textarea` |
 | `src/Tests/CreateWorktreeServerTests.fs` | Update `createWorktree` return-type call sites |
