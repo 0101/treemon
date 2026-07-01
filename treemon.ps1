@@ -23,6 +23,11 @@ if ($env:TREEMON_PORT) {
     $parsed = 0
     if ([int]::TryParse($env:TREEMON_PORT, [ref]$parsed)) { $DefaultPort = $parsed }
 }
+# Canvas doc server port. Must match Program.fs `defaultCanvasPort` — treemon.ps1 never passes
+# --canvas-port, so the server always binds this. It runs as a SEPARATE Kestrel host; a silent
+# bind failure (e.g. the port still held after a restart) leaves the dashboard up on $DefaultPort
+# while every canvas doc fails to load.
+$CanvasPort = 5002
 
 if (-not $Command) {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
@@ -164,6 +169,30 @@ function Ensure-WwwRoot {
     Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
 }
 
+# True when a TCP port can be bound on loopback (i.e. nothing is listening). Mirrors how the
+# canvas doc server binds (IPAddress.Loopback), and avoids the slow first-call cost of
+# Get-NetTCPConnection so it's cheap to poll on the start hot-path.
+function Test-PortFree([int]$Port) {
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Poll until a TCP port is bindable, up to $TimeoutSec. Returns $true when free, $false on timeout.
+function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        if (Test-PortFree $Port) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 300
+    }
+}
+
 function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -195,6 +224,21 @@ function Start-ProductionServer([string[]]$Roots) {
     $serverExe = Join-Path $PublishDir "Treemon.exe"
     $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
     $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort" } else { "--port $DefaultPort" }
+
+    # The server binds two Kestrel hosts: the dashboard on $DefaultPort and the canvas doc server on
+    # $CanvasPort. If a port is still held when we launch — e.g. the previous server hasn't released
+    # it yet after a restart — the dashboard surfaces the failure (it exits), but the canvas doc host
+    # fails SILENTLY, leaving every canvas doc unable to load. Wait for both to clear, warn if not.
+    foreach ($p in @($DefaultPort, $CanvasPort)) {
+        if (-not (Wait-PortFree $p 10)) {
+            $holder = (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+            Write-Host "Warning: port $p is still in use (PID $holder) after 10s." -ForegroundColor Yellow
+            if ($p -eq $CanvasPort) {
+                Write-Host "  The canvas doc server may fail to bind $CanvasPort, so canvas docs won't load." -ForegroundColor Yellow
+                Write-Host "  Stop the process/other treemon instance holding it, then restart." -ForegroundColor Yellow
+            }
+        }
+    }
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $serverExe `
@@ -284,6 +328,17 @@ function Show-Status {
     Write-Host "  Port:    $DefaultPort"
     Write-Host "  Uptime:  $uptimeStr"
     Write-Host "  URL:     http://localhost:$DefaultPort"
+
+    # Canvas doc server health: a separate Kestrel host on $CanvasPort. A silent bind failure at
+    # startup leaves the dashboard up here but every canvas doc unable to load, so surface it.
+    $canvasConn = Get-NetTCPConnection -LocalPort $CanvasPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($canvasConn -and $canvasConn.OwningProcess -eq $runningPid) {
+        Write-Host "  Canvas:  http://127.0.0.1:$CanvasPort (doc server up)"
+    } elseif ($canvasConn) {
+        Write-Host "  Canvas:  WARNING - port $CanvasPort is held by PID $($canvasConn.OwningProcess), not this server (PID $runningPid)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' to rebind." -ForegroundColor Red
+    }
 
     # Watched roots come from the server (the single source of truth) via `tm roots`.
     $rootLines = @()
