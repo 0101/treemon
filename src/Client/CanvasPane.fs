@@ -180,7 +180,31 @@ type CanvasPaneCallbacks =
       DismissShareNotice: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (shareNotice: string option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+/// The subset of the canvas `CanvasState` that `view` renders from, bundled into one record so the
+/// pane takes a single state value instead of a long, order-dependent positional list. Grouped for
+/// the same reason as `CanvasPaneCallbacks`: the signature had been growing one positional param
+/// per feature (`docError` → `size` → `shareNotice`), which invited a silent argument
+/// transposition that would compile and only surface at runtime. Built by `CanvasView.fs` from
+/// `model.Canvas.*`, mirroring how `canvasCallbacks` is assembled. Deliberately a subset record
+/// rather than `CanvasState` itself: `CanvasPane.fs` compiles before `CanvasState.fs` in
+/// `Client.fsproj`, so that type isn't nameable here.
+type CanvasPaneState =
+    { IsOpen: bool
+      Position: CanvasPosition
+      Size: CanvasSize
+      SendState: CanvasSendState
+      DocError: DocJsError option
+      ShareNotice: string option
+      BridgeLiveness: Map<string, BridgeLiveness> }
+
+let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+    let { IsOpen = isOpen
+          Position = position
+          Size = size
+          SendState = sendState
+          DocError = docError
+          ShareNotice = shareNotice
+          BridgeLiveness = bridgeLiveness } = state
     let { SetPosition = setPosition
           SetSize = setSize
           SelectDoc = selectDoc

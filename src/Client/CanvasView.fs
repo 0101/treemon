@@ -82,4 +82,13 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           DismissShareNotice = (fun () -> dispatch DismissShareNotice)
           LaunchSession = launchCanvasSession }
 
-    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition model.Canvas.CanvasSize (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.ShareNotice model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+    let canvasState: CanvasPane.CanvasPaneState =
+        { IsOpen = model.Canvas.CanvasPaneOpen
+          Position = model.Canvas.CanvasPosition
+          Size = model.Canvas.CanvasSize
+          SendState = model.Canvas.CanvasSendState
+          DocError = model.Canvas.DocError
+          ShareNotice = model.Canvas.ShareNotice
+          BridgeLiveness = model.Canvas.BridgeLiveness }
+
+    CanvasPane.view canvasState (focusedWorktreeCanvasDoc model) model.Repos focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
