@@ -179,7 +179,7 @@ type BranchesLoadedTests() =
 
     [<Test>]
     member _.``BranchesLoaded Ok ignored when modal is Open``() =
-        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old" }
+        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old"; Prompt = "" }
         let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "new-branch" ]))) { defaultModel with CreateModal = openForm }
 
         match model.CreateModal with
@@ -195,7 +195,7 @@ type BranchesLoadedTests() =
 type FormStateTests() =
 
     let openForm =
-        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main"; Prompt = "" }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
@@ -296,7 +296,7 @@ type FormStateTests() =
 type SubmitCreateWorktreeTests() =
 
     let openForm =
-        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main"; Prompt = "" }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
@@ -313,7 +313,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with empty name is ignored``() =
         let emptyName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main"; Prompt = "" }
         let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = emptyName }
 
         match model.CreateModal with
@@ -324,7 +324,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with whitespace-only name is ignored``() =
         let wsName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main"; Prompt = "" }
         let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = wsName }
 
         match model.CreateModal with
@@ -342,7 +342,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree trims name with leading and trailing spaces``() =
         let spacedName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main"; Prompt = "" }
         let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = spacedName }
 
         match model.CreateModal with
@@ -425,7 +425,7 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal resets to Closed from Open``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let model, _ = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -453,7 +453,7 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal produces no command``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let _, cmd = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Empty)
@@ -473,7 +473,7 @@ type EscapeKeyClosesModalTests() =
     [<Test>]
     member _.``Escape key closes modal from Open state``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -500,7 +500,7 @@ type EscapeKeyClosesModalTests() =
     [<Test>]
     member _.``Escape key produces no command when modal is open``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let _, cmd = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Empty)
@@ -600,7 +600,7 @@ type EnterKeySuppressedWhileModalOpenTests() =
           BaseBranch = "main" }
 
     let openForm =
-        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
 
     let modelWithRepoAndModal =
         { defaultModel with
@@ -677,7 +677,7 @@ type FocusRestorationTests() =
     let repoId = testRepoId
 
     let openForm =
-        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
 
     let modelWithFocusAndModal =
         { defaultModel with
