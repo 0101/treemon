@@ -119,7 +119,14 @@ not matter.
 - **Server wiring** (`src/Server/WorktreeApi.fs`): `shareCanvasDocImpl` =
   `validateCanvasPath → read file → CanvasExport.buildStaticHtml → CanvasShare.publish → Result`,
   wired into the live `IWorktreeApi` record via `withValidatedPath` (mirroring `archiveCanvasDoc`),
-  plus the demo-mode stub.
+  plus the demo-mode stub. `withValidatedPath` was generalized from
+  `(unit -> Async<Result<unit,string>>)` to `(unit -> Async<Result<'a,string>>)` so `shareCanvasDoc`
+  (which returns `CanvasShareResult`, not `unit`) reuses the same path-validation guard as every
+  other write method; existing `unit`-returning callers unify unchanged. `Title` is assembled with
+  `CanvasExport.resolveTitle html filename` (not bare `extractTitle`, which is `string option`) so the
+  non-optional `CanvasShareResult.Title` gets the `<title>`→prettified-filename fallback; the title is
+  read from the original on-disk HTML since `buildStaticHtml` only injects at `</head>` and never
+  alters `<title>`.
 - **Client** (`src/Client/CanvasPane.fs`, `CanvasUpdate.fs`, `index.html`): a Share button in
   `headerBar` (AgentDoc-only, beside Archive) raising a new `ShareDoc` callback in
   `CanvasPaneCallbacks`; `ShareCanvasDoc` / `ShareCanvasDocResult` update arms in `CanvasUpdate.fs`;

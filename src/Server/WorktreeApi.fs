@@ -93,6 +93,30 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
         File.Move(sourcePath, destPath, overwrite = true)
     }
 
+/// Share a canvas doc: validate the path → read the on-disk file → static-export it
+/// (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish to Azure Blob and
+/// mint a per-doc read-only SAS (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the
+/// SAS URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
+/// `CanvasExport.resolveTitle` (the doc's `<title>`, falling back to a prettified filename) because
+/// `CanvasShareResult.Title` is a plain string, not an option; the title is read from the original
+/// HTML (`buildStaticHtml` injects only at `</head>`, so it never alters the doc's `<title>`).
+let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
+    let path = WorktreePath.value request.WorktreePath
+    asyncResult {
+        let! sourcePath =
+            Server.PathUtils.validateCanvasPath path request.Filename
+            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
+
+        if not (File.Exists sourcePath) then
+            return! Error $"File not found: {request.Filename}"
+
+        let html = File.ReadAllText sourcePath
+        let! sasUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
+        return
+            { Url = sasUrl
+              Title = Server.CanvasExport.resolveTitle html request.Filename }
+    }
+
 let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
@@ -346,7 +370,7 @@ let worktreeApi
             return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
 
-    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
+    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<'a, string>>) =
         let path = WorktreePath.value wtPath
         async {
             let! isValid = validatePath path
@@ -597,8 +621,9 @@ let worktreeApi
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)
-          // Contract-only placeholder; real export + Azure publish wiring lands in tm-canvas-share-p9v.
-          shareCanvasDoc = fun _ -> async { return Error "Canvas sharing is not yet implemented" }
+          shareCanvasDoc = fun req ->
+              withValidatedPath req.WorktreePath "shareCanvasDoc" (fun () ->
+                  shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
           getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
