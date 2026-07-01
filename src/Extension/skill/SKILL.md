@@ -1,6 +1,7 @@
 ---
 name: canvas
 description: Creates and updates HTML documents displayed in the Treemon canvas pane. Use when building dashboards, status pages, interactive forms, or any visual content for an agent session.
+allowed-tools: canvas_take_ownership
 ---
 
 # Canvas Docs
@@ -95,9 +96,11 @@ You never need to know or send your own session ID: writing the `.html` file wit
 
 Editing a doc another session created transfers ownership to you (most recent author wins), so from then on its messages arrive in your session.
 
+**Claiming ownership explicitly.** If a canvas doc was written by a **script or another tool** (so no create/edit event fired to declare ownership), or its messages are reaching the **wrong session**, claim it directly: call the **`canvas_take_ownership`** tool with the doc's filename — e.g. `canvas_take_ownership({ filename: "review.html" })`. It stamps in your session ID without rewriting the file. When the user says something like "take ownership of the review doc," find which `.agents/canvas/*.html` they mean and call the tool with that filename.
+
 ## Updating
 
-Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and returns the browser URL in the tool result right after you create or edit a canvas file (open it for the user or share the ctrl+clickable URL). `canvasSend` interactions work identically in both modes — no changes needed in your HTML.
+Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and sends you the browser URL as a separate session message right after you create or edit a canvas file (open it for the user or share the ctrl+clickable URL). `canvasSend` interactions work identically in both modes — no changes needed in your HTML.
 
 ## Multiple docs
 
