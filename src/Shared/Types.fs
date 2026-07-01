@@ -258,6 +258,17 @@ type ArchiveCanvasDocRequest =
     { WorktreePath: WorktreePath
       Filename: string }
 
+type ShareCanvasDocRequest =
+    { WorktreePath: WorktreePath
+      Filename: string }
+
+/// Result of publishing a canvas doc: the per-doc read-only SAS URL plus the doc's title
+/// (extracted server-side from the HTML) so the client can build the rich clipboard link
+/// without re-parsing.
+type CanvasShareResult =
+    { Url: string
+      Title: string }
+
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
@@ -283,6 +294,7 @@ type IWorktreeApi =
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
+      shareCanvasDoc: ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>
       saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
       loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>>
       getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>>

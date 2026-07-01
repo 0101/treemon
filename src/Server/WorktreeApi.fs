@@ -67,6 +67,7 @@ let readOnlyApi
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
+      shareCanvasDoc = fun _ -> async { return Error $"Share canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
       getBridgeLiveness = fun _ -> async { return Map.empty }
@@ -596,6 +597,8 @@ let worktreeApi
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)
+          // Contract-only placeholder; real export + Azure publish wiring lands in tm-canvas-share-p9v.
+          shareCanvasDoc = fun _ -> async { return Error "Canvas sharing is not yet implemented" }
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
           getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
