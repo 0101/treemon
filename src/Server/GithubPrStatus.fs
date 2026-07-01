@@ -233,7 +233,7 @@ let private fetchPrList (remote: GithubRemote) (state: string) (extraParams: str
 let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
     async {
         let! openChild = Async.StartChild(fetchPrList remote "open" "")
-        let! closedChild = Async.StartChild(fetchPrList remote "closed" "&sort=updated&direction=desc&per_page=10")
+        let! closedChild = Async.StartChild(fetchPrList remote "closed" "&sort=updated&direction=desc&per_page=30")
         let! openPrs = openChild
         let! closedPrs = closedChild
 
