@@ -509,6 +509,37 @@ let worktreeApi
 
                   let! result = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+
+                  // Fire-and-forget: when a prompt was supplied, spawn a tracked coding-agent
+                  // window in the new worktree seeded with the config-driven skill invocation.
+                  // Reuses SessionManager.launchAction (spawns+tracks when no window exists yet).
+                  // Launched even when create returned post-fork warnings; a blank prompt is a no-op.
+                  match req.Prompt with
+                  | Some prompt when not (String.IsNullOrWhiteSpace prompt) ->
+                      let newPath = result.WorktreePath
+                      // Provider is read from the new worktree first (its .treemon.json exists once
+                      // create returns) because it can differ from the root working copy; the skill
+                      // falls back to the root config.
+                      let provider =
+                          CodingToolStatus.readConfiguredProvider newPath
+                          |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
+                      let skill = TreemonConfig.readDefaultSkill root
+                      let wrapped = CodingToolStatus.skillInvocation provider skill prompt
+                      let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
+                      // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
+                      // throws on timeout, and Async.Ignore would swallow the Error case — an
+                      // unguarded Async.Start could fault silently.
+                      async {
+                          try
+                              match! SessionManager.launchAction sessionAgent (WorktreePath newPath) cmd with
+                              | Ok () -> ()
+                              | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
+                          with ex ->
+                              Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
+                      }
+                      |> Async.Start
+                  | _ -> ()
+
                   return result.Warnings
               }
           openNewTab = fun wtPath ->
