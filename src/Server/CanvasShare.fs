@@ -22,6 +22,7 @@ open System.Text
 open Azure.Storage.Blobs
 open Azure.Storage.Blobs.Models
 open Azure.Storage.Sas
+open FsToolkit.ErrorHandling
 open Server.GlobalConfig
 
 // ── pure: blob naming ────────────────────────────────────────────────────────
@@ -61,12 +62,12 @@ let internal blobName (prefix: string) (filename: string) : string =
 /// grant is unit-testable in isolation. Least privilege (Decision #2): a recipient of doc A's link
 /// cannot read doc B because the signature is bound to A's blob.
 let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: DateTimeOffset) : BlobSasBuilder =
-    let builder = BlobSasBuilder(BlobSasPermissions.Read, expiresOn)
-    builder.BlobContainerName <- containerName
-    builder.BlobName <- blob
-    builder.Resource <- "b"
-    builder.Protocol <- SasProtocol.Https
-    builder
+    BlobSasBuilder(
+        BlobSasPermissions.Read, expiresOn,
+        BlobContainerName = containerName,
+        BlobName = blob,
+        Resource = "b",
+        Protocol = SasProtocol.Https)
 
 // ── impure: publish ──────────────────────────────────────────────────────────
 
@@ -97,41 +98,43 @@ let private tryContainerClient (connStr: string) (container: string) : BlobConta
 /// credential — Decision #3), or on any storage failure. No returned message or log line contains
 /// the account key or the full SAS.
 let publish (filename: string) (html: string) : Async<Result<string, string>> =
-    async {
-        match connectionString () with
-        | None -> return Error notConfiguredMessage
-        | Some connStr ->
-            let config = readCanvasShareConfig ()
-            match tryContainerClient connStr config.Container with
-            | None -> return Error notConfiguredMessage
-            | Some containerClient ->
-                try
-                    let blob = blobName (generatePrefix ()) filename
-                    let blobClient = containerClient.GetBlobClient(blob)
-                    // A SAS can only be signed from a shared-key (account-key) credential; a connection
-                    // string carrying only a SAS token can't. Fail clearly instead of throwing, and
-                    // before uploading so we don't leave an unreachable orphan blob.
-                    if not blobClient.CanGenerateSasUri then
-                        return Error "Canvas sharing needs an account-key connection string so a read-only link can be signed."
-                    else
-                        // charset is declared so non-ASCII doc content isn't mojibaked when the blob is
-                        // opened standalone (the export injects no <meta charset>).
-                        let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
-                        use stream = new MemoryStream(Encoding.UTF8.GetBytes html)
-                        let! _ =
-                            blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
-                            |> Async.AwaitTask
-                        let expiresOn = DateTimeOffset.UtcNow.AddDays(float config.DefaultExpiryDays)
-                        let sasUri = blobClient.GenerateSasUri(buildSasBuilder config.Container blob expiresOn)
-                        return Ok(sasUri.ToString())
-                with
-                | :? Azure.RequestFailedException as ex ->
-                    // Log/return the status + error code only (e.g. 404 ContainerNotFound) — a safe,
-                    // actionable token that carries no secret; the full message can echo request
-                    // details.
-                    Log.log "CanvasShare" $"Publish to container '{config.Container}' failed: HTTP {ex.Status} {ex.ErrorCode}"
-                    return Error $"Failed to publish shared doc: {ex.ErrorCode} (HTTP {ex.Status})."
-                | ex ->
-                    Log.log "CanvasShare" $"Publish to container '{config.Container}' failed: {ex.GetType().Name}"
-                    return Error $"Failed to publish shared doc ({ex.GetType().Name})."
+    asyncResult {
+        // A missing connection string ⇒ "not configured"; a malformed one is swallowed by
+        // tryContainerClient into the same outcome, so the raw string (account key) is never surfaced.
+        let! connStr = connectionString () |> Result.requireSome notConfiguredMessage
+        let config = readCanvasShareConfig ()
+        let! containerClient =
+            tryContainerClient connStr config.Container
+            |> Result.requireSome notConfiguredMessage
+        // The try/with stays around the Azure SDK calls (a genuine interop boundary); the two
+        // Option→Error gates above are flattened into the asyncResult track.
+        try
+            let blob = blobName (generatePrefix ()) filename
+            let blobClient = containerClient.GetBlobClient(blob)
+            // A SAS can only be signed from a shared-key (account-key) credential; a connection
+            // string carrying only a SAS token can't. Fail clearly instead of throwing, and
+            // before uploading so we don't leave an unreachable orphan blob.
+            if not blobClient.CanGenerateSasUri then
+                return! Error "Canvas sharing needs an account-key connection string so a read-only link can be signed."
+            else
+                // charset is declared so non-ASCII doc content isn't mojibaked when the blob is
+                // opened standalone (the export injects no <meta charset>).
+                let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
+                use stream = new MemoryStream(Encoding.UTF8.GetBytes html)
+                let! _ =
+                    blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
+                    |> Async.AwaitTask
+                let expiresOn = DateTimeOffset.UtcNow.AddDays(float config.DefaultExpiryDays)
+                let sasUri = blobClient.GenerateSasUri(buildSasBuilder config.Container blob expiresOn)
+                return sasUri.ToString()
+        with
+        | :? Azure.RequestFailedException as ex ->
+            // Log/return the status + error code only (e.g. 404 ContainerNotFound) — a safe,
+            // actionable token that carries no secret; the full message can echo request
+            // details.
+            Log.log "CanvasShare" $"Publish to container '{config.Container}' failed: HTTP {ex.Status} {ex.ErrorCode}"
+            return! Error $"Failed to publish shared doc: {ex.ErrorCode} (HTTP {ex.Status})."
+        | ex ->
+            Log.log "CanvasShare" $"Publish to container '{config.Container}' failed: {ex.GetType().Name}"
+            return! Error $"Failed to publish shared doc ({ex.GetType().Name})."
     }
