@@ -861,3 +861,41 @@ type DocErrorTests() =
         let updated = tryUpdateModel (SelectCanvasDoc ("r/feat", "b.html")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "Switching tabs clears the stored error so it can never re-show when you switch back")
+
+
+// ── ShareCanvasDocResult banner state (client share feature) ─────────
+// The Ok arm raises the green "Shared — link copied" success banner (and copies the rich link). The
+// success and the red delivery-error banner must never show together, so Ok also clears a stale
+// Failed send-state (from a prior failed share or message send) while leaving an independent Waiting
+// banner intact. Only the Ok arm is exercised through `update` — the Error arm calls
+// Fable.Core.JS.console.error, dummy code that throws under .NET.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ShareCanvasDocResultTests() =
+
+    let shareResult : CanvasShareResult =
+        { Url = "https://acct.blob.core.windows.net/canvas/x/status.html?sig=s"; Title = "Status" }
+
+    let modelWithSendState state =
+        { defaultModel with Canvas = { defaultModel.Canvas with CanvasSendState = state } }
+
+    [<Test>]
+    member _.``Ok raises the success banner``() =
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState CanvasSendState.Idle)
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+
+    [<Test>]
+    member _.``Ok clears a stale Failed send-state so the error and success banners never stack``() =
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Failed "earlier failure"))
+        Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle),
+            "A prior delivery error must be cleared on a successful share (no red + green banner at once)")
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+
+    [<Test>]
+    member _.``Ok preserves an independent Waiting send-state``() =
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Waiting "r/feat"))
+        Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
+            "A live 'waiting for session' banner is an independent fact and must survive a share")
+

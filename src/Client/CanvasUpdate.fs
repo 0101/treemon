@@ -145,6 +145,92 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
         model, Cmd.none
 
+// ── Canvas doc sharing (client) ─────────────────────────────────────────────────────────────────
+// The share success/error handling + the rich-link clipboard payload. The server publishes the doc
+// and returns a CanvasShareResult { Url; Title }; on Ok the client copies BOTH clipboard formats and
+// raises the success banner, on Error it reuses the delivery error banner.
+
+/// The two clipboard formats written on a successful share (see `buildClipboardPayload`).
+type ClipboardPayload =
+    { /// `text/html` — a titled `<a>` so rich targets (Teams, Slack, Outlook, Gmail, Word) render a
+      /// hyperlink whose visible text is the doc title, hiding the long SAS URL.
+      Html: string
+      /// `text/plain` — the raw SAS URL, for plain targets (the VS Code editor, a terminal, Notepad).
+      Text: string }
+
+/// Escape the four characters that would otherwise break the rich `<a href="…">…</a>` — used for
+/// both the href value and the anchor text so a title or URL containing `&`/`<`/`>`/`"` can't inject
+/// markup or truncate the link. `&` is replaced first so the `&`-prefixed entities aren't re-escaped.
+let private htmlEscape (s: string) : string =
+    s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;")
+
+/// Prettify a canvas filename into a human title — `build-status.html` → `Build status`: take the
+/// path leaf, drop a trailing `.html`, turn `-`/`_` into spaces, collapse whitespace, and capitalize
+/// only the first letter (sentence case). Mirrors the server's `CanvasExport.prettifyFilename` so
+/// this client-side fallback resolves to the same title the server would have returned; used only
+/// when the shared doc reports no usable `<title>`.
+let prettifyFilename (filename: string) : string =
+    let leaf = filename.Replace('\\', '/').Split('/') |> Array.last
+    let stem =
+        if leaf.EndsWith(".html", System.StringComparison.OrdinalIgnoreCase)
+        then leaf.Substring(0, leaf.Length - ".html".Length)
+        else leaf
+    let spaced =
+        stem.Replace('-', ' ').Replace('_', ' ').Split([| ' '; '\t'; '\n'; '\r'; '\f'; '\v' |], System.StringSplitOptions.RemoveEmptyEntries)
+        |> String.concat " "
+    if spaced = "" then filename
+    else string (System.Char.ToUpperInvariant spaced[0]) + spaced.Substring(1)
+
+/// Build the dual-format clipboard payload for a shared doc: the titled HTML anchor (`text/html`)
+/// and the raw URL (`text/plain`). The title is the server-resolved `CanvasShareResult.Title`,
+/// falling back to a prettified filename when it is blank; both the href and the anchor text are
+/// HTML-escaped. Pure so the payload is unit-testable without a browser clipboard.
+let buildClipboardPayload (result: CanvasShareResult) (filename: string) : ClipboardPayload =
+    let title =
+        if System.String.IsNullOrWhiteSpace result.Title then prettifyFilename filename
+        else result.Title
+    { Html = $"<a href=\"{htmlEscape result.Url}\">{htmlEscape title}</a>"
+      Text = result.Url }
+
+/// Fire-and-forget effect that writes BOTH clipboard formats at once via the async Clipboard API —
+/// one `ClipboardItem` carrying a `text/html` and a `text/plain` Blob so every paste target
+/// self-selects the format it understands. A rejected write (e.g. a revoked permission) is logged,
+/// not surfaced: the share itself already succeeded and its banner is what the user sees.
+let private writeClipboardCmd (payload: ClipboardPayload) : Cmd<Msg> =
+    Cmd.ofEffect (fun _ ->
+        Fable.Core.JsInterop.emitJsExpr (payload.Html, payload.Text)
+            "navigator.clipboard.write([new ClipboardItem({'text/html': new Blob([$0], {type: 'text/html'}), 'text/plain': new Blob([$1], {type: 'text/plain'})})]).catch(function(e){ console.error('[canvas] clipboard write failed', e) })")
+
+let shareCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
+    match findWorktree scopedKey model with
+    | Some wt ->
+        let request: ShareCanvasDocRequest = { WorktreePath = wt.Path; Filename = filename }
+        model, Cmd.OfAsync.either worktreeApi.Value.shareCanvasDoc request (fun r -> ShareCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ShareCanvasDocResult (scopedKey, filename, r))
+    | None -> model, Cmd.none
+
+let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<CanvasShareResult, string>) (model: Model) =
+    match result with
+    | Ok shareResult ->
+        // Copy the rich link + plain URL, then raise the success banner (what the user sees). The
+        // clipboard write is a separate fire-and-forget effect with its own error handling. Clear any
+        // stale delivery *error* (from a prior failed share or message send) so the red error banner
+        // can't linger beside the green success one — mirroring how the Error arm clears a stale
+        // success notice; a live Waiting banner is an independent fact and is left untouched.
+        let clearedSendState =
+            match model.Canvas.CanvasSendState with
+            | CanvasSendState.Failed _ -> CanvasSendState.Idle
+            | other -> other
+        { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = Some "Shared — link copied" } },
+        writeClipboardCmd (buildClipboardPayload shareResult filename)
+    | Error msg ->
+        // Reuse the existing dismissible delivery-error banner; clear any stale success notice so the
+        // two never show together.
+        Fable.Core.JS.console.error ($"Share canvas doc error ({scopedKey}/{filename}):", msg)
+        { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Failed msg; ShareNotice = None } }, Cmd.none
+
+let dismissShareNotice (model: Model) =
+    { model with Canvas = { model.Canvas with ShareNotice = None } }, Cmd.none
+
 let navigateCanvasDoc (filename: string) (model: Model) =
     match model.FocusedElement with
     | Some (Card scopedKey) ->

@@ -28,6 +28,20 @@ let private livenessDot (isAlive: bool) =
         prop.title (if isAlive then "Session alive" else "No active session")
     ]
 
+/// The Share-button glyph (the standard three-node share icon), styled like `ArchiveViews.archiveIcon`
+/// (`btn-icon`, 24×24, `currentColor`) so the Share and Archive buttons sit uniformly in the header.
+let private shareIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [
+                svg.d "M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"
+            ]
+        ]
+    ]
+
 /// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
 /// server-generated and has no owner session, so liveness is meaningless and the dot is omitted.
 let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
@@ -149,9 +163,10 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the seven
-/// handlers are passed by name: three share the type `string -> unit`, so positional passing let a
-/// silent argument transposition compile and surface only at runtime.
+/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the handlers
+/// are passed by name: several share the type `string -> unit` (`SelectDoc`, `OnOverviewClick`,
+/// `ArchiveDoc`, `ShareDoc`), so positional passing let a silent argument transposition compile and
+/// surface only at runtime.
 type CanvasPaneCallbacks =
     { SetPosition: CanvasPosition -> unit
       SetSize: CanvasSize -> unit
@@ -159,19 +174,23 @@ type CanvasPaneCallbacks =
       OnOverviewClick: string -> unit
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
+      ShareDoc: string -> unit
       DismissError: unit -> unit
       DismissDocError: unit -> unit
+      DismissShareNotice: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (shareNotice: string option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
     let { SetPosition = setPosition
           SetSize = setSize
           SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
+          ShareDoc = shareDoc
           DismissError = dismissError
           DismissDocError = dismissDocError
+          DismissShareNotice = dismissShareNotice
           LaunchSession = launchSession } = callbacks
     let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
@@ -225,6 +244,15 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                                 prop.title "Start a session to work on the selected canvas doc"
                                 prop.text "▶ Start session"
                             ]
+                        match activeDoc with
+                        | Some d when d.Kind = AgentDoc ->
+                            Html.button [
+                                prop.className "canvas-share-btn"
+                                prop.onClick (fun _ -> shareDoc d.Filename)
+                                prop.title "Share this doc — copies a rich link to the clipboard"
+                                prop.children [ shareIcon ]
+                            ]
+                        | _ -> ()
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
                             Html.button [
@@ -299,6 +327,25 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
             ]
         | _ -> Html.none
 
+    // Success banner shown after a doc is shared and its rich link copied to the clipboard. A share
+    // *failure* reuses the red errorBanner (CanvasSendState.Failed) above; this green notice is the
+    // Ok path and is dismissible like the others.
+    let shareBanner =
+        match shareNotice with
+        | Some msg ->
+            Html.div [
+                prop.className "canvas-share-banner"
+                prop.children [
+                    Html.span [ prop.text msg ]
+                    Html.button [
+                        prop.className "canvas-share-dismiss"
+                        prop.onClick (fun _ -> dismissShareNotice ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        | None -> Html.none
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
@@ -367,6 +414,7 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 errorBanner
                 docErrorBanner
                 waitingBanner
+                shareBanner
                 yield! iframes
             ]
         | None ->
@@ -375,6 +423,7 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 errorBanner
                 docErrorBanner
                 waitingBanner
+                shareBanner
                 overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
             ]
 

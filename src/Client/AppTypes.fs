@@ -76,6 +76,13 @@ type Msg =
     | OpenCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
+    // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
+    // doc title) then write a rich clipboard link. ShareCanvasDocResult carries the CanvasShareResult
+    // on Ok (→ dual-format clipboard write + success banner) or an error message on failure (→ the
+    // existing error banner). DismissShareNotice clears the success banner.
+    | ShareCanvasDoc of scopedKey: string * filename: string
+    | ShareCanvasDocResult of scopedKey: string * filename: string * Result<CanvasShareResult, string>
+    | DismissShareNotice
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
     | CanvasSendResult of CanvasMessageResult * scopedKey: string

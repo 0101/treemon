@@ -147,6 +147,7 @@ not matter.
 | 7 | Clipboard | Write **`text/html` titled `<a>` + `text/plain` URL**; every app self-selects. URL length is cosmetic. Title from doc `<title>`, fallback prettified filename. |
 | 8 | Scope | **Single self-contained doc** in v1. Multi-doc link bundles, custom-domain short URLs, and redirect-indirection (stable link → freshly-minted short-lived SAS) are deferred. |
 | 9 | Blob lifecycle | **Auto-delete via an Azure storage lifecycle policy** — blobs older than the expiry window (default 90 days) are removed, so a doc's content does not linger at rest after its link is dead (privacy) and storage does not accumulate (cost). Runs daily (≈1-day granularity); immediate per-doc revoke is still a blob delete. |
+| 10 | Client banner state | Two **mutually-exclusive** banners: share **failure reuses** the existing dismissible error banner (`CanvasSendState.Failed`), success uses a **new** dismissible `ShareNotice` (`Shared — link copied`). Each result arm clears the other channel — the `Ok` arm clears a stale `Failed`, the `Error` arm clears a stale `ShareNotice` — so a red + green stack can never render (a fail→retry→succeed flow is common). A live `Waiting` banner is independent and is preserved. Invariant locked by `ShareCanvasDocResultTests`. |
 
 ## Key Files
 

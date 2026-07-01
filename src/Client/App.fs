@@ -485,6 +485,12 @@ let update msg model =
 
     | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
 
+    | ShareCanvasDoc (scopedKey, filename) -> CanvasUpdate.shareCanvasDoc scopedKey filename model
+
+    | ShareCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.shareCanvasDocResult scopedKey filename result model
+
+    | DismissShareNotice -> CanvasUpdate.dismissShareNotice model
+
     | NavigateCanvasDoc filename -> CanvasUpdate.navigateCanvasDoc filename model
 
     | CanvasMessageReceived payload -> CanvasUpdate.canvasMessageReceived payload model

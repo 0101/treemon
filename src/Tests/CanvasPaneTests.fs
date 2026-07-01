@@ -800,3 +800,25 @@ type CanvasPaneTests() =
             let! archiveWhenAgentDoc = archiveBtn.CountAsync()
             Assert.That(archiveWhenAgentDoc, Is.EqualTo(1), "Archive button should be available while an AgentDoc (dashboard) is the active doc")
         }
+
+    [<Test>]
+    member this.``Share button is hidden while a SystemView is active but available for an AgentDoc``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // beads.html (SystemView) is the default-active doc → share button hidden (a
+            // server-generated view is not a self-contained, shareable AgentDoc).
+            let shareBtn = this.Page.Locator(".canvas-pane .canvas-share-btn")
+            let! shareWhenSystemView = shareBtn.CountAsync()
+            Assert.That(shareWhenSystemView, Is.EqualTo(0), "Share button should be hidden while a SystemView (beads) is the active doc")
+
+            // Switching to an AgentDoc restores the share button.
+            let dashboardTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
+            do! dashboardTab.ClickAsync()
+            do! shareBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! shareWhenAgentDoc = shareBtn.CountAsync()
+            Assert.That(shareWhenAgentDoc, Is.EqualTo(1), "Share button should be available while an AgentDoc (dashboard) is the active doc")
+        }

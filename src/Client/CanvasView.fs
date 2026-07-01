@@ -44,6 +44,11 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
         | Some (Card scopedKey) -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
         | _ -> ()
 
+    let shareCanvasDoc filename =
+        match model.FocusedElement with
+        | Some (Card scopedKey) -> dispatch (ShareCanvasDoc (scopedKey, filename))
+        | _ -> ()
+
     let launchCanvasSession () =
         match model.FocusedElement with
         | Some (Card scopedKey) -> dispatch (LaunchCanvasSession scopedKey)
@@ -71,8 +76,10 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveCanvasDoc
+          ShareDoc = shareCanvasDoc
           DismissError = (fun () -> dispatch DismissCanvasMessageError)
           DismissDocError = (fun () -> dispatch DismissCanvasDocError)
+          DismissShareNotice = (fun () -> dispatch DismissShareNotice)
           LaunchSession = launchCanvasSession }
 
-    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition model.Canvas.CanvasSize (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+    CanvasPane.view model.Canvas.CanvasPaneOpen model.Canvas.CanvasPosition model.Canvas.CanvasSize (focusedWorktreeCanvasDoc model) model.Repos model.Canvas.CanvasSendState model.Canvas.DocError model.Canvas.ShareNotice model.Canvas.BridgeLiveness focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
