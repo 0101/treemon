@@ -4,9 +4,8 @@ open NUnit.Framework
 open Shared
 open CanvasUpdate
 
-// Unit tests for the client-side share helpers in CanvasUpdate: the rich-link clipboard payload
-// builder (both formats) and the filename-prettify title fallback it uses. Pure functions — no
-// browser, no clipboard, no server.
+// Unit tests for the client-side share helper in CanvasUpdate: the rich-link clipboard payload
+// builder (both formats). Pure functions — no browser, no clipboard, no server.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -21,7 +20,7 @@ type BuildClipboardPayloadTests() =
     [<Test>]
     member _.``Writes BOTH formats: titled text/html anchor + plain-text URL``() =
         let result = { Url = sasUrl; Title = "Build Status Report" }
-        let payload = buildClipboardPayload result "build-status.html"
+        let payload = buildClipboardPayload result
 
         // text/plain is the raw URL, verbatim (plain targets get the link itself).
         Assert.That(payload.Text, Is.EqualTo(sasUrl), "text/plain must be the raw SAS URL")
@@ -35,50 +34,9 @@ type BuildClipboardPayloadTests() =
                     "href must carry the full, HTML-escaped SAS URL")
 
     [<Test>]
-    member _.``Title falls back to the prettified filename when the server title is blank``() =
-        let result = { Url = sasUrl; Title = "" }
-        let payload = buildClipboardPayload result "build-status.html"
-
-        // build-status.html → "Build status" (drop .html, '-'→space, sentence-case).
-        Assert.That(payload.Html, Does.Contain(">Build status</a>"),
-                    "a blank server title must fall back to the prettified filename")
-        Assert.That(payload.Text, Is.EqualTo(sasUrl), "text/plain is still the raw URL on the fallback path")
-
-    [<Test>]
-    member _.``Whitespace-only title also falls back to the prettified filename``() =
-        let result = { Url = sasUrl; Title = "   " }
-        let payload = buildClipboardPayload result "release_notes.html"
-
-        // release_notes.html → "Release notes" ('_'→space).
-        Assert.That(payload.Html, Does.Contain(">Release notes</a>"))
-
-    [<Test>]
     member _.``HTML-special characters in the title are escaped in the anchor text``() =
         let result = { Url = "https://acct.blob.core.windows.net/canvas/x/a.html?sig=x"; Title = "A & B <tag> \"q\"" }
-        let payload = buildClipboardPayload result "a.html"
+        let payload = buildClipboardPayload result
 
         Assert.That(payload.Html, Does.Contain(">A &amp; B &lt;tag&gt; &quot;q&quot;</a>"),
                     "title must be HTML-escaped so it cannot inject markup")
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-[<Category("Canvas")>]
-type PrettifyFilenameTests() =
-
-    [<Test>]
-    member _.``Drops .html, turns hyphens into spaces, sentence-cases``() =
-        Assert.That(prettifyFilename "build-status.html", Is.EqualTo("Build status"))
-
-    [<Test>]
-    member _.``Turns underscores into spaces``() =
-        Assert.That(prettifyFilename "release_notes.html", Is.EqualTo("Release notes"))
-
-    [<Test>]
-    member _.``Single-word filename is just capitalized``() =
-        Assert.That(prettifyFilename "data.html", Is.EqualTo("Data"))
-
-    [<Test>]
-    member _.``.html match is case-insensitive``() =
-        Assert.That(prettifyFilename "Report.HTML", Is.EqualTo("Report"))

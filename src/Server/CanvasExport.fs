@@ -88,23 +88,9 @@ let extractTitle (html: string) : string option =
         let text = Regex.Replace(System.Net.WebUtility.HtmlDecode m.Groups[1].Value, @"\s+", " ").Trim()
         if text = "" then None else Some text
 
-/// A human title fallback derived from the filename when the doc has no usable `<title>`:
-/// `build-status.html` → `Build status`. Strips a trailing `.html`, turns `-`/`_` into spaces,
-/// collapses whitespace, and capitalizes only the first letter (sentence case, not Title Case). Falls
-/// back to the raw filename if stripping leaves nothing (e.g. a bare ".html").
-let prettifyFilename (filename: string) : string =
-    let leaf = filename.Replace('\\', '/').Split('/') |> Array.last
-    let stem =
-        if leaf.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
-        then leaf.Substring(0, leaf.Length - ".html".Length)
-        else leaf
-    let spaced = Regex.Replace(stem.Replace('-', ' ').Replace('_', ' '), @"\s+", " ").Trim()
-    if spaced = "" then filename
-    else string (Char.ToUpperInvariant spaced[0]) + spaced.Substring(1)
-
 /// The share title the spec's clipboard link uses: the doc's `<title>`, falling back to a prettified
-/// filename when the doc has none. Single source of truth for the `extractTitle`→`prettifyFilename`
-/// fallback so the server (which returns the title to the client) and any other caller resolve it
-/// identically.
+/// filename (`Shared.Formatting.prettifyFilename`) when the doc has none. Single source of truth for
+/// the `extractTitle`→prettified-filename fallback so the server (which returns the title to the
+/// client) and any other caller resolve it identically.
 let resolveTitle (html: string) (filename: string) : string =
-    extractTitle html |> Option.defaultWith (fun () -> prettifyFilename filename)
+    extractTitle html |> Option.defaultWith (fun () -> Shared.Formatting.prettifyFilename filename)

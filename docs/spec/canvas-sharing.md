@@ -113,10 +113,11 @@ banner never claims a copy that did not happen (Decision #10).
   + a no-op `canvasSend` (and nothing else) at `</head>`. The shared `baseStyle` is **relocated**
   from `CanvasDocServer.fs` into this dependency-free module (single source of truth; `buildInjection`
   now references `CanvasExport.baseStyle`), and the `</head>` placement is a shared
-  `injectAtHead` both call. Also exposes `extractTitle (html) : string option`, `prettifyFilename`,
-  and `resolveTitle html filename` (the `<title>`→prettified-filename fallback the server returns as
-  `CanvasShareResult.Title`). Every function is a pure `string→string`/`string option` for unit
-  testing.
+  `injectAtHead` both call. Also exposes `extractTitle (html) : string option` and
+  `resolveTitle html filename` (the `<title>`→prettified-filename fallback the server returns as
+  `CanvasShareResult.Title`), which delegates the filename fallback to the shared
+  `Shared.Formatting.prettifyFilename` (Decision #11). Every function is a pure
+  `string→string`/`string option` for unit testing.
 - **Publish backend** (`src/Server/CanvasShare.fs`, new): use `Azure.Storage.Blobs` —
   `BlobContainerClient` (private), `UploadBlobAsync(randomPrefix/filename, html)` with
   `BlobHttpHeaders.ContentType = "text/html"`, then `BlobClient.GenerateSasUri(BlobSasBuilder with
@@ -213,13 +214,15 @@ az storage account management-policy show \
 | 8 | Scope | **Single self-contained doc** in v1. Multi-doc link bundles, custom-domain short URLs, and redirect-indirection (stable link → freshly-minted short-lived SAS) are deferred. |
 | 9 | Blob lifecycle | **Auto-delete via an Azure storage lifecycle policy** — blobs older than the expiry window (default 90 days) are removed, so a doc's content does not linger at rest after its link is dead (privacy) and storage does not accumulate (cost). Runs daily (≈1-day granularity); immediate per-doc revoke is still a blob delete. Rule JSON + apply/verify commands live in **Storage Account Setup** (`scripts/canvas-share-lifecycle-policy.json`). |
 | 10 | Client banner state | Two **mutually-exclusive** banners: share **failure reuses** the existing dismissible error banner (`CanvasSendState.Failed`), success uses a **new** dismissible `ShareNotice`. The success banner reflects the **actual clipboard-write outcome**, not merely that the share succeeded: because `navigator.clipboard.write` is async and can be rejected (transient user activation / an active document — both can be lost across the share network round-trip — a revoked permission, or an unavailable API), the `Ok` share arm does **not** pre-claim a copy. It clears the stale channels and fires the write, then a `ClipboardWriteResult` arm raises `Shared — link copied` on a landed write or `Shared — link ready, copy it manually: <url>` on a rejected one (the raw SAS URL is surfaced as selectable text so a failed copy is still recoverable). Each result arm clears the other channel — the `Ok` arm clears a stale `Failed`, the `Error` arm clears a stale `ShareNotice` — so a red + green stack can never render (a fail→retry→succeed flow is common). A live `Waiting` banner is independent and is preserved. Invariant locked by `ShareCanvasDocResultTests`. |
+| 11 | Shared `prettifyFilename` | The filename→title helper is a **single source of truth in `src/Shared/Formatting.fs`**, not duplicated per side. It uses the client's `Split`-on-explicit-ASCII-whitespace body (proven Fable-safe; no `\s` Regex), so it compiles under Fable and behaves identically everywhere — a Unicode space such as U+00A0 is preserved, not collapsed (pinned by `FormattingTests`). Home is a new `Formatting.fs`, not `PathUtils.fs`, to keep `PathUtils` scoped to path comparison (module cohesion). The client's `buildClipboardPayload` **dead fallback was removed**: `WorktreeApi.shareCanvasDocImpl` always resolves a non-blank `CanvasShareResult.Title` via `resolveTitle`, so the client uses `result.Title` directly and no longer takes a `filename` arg. Fixes focused-review F4/F5. |
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/Shared/Types.fs` | `ShareCanvasDocRequest`, `CanvasShareResult`, `IWorktreeApi.shareCanvasDoc` |
-| `src/Server/CanvasDocServer.fs` or new `src/Server/CanvasExport.fs` | `StaticExport` transform: base theme + no-op `canvasSend`; `extractTitle` / `prettifyFilename` |
+| `src/Server/CanvasExport.fs` | `StaticExport` transform: base theme + no-op `canvasSend`; `extractTitle` / `resolveTitle` |
+| `src/Shared/Formatting.fs` | `prettifyFilename` (filename → sentence-case title) — the single Fable-safe source shared by the server's `resolveTitle` and any client caller (Decision #11) |
 | `src/Server/CanvasShare.fs` (new) | Azure Blob upload + per-doc read-only SAS; reads config + `AZURE_STORAGE_CONNECTION_STRING` |
 | `src/Server/Server.fsproj` | Add `Azure.Storage.Blobs` package reference |
 | `scripts/canvas-share-lifecycle-policy.json` (new) | Storage lifecycle rule — deletes canvas-share blobs older than the expiry window (see **Storage Account Setup**) |

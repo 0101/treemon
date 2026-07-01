@@ -52,6 +52,7 @@
     <Compile Include="CanvasPhase4Tests.fs" />
     <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="CanvasShareClientTests.fs" />
+    <Compile Include="FormattingTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />

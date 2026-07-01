@@ -164,32 +164,14 @@ type ClipboardPayload =
 let private htmlEscape (s: string) : string =
     s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;")
 
-/// Prettify a canvas filename into a human title — `build-status.html` → `Build status`: take the
-/// path leaf, drop a trailing `.html`, turn `-`/`_` into spaces, collapse whitespace, and capitalize
-/// only the first letter (sentence case). Mirrors the server's `CanvasExport.prettifyFilename` so
-/// this client-side fallback resolves to the same title the server would have returned; used only
-/// when the shared doc reports no usable `<title>`.
-let prettifyFilename (filename: string) : string =
-    let leaf = filename.Replace('\\', '/').Split('/') |> Array.last
-    let stem =
-        if leaf.EndsWith(".html", System.StringComparison.OrdinalIgnoreCase)
-        then leaf.Substring(0, leaf.Length - ".html".Length)
-        else leaf
-    let spaced =
-        stem.Replace('-', ' ').Replace('_', ' ').Split([| ' '; '\t'; '\n'; '\r'; '\f'; '\v' |], System.StringSplitOptions.RemoveEmptyEntries)
-        |> String.concat " "
-    if spaced = "" then filename
-    else string (System.Char.ToUpperInvariant spaced[0]) + spaced.Substring(1)
-
 /// Build the dual-format clipboard payload for a shared doc: the titled HTML anchor (`text/html`)
-/// and the raw URL (`text/plain`). The title is the server-resolved `CanvasShareResult.Title`,
-/// falling back to a prettified filename when it is blank; both the href and the anchor text are
-/// HTML-escaped. Pure so the payload is unit-testable without a browser clipboard.
-let buildClipboardPayload (result: CanvasShareResult) (filename: string) : ClipboardPayload =
-    let title =
-        if System.String.IsNullOrWhiteSpace result.Title then prettifyFilename filename
-        else result.Title
-    { Html = $"<a href=\"{htmlEscape result.Url}\">{htmlEscape title}</a>"
+/// and the raw URL (`text/plain`). The title is the server-resolved `CanvasShareResult.Title`, which
+/// `WorktreeApi.shareCanvasDocImpl` always populates via `CanvasExport.resolveTitle` (the doc's
+/// `<title>`, else a prettified filename) — so it is never blank and needs no client-side fallback.
+/// Both the href and the anchor text are HTML-escaped. Pure so the payload is unit-testable without
+/// a browser clipboard.
+let buildClipboardPayload (result: CanvasShareResult) : ClipboardPayload =
+    { Html = $"<a href=\"{htmlEscape result.Url}\">{htmlEscape result.Title}</a>"
       Text = result.Url }
 
 /// Effect that writes BOTH clipboard formats at once via the async Clipboard API — one `ClipboardItem`
@@ -243,7 +225,7 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
             | CanvasSendState.Failed _ -> CanvasSendState.Idle
             | other -> other
         { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = None } },
-        writeClipboardCmd (buildClipboardPayload shareResult filename)
+        writeClipboardCmd (buildClipboardPayload shareResult)
     | Error msg ->
         // Raise the existing dismissible delivery-error banner and clear any stale success notice so
         // the two never show together. A live Waiting banner is an independent fact and is preserved

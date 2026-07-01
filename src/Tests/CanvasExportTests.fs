@@ -187,36 +187,6 @@ type ExtractTitleTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type PrettifyFilenameTests() =
-
-    [<Test>]
-    member _.``prettifyFilename turns a kebab filename into sentence case``() =
-        Assert.That(prettifyFilename "build-status.html", Is.EqualTo("Build status"))
-
-    [<Test>]
-    member _.``prettifyFilename handles a single word``() =
-        Assert.That(prettifyFilename "ci.html", Is.EqualTo("Ci"))
-
-    [<Test>]
-    member _.``prettifyFilename treats underscores as spaces``() =
-        Assert.That(prettifyFilename "my_report.html", Is.EqualTo("My report"))
-
-    [<Test>]
-    member _.``prettifyFilename handles mixed separators``() =
-        Assert.That(prettifyFilename "weekly-sync_notes.html", Is.EqualTo("Weekly sync notes"))
-
-    [<Test>]
-    member _.``prettifyFilename strips the extension case-insensitively``() =
-        Assert.That(prettifyFilename "Report.HTML", Is.EqualTo("Report"))
-
-    [<Test>]
-    member _.``prettifyFilename falls back to the raw name when stripping leaves nothing``() =
-        Assert.That(prettifyFilename ".html", Is.EqualTo(".html"))
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
 type ResolveTitleTests() =
 
     [<Test>]
