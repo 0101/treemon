@@ -98,6 +98,13 @@ let private tryContainerClient (connStr: string) (container: string) : BlobConta
 /// backend is unconfigured, when the connection string cannot sign a SAS (a non-account-key
 /// credential — Decision #3), or on any storage failure. No returned message or log line contains
 /// the account key or the full SAS.
+///
+/// SECURITY (accepted risk — focused-review F17): `html` is author-controlled canvas content, and it
+/// is published as ACTIVE, non-sandboxed HTML/JS with only `Content-Type` — no CSP, no
+/// `X-Content-Type-Options`, no sanitization — so whatever JS it contains runs top-level in the
+/// recipient's browser for the life of the link. Not sanitized on purpose: that would break the
+/// feature's interactivity goal (Decision #6), and a per-blob CSP would need a CDN/proxy. Documented,
+/// accepted trade-off — see `docs/spec/canvas-sharing.md` §"Security Posture".
 let publish (filename: string) (html: string) : Async<Result<string, string>> =
     asyncResult {
         // A missing connection string ⇒ "not configured"; a malformed one is swallowed by
