@@ -359,11 +359,12 @@ let private errorOverlayScript (filename: string) =
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper and its
-/// spinner style (canvasExpandStyle), the JS
-/// error overlay, and the idiomorph runtime + morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
-/// doc-side error carries its own identity (the emitter), letting the pane attribute it correctly
-/// even when other docs are mounted as hidden iframes. It is unused for SystemViews (no overlay).
+/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper and
+/// its spinner style (canvasExpandStyle), the JS error overlay, and the idiomorph runtime +
+/// morph controller. `filename` is the doc being served: it is embedded into the error overlay
+/// so a doc-side error carries its own identity (the emitter), letting the pane attribute it
+/// correctly even when other docs are mounted as hidden iframes. It is unused for SystemViews
+/// (no overlay).
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
