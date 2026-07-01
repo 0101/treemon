@@ -867,8 +867,9 @@ type DocErrorTests() =
 // The Ok arm raises the green "Shared — link copied" success banner (and copies the rich link). The
 // success and the red delivery-error banner must never show together, so Ok also clears a stale
 // Failed send-state (from a prior failed share or message send) while leaving an independent Waiting
-// banner intact. Only the Ok arm is exercised through `update` — the Error arm calls
-// Fable.Core.JS.console.error, dummy code that throws under .NET.
+// banner intact. The Ok arm is exercised directly through `update`; the Error arm calls
+// Fable.Core.JS.console.error (dummy code that throws under .NET), so its send-state transition is
+// extracted into the pure preserveWaitingOnShareFailure helper and locked here instead.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -898,4 +899,25 @@ type ShareCanvasDocResultTests() =
         let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Waiting "r/feat"))
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "A live 'waiting for session' banner is an independent fact and must survive a share")
+
+    // The Error arm can't be driven through `update` (its direct Fable.Core.JS.console.error throws
+    // under .NET), so its send-state transition lives in the pure preserveWaitingOnShareFailure helper
+    // and is locked below. F7 regression: a share failure must NOT clobber a live "Waiting for
+    // session" banner — a queued message may still be delivered, so Waiting is never a failure.
+    [<Test>]
+    member _.``Error preserves an independent Waiting send-state (F7 regression)``() =
+        Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Waiting "r/feat") "share boom",
+            Is.EqualTo(CanvasSendState.Waiting "r/feat"),
+            "A live 'waiting for session' banner is independent and must survive a share failure")
+
+    [<Test>]
+    member _.``Error raises the delivery-error banner from Idle``() =
+        Assert.That(preserveWaitingOnShareFailure CanvasSendState.Idle "share boom",
+            Is.EqualTo(CanvasSendState.Failed "share boom"))
+
+    [<Test>]
+    member _.``Error replaces a stale Failed with the latest message``() =
+        Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Failed "old failure") "share boom",
+            Is.EqualTo(CanvasSendState.Failed "share boom"),
+            "A retried share that fails again surfaces the latest error, not a stale one")
 
