@@ -96,10 +96,34 @@ function parseCanvasRoute(url) {
   return { filename: decodeURIComponent(match[1]), isHash: !!match[2] };
 }
 
+// Guard the local injection endpoints (/inject, /_message) against cross-origin abuse. Requiring
+// application/json turns any cross-origin browser POST into a preflighted (non-simple) request that
+// this server never answers, so the browser blocks it and the text/plain simple-request bypass is
+// closed; rejecting a present, non-loopback Origin is defense-in-depth. Legitimate callers comply:
+// Treemon POSTs /inject as application/json with no Origin, and the served-doc shim POSTs /_message
+// same-origin as application/json.
+function isLoopbackOrigin(origin) {
+  return /^https?:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?$/i.test(origin);
+}
+
+function isTrustedInjectionRequest(req) {
+  const contentType = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  if (contentType !== "application/json") return false;
+  const origin = req.headers["origin"];
+  if (origin && !isLoopbackOrigin(origin)) return false;
+  return true;
+}
+
 function startHttpServer(session, state) {
   return new Promise((resolvePromise, reject) => {
     const server = createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/inject") {
+        if (!isTrustedInjectionRequest(req)) {
+          log(`/inject rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "forbidden" }));
+          return;
+        }
         let body;
         try { body = await readBody(req); } catch {
           res.writeHead(413, { "Content-Type": "text/plain" });
@@ -115,6 +139,12 @@ function startHttpServer(session, state) {
 
       if (state.browserMode) {
         if (req.method === "POST" && req.url === "/_message") {
+          if (!isTrustedInjectionRequest(req)) {
+            log(`/_message rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "forbidden" }));
+            return;
+          }
           let body;
           try { body = await readBody(req); } catch {
             res.writeHead(413, { "Content-Type": "application/json" });

@@ -42,6 +42,13 @@ will display the docs.
 | `GET /canvas/:filename/hash` | Return MD5/SHA256 hex of file content (for change detection) |
 | `POST /_message` | Parse JSON body, forward as `session.send({ prompt: "[canvas] " + JSON.stringify(body) })` |
 
+Both `POST` sinks (`/_message` and the always-on `/inject`) are hardened against cross-origin browser
+abuse: they require `Content-Type: application/json` (so a cross-origin call becomes a preflighted
+request the server never answers — the browser blocks it, closing the `text/plain` simple-request
+CSRF vector) and reject any request carrying a non-loopback `Origin`. The legitimate callers already
+comply — Treemon's server-side POST to `/inject` sends `application/json` and no `Origin`, and the
+same-origin transport shim posts `/_message` as `application/json`.
+
 ### Injected Scripts
 
 Browser-mode docs receive two scripts injected before `</head>`:
