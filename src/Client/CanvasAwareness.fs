@@ -35,6 +35,14 @@ let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string
             if withSeeded = existing then acc2
             else acc2 |> Map.add scopedKey withSeeded) acc) hashes
 
+/// A doc is unviewed when its current ContentHash differs from the last viewed hash for that
+/// filename (a missing entry means it was never viewed). This is the single unviewed predicate,
+/// shared by unviewedDocsByScopedKey (badge counts) and mostRecentUnviewedDoc (focus retarget).
+let private isUnviewed (viewedHashes: Map<string, string>) (doc: CanvasDoc) : bool =
+    match viewedHashes |> Map.tryFind doc.Filename with
+    | Some hash -> hash <> doc.ContentHash
+    | None -> true
+
 let unviewedDocsByScopedKey (repos: RepoModel list) (lastViewedHashes: Map<string, Map<string, string>>) : Map<string, string list> =
     repos
     |> List.collect (fun r ->
@@ -47,14 +55,27 @@ let unviewedDocsByScopedKey (repos: RepoModel list) (lastViewedHashes: Map<strin
                 |> Option.defaultValue Map.empty
             let unviewed =
                 awarenessDocs wt.CanvasDocs
-                |> List.filter (fun doc ->
-                    match viewedHashes |> Map.tryFind doc.Filename with
-                    | Some hash -> hash <> doc.ContentHash
-                    | None -> true)
+                |> List.filter (isUnviewed viewedHashes)
                 |> List.map _.Filename
             if List.isEmpty unviewed then None
             else Some (scopedKey, unviewed)))
     |> Map.ofList
+
+/// Filename of the worktree's most recently modified *unviewed* AgentDoc (None if none).
+/// Drives the active-user "select the worktree surfaces the newly published/updated doc" path:
+/// on a focus transition onto a card we retarget its ActiveCanvasDoc to this doc instead of the
+/// sticky last-open one. SystemView docs are excluded (via awarenessDocs) and viewed docs are
+/// filtered out (via isUnviewed), so a SystemView or an already-seen doc never wins.
+let mostRecentUnviewedDoc (repos: RepoModel list) (lastViewedHashes: Map<string, Map<string, string>>) (scopedKey: string) : string option =
+    repos
+    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+    |> Option.bind (fun wt ->
+        let viewedHashes = lastViewedHashes |> Map.tryFind scopedKey |> Option.defaultValue Map.empty
+        awarenessDocs wt.CanvasDocs
+        |> List.filter (isUnviewed viewedHashes)
+        |> List.sortByDescending _.LastModified
+        |> List.tryHead
+        |> Option.map _.Filename)
 
 let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, string>> =
     repos

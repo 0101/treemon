@@ -82,6 +82,30 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
     ]
 
+/// When focus transitions onto a worktree card (a genuine change of the focused element), surface
+/// that worktree's most recently published/updated *unviewed* AgentDoc instead of the sticky
+/// last-open selection — the active-user "select the worktree shows THAT doc" path. A no-op when the
+/// card was already focused (`previousFocus` already names it — preserves a manual in-worktree tab
+/// choice) or when nothing is unviewed (keeps the sticky selection, so the idle path stays
+/// idempotent). `model` must already carry the NEW FocusedElement. When the pane is open the doc is
+/// actually shown, so route through `selectCanvasDoc` (sets the active doc, marks it viewed, morphs a
+/// revisited iframe); when the pane is closed only set the active doc silently — it is not displayed
+/// yet, so it must not be marked viewed, but becomes the doc shown when the pane is next opened.
+let retargetActiveDocOnFocus (previousFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
+    match model.FocusedElement with
+    | Some (Card scopedKey) when previousFocus <> Some (Card scopedKey) ->
+        match CanvasAwareness.mostRecentUnviewedDoc model.Repos model.Canvas.LastViewedHashes scopedKey with
+        | Some filename when model.Canvas.CanvasPaneOpen -> selectCanvasDoc scopedKey filename model
+        | Some filename ->
+            { model with
+                Canvas =
+                    { model.Canvas with
+                        ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+                        VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
+            Cmd.none
+        | None -> model, Cmd.none
+    | _ -> model, Cmd.none
+
 let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let openPane = not model.Canvas.CanvasPaneOpen
     let repos, expanded = expandRepoOwning scopedKey model.Repos
