@@ -197,3 +197,43 @@ type SkillInvocationTests() =
         let viaHelper = skillInvocation (Some CodingToolProvider.Claude) "fix-build" url
         let viaAction = actionPrompt (Some CodingToolProvider.Claude) (FixBuild url)
         Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+// Verification coverage for tm-quicklaunch-nvb (worktree prompt -> investigate launch).
+// These reproduce the exact command-construction chain WorktreeApi.createWorktree performs on
+// auto-launch: skillInvocation wraps the user's prompt, then CodingToolCli.build renders the
+// interactive shell string. Kept as falsifiable, literal-output assertions.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type InvestigateLaunchCommandTests() =
+
+    // Step 1: command construction for the investigate skill.
+    [<Test>]
+    member _.``skillInvocation investigate Copilot yields natural-language form``() =
+        let result = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "clean up auth"
+        Assert.That(result, Is.EqualTo("use investigate skill with clean up auth"))
+
+    [<Test>]
+    member _.``skillInvocation investigate Claude yields slash-command form``() =
+        let result = skillInvocation (Some CodingToolProvider.Claude) "investigate" "clean up auth"
+        Assert.That(result, Is.EqualTo("/investigate clean up auth"))
+
+    [<Test>]
+    member _.``build wraps the Copilot investigate invocation as an interactive shell string``() =
+        let wrapped = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "clean up auth"
+        let cmd = (build (Some CodingToolProvider.Copilot) (Interactive wrapped)).AsShellString
+        Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with clean up auth'"))
+
+    // Step 2: a 3-line prompt survives the whole launch-command construction intact — every line
+    // and the newlines between them remain inside the single-quoted argument (not truncated at the
+    // first newline, no line dropped).
+    [<Test>]
+    member _.``multi-line prompt survives launch command construction intact``() =
+        let prompt = "line a\nline b\nline c"
+        let wrapped = skillInvocation (Some CodingToolProvider.Copilot) "investigate" prompt
+        let cmd = (build (Some CodingToolProvider.Copilot) (Interactive wrapped)).AsShellString
+        Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with line a\nline b\nline c'"))
+        Assert.That(cmd, Does.Contain("line a"), "first line must be present")
+        Assert.That(cmd, Does.Contain("line b"), "middle line must be present")
+        Assert.That(cmd, Does.Contain("line c"), "last line must be present")
+        Assert.That(cmd, Does.Contain("line a\nline b\nline c"), "newlines between all three lines must be preserved")
