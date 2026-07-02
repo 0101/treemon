@@ -38,6 +38,7 @@
     <Compile Include="CommandBuilderTests.fs" />
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
+    <Compile Include="SessionManagerBuildScriptTests.fs" />
     <Compile Include="ConfigWriterTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
