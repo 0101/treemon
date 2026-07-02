@@ -426,15 +426,24 @@ let private executeTask
                 |> Seq.choose _.UpstreamBranch
                 |> set
 
+            // The store may only be PRUNED against a complete, trustworthy branch enumeration. When
+            // git-data collection is unready or partial (a RefreshGit timeout never posts UpdateGit,
+            // a transient short RefreshWorktreeList drops GitData) `knownBranches` is empty/partial,
+            // and pruning against it would wipe just-loaded merged-PR facts (review F7). `pruneScope`
+            // yields `Some` only when every known worktree has collected git data, else `None`.
+            let collectedGitPaths = repo.GitData |> Map.keys |> Set.ofSeq
+            let knownBranchesForPrune =
+                MergedPrStore.pruneScope repo.KnownPaths collectedGitPaths knownBranches
+
             // Reconcile the bounded live PR fetch with the persisted merged-PR store: live data
-            // always wins, the store fills merged branches that have aged out of the fetch window,
-            // and records are pruned to `knownBranches`. `PrData` becomes this effective map;
-            // `lookupPrStatus`/`WorktreeApi` consume it unchanged (spec: merged-pr-persistence.md).
+            // always wins and the store fills merged branches that have aged out of the fetch window.
+            // `PrData` becomes this effective map; `lookupPrStatus`/`WorktreeApi` consume it unchanged
+            // (spec: merged-pr-persistence.md).
             let! livePrMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
             let! persisted = MergedPrStore.getForRepo repoId
 
             let effectiveMap, newPersisted =
-                MergedPrStore.reconcileMergedPrs livePrMap persisted knownBranches
+                MergedPrStore.reconcileMergedPrs livePrMap persisted knownBranchesForPrune
 
             // Persist only when the reconciled store actually moved (Decision #6).
             if newPersisted <> persisted then

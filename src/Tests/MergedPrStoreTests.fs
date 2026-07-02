@@ -215,7 +215,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", record ]
 
         let effective, newPersisted =
-            reconcileMergedPrs Map.empty persisted (Set.ofList [ "feature/x" ])
+            reconcileMergedPrs Map.empty persisted (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a known branch absent from the live map must be overlaid with the reconstructed merged PR")
@@ -229,7 +229,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", record ]
         let live = Map.ofList [ "feature/x", NoPr ]
 
-        let effective, _ = reconcileMergedPrs live persisted (Set.ofList [ "feature/x" ])
+        let effective, _ = reconcileMergedPrs live persisted (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a live NoPr is not a HasPr, so the persisted record must be overlaid")
@@ -242,7 +242,7 @@ type ReconcileMergedPrsTests() =
         let liveOpen = openLivePr 55
 
         let effective, _ =
-            reconcileMergedPrs (Map.ofList [ "feature/x", liveOpen ]) persisted (Set.ofList [ "feature/x" ])
+            reconcileMergedPrs (Map.ofList [ "feature/x", liveOpen ]) persisted (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some liveOpen),
             "live HasPr always wins; the overlay only fills branches the live map is missing")
@@ -256,7 +256,7 @@ type ReconcileMergedPrsTests() =
                   "feature/gone", mk 2 "Gone" "https://example.test/pull/2" ]
 
         let effective, newPersisted =
-            reconcileMergedPrs Map.empty persisted (Set.ofList [ "feature/x" ])
+            reconcileMergedPrs Map.empty persisted (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(newPersisted |> Map.containsKey "feature/gone", Is.False,
             "a branch outside knownBranches must be pruned from the store")
@@ -271,7 +271,7 @@ type ReconcileMergedPrsTests() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
 
-        let _, newPersisted = reconcileMergedPrs live Map.empty (Set.ofList [ "feature/x" ])
+        let _, newPersisted = reconcileMergedPrs live Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
             Is.EqualTo(Some(mk 77 "Freshly merged" "https://example.test/pull/77")),
@@ -283,7 +283,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", mk 1 "stale" "https://example.test/pull/1" ]
         let live = Map.ofList [ "feature/x", mergedLivePr 2 "renamed" "https://example.test/pull/2" ]
 
-        let _, newPersisted = reconcileMergedPrs live persisted (Set.ofList [ "feature/x" ])
+        let _, newPersisted = reconcileMergedPrs live persisted (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
             Is.EqualTo(Some(mk 2 "renamed" "https://example.test/pull/2")),
@@ -298,7 +298,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", record ]
         let live = Map.ofList [ "feature/x", mergedLivePr 12 "Add X" "https://example.test/pull/12" ]
 
-        let effective, newPersisted = reconcileMergedPrs live persisted (Set.ofList [ "feature/x" ])
+        let effective, newPersisted = reconcileMergedPrs live persisted (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(newPersisted, Is.EqualTo(persisted),
             "re-upserting an identical merged PR must leave the store structurally unchanged (Decision #6)")
@@ -315,7 +315,7 @@ type ReconcileMergedPrsTests() =
         let live = Map.ofList [ "feature/y", openLivePr 9 ]
         let known = Set.ofList [ "feature/x"; "feature/y" ]
 
-        let effective, newPersisted = reconcileMergedPrs live persisted known
+        let effective, newPersisted = reconcileMergedPrs live persisted (Some known)
 
         Assert.That(newPersisted, Is.EqualTo(persisted),
             "no new merged PRs and nothing to prune -> the store is unchanged (Decision #6 no-op write)")
@@ -324,3 +324,83 @@ type ReconcileMergedPrsTests() =
             "the aged-out branch is overlaid from the store")
         Assert.That(Map.tryFind "feature/y" effective, Is.EqualTo(Some(openLivePr 9)),
             "the branch with a live PR stays live")
+
+    // (F7) An untrusted enumeration (`None`) — the empty/partial `knownBranches` the buggy path
+    // produced whenever git-data collection was unready — must NEVER prune. Before this fix a
+    // non-empty persisted map reconciled against an empty set became `Map.empty`, whose change
+    // fired `setForRepo Map.empty` and wiped data/merged-prs.json permanently.
+    [<Test>]
+    member _.``preserves the whole store when the branch enumeration is untrusted (review F7)``() =
+        let persisted =
+            Map.ofList
+                [ "feature/x", mk 1 "X" "https://example.test/pull/1"
+                  "feature/y", mk 2 "Y" "https://example.test/pull/2" ]
+
+        let effective, newPersisted = reconcileMergedPrs Map.empty persisted None
+
+        Assert.That(newPersisted, Is.EqualTo(persisted),
+            "None must skip pruning entirely - the just-loaded store must survive intact, never wiped (review F7)")
+        Assert.That(Map.tryFind "feature/x" effective,
+            Is.EqualTo(Some(reconstructed (mk 1 "X" "https://example.test/pull/1"))),
+            "the store must still overlay merged badges while the enumeration is untrusted")
+        Assert.That(Map.tryFind "feature/y" effective,
+            Is.EqualTo(Some(reconstructed (mk 2 "Y" "https://example.test/pull/2"))),
+            "every persisted record is overlaid; none is dropped under an untrusted enumeration")
+
+    // (F7) Upserts stay additive under `None`: a newly observed live merged PR is still recorded
+    // (provider ground truth), so the fix never sacrifices recording merges to protect the store.
+    [<Test>]
+    member _.``still upserts a live merged PR when the enumeration is untrusted (review F7)``() =
+        let live =
+            Map.ofList [ "feature/new", mergedLivePr 88 "Just merged" "https://example.test/pull/88" ]
+
+        let _, newPersisted = reconcileMergedPrs live Map.empty None
+
+        Assert.That(Map.tryFind "feature/new" newPersisted,
+            Is.EqualTo(Some(mk 88 "Just merged" "https://example.test/pull/88")),
+            "a live merged PR must still be recorded even when pruning is skipped")
+
+// pruneScope decides whether the live-derived branch enumeration is trustworthy enough to prune
+// against (review F7). Pure, so these run parallel with no setup.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MergedPrPruneScopeTests() =
+
+    // Complete: every known worktree path has collected git data -> trust the enumeration.
+    [<Test>]
+    member _.``trusts the enumeration when every known worktree has collected git data``() =
+        let known = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let collected = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let branches = Set.ofList [ "feature/a"; "feature/b" ]
+
+        Assert.That(pruneScope known collected branches, Is.EqualTo(Some branches),
+            "a fully collected worktree set proves the branch enumeration - prune against it")
+
+    // Partial: a worktree's git data is missing (a RefreshGit timeout never posted UpdateGit).
+    [<Test>]
+    member _.``refuses to prune when a known worktree has no collected git data``() =
+        let known = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let collected = Set.ofList [ "/wt/a" ] // /wt/b's git data never arrived
+        let branches = Set.ofList [ "feature/a" ]
+
+        Assert.That(pruneScope known collected branches |> Option.isNone, Is.True,
+            "a partially collected worktree set must not be used to prune (review F7)")
+
+    // Unready or a transient empty worktree list: no known worktrees -> never prune.
+    [<Test>]
+    member _.``refuses to prune when there are no known worktrees``() =
+        Assert.That(pruneScope Set.empty Set.empty Set.empty |> Option.isNone, Is.True,
+            "an empty worktree set (unready or a transient empty list) must not prune the store")
+
+    // Correlated upstream-read failure: every worktree is collected (paths complete) yet resolves
+    // NO branch, so the enumeration collapses to empty. Pruning against it would wipe the WHOLE
+    // store, so an empty enumeration must be refused even when path-completeness holds (review F7).
+    [<Test>]
+    member _.``refuses to prune when the worktree set is complete but resolves no branches``() =
+        let known = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let collected = Set.ofList [ "/wt/a"; "/wt/b" ] // all collected...
+        let branches = Set.empty // ...but every upstream read returned nothing
+
+        Assert.That(pruneScope known collected branches |> Option.isNone, Is.True,
+            "a complete worktree set that resolved zero branches must NOT prune - it would wipe the whole store (review F7)")

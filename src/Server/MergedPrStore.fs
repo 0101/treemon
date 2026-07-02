@@ -31,21 +31,34 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
 /// repo's currently known branches. The effectful store calls this and persists `newPersisted` only
 /// when it differs from what it loaded (Decision #6), so this stays unit-testable in isolation.
 ///
+/// `knownBranches` gates pruning (Decision #8):
+///  - `Some branches`: the caller (via `pruneScope`) has proven a COMPLETE, non-empty live-worktree
+///    enumeration, so records for branches outside `branches` are pruned, bounding the store by live
+///    worktrees (Decision #4). `pruneScope` never yields `Some ∅`, so an automatic refresh cannot
+///    prune the whole store to empty.
+///  - `None`: the enumeration is unavailable or incomplete (git-data collection unready, a
+///    `collectWorktreeGitData` timeout, or a transient short worktree list that dropped GitData).
+///    Pruning is SKIPPED so an empty/partial set can never wipe just-loaded merged-PR facts
+///    (review F7). Upserts and the overlay still run; the store is re-bounded on a later refresh
+///    once a complete enumeration is available.
+///
 /// Returns:
-///  - `effectiveMap`: `livePrMap` with a reconstructed merged `HasPr` overlaid for every known
-///    branch the live fetch did NOT return as `HasPr` but which has a persisted record. A live
-///    `HasPr` (merged or not) is never overridden — the overlay is fallback-only (Decision #3).
+///  - `effectiveMap`: `livePrMap` with a reconstructed merged `HasPr` overlaid for every persisted
+///    branch the live fetch did NOT return as `HasPr`. A live `HasPr` (merged or not) is never
+///    overridden — the overlay is fallback-only (Decision #3).
 ///  - `newPersisted`: `persisted` with every live `HasPr { IsMerged = true }` upserted (keeping only
-///    `Id`/`Title`/`Url`) and every branch outside `knownBranches` pruned (Decision #4), bounding the
-///    store by live worktrees. Equals `persisted` when nothing moved, so the caller skips the write.
+///    `Id`/`Title`/`Url`) and, when `knownBranches` is `Some`, every branch outside it pruned. Equals
+///    `persisted` when nothing moved, so the caller skips the write.
 let reconcileMergedPrs
     (livePrMap: Map<string, PrStatus>)
     (persisted: Map<string, MergedPrRecord>)
-    (knownBranches: Set<string>)
+    (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
-    // Record every branch observed as merged in the live map, then prune to the known branches.
-    let newPersisted =
+    // Record every branch observed as merged in the live map. This is always safe and purely
+    // additive: a live `HasPr { IsMerged = true }` is provider ground truth, independent of local
+    // git state, so it is upserted regardless of whether pruning is currently trustworthy.
+    let upserted =
         livePrMap
         |> Map.fold
             (fun acc branch status ->
@@ -54,10 +67,16 @@ let reconcileMergedPrs
                     acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url }
                 | _ -> acc)
             persisted
-        |> Map.filter (fun branch _ -> Set.contains branch knownBranches)
 
-    // Overlay a reconstructed merged PR for each persisted (already pruned to known) branch the live
-    // map is missing as `HasPr`. A live `HasPr` — even a non-merged one — always wins.
+    // Prune to the known branches ONLY against a trustworthy enumeration (`Some`). `None` leaves the
+    // store intact (review F7): an empty/partial known-branch set must never destroy persisted facts.
+    let newPersisted =
+        match knownBranches with
+        | Some branches -> upserted |> Map.filter (fun branch _ -> Set.contains branch branches)
+        | None -> upserted
+
+    // Overlay a reconstructed merged PR for each persisted branch the live map is missing as
+    // `HasPr`. A live `HasPr` — even a non-merged one — always wins.
     let effectiveMap =
         newPersisted
         |> Map.fold
@@ -68,6 +87,30 @@ let reconcileMergedPrs
             livePrMap
 
     effectiveMap, newPersisted
+
+/// Decides the branch enumeration `reconcileMergedPrs` may safely prune against (review F7).
+/// `knownBranches` is derived from live git data, which is only trustworthy once EVERY known
+/// worktree has a collected `GitData` entry and at least one worktree exists. Even then the set is
+/// rejected when it is EMPTY: a collected worktree can still contribute no branch — a transient
+/// `git rev-parse @{u}` failure (a shared-`.git` lock, `git gc` repacking refs) degrades to
+/// `UpstreamBranch = None`, and if that hits every worktree at once, path-completeness would hold
+/// while the enumeration collapsed to ∅, pruning the WHOLE store to empty. An empty enumeration is
+/// never a trustworthy basis to drop records (the live fetch also returned nothing to reconcile
+/// against), so it yields `None`. Returns `Some knownBranches` only when the enumeration is complete
+/// AND non-empty, else `None` (skip pruning, keep the store intact).
+let pruneScope
+    (knownPaths: Set<string>)
+    (collectedGitPaths: Set<string>)
+    (knownBranches: Set<string>)
+    : Set<string> option =
+    if
+        not (Set.isEmpty knownPaths)
+        && not (Set.isEmpty knownBranches)
+        && Set.isSubset knownPaths collectedGitPaths
+    then
+        Some knownBranches
+    else
+        None
 
 /// Default on-disk location: gitignored server runtime state, NOT the user-authored `config.json`.
 /// Matches `data/canvas-owners.json` (`CanvasDocOwnership.fs`) and `data/sessions.json`.

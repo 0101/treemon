@@ -39,6 +39,15 @@ On each refresh, records for branches **not** in the repo's current `knownBranch
 keeping the store bounded by live worktrees. A deleted worktree ⇒ its branch is no longer known ⇒
 its record is forgotten.
 
+Pruning runs **only against a trustworthy enumeration**. `knownBranches` is derived from live git
+data, which is empty or partial whenever worktree-git collection is unready, timed out, or was
+dropped by a transient short worktree list. Pruning against such a set would delete just-loaded
+merged facts, permanently forgetting merged PRs that have aged out of the bounded live fetch
+(review F7). So the store is pruned only once **every** known worktree has collected git data, at
+least one worktree exists, and at least one branch resolved; otherwise pruning is skipped and the
+store is left untouched. Upserts (recording newly observed live merges) and the fallback overlay
+always run — they are additive and can never lose data. (Decision #8.)
+
 ### Persistence location
 
 Stored as `data/merged-prs.json` (gitignored server runtime state), **not** `config.json` —
@@ -64,12 +73,18 @@ matching `data/canvas-owners.json` (`CanvasDocOwnership.fs`) and `data/sessions.
   Exposes async reads (`getForRepo`) and a change-persisting write (`setForRepo`), plus `load()`.
 - **Pure `reconcileMergedPrs`** (no I/O, unit-testable):
   `(livePrMap: Map<string, PrStatus>) -> (persisted: Map<string, MergedPrRecord>) ->
-  (knownBranches: Set<string>) -> (effectiveMap: Map<string, PrStatus>) * (newPersisted: Map<string, MergedPrRecord>)`.
-  Upserts branches observed as merged, prunes `persisted` to `knownBranches`, and overlays a
-  reconstructed `HasPr` for each known branch missing from the live map. Returns the new persisted
-  map so the caller can persist only when it changed.
+  (knownBranches: Set<string> option) -> (effectiveMap: Map<string, PrStatus>) * (newPersisted: Map<string, MergedPrRecord>)`.
+  Upserts branches observed as merged and overlays a reconstructed `HasPr` for each persisted branch
+  missing from the live map. Pruning to `knownBranches` runs only when it is `Some` (a trustworthy
+  enumeration); `None` skips pruning so an empty/partial set can never wipe the store (Decision #8).
+  Returns the new persisted map so the caller can persist only when it changed.
+- **Pure `pruneScope`** (`knownPaths -> collectedGitPaths -> knownBranches -> Set<string> option`):
+  returns `Some knownBranches` only when every known worktree path has a collected `GitData` entry
+  and at least one worktree exists, else `None`. Isolates the "is the enumeration complete?" decision
+  from `RefreshPr` so it is unit-testable.
 - **Wiring in `src/Server/RefreshScheduler.fs`** (`RefreshPr` handler): after
-  `PrStatus.fetchPrStatusesByRepoRoot`, read the repo's persisted records, run `reconcileMergedPrs`,
+  `PrStatus.fetchPrStatusesByRepoRoot`, read the repo's persisted records, compute
+  `pruneScope repo.KnownPaths (keys repo.GitData) knownBranches`, run `reconcileMergedPrs`,
   `setForRepo` only if changed, then `UpdatePr(repoId, effectiveMap)`.
 - **Startup** — `Program.fs` calls `MergedPrStore.load()` alongside `CanvasDocOwnership.load()`.
 
@@ -84,6 +99,7 @@ matching `data/canvas-owners.json` (`CanvasDocOwnership.fs`) and `data/sessions.
 | 5 | Pure/effect split | Pure `reconcileMergedPrs` (transform) separated from the effectful store (I/O) for testability. |
 | 6 | Write frequency | Persist only when the reconciled store differs from the loaded one. |
 | 7 | Client/protocol | Unchanged — reconstruct a full `PrInfo` server-side; badge renders from `IsMerged`/`Title`/`Url`. |
+| 8 | Prune safety (review F7) | Prune only against a **complete and non-empty** live-worktree enumeration: every known worktree has collected git data, ≥1 worktree exists, **and** ≥1 branch resolved (`pruneScope` → `Some`). Empty/partial git-data (unready, a `collectWorktreeGitData` timeout, or a transient short worktree list) → `None`; an enumeration that collapses to ∅ (a correlated `git rev-parse @{u}` failure degrading every `UpstreamBranch` to `None` while paths stay collected) is also → `None`, closing the full-store-wipe class. Upserts/overlay always run (additive, lossless). **Residual (partial):** when only *some* upstream reads transiently fail, those branches' records are still pruned, because `GitData` cannot distinguish "read failed" from "no upstream". Bounded (only branches whose read failed *and* whose PR already aged out of the live window) — not a full wipe; closing it fully needs `getUpstreamBranch`/`GitData` to surface read-failure vs no-upstream. |
 
 ## Key Files
 
