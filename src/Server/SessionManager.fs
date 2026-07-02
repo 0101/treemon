@@ -3,7 +3,6 @@ module Server.SessionManager
 open System
 open System.Diagnostics
 open System.IO
-open System.Text.Json
 open System.Threading
 open Shared
 
@@ -186,52 +185,28 @@ let private sessionsFilePath =
     Path.Combine("data", "sessions.json")
 
 let internal persistSessions (sessions: Map<string, nativeint>) =
-    async {
-        try
-            let dir = Path.GetDirectoryName(sessionsFilePath)
-            if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
-
-            let options = JsonWriterOptions(Indented = true)
-            use stream = new MemoryStream()
-            use writer = new Utf8JsonWriter(stream, options)
-            writer.WriteStartObject()
-            writer.WritePropertyName("sessions")
-            writer.WriteStartObject()
-            sessions |> Map.iter (fun path hwnd -> writer.WriteNumber(path, int64 hwnd))
-            writer.WriteEndObject()
-            writer.WriteEndObject()
-            writer.Flush()
-
-            let json = System.Text.Encoding.UTF8.GetString(stream.ToArray())
-            let tempPath = sessionsFilePath + ".tmp"
-            do! File.WriteAllTextAsync(tempPath, json) |> Async.AwaitTask
-            File.Move(tempPath, sessionsFilePath, overwrite = true)
-        with ex ->
-            Log.log "SessionManager" $"Failed to persist sessions: {ex.Message}"
-    }
+    JsonStore.persist "SessionManager" sessionsFilePath (fun writer ->
+        writer.WriteStartObject()
+        writer.WritePropertyName("sessions")
+        writer.WriteStartObject()
+        sessions |> Map.iter (fun path hwnd -> writer.WriteNumber(path, int64 hwnd))
+        writer.WriteEndObject()
+        writer.WriteEndObject())
 
 let internal loadSessions () =
-    try
-        if not (File.Exists(sessionsFilePath)) then
-            Map.empty
-        else
-            let json = File.ReadAllText(sessionsFilePath)
-            use doc = JsonDocument.Parse(json)
-
-            match doc.RootElement.TryGetProperty("sessions") with
-            | false, _ -> Map.empty
-            | true, sessionsElement ->
-                sessionsElement.EnumerateObject()
-                |> Seq.fold (fun acc prop ->
-                    let hwnd = nativeint (prop.Value.GetInt64())
-                    if Win32.isWindowValid hwnd then
-                        acc |> Map.add (Server.PathUtils.normalizePath prop.Name) hwnd
-                    else
-                        acc
-                ) Map.empty
-    with ex ->
-        Log.log "SessionManager" $"Failed to load sessions: {ex.Message}"
-        Map.empty
+    JsonStore.load "SessionManager" sessionsFilePath (fun root ->
+        match root.TryGetProperty("sessions") with
+        | false, _ -> Map.empty
+        | true, sessionsElement ->
+            sessionsElement.EnumerateObject()
+            |> Seq.fold (fun acc prop ->
+                let hwnd = nativeint (prop.Value.GetInt64())
+                if Win32.isWindowValid hwnd then
+                    acc |> Map.add (Server.PathUtils.normalizePath prop.Name) hwnd
+                else
+                    acc
+            ) Map.empty)
+    |> Option.defaultValue Map.empty
 
 let private replyError (msg: SessionMsg) (sessions: Map<string, nativeint>) (ex: exn) =
     match msg with

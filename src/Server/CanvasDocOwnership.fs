@@ -1,7 +1,6 @@
 module Server.CanvasDocOwnership
 
 open System.IO
-open System.Text.Json
 
 let private normalizePath = Server.PathUtils.normalizePath
 
@@ -14,34 +13,18 @@ type private Msg =
     | Load of state: Map<string, Map<string, string>>
 
 let private persistImpl (state: Map<string, Map<string, string>>) =
-    async {
-        try
-            let dir = Path.GetDirectoryName(filePath)
-            if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+    JsonStore.persist "CanvasDocOwnership" filePath (fun writer ->
+        writer.WriteStartObject()
 
-            let options = JsonWriterOptions(Indented = true)
-            use stream = new MemoryStream()
-            use writer = new Utf8JsonWriter(stream, options)
+        state
+        |> Map.iter (fun worktreeKey docs ->
+            writer.WritePropertyName(worktreeKey)
             writer.WriteStartObject()
+            docs |> Map.iter (fun filename sessionId ->
+                writer.WriteString(filename, sessionId))
+            writer.WriteEndObject())
 
-            state
-            |> Map.iter (fun worktreeKey docs ->
-                writer.WritePropertyName(worktreeKey)
-                writer.WriteStartObject()
-                docs |> Map.iter (fun filename sessionId ->
-                    writer.WriteString(filename, sessionId))
-                writer.WriteEndObject())
-
-            writer.WriteEndObject()
-            writer.Flush()
-
-            let json = System.Text.Encoding.UTF8.GetString(stream.ToArray())
-            let tempPath = filePath + ".tmp"
-            do! File.WriteAllTextAsync(tempPath, json) |> Async.AwaitTask
-            File.Move(tempPath, filePath, overwrite = true)
-        with ex ->
-            Log.log "CanvasDocOwnership" $"Failed to persist: {ex.Message}"
-    }
+        writer.WriteEndObject())
 
 let private agent =
     MailboxProcessor.Start(fun inbox ->
@@ -94,23 +77,15 @@ let getAll (worktreePath: string) =
     agent.PostAndAsyncReply(fun reply -> GetAll(normalizePath worktreePath, reply))
 
 let load () =
-    try
-        if File.Exists(filePath) then
-            let json = File.ReadAllText(filePath)
-            use doc = JsonDocument.Parse(json)
-
-            let state =
-                doc.RootElement.EnumerateObject()
-                |> Seq.fold (fun acc worktreeProp ->
-                    let docs =
-                        worktreeProp.Value.EnumerateObject()
-                        |> Seq.fold (fun acc prop ->
-                            acc |> Map.add (prop.Name) (prop.Value.GetString())
-                        ) Map.empty
-
-                    acc |> Map.add (normalizePath worktreeProp.Name) docs
+    JsonStore.load "CanvasDocOwnership" filePath (fun root ->
+        root.EnumerateObject()
+        |> Seq.fold (fun acc worktreeProp ->
+            let docs =
+                worktreeProp.Value.EnumerateObject()
+                |> Seq.fold (fun acc prop ->
+                    acc |> Map.add (prop.Name) (prop.Value.GetString())
                 ) Map.empty
 
-            agent.Post(Load state)
-    with ex ->
-        Log.log "CanvasDocOwnership" $"Failed to load: {ex.Message}"
+            acc |> Map.add (normalizePath worktreeProp.Name) docs
+        ) Map.empty)
+    |> Option.iter (Load >> agent.Post)
