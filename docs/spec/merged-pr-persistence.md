@@ -61,8 +61,13 @@ matching `data/canvas-owners.json` (`CanvasDocOwnership.fs`) and `data/sessions.
 - Shared types, the wire protocol, and the entire client are unchanged.
 - Only the terminal **merged** fact is persisted. Volatile fields (builds, comments, conflicts,
   draft) are never persisted; open/active PRs are not stored at all.
-- `PrStatus.lookupPrStatus` and `WorktreeApi` are untouched — `PerRepoState.PrData` simply becomes
-  the effective (live + fallback) map.
+- `PrStatus.lookupPrStatus`, `WorktreeApi`, and `SyncEngine` code is untouched — `PerRepoState.PrData`
+  simply becomes the effective (live + fallback) map. One behavioral consequence is intended and
+  documented rather than a code change: `PrData` has two consumers — the merged badge **and** the sync
+  pipeline's push step (`WorktreeApi.fs:391` `lookupPrStatus` → `SyncEngine.executeSyncPipeline`, whose
+  `HasPr _ -> push` runs `git push`). The overlay makes an aged-out merged branch resolve to
+  `HasPr { IsMerged = true }` instead of `NoPr`, so `sync` can now `git push` it. This is pre-existing,
+  low-harm behavior (touches only the branch's own remote ref, never `main`) — see Decision #9 (review F8).
 
 ## Technical Approach
 
@@ -100,6 +105,7 @@ matching `data/canvas-owners.json` (`CanvasDocOwnership.fs`) and `data/sessions.
 | 6 | Write frequency | Persist only when the reconciled store differs from the loaded one. |
 | 7 | Client/protocol | Unchanged — reconstruct a full `PrInfo` server-side; badge renders from `IsMerged`/`Title`/`Url`. |
 | 8 | Prune safety (review F7) | Prune only against a **complete and non-empty** live-worktree enumeration: every known worktree has collected git data, ≥1 worktree exists, **and** ≥1 branch resolved (`pruneScope` → `Some`). Empty/partial git-data (unready, a `collectWorktreeGitData` timeout, or a transient short worktree list) → `None`; an enumeration that collapses to ∅ (a correlated `git rev-parse @{u}` failure degrading every `UpstreamBranch` to `None` while paths stay collected) is also → `None`, closing the full-store-wipe class. Upserts/overlay always run (additive, lossless). **Residual (partial):** when only *some* upstream reads transiently fail, those branches' records are still pruned, because `GitData` cannot distinguish "read failed" from "no upstream". Bounded (only branches whose read failed *and* whose PR already aged out of the live window) — not a full wipe; closing it fully needs `getUpstreamBranch`/`GitData` to surface read-failure vs no-upstream. |
+| 9 | Sync push of merged branches (review F8) | The effective `PrData` feeds **two** consumers — the merged badge **and** the sync pipeline's final push step (`WorktreeApi.fs:391` `lookupPrStatus` → `SyncEngine.executeSyncPipeline`, whose `HasPr _ -> push` runs `git push`). The fallback overlay makes an aged-out merged branch resolve to `HasPr { IsMerged = true }` (was `NoPr`), so `sync` can now `git push` it. **Accepted as-is, document-only (no code change):** the push-on-merged behavior is pre-existing — an in-window merged branch already resolved to live `HasPr { IsMerged = true }` and sync already pushed it; the overlay only makes this consistent for aged-out branches instead of window-dependent. It is reachable only in the `commitCount <> 0` arm (squash-merge / post-merge-commit branches) and touches only the branch's own remote ref — never `main`. If pushing merged branches during sync is ever deemed unwanted, guard it once for both cases in `SyncEngine.fs`: `match prStatus with HasPr pr when not pr.IsMerged -> push \| _ -> ()`. |
 
 ## Key Files
 
