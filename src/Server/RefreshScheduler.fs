@@ -426,8 +426,21 @@ let private executeTask
                 |> Seq.choose _.UpstreamBranch
                 |> set
 
-            let! prMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
-            agent.Post(UpdatePr(repoId, prMap))
+            // Reconcile the bounded live PR fetch with the persisted merged-PR store: live data
+            // always wins, the store fills merged branches that have aged out of the fetch window,
+            // and records are pruned to `knownBranches`. `PrData` becomes this effective map;
+            // `lookupPrStatus`/`WorktreeApi` consume it unchanged (spec: merged-pr-persistence.md).
+            let! livePrMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
+            let! persisted = MergedPrStore.getForRepo repoId
+
+            let effectiveMap, newPersisted =
+                MergedPrStore.reconcileMergedPrs livePrMap persisted knownBranches
+
+            // Persist only when the reconciled store actually moved (Decision #6).
+            if newPersisted <> persisted then
+                MergedPrStore.setForRepo repoId newPersisted
+
+            agent.Post(UpdatePr(repoId, effectiveMap))
 
         | RefreshFetch repoId ->
             let root = rootPaths |> Map.find repoId
