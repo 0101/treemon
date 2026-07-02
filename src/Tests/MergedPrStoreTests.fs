@@ -164,3 +164,163 @@ type MergedPrStoreAgentTests() =
             Assert.That(File.Exists(persistedPath), Is.True, "a changed setForRepo must persist")
             Assert.That(loadAtPath persistedPath |> Map.tryFind repoId, Is.EqualTo(Some updated),
                 "the persisted file must reflect the updated records"))
+
+// A live open (non-merged) PR with every volatile field populated — used to prove the fallback
+// overlay never displaces live data and that non-merged PRs are neither persisted nor overlaid.
+let private openLivePr id : PrStatus =
+    HasPr
+        { Id = id
+          Title = $"live #{id}"
+          Url = $"https://example.test/pull/{id}"
+          IsDraft = true
+          Comments = WithResolution(2, 5)
+          Builds = [ { Name = "ci"; Status = Building; Url = None; Failure = None } ]
+          IsMerged = false
+          HasConflicts = true }
+
+// A live MERGED PR carrying volatile fields, to prove reconcile persists only Id/Title/Url.
+let private mergedLivePr id title url : PrStatus =
+    HasPr
+        { Id = id
+          Title = title
+          Url = url
+          IsDraft = true
+          Comments = WithResolution(1, 3)
+          Builds = [ { Name = "ci"; Status = Succeeded; Url = Some "https://example.test/ci"; Failure = None } ]
+          IsMerged = true
+          HasConflicts = true }
+
+// The exact inert reconstruction the spec mandates for a persisted record overlaid as fallback.
+let private reconstructed (r: MergedPrRecord) : PrStatus =
+    HasPr
+        { Id = r.Id
+          Title = r.Title
+          Url = r.Url
+          IsDraft = false
+          Comments = WithResolution(0, 0)
+          Builds = []
+          IsMerged = true
+          HasConflicts = false }
+
+// Pure reconcileMergedPrs: no I/O, so these run parallel with no CWD/agent setup.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReconcileMergedPrsTests() =
+
+    // (a) inject a persisted merged PR when the live map lacks the branch entirely.
+    [<Test>]
+    member _.``injects a persisted merged PR for a known branch missing from the live map``() =
+        let record = mk 12 "Add X" "https://example.test/pull/12"
+        let persisted = Map.ofList [ "feature/x", record ]
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted (Set.ofList [ "feature/x" ])
+
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
+            "a known branch absent from the live map must be overlaid with the reconstructed merged PR")
+        Assert.That(newPersisted, Is.EqualTo(persisted),
+            "a pure overlay must not mutate the persisted store")
+
+    // (a, variant) NoPr counts as "not HasPr", so the overlay still applies.
+    [<Test>]
+    member _.``overlays a persisted merged PR when the live status is NoPr``() =
+        let record = mk 12 "Add X" "https://example.test/pull/12"
+        let persisted = Map.ofList [ "feature/x", record ]
+        let live = Map.ofList [ "feature/x", NoPr ]
+
+        let effective, _ = reconcileMergedPrs live persisted (Set.ofList [ "feature/x" ])
+
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
+            "a live NoPr is not a HasPr, so the persisted record must be overlaid")
+
+    // (b) never override a live HasPr — even a non-merged one beats a persisted merged record.
+    [<Test>]
+    member _.``never overrides a live HasPr — even an open PR beats a persisted merged record``() =
+        let persisted =
+            Map.ofList [ "feature/x", mk 12 "merged long ago" "https://example.test/pull/12" ]
+        let liveOpen = openLivePr 55
+
+        let effective, _ =
+            reconcileMergedPrs (Map.ofList [ "feature/x", liveOpen ]) persisted (Set.ofList [ "feature/x" ])
+
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some liveOpen),
+            "live HasPr always wins; the overlay only fills branches the live map is missing")
+
+    // (c) prune records for branches no longer known.
+    [<Test>]
+    member _.``prunes persisted records for branches no longer known``() =
+        let persisted =
+            Map.ofList
+                [ "feature/x", mk 1 "X" "https://example.test/pull/1"
+                  "feature/gone", mk 2 "Gone" "https://example.test/pull/2" ]
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted (Set.ofList [ "feature/x" ])
+
+        Assert.That(newPersisted |> Map.containsKey "feature/gone", Is.False,
+            "a branch outside knownBranches must be pruned from the store")
+        Assert.That(newPersisted |> Map.containsKey "feature/x", Is.True,
+            "a still-known branch's record must survive pruning")
+        Assert.That(effective |> Map.containsKey "feature/gone", Is.False,
+            "a pruned branch must not be overlaid into the effective map")
+
+    // (d) upsert newly-observed merged PRs, keeping only Id/Title/Url.
+    [<Test>]
+    member _.``upserts a newly observed live merged PR, persisting only Id/Title/Url``() =
+        let live =
+            Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
+
+        let _, newPersisted = reconcileMergedPrs live Map.empty (Set.ofList [ "feature/x" ])
+
+        Assert.That(Map.tryFind "feature/x" newPersisted,
+            Is.EqualTo(Some(mk 77 "Freshly merged" "https://example.test/pull/77")),
+            "a live merged PR must be recorded, dropping every volatile field")
+
+    // (d, variant) the "up" in upsert: refresh an existing record from the latest live merged PR.
+    [<Test>]
+    member _.``upsert refreshes an existing record from the live merged PR``() =
+        let persisted = Map.ofList [ "feature/x", mk 1 "stale" "https://example.test/pull/1" ]
+        let live = Map.ofList [ "feature/x", mergedLivePr 2 "renamed" "https://example.test/pull/2" ]
+
+        let _, newPersisted = reconcileMergedPrs live persisted (Set.ofList [ "feature/x" ])
+
+        Assert.That(Map.tryFind "feature/x" newPersisted,
+            Is.EqualTo(Some(mk 2 "renamed" "https://example.test/pull/2")),
+            "an already-persisted branch must be updated to the latest live merged PR")
+
+    // (e, canonical) a still-live merged PR re-reported identically each refresh must be a no-op
+    // write: the upsert path runs but re-adds an equal record, so the store stays unchanged and the
+    // live PR (with its volatile fields) still wins over the persisted reconstruction.
+    [<Test>]
+    member _.``a re-reported live merged PR identical to its persisted record is a no-op write``() =
+        let record = mk 12 "Add X" "https://example.test/pull/12"
+        let persisted = Map.ofList [ "feature/x", record ]
+        let live = Map.ofList [ "feature/x", mergedLivePr 12 "Add X" "https://example.test/pull/12" ]
+
+        let effective, newPersisted = reconcileMergedPrs live persisted (Set.ofList [ "feature/x" ])
+
+        Assert.That(newPersisted, Is.EqualTo(persisted),
+            "re-upserting an identical merged PR must leave the store structurally unchanged (Decision #6)")
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(live |> Map.tryFind "feature/x"),
+            "the live merged PR wins over the persisted reconstruction (volatile fields preserved)")
+
+    // (e) report the persisted store unchanged when nothing moved.
+    [<Test>]
+    member _.``leaves the persisted store unchanged across a steady-state refresh``() =
+        let persisted =
+            Map.ofList
+                [ "feature/x", mk 1 "X" "https://example.test/pull/1" // aged out of live -> overlaid
+                  "feature/y", mk 2 "Y" "https://example.test/pull/2" ] // now shows a live open PR
+        let live = Map.ofList [ "feature/y", openLivePr 9 ]
+        let known = Set.ofList [ "feature/x"; "feature/y" ]
+
+        let effective, newPersisted = reconcileMergedPrs live persisted known
+
+        Assert.That(newPersisted, Is.EqualTo(persisted),
+            "no new merged PRs and nothing to prune -> the store is unchanged (Decision #6 no-op write)")
+        Assert.That(Map.tryFind "feature/x" effective,
+            Is.EqualTo(Some(reconstructed (mk 1 "X" "https://example.test/pull/1"))),
+            "the aged-out branch is overlaid from the store")
+        Assert.That(Map.tryFind "feature/y" effective, Is.EqualTo(Some(openLivePr 9)),
+            "the branch with a live PR stays live")

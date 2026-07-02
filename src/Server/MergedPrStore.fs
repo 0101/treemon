@@ -12,6 +12,63 @@ type MergedPrRecord =
       Title: string
       Url: string }
 
+/// Reconstructs the full `PrInfo` a persisted record stands in for. Only the terminal merged fact
+/// is stored, so the volatile fields (`IsDraft`/`Comments`/`Builds`/`HasConflicts`) are filled with
+/// inert defaults. The merged badge renders from `IsMerged`/`Title`/`Url` alone, so this is
+/// indistinguishable from a live merged PR to the client (Decision #7).
+let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
+    HasPr
+        { Id = record.Id
+          Title = record.Title
+          Url = record.Url
+          IsDraft = false
+          Comments = WithResolution(0, 0)
+          Builds = []
+          IsMerged = true
+          HasConflicts = false }
+
+/// Pure reconciliation (no I/O) between the live PR map, the persisted merged-PR records, and the
+/// repo's currently known branches. The effectful store calls this and persists `newPersisted` only
+/// when it differs from what it loaded (Decision #6), so this stays unit-testable in isolation.
+///
+/// Returns:
+///  - `effectiveMap`: `livePrMap` with a reconstructed merged `HasPr` overlaid for every known
+///    branch the live fetch did NOT return as `HasPr` but which has a persisted record. A live
+///    `HasPr` (merged or not) is never overridden — the overlay is fallback-only (Decision #3).
+///  - `newPersisted`: `persisted` with every live `HasPr { IsMerged = true }` upserted (keeping only
+///    `Id`/`Title`/`Url`) and every branch outside `knownBranches` pruned (Decision #4), bounding the
+///    store by live worktrees. Equals `persisted` when nothing moved, so the caller skips the write.
+let reconcileMergedPrs
+    (livePrMap: Map<string, PrStatus>)
+    (persisted: Map<string, MergedPrRecord>)
+    (knownBranches: Set<string>)
+    : Map<string, PrStatus> * Map<string, MergedPrRecord> =
+
+    // Record every branch observed as merged in the live map, then prune to the known branches.
+    let newPersisted =
+        livePrMap
+        |> Map.fold
+            (fun acc branch status ->
+                match status with
+                | HasPr pr when pr.IsMerged ->
+                    acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url }
+                | _ -> acc)
+            persisted
+        |> Map.filter (fun branch _ -> Set.contains branch knownBranches)
+
+    // Overlay a reconstructed merged PR for each persisted (already pruned to known) branch the live
+    // map is missing as `HasPr`. A live `HasPr` — even a non-merged one — always wins.
+    let effectiveMap =
+        newPersisted
+        |> Map.fold
+            (fun acc branch record ->
+                match Map.tryFind branch acc with
+                | Some(HasPr _) -> acc
+                | _ -> acc |> Map.add branch (toMergedPrStatus record))
+            livePrMap
+
+    effectiveMap, newPersisted
+
 /// Default on-disk location: gitignored server runtime state, NOT the user-authored `config.json`.
 /// Matches `data/canvas-owners.json` (`CanvasDocOwnership.fs`) and `data/sessions.json`.
 let private filePath = Path.Combine("data", "merged-prs.json")
