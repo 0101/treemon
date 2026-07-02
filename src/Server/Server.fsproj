@@ -32,6 +32,7 @@
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
+    <Compile Include="MergedPrStore.fs" />
     <Compile Include="CanvasBridge.fs" />
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />

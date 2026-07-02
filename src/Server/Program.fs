@@ -270,6 +270,7 @@ let main args =
             let syncAgent = SyncEngine.createSyncAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
+            MergedPrStore.load ()
 
             match config.TestFixtures with
             | Some path ->

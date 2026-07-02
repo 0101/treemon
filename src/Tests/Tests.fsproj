@@ -39,6 +39,7 @@
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="ConfigWriterTests.fs" />
+    <Compile Include="MergedPrStoreTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="ServerStartupResolutionTests.fs" />
