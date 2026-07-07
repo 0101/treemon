@@ -17,6 +17,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
       Beads = BeadsSummary.zero
+      Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
       LastUserMessage = None

@@ -12,6 +12,7 @@ module NavHelpers =
           LastCommitMessage = "msg"
           LastCommitTime = DateTimeOffset.UtcNow
           Beads = BeadsSummary.zero
+          Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
           LastUserMessage = None

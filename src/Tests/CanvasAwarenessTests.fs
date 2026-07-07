@@ -18,6 +18,7 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
       Beads = BeadsSummary.zero
+      Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
       LastUserMessage = None

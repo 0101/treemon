@@ -118,6 +118,7 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
+      Planning = BeadsPlanning.zero
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
       LastUserMessage = codingToolData.LastUserMessage

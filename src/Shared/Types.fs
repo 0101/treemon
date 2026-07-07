@@ -34,6 +34,21 @@ type BeadsSummary =
 module BeadsSummary =
     let zero = { Open = 0; InProgress = 0; Blocked = 0; Closed = 0 }
 
+/// Server-side split of a worktree's OPEN beads tasks by their direct parent-feature status,
+/// the source of the band's started-vs-awaiting signal:
+///   - Planned: open task under an OPEN feature (planning done, awaiting go-ahead)
+///   - Queued:  open task under an IN_PROGRESS feature (execution underway, next-up)
+///   - Loose:   open task with no/closed/blocked feature parent, or a non-feature parent
+/// Loose is kept distinct server-side for fidelity but folds into Planned for display.
+/// (FeaturesOpen/FeaturesWip were deliberately dropped — the v1 band shows no feature counts.)
+type BeadsPlanning =
+    { Planned: int
+      Queued: int
+      Loose: int }
+
+module BeadsPlanning =
+    let zero = { Planned = 0; Queued = 0; Loose = 0 }
+
 type CodingToolStatus =
     | Working
     | WaitingForUser
@@ -184,6 +199,7 @@ type WorktreeStatus =
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
       Beads: BeadsSummary
+      Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
       LastUserMessage: (string * DateTimeOffset) option

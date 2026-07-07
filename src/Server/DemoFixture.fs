@@ -157,6 +157,7 @@ let private wtAzDoMain: WorktreeStatus =
       LastCommitMessage = "Merge PR #4198: Update dependencies to latest stable"
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
+      Planning = BeadsPlanning.zero
       CodingTool = Idle
       CodingToolProvider = None
       LastUserMessage = None
@@ -176,6 +177,7 @@ let private wtRetryLogic: WorktreeStatus =
       LastCommitMessage = "Add exponential backoff to blob storage retries"
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
+      Planning = BeadsPlanning.zero
       CodingTool = Working
       CodingToolProvider = Some Claude
       LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
@@ -195,6 +197,7 @@ let private wtConfigLoading: WorktreeStatus =
       LastCommitMessage = "Extract config validation into separate module"
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
+      Planning = BeadsPlanning.zero
       CodingTool = Working
       CodingToolProvider = Some Claude
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
@@ -214,6 +217,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       LastCommitMessage = "Add JWT validation and claims extraction"
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
+      Planning = BeadsPlanning.zero
       CodingTool = Done
       CodingToolProvider = Some Copilot
       LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
@@ -233,6 +237,7 @@ let private wtArchived: WorktreeStatus =
       LastCommitMessage = "Complete database migration script v2"
       LastCommitTime = baseTimestamp.AddHours(-48.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
+      Planning = BeadsPlanning.zero
       CodingTool = Done
       CodingToolProvider = Some Claude
       LastUserMessage = None
@@ -252,6 +257,7 @@ let private wtGithubMain: WorktreeStatus =
       LastCommitMessage = "Merge pull request #308: Fix CSV parser edge case"
       LastCommitTime = baseTimestamp.AddMinutes(-15.0)
       Beads = BeadsSummary.zero
+      Planning = BeadsPlanning.zero
       CodingTool = Idle
       CodingToolProvider = None
       LastUserMessage = None
@@ -271,6 +277,7 @@ let private wtStreaming: WorktreeStatus =
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
+      Planning = BeadsPlanning.zero
       CodingTool = Working
       CodingToolProvider = Some Copilot
       LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
@@ -290,6 +297,7 @@ let private wtCsvFix: WorktreeStatus =
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
+      Planning = BeadsPlanning.zero
       CodingTool = Done
       CodingToolProvider = Some Copilot
       LastUserMessage = None

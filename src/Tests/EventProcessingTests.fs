@@ -272,6 +272,7 @@ type SortWorktreesTests() =
           LastCommitMessage = "msg"
           LastCommitTime = commitTime
           Beads = BeadsSummary.zero
+          Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
           LastUserMessage = None
