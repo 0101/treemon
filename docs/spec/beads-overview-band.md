@@ -200,6 +200,21 @@ the solution compiling (no compat shims, per house rules).
   gated on `model.OverviewPanelOpen`; reflow via a `@container dashboard (min-width: 1200px)` rule
   that flips the two sections from stacked (narrow) to side-by-side (wide).
 
+**Implementation notes (49w — the per-card stripe, `CardViews.fs` + `index.html`):**
+- **`CardViews.activityStripe` appends a card-scoped `act-*` modifier**, gated on `HasActiveSession`
+  (mirrors the band's active-only filter, since `CurrentSkill` is not staleness-gated) and derived
+  from `Activity.classify (CurrentSkill |> Option.defaultValue "")`. `Working` / no skill ⇒ `""` (no
+  stripe). `cardClassName` concatenates it alongside `ct-*` / `has-session`, so the red dot is
+  untouched.
+- **Distinct `act-*` classes, not the band's `activity-*`.** The band's `.activity-*` set `color`
+  (for `currentColor`); reusing them on the whole `wt-card` would tint every child text node, so the
+  stripe uses its own `.wt-card.act-*` classes that only paint the stripe. Colors still match the
+  band accents exactly (one source of truth for the *what*).
+- **Stripe is a `::before` pseudo-element, not `border-left`.** A prior decision removed the
+  has-session left border (guarded by a test asserting `borderLeftWidth == 0px`); the stripe adds
+  `position: relative` to `.wt-card` and a 3px left `::before`, clipped to the rounded corners by the
+  card's existing `overflow: hidden` — no layout shift and the border test still holds.
+
 ## Decisions
 
 Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.md`. Key ones:

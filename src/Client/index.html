@@ -66,8 +66,26 @@
             box-shadow: 0 1px 3px rgba(0,0,0,0.3);
             min-width: 0;
             overflow: hidden;
+            position: relative;
             display: flex; flex-direction: column;
         }
+        /* Per-card activity stripe: a left color bar on active worktrees, colored by the running
+           skill's activity (matches the overview band's activity accents). Only active worktrees
+           with a recognized activity carry an act-* class; Working / no skill => no stripe. The
+           pseudo-element sits in the card's left gutter and is clipped to the rounded corners by
+           the card's overflow:hidden. */
+        .wt-card.act-investigating::before,
+        .wt-card.act-planning::before,
+        .wt-card.act-executing::before,
+        .wt-card.act-reviewing::before,
+        .wt-card.act-fixing::before {
+            content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+        }
+        .wt-card.act-investigating::before { background: #89dceb; }
+        .wt-card.act-planning::before      { background: #f9e2af; }
+        .wt-card.act-executing::before     { background: #a6e3a1; }
+        .wt-card.act-reviewing::before     { background: #cba6f7; }
+        .wt-card.act-fixing::before        { background: #fab387; }
         .card-body { padding: 12px 14px 6px; }
         .wt-card.merged      { opacity: 0.5; }
         .wt-card.merged .delete-btn { color: #f38ba8; border-color: #f38ba8; }
