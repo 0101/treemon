@@ -98,6 +98,10 @@ type Msg =
     // actually threw, not the active tab. Carried as its own message + model field, distinct from
     // CanvasSendState.Failed (which is a pane→session *delivery* failure, a different source).
     | CanvasDocError of scopedKey: string * filename: string * message: string
+    // A canvas doc posted a valid object with no usable top-level string `action`, so CanvasPane could
+    // not route it. Surfaced (not silently dropped) via the doc-error banner, attributed to the active
+    // visible doc.
+    | CanvasMalformedDocMessage
     | DismissCanvasDocError
     | MarkDocViewed of scopedKey: string * filename: string
     | LoadLastViewedHashes of Map<string, Map<string, string>>

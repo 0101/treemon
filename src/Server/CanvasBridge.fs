@@ -59,10 +59,16 @@ let private enqueue key filename (owner: string option) payload =
     )
     |> ignore
 
-/// A queued message may be handed to a draining session only when it has no known owner
-/// (single-session back-compat / anonymous poll) or that session *is* the owner. This stops an
-/// owner-bound message being cross-routed to a co-located non-owner that re-registers or polls
-/// first. An anonymous drainer (sessionId = None) therefore takes only owner-unknown messages.
+/// Which queued messages a draining session may receive. An owner-BOUND message goes only to its
+/// owner — never cross-routed to a co-located non-owner that re-registers or polls first. An
+/// owner-UNKNOWN message (Owner = None) has no owner to route to, so it drains best-effort to
+/// whichever session takes it first (normally the resumed author, but possibly a co-located
+/// session): deliberate, since the send-time misroute is already prevented in `sendMessage` (it
+/// queues rather than hand an unowned doc to a live non-author), and strict routing resumes once
+/// the doc has a declared owner. An anonymous drainer (sessionId = None) matches only owner-unknown
+/// messages. Fully closing the owner-unknown case would require re-resolving ownership at drain
+/// time; that is intentionally out of scope — explicit ownership (auto-declared on write, or via
+/// the `canvas_take_ownership` tool) plus the 5-min TTL keep the window rare and bounded.
 let private deliverableTo (sessionId: string option) (msg: QueuedMessage) =
     match msg.Owner with
     | None -> true
@@ -236,12 +242,18 @@ let private postPayload (entry: SessionEntry) (payload: string) (key: string) : 
 ///
 /// The registry is sessionId-keyed, so two sessions can share one worktree; this
 /// resolves the doc's declared owner (`CanvasDocOwnership.getOwner`) and delivers only
-/// to that owner. A doc's message is never cross-routed to a non-owner in the worktree.
+/// to that owner. On this send path a doc's message is never handed to a non-owner: an
+/// owner-bound message goes only to its owner, and an unowned doc is queued rather than
+/// delivered to a live non-author. (A queued owner-unknown message may later drain
+/// best-effort to any session — see `deliverableTo`.)
 ///
-/// 1. Owner has a live registry entry  -> POST to it (HTTP failure -> queue for redelivery).
-/// 2. Owner offline/gone               -> queue (never fall back to a non-owner).
-/// 3. No owner, exactly one live session -> deliver to it (single-session back-compat).
-/// 4. No owner, zero or many live sessions -> queue (target is ambiguous).
+/// 1. Owner has a live registry entry -> POST to it (HTTP failure -> queue for redelivery).
+/// 2. Owner offline/gone              -> queue (never fall back to a non-owner).
+/// 3. No declared owner               -> queue (never deliver to a co-located non-author).
+///    Authoring sessions declare ownership on every canvas write, so an unowned doc has no
+///    identifiable recipient; the send/resume flow brings up a session to drain it. The old
+///    "exactly one live session" single-session fallback is gone — it misrouted unowned docs
+///    (e.g. a focused-review reply into an unrelated co-located session).
 let sendMessage (request: CanvasMessageRequest) =
     async {
         let worktree = WorktreePath.value request.WorktreePath
@@ -268,24 +280,26 @@ let sendMessage (request: CanvasMessageRequest) =
                 // Owner is live — deliver to it. A transient HTTP failure falls through to
                 // the queue so the message is redelivered when the owner re-registers.
                 match! postPayload entry request.Payload key with
-                | Ok() -> return CanvasMessageResult.Ok
+                | Ok() ->
+                    Log.log "CanvasBridge" $"sendMessage: delivered to owner {ownerId} for {Path.GetFileName(key)}"
+                    return CanvasMessageResult.Ok
                 | Error _ -> return queueWith $"owner {ownerId} unreachable"
             | None ->
                 // Owner offline or not registered — queue. Never deliver to a non-owner,
                 // even if another session for the worktree is live.
                 return queueWith $"owner {ownerId} offline"
         | None ->
-            // No declared owner — single-session back-compat: deliver only when exactly
-            // one live session can claim the doc; zero or many is ambiguous, so queue.
+            // No declared owner. Now that the authoring session declares ownership on every
+            // canvas write, an unowned doc has no identifiable recipient — delivering its
+            // message to whatever co-located session happens to be live misroutes it. Always
+            // queue; the send/resume flow starts or continues a session that drains it. The
+            // former "exactly one live session" fast-path is intentionally gone.
             match liveSessions with
-            | [ single ] ->
-                match! postPayload single request.Payload key with
-                | Ok() -> return CanvasMessageResult.Ok
-                | Error msg -> return CanvasMessageResult.Error msg
             | [] ->
-                let reason = if pollRegistry.ContainsKey(key) then "poll-based bridge" else "no bridge"
+                let reason = if pollRegistry.ContainsKey(key) then "no owner, poll-based bridge" else "no owner, no bridge"
                 return queueWith reason
-            | _ -> return queueWith "no owner and multiple live sessions"
+            | sessions ->
+                return queueWith $"no owner with {List.length sessions} live session(s) — not delivering to a non-author"
     }
 
 /// Atomically drain pending messages for a worktree (used by heartbeat polling). The poll

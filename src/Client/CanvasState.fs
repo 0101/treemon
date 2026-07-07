@@ -19,13 +19,14 @@ type CanvasState =
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
       CanvasSendState: CanvasSendState
-      // Latest doc-side JS error from a focused AgentDoc's iframe, stamped with the doc that EMITTED
-      // it — its filename is carried in the postMessage and validated against the focused worktree's
-      // docs (DocJsError). The banner is shown only while that same doc is focused (CanvasPane gates
-      // on it), so navigating to another doc/card auto-hides a stale error — doc-scoped without a
-      // clear in every focus reducer. SelectCanvasDoc additionally clears it so a tab switch (and
-      // switch back) never re-shows it. Distinct from CanvasSendState.Failed, which models
-      // pane→session message-delivery failures.
+      // Latest doc-scoped banner error, stamped with the doc it is attributed to. Two producers: a
+      // doc-side JS error from a focused AgentDoc's iframe (its filename carried in the postMessage and
+      // validated against the focused worktree's docs), and a malformed/unroutable doc message (no
+      // usable string `action`) attributed to the active visible doc (DocJsError). The banner is shown
+      // only while that same doc is focused (CanvasPane gates on it), so navigating to another doc/card
+      // auto-hides a stale error — doc-scoped without a clear in every focus reducer. SelectCanvasDoc
+      // additionally clears it so a tab switch (and switch back) never re-shows it. Distinct from
+      // CanvasSendState.Failed, which models pane→session message-delivery failures.
       DocError: DocJsError option
       // Transient success banner shown after a canvas doc is shared and its rich link copied to the
       // clipboard (the message text, e.g. "Shared — link copied", or None when nothing to show).

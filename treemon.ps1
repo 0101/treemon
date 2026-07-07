@@ -23,6 +23,11 @@ if ($env:TREEMON_PORT) {
     $parsed = 0
     if ([int]::TryParse($env:TREEMON_PORT, [ref]$parsed)) { $DefaultPort = $parsed }
 }
+# Canvas doc server port. Must match Program.fs `defaultCanvasPort` — treemon.ps1 never passes
+# --canvas-port, so the server always binds this. It runs as a SEPARATE Kestrel host; a silent
+# bind failure (e.g. the port still held after a restart) leaves the dashboard up on $DefaultPort
+# while every canvas doc fails to load.
+$CanvasPort = 5002
 
 if (-not $Command) {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
@@ -164,6 +169,58 @@ function Ensure-WwwRoot {
     Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
 }
 
+# True when a TCP port can be bound on loopback (i.e. nothing is listening). Mirrors how the
+# canvas doc server binds (IPAddress.Loopback), and avoids the slow first-call cost of
+# Get-NetTCPConnection so it's cheap to poll on the start hot-path.
+function Test-PortFree([int]$Port) {
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Poll until a TCP port is bindable, up to $TimeoutSec. Returns $true when free, $false on timeout.
+function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        if (Test-PortFree $Port) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 300
+    }
+}
+
+function Get-RunLogs([string]$Channel) {
+    # Returns this scheme's per-run log files for a channel ("" = stdout, "-stderr" = stderr), newest
+    # first. Each run writes a fresh treemon-prod[-stderr].<timestamp>.log, so a new run never touches
+    # a previous log — which means a leftover server or a log still open in an editor/viewer can never
+    # block startup the way truncating one shared file could.
+    $pattern = "^treemon-prod$([regex]::Escape($Channel))\.\d{8}-\d{6}\.log$"
+    @(Get-ChildItem -Path $LogDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $pattern } |
+        Sort-Object LastWriteTime -Descending)
+}
+
+function Get-CurrentLogFile {
+    # Newest stdout run log — the file the running server is writing to. Falls back to the canonical
+    # name (which may not exist yet) so callers always have a meaningful path to report.
+    $logs = Get-RunLogs ""
+    if ($logs.Count -eq 0) { return $LogFile }
+    return $logs[0].FullName
+}
+
+function Remove-OldRunLogs([int]$Keep) {
+    # Keep only the most recent $Keep runs per channel; older logs are best-effort deleted (a log
+    # still held open elsewhere simply survives until its holder releases it).
+    foreach ($channel in @("", "-stderr")) {
+        Get-RunLogs $channel | Select-Object -Skip $Keep |
+            ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
+    }
+}
+
 function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -176,7 +233,9 @@ function Start-ProductionServer([string[]]$Roots) {
     Ensure-WwwRoot
 
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
-    "" | Set-Content $LogFile
+    $stamp = Get-Date -Format yyyyMMdd-HHmmss
+    $script:LogFile = Join-Path $LogDir "treemon-prod.$stamp.log"
+    $stderrLog = Join-Path $LogDir "treemon-prod-stderr.$stamp.log"
 
     # Resolve the roots to launch with. Explicit roots (from the command line) win.
     # Filter out any $null/empty entries first: with ValueFromRemainingArguments an
@@ -196,12 +255,27 @@ function Start-ProductionServer([string[]]$Roots) {
     $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
     $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort" } else { "--port $DefaultPort" }
 
+    # The server binds two Kestrel hosts: the dashboard on $DefaultPort and the canvas doc server on
+    # $CanvasPort. If a port is still held when we launch — e.g. the previous server hasn't released
+    # it yet after a restart — the dashboard surfaces the failure (it exits), but the canvas doc host
+    # fails SILENTLY, leaving every canvas doc unable to load. Wait for both to clear, warn if not.
+    foreach ($p in @($DefaultPort, $CanvasPort)) {
+        if (-not (Wait-PortFree $p 10)) {
+            $holder = (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+            Write-Host "Warning: port $p is still in use (PID $holder) after 10s." -ForegroundColor Yellow
+            if ($p -eq $CanvasPort) {
+                Write-Host "  The canvas doc server may fail to bind $CanvasPort, so canvas docs won't load." -ForegroundColor Yellow
+                Write-Host "  Stop the process/other treemon instance holding it, then restart." -ForegroundColor Yellow
+            }
+        }
+    }
+
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $serverExe `
         -ArgumentList $serverArgs `
         -WorkingDirectory $ScriptDir `
         -RedirectStandardOutput $LogFile `
-        -RedirectStandardError (Join-Path $LogDir "treemon-prod-stderr.log") `
+        -RedirectStandardError $stderrLog `
         -NoNewWindow:$false `
         -WindowStyle Hidden `
         -PassThru
@@ -213,13 +287,15 @@ function Start-ProductionServer([string[]]$Roots) {
     if ($process.HasExited) {
         Remove-Item $PidFile -ErrorAction SilentlyContinue
         Write-Host "Production server failed to start (exit code: $($process.ExitCode))" -ForegroundColor Red
-        $stderrFile = Join-Path $LogDir "treemon-prod-stderr.log"
+        $stderrFile = $stderrLog
         if ((Test-Path $stderrFile) -and (Get-Item $stderrFile).Length -gt 0) {
             Write-Host ""
             Get-Content $stderrFile | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         }
         exit 1
     }
+
+    Remove-OldRunLogs 10
 
     # Server is up — it has resolved+persisted its effective roots into the global config. Retire
     # the legacy .treemon.config only when it is SAFE: every root it declared was actually migrated
@@ -285,6 +361,17 @@ function Show-Status {
     Write-Host "  Uptime:  $uptimeStr"
     Write-Host "  URL:     http://localhost:$DefaultPort"
 
+    # Canvas doc server health: a separate Kestrel host on $CanvasPort. A silent bind failure at
+    # startup leaves the dashboard up here but every canvas doc unable to load, so surface it.
+    $canvasConn = Get-NetTCPConnection -LocalPort $CanvasPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($canvasConn -and $canvasConn.OwningProcess -eq $runningPid) {
+        Write-Host "  Canvas:  http://127.0.0.1:$CanvasPort (doc server up)"
+    } elseif ($canvasConn) {
+        Write-Host "  Canvas:  WARNING - port $CanvasPort is held by PID $($canvasConn.OwningProcess), not this server (PID $runningPid)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' to rebind." -ForegroundColor Red
+    }
+
     # Watched roots come from the server (the single source of truth) via `tm roots`.
     $rootLines = @()
     try {
@@ -298,16 +385,17 @@ function Show-Status {
     } else {
         Write-Host "  Monitor: (none configured)"
     }
-    Write-Host "  Log:     $LogFile"
+    Write-Host "  Log:     $(Get-CurrentLogFile)"
 }
 
 function Show-Log {
-    if (-not (Test-Path $LogFile)) {
-        Write-Host "No log file found at $LogFile" -ForegroundColor Yellow
+    $logToTail = Get-CurrentLogFile
+    if (-not (Test-Path $logToTail)) {
+        Write-Host "No log file found at $logToTail" -ForegroundColor Yellow
         return
     }
-    Write-Host "Tailing $LogFile (Ctrl+C to stop)..." -ForegroundColor Gray
-    Get-Content $LogFile -Tail 50 -Wait
+    Write-Host "Tailing $logToTail (Ctrl+C to stop)..." -ForegroundColor Gray
+    Get-Content $logToTail -Tail 50 -Wait
 }
 
 function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$ServerLabel, [string[]]$MonitorPaths) {
