@@ -138,8 +138,14 @@ one source of truth.
 - **VS Code skill = `request.slashCommand.name`** (e.g. `@binlog /summary` → `summary`), captured
   onto `ReqState.SlashCommand` during request reconstruction; absent ⇒ `None`.
 - **Provider selection for Copilot.** `getRefreshData` carries `CurrentSkill` from the same
-  `target` provider as the last-message surfacing; when `target = Copilot` it picks the CLI-vs-VS
-  Code surface with the more recent session mtime (mirrors `pickActiveProvider`).
+  `target` provider as the last-message surfacing; when `target = Copilot` it resolves the running
+  skill via `pickActiveSkill` over the CLI and VS Code surfaces. `pickActiveSkill` shares the
+  `mostRecentActive` rule with `pickActiveProvider` (drop Idle surfaces, then newest mtime wins) and
+  reuses the *same* `ProviderResult`s that drove status resolution, so the surfaced skill always
+  comes from the surface that won the status — never from an idle surface that merely has a newer
+  session file. Only the winning surface is scanned (lazy getter); both surfaces Idle ⇒ `None`
+  (display consumers gate on an active session anyway). A raw-mtime comparison here (the original
+  bug, focused-review F5) could attach an idle CLI skill onto an active VS Code session.
 - **Bounded horizon (accepted degradation).** Like all detector reads, the scan reaches ~1 MB back
   from EOF. A skill whose start-of-run signal has scrolled past that window degrades to `None` →
   Working — consistent with the spec's graceful-degradation goal; not gated further.
