@@ -45,18 +45,18 @@ let launchCanvasSession (scopedKey: string) (model: Model) =
 
 let toggleCanvasPane (model: Model) =
     let newState = not model.Canvas.CanvasPaneOpen
-    { model with Canvas = { model.Canvas with CanvasPaneOpen = newState } },
+    { model with Canvas.CanvasPaneOpen = newState },
     Cmd.batch [
         Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen newState (fun _ -> NoOp)
         if newState then markVisibleDocCmd model else Cmd.none
     ]
 
 let setCanvasPosition (position: CanvasPosition) (model: Model) =
-    { model with Canvas = { model.Canvas with CanvasPosition = position } },
+    { model with Canvas.CanvasPosition = position },
     Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPosition position (fun _ -> NoOp)
 
 let setCanvasSize (size: CanvasSize) (model: Model) =
-    { model with Canvas = { model.Canvas with CanvasSize = size } },
+    { model with Canvas.CanvasSize = size },
     Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasSize size (fun _ -> NoOp)
 
 let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
@@ -66,14 +66,12 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         |> Option.defaultValue []
         |> List.contains filename
     { model with
-        Canvas =
-            { model.Canvas with
-                // Doc-scoped error: a tab switch must never carry a stale error from the doc we're
-                // leaving into the one we're showing, so clear it here (it reappears only if the new
-                // doc throws again).
-                DocError = None
-                ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-                VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
+        // Doc-scoped error: a tab switch must never carry a stale error from the doc we're
+        // leaving into the one we're showing, so clear it here (it reappears only if the new
+        // doc throws again).
+        Canvas.DocError = None
+        Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
     Cmd.batch [
         Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
         // When switching to a previously hidden iframe, morph it in case content changed while
@@ -97,10 +95,8 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
         | Some filename, true -> selectCanvasDoc scopedKey filename focused
         | Some filename, false ->
             { focused with
-                Canvas =
-                    { focused.Canvas with
-                        ActiveCanvasDoc = focused.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-                        VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename focused.Canvas.VisitedCanvasDocs } },
+                Canvas.ActiveCanvasDoc = focused.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+                Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename focused.Canvas.VisitedCanvasDocs },
             Cmd.none
         | None, _ -> focused, Cmd.none
     | _ -> focused, Cmd.none
@@ -111,11 +107,9 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     { model with
         Repos = repos
         FocusedElement = Some (Card scopedKey)
-        Canvas =
-            { model.Canvas with
-                CanvasPaneOpen = true
-                ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-                VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs } },
+        Canvas.CanvasPaneOpen = true
+        Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
     Cmd.batch [
         if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
         if expanded then saveCollapsedReposCmd repos
@@ -163,7 +157,7 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
             | _ ->
                 if List.isEmpty filtered then model.Canvas.VisitedCanvasDocs |> Map.remove scopedKey
                 else model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered
-        { model with Repos = repos; Canvas = { model.Canvas with ActiveCanvasDoc = activeDoc; VisitedCanvasDocs = visitedDocs } }, Cmd.none
+        { model with Repos = repos; Canvas.ActiveCanvasDoc = activeDoc; Canvas.VisitedCanvasDocs = visitedDocs }, Cmd.none
     | Error msg ->
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
         model, Cmd.none
@@ -202,15 +196,15 @@ let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (model: M
     match result with
     | CanvasMessageResult.Error msg ->
         Fable.Core.JS.console.error ("Canvas message error:", msg)
-        { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Failed msg } }, Cmd.none
+        { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
     | CanvasMessageResult.Ok ->
-        { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
+        { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
     | CanvasMessageResult.Queued ->
         Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-        { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Waiting scopedKey } }, Cmd.none
+        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
 
 let dismissCanvasMessageError (model: Model) =
-    { model with Canvas = { model.Canvas with CanvasSendState = CanvasSendState.Idle } }, Cmd.none
+    { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
 
 /// Record a doc-side JS error (window.onerror / unhandledrejection) forwarded from an AgentDoc
 /// iframe. `scopedKey` and `filename` are the EMITTING worktree + doc, carried in the postMessage
@@ -227,7 +221,7 @@ let dismissCanvasMessageError (model: Model) =
 /// CanvasPane.messageListener.)
 let canvasDocError (scopedKey: string) (filename: string) (message: string) (model: Model) =
     if isKnownCanvasDoc model scopedKey filename then
-        { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
+        { model with Canvas.DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } }, Cmd.none
     else
         model, Cmd.none
 
@@ -243,11 +237,11 @@ let canvasMalformedDocMessage (model: Model) =
         let message =
             "This canvas doc sent a message with no usable \"action\" field, so Treemon ignored it. "
             + "The doc may be out of date — try regenerating it."
-        { model with Canvas = { model.Canvas with DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } } }, Cmd.none
+        { model with Canvas.DocError = Some { ScopedKey = scopedKey; Filename = filename; Message = message } }, Cmd.none
     | None -> model, Cmd.none
 
 let dismissCanvasDocError (model: Model) =
-    { model with Canvas = { model.Canvas with DocError = None } }, Cmd.none
+    { model with Canvas.DocError = None }, Cmd.none
 
 let morphActiveDoc (model: Model) =
     model,

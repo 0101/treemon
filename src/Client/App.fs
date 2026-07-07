@@ -172,24 +172,22 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
-                Mascot = { model.Mascot with EyeDirection = MascotState.randomEyeDirection () }
+                Mascot.EyeDirection = MascotState.randomEyeDirection ()
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
-                Canvas =
-                    { model.Canvas with
-                        CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
-                        CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
-                        CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
-                        PreviousCanvasHashes = currentCanvasHashes
-                        CanvasEvents = canvasEvents
-                        CanvasSendState = canvasSendState } }
+                Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
+                Canvas.CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
+                Canvas.CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
+                Canvas.PreviousCanvasHashes = currentCanvasHashes
+                Canvas.CanvasEvents = canvasEvents
+                Canvas.CanvasSendState = canvasSendState }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
                     if seeded = m.Canvas.LastViewedHashes then m
-                    else { m with Canvas = { m.Canvas with LastViewedHashes = seeded } }
+                    else { m with Canvas.LastViewedHashes = seeded }
                 else m)
             |> (fun updatedModel ->
                 let allPaths =
@@ -273,7 +271,7 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        { model with Activity = activity; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
+        { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
@@ -475,7 +473,7 @@ let update msg model =
         let openPane = not model.Canvas.CanvasPaneOpen
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         let retargetedModel, retargetCmd =
-            { model with Repos = repos; Canvas = { model.Canvas with CanvasPaneOpen = true } }
+            { model with Repos = repos; Canvas.CanvasPaneOpen = true }
             |> CanvasUpdate.applyFocus true (Some (Card scopedKey))
         retargetedModel,
         Cmd.batch [
@@ -520,7 +518,7 @@ let update msg model =
                 |> Option.defaultValue Map.empty
                 |> Map.add filename hash
             let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
-            { model with Canvas = { model.Canvas with LastViewedHashes = updatedHashes } },
+            { model with Canvas.LastViewedHashes = updatedHashes },
             Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
         | _ -> model, Cmd.none
 
@@ -532,7 +530,7 @@ let update msg model =
         { model with Canvas.LastViewedHashes = seedLastViewedHashes model.Repos hashes }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->
-        { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none
+        { model with Canvas.BridgeLiveness = liveness }, Cmd.none
 
     | MorphActiveDoc -> CanvasUpdate.morphActiveDoc model
 

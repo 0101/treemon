@@ -104,7 +104,7 @@ let private tryUpdateModel msg model =
                         |> Map.tryFind scopedKey
                         |> Option.defaultValue Map.empty
                         |> Map.add filename hash
-                    { model with Canvas = { model.Canvas with LastViewedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap } }
+                    { model with Canvas.LastViewedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap }
                 | None -> model
             | None -> model
         | _ -> reraise ()
@@ -122,7 +122,7 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -134,7 +134,7 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "report.html" "abc123" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -146,7 +146,7 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -171,7 +171,7 @@ type UnviewedDocsByScopedKeyTests() =
                     makeDoc "a.html" "h1"
                     makeDoc "b.html" "h2"
                     makeDoc "c.html" "h3" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -187,7 +187,7 @@ type UnviewedDocsByScopedKeyTests() =
                 Repos = [
                     makeRepo "repo1" [ makeWorktree "repo1" "main" [ makeDoc "x.html" "h1" ] ]
                     makeRepo "repo2" [ makeWorktree "repo2" "dev" [ makeDoc "y.html" "h2" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -330,8 +330,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty; CanvasPaneOpen = false } }
+                Activity.LastActivityTime = 0.0
+                Canvas.PreviousCanvasHashes = Map.empty; Canvas.CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
@@ -353,8 +353,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = previousHashes; CanvasPaneOpen = false } }
+                Activity.LastActivityTime = 0.0
+                Canvas.PreviousCanvasHashes = previousHashes; Canvas.CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
@@ -377,8 +377,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty } }
+                Activity.LastActivityTime = jsNow - 10_000.0 // 10s ago, well within 60s threshold
+                Canvas.PreviousCanvasHashes = Map.empty }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
@@ -397,8 +397,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = currentHashes } }
+                Activity.LastActivityTime = 0.0
+                Canvas.PreviousCanvasHashes = currentHashes }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
@@ -481,7 +481,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "status.html")) model
 
@@ -496,7 +496,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "new.html" "hash1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "new.html")) model
 
@@ -514,7 +514,7 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
                     makeDoc "a.html" "ha"
                     makeDoc "b.html" "hb" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "b.html")) model
 
@@ -527,7 +527,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("unknown/key", "a.html")) model
 
@@ -538,7 +538,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
 
@@ -826,7 +826,7 @@ type DocErrorTests() =
     [<Test>]
     member _.``CanvasDocError does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
+        let model = { baseModel with Canvas.CanvasSendState = CanvasSendState.Waiting "r/feat" }
         let updated = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "boom")) model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Doc JS errors and message-delivery state are independent and must not overwrite each other")
@@ -843,13 +843,13 @@ type DocErrorTests() =
     [<Test>]
     member _.``DismissCanvasDocError clears the doc error``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" } } }
+        let model = { baseModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" } }
         let updated = tryUpdateModel DismissCanvasDocError model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None), "Dismiss must clear the banner")
 
     [<Test>]
     member _.``DismissCanvasDocError leaves CanvasSendState untouched``() =
-        let model = { defaultModel with Canvas = { defaultModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" }; CanvasSendState = CanvasSendState.Failed "send failed" } }
+        let model = { defaultModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" }; Canvas.CanvasSendState = CanvasSendState.Failed "send failed" }
         let updated = tryUpdateModel DismissCanvasDocError model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Failed "send failed"),
             "Dismissing the doc-error banner must not clear an unrelated send failure")
@@ -857,7 +857,7 @@ type DocErrorTests() =
     [<Test>]
     member _.``SelectCanvasDoc clears a stale doc error (so a tab switch back never re-shows it)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "stale" } } }
+        let model = { baseModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "stale" } }
         let updated = tryUpdateModel (SelectCanvasDoc ("r/feat", "b.html")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "Switching tabs clears the stored error so it can never re-show when you switch back")
@@ -949,11 +949,9 @@ type FocusRetargetTests() =
         { defaultModel with
             Repos = repos
             FocusedElement = focused
-            Canvas =
-                { defaultModel.Canvas with
-                    CanvasPaneOpen = paneOpen
-                    ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
-                    LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+            Canvas.CanvasPaneOpen = paneOpen
+            Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
+            Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
 
     [<Test>]
     member _.``focusing a card with an unviewed doc retargets ActiveCanvasDoc to that doc``() =
@@ -977,10 +975,8 @@ type FocusRetargetTests() =
             { defaultModel with
                 Repos = repos
                 FocusedElement = None
-                Canvas =
-                    { defaultModel.Canvas with
-                        ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
-                        LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+                Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
         let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
         Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
             "with nothing unviewed the sticky last-open selection stays")
@@ -1057,7 +1053,7 @@ type MalformedDocMessageTests() =
         // With b.html selected, activeVisibleDoc resolves to b.html (not the worktree's first doc),
         // so the banner is stamped with the doc the user is actually looking at.
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with ActiveCanvasDoc = Map.ofList [ "r/feat", "b.html" ] } }
+        let model = { baseModel with Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "b.html" ] }
         let updated = tryUpdateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.DocError |> Option.map _.Filename, Is.EqualTo(Some "b.html"),
             "The banner is attributed to the active doc (b.html), not the worktree's first doc (a.html)")
@@ -1072,7 +1068,7 @@ type MalformedDocMessageTests() =
     [<Test>]
     member _.``CanvasMalformedDocMessage does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
+        let model = { baseModel with Canvas.CanvasSendState = CanvasSendState.Waiting "r/feat" }
         let updated = tryUpdateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Surfacing a malformed message must not overwrite unrelated message-delivery state")
@@ -1097,7 +1093,7 @@ type LoadLastViewedHashesTests() =
         // Simulates LoadLastViewedHashes arriving AFTER DataLoaded seeded the docs, with a fresh
         // server that has no saved hashes. The docs must stay viewed, not become unviewed.
         let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-        let seeded = { defaultModel with Repos = repos; Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+        let seeded = { defaultModel with Repos = repos; Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
         let updated = tryUpdateModel (LoadLastViewedHashes Map.empty) seeded
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes, Is.Empty,
             "an empty server map must not make a seeded, already-present doc look unviewed")
