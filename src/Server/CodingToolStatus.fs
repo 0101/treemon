@@ -32,6 +32,7 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
 type CodingToolResult =
     { Status: CodingToolStatus
       Provider: CodingToolProvider option
+      CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
       LastMessageProvider: CodingToolProvider option }
@@ -137,7 +138,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
 
-    { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
+    { Status = status; Provider = provider; CurrentSkill = None; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "

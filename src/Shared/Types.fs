@@ -60,6 +60,49 @@ type CodingToolProvider =
     | Copilot
     static member Default = Copilot
 
+/// Live-agent activity buckets derived from the skill/command an agent is running,
+/// surfaced by the same session scan that drives the red dot. Working is the fallback for
+/// an active session with no recognized skill. Activity is always *derived* from CurrentSkill
+/// via Activity.classify — never stored separately — so the per-card stripe and the overview
+/// band share one source of truth.
+[<RequireQualifiedAccess>]
+type CurrentActivity =
+    | Investigating
+    | Planning
+    | Executing
+    | Reviewing
+    | Fixing
+    | Working
+
+module Activity =
+    // First whitespace-delimited token — a Claude slash command can carry args
+    // (ClaudeDetector surfaces "<cmd> <args>", e.g. "pr https://..."), so only the command
+    // itself is significant. Split never yields an empty array, but tryHead stays defensive.
+    let private firstToken (s: string) =
+        s.Split([| ' '; '\t'; '\n'; '\r' |])
+        |> Array.tryHead
+        |> Option.defaultValue ""
+
+    /// Classify a running skill/command name into an activity bucket, per the
+    /// beads-overview-band spec table. The name is normalized first — trimmed, reduced to its
+    /// first token, stripped of a leading '/' (Claude slash commands), and lower-cased — so a
+    /// CLI event name, a Claude slash command and a VS Code tool-call name all map uniformly.
+    /// Unknown or empty/whitespace input falls back to Working.
+    /// Lives in Shared so server (card stripe) and client (band) classify identically.
+    let classify (skill: string) : CurrentActivity =
+        let normalized =
+            if String.IsNullOrWhiteSpace skill then ""
+            else (firstToken (skill.Trim())).TrimStart('/').ToLowerInvariant()
+
+        match normalized with
+        | "investigate" -> CurrentActivity.Investigating
+        | "bd-plan" | "bd-improve" | "bd-autoimprove" | "spec-management" -> CurrentActivity.Planning
+        | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
+        | "pr" | "review-branch" | "reviewing-tests" | "comprehensive-review"
+        | "code-review" | "bd-review" | "contribution" -> CurrentActivity.Reviewing
+        | "fix-build" | "conflict" -> CurrentActivity.Fixing
+        | _ -> CurrentActivity.Working
+
 [<RequireQualifiedAccess>]
 type ActivityLevel =
     | Active
@@ -202,6 +245,7 @@ type WorktreeStatus =
       Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int

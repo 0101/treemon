@@ -108,6 +108,7 @@ let private assembleFromState
         |> Option.defaultValue
             { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
               Provider = None
+              CurrentSkill = None
               LastUserMessage = None
               LastAssistantMessage = None
               LastMessageProvider = None }
@@ -122,6 +123,7 @@ let private assembleFromState
       Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
+      CurrentSkill = None
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0

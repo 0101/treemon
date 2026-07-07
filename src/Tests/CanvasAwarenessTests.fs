@@ -21,6 +21,7 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
+      CurrentSkill = None
       LastUserMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0

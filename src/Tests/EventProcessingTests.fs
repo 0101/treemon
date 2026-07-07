@@ -275,6 +275,7 @@ type SortWorktreesTests() =
           Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          CurrentSkill = None
           LastUserMessage = None
           Pr = PrStatus.NoPr
           MainBehindCount = 0

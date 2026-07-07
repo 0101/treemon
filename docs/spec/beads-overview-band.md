@@ -69,6 +69,12 @@ distinct server-side bucket for fidelity but folds into **Planned** for display 
   | **Fixing** | `fix-build`, `conflict` |
   | **Working** (fallback) | active session, no recognized skill |
 
+- `Shared.Activity.classify : string -> CurrentActivity` implements the table and **normalizes its
+  input** first — trims, takes the first whitespace-delimited token, strips a leading `/`, and
+  lower-cases — so detectors may surface the **raw** skill/command (a Claude slash command such as
+  `/pr https://…`, a CLI event name, or a VS Code tool-call name) without pre-cleaning; unknown or
+  empty input ⇒ Working. `CurrentActivity` is `[<RequireQualifiedAccess>]` because its `Working`
+  case would otherwise collide with `CodingToolStatus.Working`.
 - The band groups active-agent circles by running skill. A per-card **color stripe** on `wt-card`,
   colored by activity, adds the *what* alongside the existing binary red dot.
 
