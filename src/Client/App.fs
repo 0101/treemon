@@ -160,7 +160,7 @@ let update msg model =
                 | Some (scopedKey, filename) when not canvasShowingDoc ->
                     Cmd.batch [
                         if not model.Canvas.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
-                        Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
+                        Cmd.ofMsg (SetFocusNoRetarget (Some (Card scopedKey)))
                         Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
                     ]
                 | _ -> Cmd.none
@@ -396,7 +396,10 @@ let update msg model =
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
 
     | SetFocus target ->
-        { model with FocusedElement = target }, Cmd.none
+        CanvasUpdate.applyFocus true target model
+
+    | SetFocusNoRetarget target ->
+        CanvasUpdate.applyFocus false target model
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
@@ -433,6 +436,9 @@ let update msg model =
                 Cmd.none
             | _ -> model, Cmd.none
         else
+        let focusWithRetarget newFocus scrollHint extra =
+            let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
+            m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -442,16 +448,11 @@ let update msg model =
                 | NoAction -> Cmd.none
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
-            { model with FocusedElement = newFocus },
-            Cmd.batch [ actionCmd; scrollToFocus scrollHint newFocus ]
+            focusWithRetarget newFocus scrollHint [ actionCmd ]
         | "Home" ->
-            let newFocus = navigateToFirst model.Repos
-            { model with FocusedElement = newFocus },
-            scrollToFocus ScrollToTop newFocus
+            focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
         | "End" ->
-            let newFocus = navigateToLast model.Repos
-            { model with FocusedElement = newFocus },
-            scrollToFocus ScrollToBottom newFocus
+            focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -473,10 +474,14 @@ let update msg model =
     | FocusOverviewCard scopedKey ->
         let openPane = not model.Canvas.CanvasPaneOpen
         let repos, expanded = expandRepoOwning scopedKey model.Repos
-        { model with Repos = repos; FocusedElement = Some (Card scopedKey); Canvas = { model.Canvas with CanvasPaneOpen = true } },
+        let retargetedModel, retargetCmd =
+            { model with Repos = repos; Canvas = { model.Canvas with CanvasPaneOpen = true } }
+            |> CanvasUpdate.applyFocus true (Some (Card scopedKey))
+        retargetedModel,
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
             if expanded then saveCollapsedReposCmd repos
+            retargetCmd
         ]
 
     | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
@@ -520,7 +525,11 @@ let update msg model =
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
-        { model with Canvas = { model.Canvas with LastViewedHashes = hashes } }, Cmd.none
+        // Merge (don't overwrite) — this races the first `DataLoaded` seeding in `init`, so a plain
+        // overwrite with an empty/partial server map would wipe already-seeded docs and make them
+        // look unviewed. `seedLastViewedHashes` keeps every server value (genuine updates still
+        // register) and only fills in docs the server doesn't know, so arrival order stops mattering.
+        { model with Canvas.LastViewedHashes = seedLastViewedHashes model.Repos hashes }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->
         { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none

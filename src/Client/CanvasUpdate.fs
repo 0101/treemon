@@ -82,6 +82,29 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
     ]
 
+/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus genuinely
+/// transitions onto a worktree card, that card's active doc is retargeted to its most recently
+/// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
+/// card was already focused or nothing is unviewed. An open pane shows the doc, so it routes through
+/// `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display passes
+/// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
+let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
+    let previousFocus = model.FocusedElement
+    let focused = { model with FocusedElement = newFocus }
+    match retarget, newFocus with
+    | true, Some (Card scopedKey) when previousFocus <> Some (Card scopedKey) ->
+        match CanvasAwareness.mostRecentUnviewedDoc focused.Repos focused.Canvas.LastViewedHashes scopedKey, focused.Canvas.CanvasPaneOpen with
+        | Some filename, true -> selectCanvasDoc scopedKey filename focused
+        | Some filename, false ->
+            { focused with
+                Canvas =
+                    { focused.Canvas with
+                        ActiveCanvasDoc = focused.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+                        VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename focused.Canvas.VisitedCanvasDocs } },
+            Cmd.none
+        | None, _ -> focused, Cmd.none
+    | _ -> focused, Cmd.none
+
 let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let openPane = not model.Canvas.CanvasPaneOpen
     let repos, expanded = expandRepoOwning scopedKey model.Repos

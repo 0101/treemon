@@ -863,6 +863,161 @@ type DocErrorTests() =
             "Switching tabs clears the stored error so it can never re-show when you switch back")
 
 
+// ── mostRecentUnviewedDoc (focus-retarget target picker) ─────────────
+// Picks the worktree's most recently modified *unviewed* AgentDoc — the doc that "selecting the
+// worktree" should surface. Viewed docs (hash matches LastViewedHashes) and SystemView docs are
+// excluded, so an already-seen doc or the beads dashboard never wins.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MostRecentUnviewedDocTests() =
+
+    let docAt filename hash (time: DateTimeOffset) kind =
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = kind }
+
+    [<Test>]
+    member _.``picks the most recently modified unviewed AgentDoc``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "old.html" "h1" (now.AddMinutes(-10.0)) AgentDoc
+            docAt "new.html" "h2" now AgentDoc
+            docAt "mid.html" "h3" (now.AddMinutes(-5.0)) AgentDoc ] ] ]
+        Assert.That(mostRecentUnviewedDoc repos Map.empty "r/feat", Is.EqualTo(Some "new.html"))
+
+    [<Test>]
+    member _.``ignores a doc whose hash matches the last viewed hash``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "old.html" "h1" (now.AddMinutes(-10.0)) AgentDoc
+            docAt "new.html" "h2" now AgentDoc ] ] ]
+        let viewed = Map.ofList [ "r/feat", Map.ofList [ "new.html", "h2" ] ]
+        Assert.That(mostRecentUnviewedDoc repos viewed "r/feat", Is.EqualTo(Some "old.html"),
+            "the most-recent doc is already viewed, so the older unviewed doc wins")
+
+    [<Test>]
+    member _.``ignores a SystemView doc even when it is the most recent``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "status.html" "a1" (now.AddMinutes(-5.0)) AgentDoc
+            docAt "beads.html" "b1" now SystemView ] ] ]
+        Assert.That(mostRecentUnviewedDoc repos Map.empty "r/feat", Is.EqualTo(Some "status.html"),
+            "a SystemView must never be treated as newly published")
+
+    [<Test>]
+    member _.``returns None when every AgentDoc is viewed``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docAt "a.html" "h1" now AgentDoc ] ] ]
+        let viewed = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
+        Assert.That(mostRecentUnviewedDoc repos viewed "r/feat", Is.EqualTo(None))
+
+    [<Test>]
+    member _.``returns None for a scoped key that names no worktree``() =
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
+        Assert.That(mostRecentUnviewedDoc repos Map.empty "r/ghost", Is.EqualTo(None))
+
+
+// ── Focus-transition retarget (select-the-worktree surfaces THAT doc) ─
+// When focus transitions ONTO a worktree card that has an unviewed (newly published/updated) doc,
+// its ActiveCanvasDoc is retargeted to that doc — via update(SetFocus …), the message every
+// "select the worktree" entry point funnels through. No retarget when the card is already focused
+// (manual tab choice preserved) or nothing is unviewed. The doc is marked viewed only when the pane
+// is open (it is actually shown).
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FocusRetargetTests() =
+
+    // Run the Cmd's effects and collect the messages they dispatch. The retarget Cmds are only
+    // Cmd.ofMsg/Cmd.none, so this forces neither the (lazy) Remoting proxy nor Fable.Core.JS.
+    let dispatchedMsgs cmd : Msg list =
+        let captured = ResizeArray<Msg>()
+        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
+        List.ofSeq captured
+
+    let docAt filename hash (time: DateTimeOffset) =
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = AgentDoc }
+
+    // Worktree "r/feat" with a.html (older, viewed) and b.html (newer, unviewed). ActiveCanvasDoc
+    // sticks on a.html (a prior manual/last-open selection).
+    let modelWithUnviewed paneOpen focused =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "a.html" "h1" (now.AddMinutes(-10.0))
+            docAt "b.html" "h2" now ] ] ]
+        { defaultModel with
+            Repos = repos
+            FocusedElement = focused
+            Canvas =
+                { defaultModel.Canvas with
+                    CanvasPaneOpen = paneOpen
+                    ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
+                    LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+
+    [<Test>]
+    member _.``focusing a card with an unviewed doc retargets ActiveCanvasDoc to that doc``() =
+        let model = modelWithUnviewed false None
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "b.html"),
+            "selecting the worktree surfaces the newly published/updated doc, not the sticky last-open one")
+
+    [<Test>]
+    member _.``no retarget when the card is already the focused element``() =
+        let model = modelWithUnviewed false (Some (Card "r/feat"))
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "re-focusing the already-focused card must preserve a manual in-worktree tab choice")
+
+    [<Test>]
+    member _.``no retarget when there are no unviewed docs``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docAt "a.html" "h1" now ] ] ]
+        let model =
+            { defaultModel with
+                Repos = repos
+                FocusedElement = None
+                Canvas =
+                    { defaultModel.Canvas with
+                        ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
+                        LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "with nothing unviewed the sticky last-open selection stays")
+
+    [<Test>]
+    member _.``retarget marks the doc viewed when the pane is open``() =
+        let model = modelWithUnviewed true None
+        let updated, cmd = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "b.html"))
+        Assert.That(dispatchedMsgs cmd |> List.contains (MarkDocViewed ("r/feat", "b.html")), Is.True,
+            "an open pane shows the doc, so it is marked viewed")
+
+    [<Test>]
+    member _.``retarget does NOT mark viewed when the pane is closed``() =
+        let model = modelWithUnviewed false None
+        let updated, cmd = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(dispatchedMsgs cmd, Is.Empty,
+            "a closed pane does not display the doc, so nothing is marked viewed")
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
+            "the doc stays unviewed (badge preserved) until the pane actually shows it")
+
+    [<Test>]
+    member _.``SetFocusNoRetarget focuses the card without retargeting or marking viewed (idle path)``() =
+        // The idle auto-display path opens the pane, focuses the card, then selects its OWN target
+        // doc. It must use the no-retarget focus set so it never re-enters the active-user retarget —
+        // otherwise (pane already open) the retarget would mark mostRecentUnviewedDoc viewed before
+        // the intended doc is shown (finding F1). Pane open + b.html unviewed is exactly that state.
+        let model = modelWithUnviewed true None
+        let updated, cmd = update (SetFocusNoRetarget (Some (Card "r/feat"))) model
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "r/feat")),
+            "the focus is still applied")
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "the sticky active doc is untouched — the idle path selects its own target via SelectCanvasDoc")
+        Assert.That(dispatchedMsgs cmd, Is.Empty,
+            "no MarkDocViewed/morph — SetFocusNoRetarget must not re-enter the retarget")
+
+
 // A canvas doc that posts a message with no top-level string `action` cannot be routed by
 // CanvasPane (there is no action to switch on), so the listener surfaces it here instead of dropping
 // it silently. The malformed message carries no self-identifying wt/doc fields, so the reducer
@@ -923,3 +1078,37 @@ type MalformedDocMessageTests() =
             "Surfacing a malformed message must not overwrite unrelated message-delivery state")
         Assert.That(updated.Canvas.DocError |> Option.isSome, Is.True,
             "The banner is still raised alongside the untouched send state")
+
+
+// ── LoadLastViewedHashes merge (init-race safety) ────────────────────
+// loadLastViewedHashes races the first DataLoaded seeding in init. The handler must MERGE the
+// server hashes with a seed of the currently-known docs, not overwrite — otherwise an empty/partial
+// server map arriving last wipes the seed, making already-present docs look unviewed (which the
+// focus retarget would then act on). These guard that already-present docs stay viewed while genuine
+// server-recorded updates still register as unviewed.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LoadLastViewedHashesTests() =
+
+    [<Test>]
+    member _.``an empty server map does not wipe the seed for already-present docs``() =
+        // Simulates LoadLastViewedHashes arriving AFTER DataLoaded seeded the docs, with a fresh
+        // server that has no saved hashes. The docs must stay viewed, not become unviewed.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
+        let seeded = { defaultModel with Repos = repos; Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] } }
+        let updated = tryUpdateModel (LoadLastViewedHashes Map.empty) seeded
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes, Is.Empty,
+            "an empty server map must not make a seeded, already-present doc look unviewed")
+
+    [<Test>]
+    member _.``a server-recorded stale hash still registers the doc as unviewed``() =
+        // The doc is now at h2 but the server last saw h1 (updated while away) → stays unviewed.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h2" ] ] ]
+        let model = { defaultModel with Repos = repos }
+        let updated = tryUpdateModel (LoadLastViewedHashes (Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ])) model
+        Assert.That(updated.Canvas.LastViewedHashes["r/feat"]["a.html"], Is.EqualTo("h1"),
+            "the server value is kept (not overwritten by the current hash), so the update still registers")
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
+            "a doc updated since the server last saw it must remain unviewed")
