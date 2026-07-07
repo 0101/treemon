@@ -404,3 +404,179 @@ type MergedPrPruneScopeTests() =
 
         Assert.That(pruneScope known collected branches |> Option.isNone, Is.True,
             "a complete worktree set that resolved zero branches must NOT prune - it would wipe the whole store (review F7)")
+
+// End-to-end integration (task tm-pr-recency-window-54z, spec docs/spec/merged-pr-persistence.md).
+// Exercises the REAL disk I/O of MergedPrStore (persistAtPath/loadAtPath) wired to the pure
+// reconcileMergedPrs against a temp data dir. Uses the path-injectable internal persist/load — NOT
+// the singleton getForRepo/setForRepo, which are bound to the default data/merged-prs.json — so the
+// test only ever writes to a temp file, never the repo data dir. Each numbered member maps 1:1 to a
+// falsifiable step in the task's integration scope.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MergedPrStoreEndToEndTests() =
+
+    let repo = RepoId "C:/code/repo-a"
+    let branch = "feature/x"
+
+    // A live MERGED PR (Id = 42) with every volatile field populated, to prove persistence keeps
+    // only Id/Title/Url and the reconstructed overlay is inert.
+    let liveMerged42 =
+        HasPr
+            { Id = 42
+              Title = "Add X"
+              Url = "https://example.test/pull/42"
+              IsDraft = true
+              Comments = WithResolution(1, 2)
+              Builds = [ { Name = "ci"; Status = Succeeded; Url = Some "https://example.test/ci"; Failure = None } ]
+              IsMerged = true
+              HasConflicts = true }
+
+    // A live OPEN (non-merged) PR on the SAME branch but Id = 99, for the "live wins" step.
+    let liveOpen99 =
+        HasPr
+            { Id = 99
+              Title = "Reopened work"
+              Url = "https://example.test/pull/99"
+              IsDraft = false
+              Comments = WithResolution(0, 0)
+              Builds = []
+              IsMerged = false
+              HasConflicts = false }
+
+    let record42 = mk 42 "Add X" "https://example.test/pull/42"
+    let known b = Some(Set.ofList [ b ])
+    let persistStore path store = runAsync (persistAtPath path store)
+    let recordOnDisk path = loadAtPath path |> Map.tryFind repo |> Option.bind (Map.tryFind branch)
+
+    // (1) Persist-on-observe: a freshly observed live merged PR is upserted and survives to disk as
+    // repo -> feature/x -> {Id=42}. FAIL: file or record absent.
+    [<Test>]
+    member _.``step 1 - persist-on-observe writes repo -> feature/x -> Id 42 to the temp file``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+
+            let _, newPersisted = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty (known branch)
+            persistStore path (Map.ofList [ repo, newPersisted ])
+
+            Assert.That(File.Exists path, Is.True, "step 1 FAIL: persisted file is absent")
+            Assert.That(recordOnDisk path, Is.EqualTo(Some record42),
+                "step 1 FAIL: temp JSON must contain repo -> feature/x -> {Id=42}")
+
+            let raw = File.ReadAllText path
+            Assert.That(raw.Contains "feature/x" && raw.Contains "42", Is.True,
+                "step 1 FAIL: raw JSON on disk must carry the branch and PR id"))
+
+    // (2) Fallback after aging out: an empty live map (PR aged out of the bounded fetch) is overlaid
+    // from the persisted record read back off disk. FAIL: NoPr/missing.
+    [<Test>]
+    member _.``step 2 - aged-out branch is overlaid as HasPr merged Id 42 from the persisted file``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+            persistStore path (Map.ofList [ repo, Map.ofList [ branch, record42 ] ])
+
+            let persisted = loadAtPath path |> Map.find repo
+            let effective, _ = reconcileMergedPrs Map.empty persisted (known branch)
+
+            match Map.tryFind branch effective with
+            | Some(HasPr pr) ->
+                Assert.That(pr.IsMerged, Is.True, "step 2 FAIL: overlaid PR must be merged")
+                Assert.That(pr.Id, Is.EqualTo 42, "step 2 FAIL: overlaid PR must be Id 42")
+            | other -> Assert.Fail $"step 2 FAIL: expected HasPr merged Id=42, got {other}")
+
+    // (3) Restart durability: observe -> persist -> DROP in-memory -> reload fresh from disk -> the
+    // merged badge is still restored on the next reconcile. The reload is the simulated restart.
+    // FAIL: empty after reload.
+    [<Test>]
+    member _.``step 3 - merged PR survives a persist plus fresh reload (simulated restart)``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+
+            let _, observed = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty (known branch)
+            persistStore path (Map.ofList [ repo, observed ])
+
+            // Simulated restart: nothing kept in memory; the store is re-read from disk.
+            let afterRestart = loadAtPath path |> Map.find repo
+            let effective, _ = reconcileMergedPrs Map.empty afterRestart (known branch)
+
+            match Map.tryFind branch effective with
+            | Some(HasPr pr) ->
+                Assert.That(pr.IsMerged && pr.Id = 42, Is.True,
+                    "step 3 FAIL: merged PR (Id 42) must be restored after reload")
+            | other -> Assert.Fail $"step 3 FAIL: merged PR lost after reload, got {other}")
+
+    // (4) Prune: a branch no longer known is dropped from newPersisted AND the overlay, and the
+    // pruned store persisted back no longer carries it on disk. FAIL: still present.
+    [<Test>]
+    member _.``step 4 - an unknown branch is pruned from the store, overlay, and the file``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+            persistStore path (Map.ofList [ repo, Map.ofList [ branch, record42 ] ])
+
+            let persisted = loadAtPath path |> Map.find repo
+            let effective, newPersisted = reconcileMergedPrs Map.empty persisted (known "feature/other")
+
+            Assert.That(newPersisted |> Map.containsKey branch, Is.False,
+                "step 4 FAIL: pruned branch must be dropped from newPersisted")
+            Assert.That(effective |> Map.containsKey branch, Is.False,
+                "step 4 FAIL: pruned branch must not be overlaid into effectiveMap")
+
+            persistStore path (Map.ofList [ repo, newPersisted ])
+            Assert.That(recordOnDisk path |> Option.isNone, Is.True,
+                "step 4 FAIL: pruned record must be gone from the persisted file")
+            Assert.That((File.ReadAllText path).Contains "feature/x", Is.False,
+                "step 4 FAIL: raw JSON must no longer mention the pruned branch"))
+
+    // (5) Live wins: a persisted merged record must never override a live non-merged PR on the same
+    // branch — the overlay is fallback-only (Decision #3). FAIL: overlay overrides live.
+    [<Test>]
+    member _.``step 5 - a live non-merged PR beats the persisted merged record (Id 99 kept)``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+            persistStore path (Map.ofList [ repo, Map.ofList [ branch, record42 ] ])
+
+            let persisted = loadAtPath path |> Map.find repo
+            let effective, _ = reconcileMergedPrs (Map.ofList [ branch, liveOpen99 ]) persisted (known branch)
+
+            match Map.tryFind branch effective with
+            | Some(HasPr pr) ->
+                Assert.That(pr.Id, Is.EqualTo 99, "step 5 FAIL: the live entry (Id 99) must be kept")
+                Assert.That(pr.IsMerged, Is.False, "step 5 FAIL: overlay must not flip live to merged")
+            | other -> Assert.Fail $"step 5 FAIL: expected live HasPr Id=99, got {other}")
+
+    // (6) Corruption resilience: garbage bytes on disk load as an empty store and never throw — this
+    // path runs at server startup, so a throw would crash boot. FAIL: exception propagates or store
+    // is non-empty. (Reaching the assertion proves loadAtPath returned rather than threw.)
+    [<Test>]
+    member _.``step 6 - a corrupt store file loads as empty without throwing``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+            File.WriteAllBytes(path, [| 0uy; 159uy; 146uy; 150uy; 123uy; 34uy; 255uy; 0uy |])
+
+            let loaded = loadAtPath path
+            Assert.That(Map.isEmpty loaded, Is.True,
+                "step 6 FAIL: a corrupt file must load as an empty store (server startup must not crash)"))
+
+    // Full lifecycle through a SINGLE temp file: the bytes written by the observe step are the very
+    // bytes reloaded after the simulated restart, then aged-out fallback, then pruned — proving the
+    // steps compose end-to-end on one physical file, not just in isolation.
+    [<Test>]
+    member _.``full lifecycle - observe, persist, reload, fallback, then prune on one file``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+
+            // observe + persist
+            let _, observed = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty (known branch)
+            persistStore path (Map.ofList [ repo, observed ])
+
+            // simulated restart + aged-out fallback (empty live map)
+            let afterRestart = loadAtPath path |> Map.find repo
+            let effective, still = reconcileMergedPrs Map.empty afterRestart (known branch)
+            Assert.That(Map.tryFind branch effective, Is.EqualTo(Some(reconstructed record42)),
+                "full lifecycle FAIL: aged-out branch must stay merged after reload")
+
+            // prune once the branch is no longer known, persist, confirm the file is empty of it
+            let _, pruned = reconcileMergedPrs Map.empty still (known "feature/other")
+            persistStore path (Map.ofList [ repo, pruned ])
+            Assert.That(recordOnDisk path |> Option.isNone, Is.True,
+                "full lifecycle FAIL: pruned branch must be absent from the reloaded file"))
