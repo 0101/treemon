@@ -214,6 +214,43 @@ az storage account management-policy show \
   --account-name <account> --resource-group <rg>
 ```
 
+### Provisioned account & operator credential
+
+The concrete account backing this deployment, plus the one manual step an operator must perform on
+each host that runs the production server.
+
+**Provisioned account** (user's dev subscription, `CodeTestingAgentDev`):
+
+| Setting | Value |
+|---|---|
+| Storage account | `tmcanvas92r3du` |
+| Resource group | `rg-treemon-canvas-share` |
+| Location | `eastus` |
+| Container | `canvas-shared` (private; created on demand on first publish) |
+
+**Operator credential (per host).** The account key is never committed and never written to
+`config.json`; each host supplies it through the `AZURE_STORAGE_CONNECTION_STRING` env var (read only
+from the environment by `CanvasShare.connectionString`). On Windows, set it once at **User scope** so
+it survives reboots and every `treemon.ps1` (re)start, then restart the server so the freshly-launched
+process inherits it:
+
+```powershell
+$conn = az storage account show-connection-string `
+  -n tmcanvas92r3du -g rg-treemon-canvas-share --query connectionString -o tsv
+[Environment]::SetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', $conn, 'User')
+.\treemon.ps1 restart   # new server process inherits the env var
+```
+
+`treemon.ps1` reads the persisted `AZURE_STORAGE_CONNECTION_STRING` (User scope, then Machine) straight
+from the registry-backed store and injects it into the server process at launch (`Set-CanvasShareEnv`),
+so `start`/`restart`/`deploy` pick up the credential from **any** shell — even one opened before the
+variable was set. Setting the User-scope variable once is therefore all an operator needs; no terminal
+restart or reboot is required. (The secret is still only ever read from the env var — never a file or
+`config.json`.)
+
+> The connection string embeds the account key — treat it as a secret. It is never logged and never
+> persisted to `config.json`; only `AZURE_STORAGE_CONNECTION_STRING` carries it into the server.
+
 ## Decisions
 
 | # | Decision | Choice & rationale |
