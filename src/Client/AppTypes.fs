@@ -34,7 +34,8 @@ type Model =
       ActionCooldowns: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
-      Canvas: CanvasState.CanvasState }
+      Canvas: CanvasState.CanvasState
+      OverviewPanelOpen: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -69,6 +70,7 @@ type Msg =
     | ModalMsg of CreateWorktreeModal.Msg
     | UserActivity of now: float
     | ToggleCanvasPane
+    | ToggleOverviewPanel
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string
