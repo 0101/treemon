@@ -230,8 +230,8 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
         // the two never show together. A live Waiting banner is an independent fact and is preserved
         // (see preserveWaitingOnShareFailure) — its queued message may still be delivered, so Waiting
         // must never be reported as a share failure (Decision #10 banner-XOR model).
-        Fable.Core.JS.console.error ($"Share canvas doc error ({scopedKey}/{filename}):", msg)
-        { model with Canvas = { model.Canvas with CanvasSendState = preserveWaitingOnShareFailure model.Canvas.CanvasSendState msg; ShareNotice = None } }, Cmd.none
+        { model with Canvas = { model.Canvas with CanvasSendState = preserveWaitingOnShareFailure model.Canvas.CanvasSendState msg; ShareNotice = None } },
+        Cmd.ofEffect (fun _ -> Fable.Core.JS.console.error ($"Share canvas doc error ({scopedKey}/{filename}):", msg))
 
 /// Banner text for a *settled* clipboard write after a successful share (Decision #10). A landed write
 /// confirms the copy ("Shared — link copied"); a rejected write drops the false "copied" claim, tells

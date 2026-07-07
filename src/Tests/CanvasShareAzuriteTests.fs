@@ -67,8 +67,10 @@ type CanvasShareAzuriteRoundTripTests() =
     let morphControllerMarker = "action:'content-updated'"             // morph controller / morph (absent)
     let errorOverlayMarker = "canvas-doc-error"                         // JS error overlay (absent)
 
-    let mutable originalConn : string = null
-    let mutable originalConfigDir : string = null
+    // NUnit lifecycle fields: captured/created in OneTimeSetUp and restored/cleaned up in OneTimeTearDown,
+    // so they must be mutable instance state shared across the separate setup and teardown methods.
+    let mutable originalConn : string option = None
+    let mutable originalConfigDir : string option = None
     let mutable tempConfigDir = ""
     let mutable urlA = ""
     let mutable urlB = ""
@@ -85,13 +87,16 @@ type CanvasShareAzuriteRoundTripTests() =
         match Environment.GetEnvironmentVariable("AZURITE_CERT_PATH") with
         | path when not (String.IsNullOrWhiteSpace path) && File.Exists path ->
             use c = X509CertificateLoader.LoadCertificateFromFile path
-            c.Thumbprint
-        | _ -> null
+            Some c.Thumbprint
+        | _ -> None
 
     let certValidation =
         Func<HttpRequestMessage, X509Certificate2, X509Chain, SslPolicyErrors, bool>(fun req cert _ _ ->
             let hostOk = not (isNull req.RequestUri) && loopbackHosts.Contains req.RequestUri.Host
-            let thumbOk = String.IsNullOrEmpty pinnedThumbprint || (not (isNull cert) && cert.Thumbprint = pinnedThumbprint)
+            let thumbOk =
+                match pinnedThumbprint with
+                | None -> true
+                | Some t -> not (isNull cert) && cert.Thumbprint = t
             hostOk && thumbOk)
 
     let makeHttpClient () =
@@ -100,9 +105,9 @@ type CanvasShareAzuriteRoundTripTests() =
         new HttpClient(h)
 
     // Azure SDK plumbing captured so OneTimeTearDown can restore the process-global shared transport.
-    let mutable sdkClientField : FieldInfo = null
-    let mutable sdkWrapper : obj = null
-    let mutable sdkOriginalClient : obj = null
+    let mutable sdkClientField : FieldInfo option = None
+    let mutable sdkWrapper : obj option = None
+    let mutable sdkOriginalClient : obj option = None
 
     /// Point the Azure SDK's process-shared HttpClientTransport at our cert-validating HttpClient so the
     /// backend's own BlobServiceClient — which uses the default transport and exposes no injection seam —
@@ -114,9 +119,9 @@ type CanvasShareAzuriteRoundTripTests() =
             let wrapperField = typeof<HttpClientTransport>.GetField("_clientWrapper", BindingFlags.Instance ||| BindingFlags.NonPublic)
             let wrapper = wrapperField.GetValue(shared)
             let clientField = wrapper.GetType().GetField("_client", BindingFlags.Instance ||| BindingFlags.NonPublic)
-            sdkWrapper <- wrapper
-            sdkClientField <- clientField
-            sdkOriginalClient <- clientField.GetValue(wrapper)
+            sdkWrapper <- Some wrapper
+            sdkClientField <- Some clientField
+            sdkOriginalClient <- clientField.GetValue(wrapper) |> Option.ofObj
             clientField.SetValue(wrapper, makeHttpClient())
         with ex ->
             TestContext.WriteLine($"WARNING: could not redirect Azure SDK shared transport ({ex.GetType().Name}: {ex.Message}); publish over HTTPS may fail.")
@@ -130,7 +135,7 @@ type CanvasShareAzuriteRoundTripTests() =
         runAsync (resp.Content.ReadAsStringAsync() |> Async.AwaitTask)
 
     /// Everything before the '?' — the bare blob URL with its SAS query stripped off.
-    let stripQuery (url: string) : string = url.Split('?').[0]
+    let stripQuery (url: string) : string = url.Split('?')[0]
 
     /// The SAS query, INCLUDING the leading '?', taken verbatim off `url` (no Uri round-trip, so the
     /// percent-encoding of the signature is preserved byte-for-byte).
@@ -146,8 +151,8 @@ type CanvasShareAzuriteRoundTripTests() =
     [<OneTimeSetUp>]
     member _.Setup() =
         // Capture originals FIRST so OneTimeTearDown always restores correctly, even on the Ignore path.
-        originalConn <- Environment.GetEnvironmentVariable(connKey)
-        originalConfigDir <- Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR")
+        originalConn <- Environment.GetEnvironmentVariable(connKey) |> Option.ofObj
+        originalConfigDir <- Environment.GetEnvironmentVariable("TREEMON_CONFIG_DIR") |> Option.ofObj
 
         // Skip (do not fail) when the emulator isn't up, so the unit suite is green without Azurite.
         let reachable =
@@ -180,11 +185,13 @@ type CanvasShareAzuriteRoundTripTests() =
 
     [<OneTimeTearDown>]
     member _.Teardown() =
-        Environment.SetEnvironmentVariable(connKey, originalConn)
-        Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", originalConfigDir)
+        Environment.SetEnvironmentVariable(connKey, Option.toObj originalConn)
+        Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", Option.toObj originalConfigDir)
         // Restore the process-global Azure SDK shared transport we redirected in setup.
-        if not (isNull sdkClientField) then
-            try sdkClientField.SetValue(sdkWrapper, sdkOriginalClient) with _ -> ()
+        match sdkClientField, sdkWrapper with
+        | Some clientField, Some wrapper ->
+            try clientField.SetValue(wrapper, Option.toObj sdkOriginalClient) with _ -> ()
+        | _ -> ()
         httpClient.Dispose()
         if not (String.IsNullOrEmpty tempConfigDir) then
             try Directory.Delete(tempConfigDir, recursive = true) with _ -> ()
