@@ -529,7 +529,7 @@ let update msg model =
         // overwrite with an empty/partial server map would wipe already-seeded docs and make them
         // look unviewed. `seedLastViewedHashes` keeps every server value (genuine updates still
         // register) and only fills in docs the server doesn't know, so arrival order stops mattering.
-        { model with Canvas = { model.Canvas with LastViewedHashes = seedLastViewedHashes model.Repos hashes } }, Cmd.none
+        { model with Canvas.LastViewedHashes = seedLastViewedHashes model.Repos hashes }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->
         { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none
