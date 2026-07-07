@@ -14,6 +14,7 @@
   <ItemGroup>
     <Compile Include="Log.fs" />
     <Compile Include="JsonStore.fs" />
+    <Compile Include="PersistentStore.fs" />
     <Compile Include="PathUtils.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
