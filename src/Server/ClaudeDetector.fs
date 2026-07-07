@@ -325,24 +325,7 @@ let private tryParseUserText (line: string) =
                 | true, ts -> ts.GetString() |> DateTimeOffset.Parse |> Some
                 | _ -> None
 
-            let rawContent =
-                match root.TryGetProperty("message") with
-                | true, msg ->
-                    match msg.TryGetProperty("content") with
-                    | true, content when content.ValueKind = JsonValueKind.String ->
-                        Some(content.GetString())
-                    | true, contentArr when contentArr.ValueKind = JsonValueKind.Array ->
-                        contentArr.EnumerateArray()
-                        |> Seq.tryFind (fun block ->
-                            match block.TryGetProperty("type") with
-                            | true, t -> t.GetString() = "text"
-                            | _ -> false)
-                        |> Option.bind (fun block ->
-                            match block.TryGetProperty("text") with
-                            | true, t -> Some(t.GetString())
-                            | _ -> None)
-                    | _ -> None
-                | _ -> None
+            let rawContent = extractTextFromMessage root
 
             match rawContent |> Option.bind extractUserContent, timestamp with
             | Some text, Some ts when not (String.IsNullOrWhiteSpace(text)) ->
@@ -362,3 +345,32 @@ let getLastUserMessageFromFiles (files: (FileInfo * SessionFileKind) list) =
     |> List.choose (fun fi -> scanForUserMessage fi.FullName)
     |> tryMaxBy snd
     |> Option.map (fun (text, ts) -> FileUtils.truncateMessage 120 text, ts)
+
+// The running skill for Claude Code is the slash command the user invoked (a command such as
+// /pr or /investigate *is* the skill). tryExtractSlashCommand already isolates it; here we scan
+// backward through parent sessions for the most recent user entry that carries one, ignoring
+// ordinary chat. The raw command (with args) is surfaced; Shared.Activity.classify normalizes it.
+let private tryParseSlashCommandLine (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp when typeProp.GetString() = "user" ->
+            match extractTextFromMessage root |> Option.bind tryExtractSlashCommand, tryParseTimestamp root with
+            | Some cmd, Some ts when not (String.IsNullOrWhiteSpace(cmd)) -> Some(cmd, ts)
+            | _ -> None
+        | _ -> None
+    with ex ->
+        Log.log "Claude" $"Failed to parse slash command: {ex.Message}"
+        None
+
+let internal scanForSlashCommand (filePath: string) =
+    FileUtils.scanBackward "Claude" filePath tryParseSlashCommandLine
+
+let getCurrentSkillFromFiles (files: (FileInfo * SessionFileKind) list) : string option =
+    files
+    |> parentFiles
+    |> List.choose (fun fi -> scanForSlashCommand fi.FullName)
+    |> tryMaxBy snd
+    |> Option.map fst

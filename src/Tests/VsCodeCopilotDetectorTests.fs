@@ -312,6 +312,45 @@ type EdgeCaseTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type SlashCommandTests() =
+
+    [<Test>]
+    member _.``Request slashCommand name is captured as SlashCommand``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"@binlog /summary"},"slashCommand":{"name":"summary","description":"Show a summary"},"modelState":{"value":0},"response":[]}]}}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.SlashCommand, Is.EqualTo(Some "summary"))
+
+    [<Test>]
+    member _.``Request without slashCommand has None SlashCommand``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"just chatting"},"modelState":{"value":0},"response":[]}]}}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.SlashCommand, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Empty slashCommand name is treated as None``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"x"},"slashCommand":{"name":"  "},"modelState":{"value":0},"response":[]}]}}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.SlashCommand, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Last request slashCommand wins across a pushed new request``() =
+        let lines =
+            [ """{"kind":0,"v":{"requests":[{"message":{"text":"@binlog /summary"},"slashCommand":{"name":"summary"},"modelState":{"value":4,"completedAt":1710000000000},"response":[{"value":"done"}]}]}}"""
+              """{"kind":2,"k":["requests"],"v":[{"message":{"text":"@binlog /errors"},"slashCommand":{"name":"errors"},"modelState":{"value":0},"response":[]}]}""" ]
+        let result = reconstructLastRequest lines
+        Assert.That(result.IsSome, Is.True)
+        Assert.That(result.Value.SlashCommand, Is.EqualTo(Some "errors"))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type DetachedHeadKeyTests() =
 
     let repoId = RepoId "myrepo"
@@ -372,7 +411,8 @@ type LastMessageEventTests() =
           CompletedAt = completedAt
           ResponseText = responseText
           ResponseKinds = []
-          UserText = None }
+          UserText = None
+          SlashCommand = None }
 
     [<Test>]
     member _.``Complete request with response text returns message``() =

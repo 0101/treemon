@@ -261,3 +261,90 @@ type LargeToolOutputTests() =
             let pastGrace = DateTimeOffset.UtcNow.AddSeconds(20.0)
             let status = getStatusFromEventsFile path pastGrace
             Assert.That(status, Is.EqualTo(Done)))
+
+
+let private makeSkillInvoked (name: string) (timestamp: string) =
+    $"""{{"type":"skill.invoked","data":{{"name":"{name}","path":"x/SKILL.md","content":"body"}},"timestamp":"{timestamp}"}}"""
+
+let private makeSkillToolCall (skill: string) (timestamp: string) =
+    $"""{{"type":"assistant.message","data":{{"content":"invoking","toolRequests":[{{"toolCallId":"tc1","name":"skill","arguments":{{"skill":"{skill}"}},"type":"function"}}]}},"timestamp":"{timestamp}"}}"""
+
+let private makeSkillToolCallJsonArgs (skill: string) (timestamp: string) =
+    // arguments encoded as a JSON string (arguments_json) rather than a nested object
+    $"""{{"type":"assistant.message","data":{{"content":"invoking","toolRequests":[{{"toolCallId":"tc1","name":"skill","arguments_json":"{{\"skill\":\"{skill}\"}}","type":"function"}}]}},"timestamp":"{timestamp}"}}"""
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CurrentSkillTests() =
+
+    [<Test>]
+    member _.``skill.invoked event yields data.name``() =
+        let content =
+            [ makeUserEvent "please fix the build" "2026-03-01T10:00:00Z"
+              makeSkillToolCall "fix-build" "2026-03-01T10:00:01Z"
+              makeSkillInvoked "fix-build" "2026-03-01T10:00:02Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "fix-build")))
+
+    [<Test>]
+    member _.``skill tool-call arguments.skill is used when no skill.invoked follows``() =
+        let content =
+            [ makeUserEvent "investigate this" "2026-03-01T10:00:00Z"
+              makeSkillToolCall "investigate" "2026-03-01T10:00:01Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "investigate")))
+
+    [<Test>]
+    member _.``Most recent skill wins across multiple invocations``() =
+        let content =
+            [ makeSkillToolCall "investigate" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "investigate" "2026-03-01T10:00:01Z"
+              makeSkillToolCall "bd-execute" "2026-03-01T10:05:00Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "bd-execute")))
+
+    [<Test>]
+    member _.``Non-skill tool-call after skill.invoked is skipped``() =
+        // A regular assistant.message with a non-skill tool-call sits between the skill signal and
+        // EOF; the backward scan must step past it and still return the running skill.
+        let content =
+            [ makeSkillInvoked "fix-build" "2026-03-01T10:00:00Z"
+              makeAssistantEvent "editing a file" "2026-03-01T10:00:01Z"
+              makeToolEvent "2026-03-01T10:00:02Z"
+              makeTurnEnd "2026-03-01T10:00:03Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "fix-build")))
+
+    [<Test>]
+    member _.``arguments encoded as a JSON string still yields skill``() =
+        let content =
+            [ makeSkillToolCallJsonArgs "refactor" "2026-03-01T10:00:00Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "refactor")))
+
+    [<Test>]
+    member _.``Session with no skill signal yields None``() =
+        let content =
+            [ makeUserEvent "hello" "2026-03-01T10:00:00Z"
+              makeAssistantEvent "hi" "2026-03-01T10:00:01Z"
+              makeTurnEnd "2026-03-01T10:00:02Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``Non-existent file yields None``() =
+        Assert.That(getCurrentSkillFromEventsFile (Path.Combine(fixtureDir, "nonexistent", "events.jsonl")), Is.EqualTo(None))

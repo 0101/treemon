@@ -87,6 +87,19 @@ let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInf
 
     [ claudeResult; copilotResult; vsCodeCopilotResult ]
 
+// The running skill is surfaced from whichever Copilot surface (CLI vs VS Code) has the more
+// recent session, mirroring how pickActiveProvider resolves status by recency. Only the winning
+// source is scanned; if neither has a session, None (-> Working via Activity.classify).
+let private copilotCurrentSkill (worktreePath: string) : string option =
+    let cliMtime = CopilotDetector.getSessionMtime worktreePath
+    let vsCodeMtime = VsCodeCopilotDetector.getSessionMtime worktreePath
+
+    match cliMtime, vsCodeMtime with
+    | Some c, Some v when v > c -> VsCodeCopilotDetector.getCurrentSkill worktreePath
+    | Some _, _ -> CopilotDetector.getCurrentSkill worktreePath
+    | None, Some _ -> VsCodeCopilotDetector.getCurrentSkill worktreePath
+    | None, None -> None
+
 let getRefreshData (worktreePath: string) : CodingToolResult =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
@@ -138,7 +151,13 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
 
-    { Status = status; Provider = provider; CurrentSkill = None; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
+    let currentSkill =
+        match target with
+        | Some Claude -> ClaudeDetector.getCurrentSkillFromFiles claudeFiles
+        | Some Copilot -> copilotCurrentSkill worktreePath
+        | None -> None
+
+    { Status = status; Provider = provider; CurrentSkill = currentSkill; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "

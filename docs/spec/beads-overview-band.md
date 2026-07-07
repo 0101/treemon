@@ -125,6 +125,28 @@ Carry `CurrentSkill: string option` on `CodingToolResult` → `WorktreeStatus`. 
 from the skill via the pure Shared classifier (no separate stored field), so client and card share
 one source of truth.
 
+**Implementation notes (a32):**
+- **Single backward scan, recency = preference.** Each detector reuses the existing bounded
+  `FileUtils.scanBackward` (most-recent line wins). Copilot's parser matches *either* a
+  `skill.invoked` event or a `skill` tool-call in one pass; because `skill.invoked` is written
+  *after* its tool-call, recency naturally yields `skill.invoked` and falls back to the tool-call
+  for a skill that is still starting (no second scan needed). Non-skill `assistant.message`s between
+  the signal and EOF parse to `None`, so the scan steps past them.
+- **Copilot tool-call arg encoding.** Real `events.jsonl` encodes tool-call args as a nested
+  `arguments` *object* (`{"skill":"fix-build"}`), whereas the session-store schema names it
+  `arguments_json` as a JSON *string*. Both are handled (object read directly; string re-parsed).
+- **VS Code skill = `request.slashCommand.name`** (e.g. `@binlog /summary` → `summary`), captured
+  onto `ReqState.SlashCommand` during request reconstruction; absent ⇒ `None`.
+- **Provider selection for Copilot.** `getRefreshData` carries `CurrentSkill` from the same
+  `target` provider as the last-message surfacing; when `target = Copilot` it picks the CLI-vs-VS
+  Code surface with the more recent session mtime (mirrors `pickActiveProvider`).
+- **Bounded horizon (accepted degradation).** Like all detector reads, the scan reaches ~1 MB back
+  from EOF. A skill whose start-of-run signal has scrolled past that window degrades to `None` →
+  Working — consistent with the spec's graceful-degradation goal; not gated further.
+- **Not staleness-gated.** `CurrentSkill` mirrors `getLastUserMessage` (no age gate); display
+  consumers (band circles, per-card stripe) gate on an active session, so an idle card never shows
+  a stale skill even though the field may be populated.
+
 ### Domain changes (`src/Shared/Types.fs`)
 
 - `BeadsPlanning { Planned; Queued; Loose }` (+ `zero`), new field

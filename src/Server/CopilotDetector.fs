@@ -166,6 +166,86 @@ let getStatus (worktreePath: string) =
     | Some fi -> getStatusFromEventsFile fi.FullName DateTimeOffset.UtcNow
     | None -> Idle
 
+// The running skill rides the same events scan as the red dot. Copilot CLI emits a dedicated
+// `skill.invoked` event (data.name) once a skill loads; before that, the assistant.message that
+// requested it carries a `skill` tool-call whose arguments name the skill. A single backward scan
+// returns the most recent of *either* — and because skill.invoked is written after its tool-call,
+// recency naturally prefers skill.invoked while falling back to the tool-call for a skill that is
+// still starting. The raw name is surfaced; Shared.Activity.classify normalizes it.
+let private tryReadSkillArgument (req: JsonElement) =
+    let skillFromObject (obj: JsonElement) =
+        match obj.TryGetProperty("skill") with
+        | true, s when s.ValueKind = JsonValueKind.String ->
+            let name = s.GetString()
+            if String.IsNullOrWhiteSpace(name) then None else Some name
+        | _ -> None
+
+    // Real events.jsonl encodes arguments as a nested object ({"skill":"..."}); the session-store
+    // schema names it arguments_json as a JSON string. Handle both so the source doesn't matter.
+    let argsElement =
+        match req.TryGetProperty("arguments") with
+        | true, a -> Some a
+        | _ ->
+            match req.TryGetProperty("arguments_json") with
+            | true, a -> Some a
+            | _ -> None
+
+    argsElement
+    |> Option.bind (fun args ->
+        match args.ValueKind with
+        | JsonValueKind.Object -> skillFromObject args
+        | JsonValueKind.String ->
+            try
+                use argsDoc = JsonDocument.Parse(args.GetString())
+                skillFromObject argsDoc.RootElement
+            with _ -> None
+        | _ -> None)
+
+let private tryParseSkill (line: string) =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp ->
+            match typeProp.GetString() with
+            | "skill.invoked" ->
+                match root.TryGetProperty("data") with
+                | true, data ->
+                    match data.TryGetProperty("name") with
+                    | true, n when n.ValueKind = JsonValueKind.String ->
+                        let name = n.GetString()
+                        if String.IsNullOrWhiteSpace(name) then None else Some name
+                    | _ -> None
+                | _ -> None
+            | "assistant.message" ->
+                match root.TryGetProperty("data") with
+                | true, data ->
+                    match data.TryGetProperty("toolRequests") with
+                    | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
+                        reqs.EnumerateArray()
+                        |> Seq.tryPick (fun req ->
+                            let isSkillCall =
+                                match req.TryGetProperty("name") with
+                                | true, n -> n.GetString() = "skill"
+                                | _ -> false
+                            if isSkillCall then tryReadSkillArgument req else None)
+                    | _ -> None
+                | _ -> None
+            | _ -> None
+        | _ -> None
+    with ex ->
+        Log.log "Copilot" $"Failed to parse skill event: {ex.Message}"
+        None
+
+let internal getCurrentSkillFromEventsFile (eventsPath: string) : string option =
+    FileUtils.scanBackward "Copilot" eventsPath tryParseSkill
+
+let getCurrentSkill (worktreePath: string) : string option =
+    getSessionDirsForPath worktreePath
+    |> findMostRecentEventsFile
+    |> Option.bind (fun fi -> getCurrentSkillFromEventsFile fi.FullName)
+
 let private tryParseAssistantContent (line: string) =
     try
         use doc = JsonDocument.Parse(line)
