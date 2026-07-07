@@ -56,6 +56,7 @@
     <Compile Include="BeadspaceProvisionerTests.fs" />
     <Compile Include="BeadsPlanningTests.fs" />
     <Compile Include="ActivityClassifierTests.fs" />
+    <Compile Include="OverviewDataTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
     <Compile Include="SmokeTests.fs" />

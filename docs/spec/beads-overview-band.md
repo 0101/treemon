@@ -164,10 +164,16 @@ the solution compiling (no compat shims, per house rules).
 
 ### Client aggregation + band
 
-- Aggregate **client-side** (the client already receives every worktree). A pure module folds
-  `RepoWorktrees list` → task buckets (Planned = Σ Planned+Loose, Queued, InProgress, Blocked,
-  Done = Σ Closed where `not IsArchived`) + activity groups (active worktrees by `CurrentSkill` /
-  `Activity.classify`) + the true-scale max.
+- Aggregate **client-side** (the client already receives every worktree). `Client/OverviewData.fs`
+  (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every worktree → task buckets
+  (Planned = Σ Planned+Loose, Queued, InProgress, Blocked, Done = Σ Closed where `not IsArchived`)
+  + activity groups (active worktrees grouped by `Activity.classify` of `CurrentSkill`; absent skill
+  ⇒ Working) + `Scale` (the largest bucket count — the one true shared linear denominator). Empty
+  buckets/groups are omitted (never a `0`); both lists come back in canonical order. The result
+  `Overview` carries `Tasks: TaskBucket list` / `Activities: ActivityGroup list` / `Scale: int`
+  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to avoid the `Done`/`Working` collisions with
+  `CodingToolStatus`). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision
+  (f)) — not the client `RepoModel`.
 - The band is native **Feliz with CSS classes only** (no inline styles). Toggle mirrors Canvas:
   `ToggleOverviewPanel` message, `OverviewPanelOpen` model state, `saveOverviewPanelOpen` persistence.
 - Per-card stripe: an activity modifier class on `wt-card` in `CardViews.fs`.
@@ -201,6 +207,16 @@ running skill from the existing session scan; per-session context usage (Extensi
   never overlap. A parent that is absent, dangling (id not in the set), non-feature, or a
   closed/blocked feature ⇒ Loose. Matching is one hop and case-insensitive against the raw beads
   strings (`"feature"`, `"open"`, `"in_progress"`).
+- (f) **Only `Done` filters archived; the aggregation folds the un-split `RepoWorktrees list`.**
+  `OverviewData.aggregate` scopes the `not IsArchived` filter to `Done` alone — Planned/Queued/
+  In-progress/Blocked sum across *all* worktrees, archived included. Rationale: `Done` accumulates
+  closed work, so a stale/parked (archived) worktree would inflate it, whereas the other buckets are
+  current work and naturally bounded. Consequence for wiring: the aggregation must receive the
+  server-shaped `RepoWorktrees list` (every worktree present, archived ones flagged via
+  `IsArchived`), **not** the client `RepoModel`, which pre-splits archived worktrees into a separate
+  `ArchivedWorktrees` field. A `RepoModel`-based caller must recombine `Worktrees @ ArchivedWorktrees`
+  before calling `aggregate`, or archived worktrees vanish entirely (silently zeroing their
+  contribution to every bucket, not just `Done`).
 
 ## Key Files
 
@@ -208,6 +224,7 @@ running skill from the existing session scan; per-session context usage (Extensi
 |---|---|
 | Domain types | `src/Shared/Types.fs` (`BeadsSummary`, `WorktreeStatus`, `DashboardResponse`, `IWorktreeApi`) |
 | Beads collection | `src/Server/BeadsStatus.fs` (`getBeadsData`, `getBeadsIssueList`) |
+| Cross-worktree aggregation | `src/Client/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `ActivityGroup`) |
 | Session/skill scan | `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs`, `CodingToolStatus.fs` |
 | Refresh + assembly | `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs` |
 | Toggle precedent | `src/Client/App.fs` (`ToggleCanvasPane`, `header-controls`), `saveCanvasPaneOpen` |
