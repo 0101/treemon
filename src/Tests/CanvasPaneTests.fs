@@ -20,9 +20,9 @@ let [<Literal>] private FixtureMultiDocBranch = "feature-multidoc"
 let [<Literal>] private FixtureSystemViewBranch = "multirepo"
 
 /// E2E tests for the canvas pane feature.
-/// Prerequisites:
-///   - Server running on :5001 with canvas doc server on :5002
-///   - Vite dev server on :5174
+/// Prerequisites (all started by ServerFixture.GlobalSetup on dynamically chosen free ports):
+///   - API server + canvas-doc server (ServerFixture.serverUrl / ServerFixture.canvasUrl)
+///   - Vite dev server (ServerFixture.viteUrl)
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
@@ -30,7 +30,7 @@ type CanvasPaneTests() =
     inherit PageTest()
 
     let baseUrl = ServerFixture.viteUrl
-    let canvasOrigin = "http://127.0.0.1:5002"
+    let canvasOrigin = ServerFixture.canvasUrl
 
     let canvasPane (page: IPage) =
         page.Locator(".canvas-pane")
@@ -799,4 +799,26 @@ type CanvasPaneTests() =
             do! archiveBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! archiveWhenAgentDoc = archiveBtn.CountAsync()
             Assert.That(archiveWhenAgentDoc, Is.EqualTo(1), "Archive button should be available while an AgentDoc (dashboard) is the active doc")
+        }
+
+    [<Test>]
+    member this.``Share button is hidden while a SystemView is active but available for an AgentDoc``() =
+        task {
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (canvasTabBar this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // beads.html (SystemView) is the default-active doc → share button hidden (a
+            // server-generated view is not a self-contained, shareable AgentDoc).
+            let shareBtn = this.Page.Locator(".canvas-pane .canvas-share-btn")
+            let! shareWhenSystemView = shareBtn.CountAsync()
+            Assert.That(shareWhenSystemView, Is.EqualTo(0), "Share button should be hidden while a SystemView (beads) is the active doc")
+
+            // Switching to an AgentDoc restores the share button.
+            let dashboardTab = this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = "dashboard"))
+            do! dashboardTab.ClickAsync()
+            do! shareBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! shareWhenAgentDoc = shareBtn.CountAsync()
+            Assert.That(shareWhenAgentDoc, Is.EqualTo(1), "Share button should be available while an AgentDoc (dashboard) is the active doc")
         }

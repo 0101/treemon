@@ -28,6 +28,12 @@ type CanvasState =
       // additionally clears it so a tab switch (and switch back) never re-shows it. Distinct from
       // CanvasSendState.Failed, which models pane→session message-delivery failures.
       DocError: DocJsError option
+      // Transient success banner shown after a canvas doc is shared and its rich link copied to the
+      // clipboard (the message text, e.g. "Shared — link copied", or None when nothing to show).
+      // A share *failure* reuses the CanvasSendState.Failed error banner per spec, so only the
+      // success path needs its own state; kept distinct from CanvasSendState (message delivery) and
+      // DocError (doc JS errors) so the banners never overwrite each other.
+      ShareNotice: string option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// Initial canvas state: pane closed on the right, all maps empty, send state idle.
@@ -43,6 +49,7 @@ let empty : CanvasState =
       CanvasEvents = Map.empty
       CanvasSendState = CanvasSendState.Idle
       DocError = None
+      ShareNotice = None
       BridgeLiveness = Map.empty }
 
 let [<Literal>] private MaxLiveIframes = 3

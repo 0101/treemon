@@ -221,6 +221,21 @@ function Remove-OldRunLogs([int]$Keep) {
     }
 }
 
+function Set-CanvasShareEnv {
+    # Canvas sharing reads its Azure credential ONLY from the AZURE_STORAGE_CONNECTION_STRING env var
+    # (docs/spec/canvas-sharing.md). The server inherits THIS shell's environment block via
+    # Start-Process, and Windows only loads a persisted User/Machine env var into a process at launch
+    # — so deploying from a terminal opened before the var was set would start the server without it.
+    # Read the persisted value straight from the registry-backed store and propagate it, so
+    # start/restart/deploy work from any shell. The secret is only ever read from the env var, never
+    # written to a file or config.
+    if (-not $env:AZURE_STORAGE_CONNECTION_STRING) {
+        $persisted = [Environment]::GetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', 'User')
+        if (-not $persisted) { $persisted = [Environment]::GetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', 'Machine') }
+        if ($persisted) { $env:AZURE_STORAGE_CONNECTION_STRING = $persisted }
+    }
+}
+
 function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -269,6 +284,8 @@ function Start-ProductionServer([string[]]$Roots) {
             }
         }
     }
+
+    Set-CanvasShareEnv
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $serverExe `
@@ -413,6 +430,7 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
 
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
+    Set-CanvasShareEnv
 
     $serverProcess = $null
     $viteProcess = $null
