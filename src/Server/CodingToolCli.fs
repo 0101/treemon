@@ -13,6 +13,10 @@ type CliInvocation =
 
     member this.AsShellString = $"{this.Executable} {this.Args}"
 
+// Injection-safety chokepoint: every value interpolated into an Args string MUST be wrapped in
+// single quotes with embedded single quotes doubled, so a hostile value (';', newline, '$(...)')
+// cannot break out of the quoted literal once the shell string is embedded into the pwsh
+// -EncodedCommand script by SessionManager.buildScript.
 let private escape (s: string) = s.Replace("'", "''")
 
 let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvocation =
@@ -24,7 +28,7 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
           Args = $"--dangerously-skip-permissions '{escape prompt}'" }
     | CodingToolProvider.Claude, Resume (Some id) ->
         { Executable = "claude"
-          Args = $"--dangerously-skip-permissions --resume {id}" }
+          Args = $"--dangerously-skip-permissions --resume '{escape id}'" }
     | CodingToolProvider.Claude, Resume None ->
         { Executable = "claude"
           Args = "--dangerously-skip-permissions --continue" }
@@ -36,7 +40,7 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
           Args = $"--yolo -i '{escape prompt}'" }
     | CodingToolProvider.Copilot, Resume (Some id) ->
         { Executable = "copilot"
-          Args = $"--yolo --resume {id}" }
+          Args = $"--yolo --resume '{escape id}'" }
     | CodingToolProvider.Copilot, Resume None ->
         { Executable = "copilot"
           Args = "--yolo --continue" }

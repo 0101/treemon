@@ -48,7 +48,7 @@ type ResumeCommandTests() =
     [<Test>]
     member _.``Claude Resume with id includes permission flag``() =
         let inv = build (Some CodingToolProvider.Claude) (Resume (Some "abc-123"))
-        Assert.That(inv.AsShellString, Is.EqualTo("claude --dangerously-skip-permissions --resume abc-123"))
+        Assert.That(inv.AsShellString, Is.EqualTo("claude --dangerously-skip-permissions --resume 'abc-123'"))
 
     [<Test>]
     member _.``Claude Resume without id uses --continue with permission flag``() =
@@ -58,7 +58,20 @@ type ResumeCommandTests() =
     [<Test>]
     member _.``Copilot Resume with id includes yolo flag``() =
         let inv = build (Some CodingToolProvider.Copilot) (Resume (Some "abc-123"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume abc-123"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume 'abc-123'"))
+
+    // F9 (security): the resume id is interpolated into a pwsh -EncodedCommand script, so it must be
+    // single-quoted with embedded quotes doubled exactly like the Interactive prompt. Without this a
+    // hostile owner sessionId (planted via /api/canvas/attribute) could inject PowerShell.
+    [<Test>]
+    member _.``Claude Resume single-quotes and escapes the id (no command injection)``() =
+        let inv = build (Some CodingToolProvider.Claude) (Resume (Some "abc'; rm -rf ~ #"))
+        Assert.That(inv.AsShellString, Is.EqualTo("claude --dangerously-skip-permissions --resume 'abc''; rm -rf ~ #'"))
+
+    [<Test>]
+    member _.``Copilot Resume single-quotes and escapes the id (no command injection)``() =
+        let inv = build (Some CodingToolProvider.Copilot) (Resume (Some "$(calc); '"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume '$(calc); '''"))
 
     [<Test>]
     member _.``Copilot Resume without id uses --continue with yolo flag``() =
