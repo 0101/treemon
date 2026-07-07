@@ -59,8 +59,7 @@ let touchVisitedDoc (scopedKey: string) (filename: string) (visited: Map<string,
 /// (e.g. the beads dashboard) drives its own refresh and must neither be morphed (a morph stomps
 /// the live, JS-rendered dashboard back to the empty template shell) nor steal focus on change.
 let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string) : CanvasDocKind option =
-    repos
-    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+    findWorktreeByScopedKey repos scopedKey
     |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
     |> Option.map _.Kind
 
@@ -70,8 +69,7 @@ let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string)
 let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (activeCanvasDoc: Map<string, string>) : (string * string) option =
     match focused with
     | Some (Card scopedKey) ->
-        repos
-        |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+        findWorktreeByScopedKey repos scopedKey
         |> Option.bind (fun wt ->
             let doc =
                 activeCanvasDoc

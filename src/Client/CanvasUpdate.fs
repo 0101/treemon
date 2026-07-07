@@ -82,19 +82,12 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
     ]
 
-/// Single chokepoint for setting `FocusedElement`. Applies `newFocus`, then — when `retarget` is
-/// requested and focus *genuinely transitions* onto a worktree card — surfaces that worktree's most
-/// recently published/updated *unviewed* AgentDoc instead of the sticky last-open selection (the
-/// active-user "select the worktree shows THAT doc" path). The retarget is a no-op when the card was
-/// already focused (preserves a manual in-worktree tab choice) or nothing is unviewed (keeps the
-/// sticky selection). When the pane is open the doc is actually shown, so route through
-/// `selectCanvasDoc` (sets the active doc, marks it viewed, morphs a revisited iframe); when the pane
-/// is closed set the active doc without marking it viewed (it is not displayed yet) — it also enters
-/// `VisitedCanvasDocs` (via `touchVisitedDoc`) so its iframe is mounted, subject to the LRU cap, and
-/// it becomes the doc shown when the pane is next opened. Callers that must NOT steal the doc
-/// — the idle auto-display sequence, which opens the pane then selects its own target — pass
-/// `retarget = false`, which just applies the focus. The old focus is read from `model.FocusedElement`
-/// internally, so callers pass only the new focus and cannot misuse a separate previous-focus arg.
+/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus genuinely
+/// transitions onto a worktree card, that card's active doc is retargeted to its most recently
+/// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
+/// card was already focused or nothing is unviewed. An open pane shows the doc, so it routes through
+/// `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display passes
+/// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
     let focused = { model with FocusedElement = newFocus }

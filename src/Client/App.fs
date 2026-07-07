@@ -436,6 +436,9 @@ let update msg model =
                 Cmd.none
             | _ -> model, Cmd.none
         else
+        let focusWithRetarget newFocus scrollHint extra =
+            let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
+            m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -445,22 +448,11 @@ let update msg model =
                 | NoAction -> Cmd.none
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
-            let retargetedModel, retargetCmd =
-                CanvasUpdate.applyFocus true newFocus model
-            retargetedModel,
-            Cmd.batch [ actionCmd; retargetCmd; scrollToFocus scrollHint newFocus ]
+            focusWithRetarget newFocus scrollHint [ actionCmd ]
         | "Home" ->
-            let newFocus = navigateToFirst model.Repos
-            let retargetedModel, retargetCmd =
-                CanvasUpdate.applyFocus true newFocus model
-            retargetedModel,
-            Cmd.batch [ retargetCmd; scrollToFocus ScrollToTop newFocus ]
+            focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
         | "End" ->
-            let newFocus = navigateToLast model.Repos
-            let retargetedModel, retargetCmd =
-                CanvasUpdate.applyFocus true newFocus model
-            retargetedModel,
-            Cmd.batch [ retargetCmd; scrollToFocus ScrollToBottom newFocus ]
+            focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -533,14 +525,10 @@ let update msg model =
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
-        // Merge the server's saved hashes with a seed of the currently-known docs rather than
-        // overwriting. `loadLastViewedHashes` races with the first `DataLoaded` seeding in `init`;
-        // a plain overwrite with an empty/partial server map (e.g. a fresh install) wipes that seed
-        // when it arrives last, making already-present docs look unviewed. `seedLastViewedHashes`
-        // keeps every server value (so genuine updates still register as unviewed) and only fills in
-        // current docs the server does not know, so the outcome is the same regardless of arrival
-        // order. Repos may still be empty here (this message can win the race) — then `DataLoaded`'s
-        // own first-load seeding covers the docs.
+        // Merge (don't overwrite) — this races the first `DataLoaded` seeding in `init`, so a plain
+        // overwrite with an empty/partial server map would wipe already-seeded docs and make them
+        // look unviewed. `seedLastViewedHashes` keeps every server value (genuine updates still
+        // register) and only fills in docs the server doesn't know, so arrival order stops mattering.
         { model with Canvas = { model.Canvas with LastViewedHashes = seedLastViewedHashes model.Repos hashes } }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->

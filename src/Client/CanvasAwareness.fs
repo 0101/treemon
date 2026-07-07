@@ -20,6 +20,11 @@ type CanvasEvent =
 let private awarenessDocs (docs: CanvasDoc list) : CanvasDoc list =
     docs |> List.filter (fun d -> d.Kind = AgentDoc)
 
+/// The worktree in `repos` whose path matches `scopedKey` (None if none). The single repos-level
+/// worktree lookup, shared by the awareness pickers and CanvasState's doc helpers.
+let findWorktreeByScopedKey (repos: RepoModel list) (scopedKey: string) =
+    repos |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+
 let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string, string>>) =
     repos
     |> List.fold (fun acc r ->
@@ -67,8 +72,7 @@ let unviewedDocsByScopedKey (repos: RepoModel list) (lastViewedHashes: Map<strin
 /// sticky last-open one. SystemView docs are excluded (via awarenessDocs) and viewed docs are
 /// filtered out (via isUnviewed), so a SystemView or an already-seen doc never wins.
 let mostRecentUnviewedDoc (repos: RepoModel list) (lastViewedHashes: Map<string, Map<string, string>>) (scopedKey: string) : string option =
-    repos
-    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+    findWorktreeByScopedKey repos scopedKey
     |> Option.bind (fun wt ->
         let viewedHashes = lastViewedHashes |> Map.tryFind scopedKey |> Option.defaultValue Map.empty
         awarenessDocs wt.CanvasDocs
@@ -138,14 +142,9 @@ let detectChangedCanvasDocs (now: System.DateTimeOffset) (previous: Map<string, 
 let findMostRecentChangedDoc (repos: RepoModel list) (changedDocs: (string * string) list) =
     changedDocs
     |> List.choose (fun (scopedKey, filename) ->
-        repos
-        |> List.tryPick (fun r ->
-            r.Worktrees
-            |> List.tryPick (fun wt ->
-                if WorktreePath.value wt.Path = scopedKey
-                then awarenessDocs wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename)
-                     |> Option.map (fun doc -> scopedKey, filename, doc.LastModified)
-                else None)))
+        findWorktreeByScopedKey repos scopedKey
+        |> Option.bind (fun wt -> awarenessDocs wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
+        |> Option.map (fun doc -> scopedKey, filename, doc.LastModified))
     |> List.sortByDescending (fun (_, _, lastModified) -> lastModified)
     |> List.tryHead
     |> Option.map (fun (scopedKey, filename, _) -> scopedKey, filename)
