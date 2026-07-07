@@ -61,6 +61,7 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
+    | SetFocusNoRetarget of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * action: ActionKind
     | LaunchActionResult of Result<unit, string>
