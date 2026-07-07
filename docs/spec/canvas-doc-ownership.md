@@ -101,7 +101,7 @@ enqueue and drain is not reconciled.)
 | 1b-i | `None`/blank sessionId | A blank/whitespace sessionId is normalized to `None`, so it can't become a sticky, unroutable owner; `None`-sessionId registrations share one per-worktree fallback slot and never clobber an identified session. |
 | 1c | Delivery routing | Route by doc **owner** sessionId; with no declared owner, queue (the single-session fallback is removed — never deliver to a co-located non-author); never cross-route to a non-owner |
 | 1c-i | Queue/drain ownership | Each `QueuedMessage` carries its resolved owner; `drainQueue` (on register) and `drainPending` (anonymous poll) deliver only when the owner is unknown or matches the drainer, re-queuing the rest (TTL preserved) |
-| 1d | sessionId source | Extension **stamps its own** sessionId; the agent only sends the filename |
+| 1d | sessionId source | Extension **stamps its own** sessionId; the agent only sends the filename. Extract it defensively as `session.sessionId ?? session.id` — the `@github/copilot-sdk` dep is floating (`"*"`) with no version guard, and an id-only runtime shape yields `undefined` from `session.sessionId` alone, silently collapsing the whole ownership model to anonymous registration + skipped `declareOwnership` (unowned docs whose replies queue but never deliver). |
 | 2 | Persistence format | JSON file `data/canvas-owners.json` — matches `data/sessions.json` pattern |
 | 3 | Resume mechanism | `SessionManager.spawnSession` using a targeted resume command |
 | 4 | Resume command | `CodingToolCli.build provider (Resume (Some ownerSessionId))` — same as `resumeSession` but targeted |
