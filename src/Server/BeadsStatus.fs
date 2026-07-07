@@ -55,35 +55,70 @@ module Planning =
             | _ -> { acc with Loose = acc.Loose + 1 })
             BeadsPlanning.zero
 
-let private runBd (dbPath: string) =
-    ProcessRunner.run "Beads" "bd" $"count --by-status --json --db \"{dbPath}\""
+/// Case-insensitive match against a raw beads schema string (status or issue_type).
+let private eqCI (a: string) (b: string) =
+    not (isNull a) && String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
 
-let private parseCountResponse (json: string) =
+let private stringProp (el: JsonElement) (name: string) =
+    match el.TryGetProperty(name) with
+    | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString())
+    | _ -> None
+
+/// Parse one issues.jsonl line into the lightweight model. The parent-child parent is resolved
+/// from an inline dependency edge ONLY: a "parent-child" edge carries issue_id = this record (the
+/// child) and depends_on_id = its parent feature, so we take depends_on_id. A "blocks" edge is
+/// deliberately ignored and NEVER populates ParentId (the planning classifier relies on this).
+/// Returns None for a blank/malformed line (logged, then skipped) so one bad row can't nuke the
+/// whole collection.
+let private parseLine (line: string) : PlanningIssue option =
     try
-        use doc = JsonDocument.Parse(json)
+        use doc = JsonDocument.Parse(line)
         let root = doc.RootElement
+        let id = stringProp root "id" |> Option.defaultValue ""
 
-        let groups =
-            match root.TryGetProperty("groups") with
-            | true, arr ->
-                arr.EnumerateArray()
-                |> Seq.map (fun el ->
-                    el.GetProperty("group").GetString(),
-                    el.GetProperty("count").GetInt32())
-                |> Map.ofSeq
-            | _ -> Map.empty
+        let parentId =
+            match root.TryGetProperty("dependencies") with
+            | true, deps when deps.ValueKind = JsonValueKind.Array ->
+                deps.EnumerateArray()
+                |> Seq.tryPick (fun edge ->
+                    // Guard the edge direction: it must belong to THIS record as the child
+                    // (issue_id = id); depends_on_id is then the parent we want.
+                    let childMatches =
+                        match stringProp edge "issue_id" with
+                        | Some iid -> String.Equals(iid, id, StringComparison.Ordinal)
+                        | None -> true
 
-        let findCount name =
-            Map.tryFind name groups
-            |> Option.defaultValue 0
+                    if eqCI (stringProp edge "type" |> Option.defaultValue "") "parent-child" && childMatches then
+                        stringProp edge "depends_on_id"
+                    else
+                        None)
+            | _ -> None
 
-        { Open = findCount "open"
-          InProgress = findCount "in_progress"
-          Blocked = findCount "blocked"
-          Closed = findCount "closed" }
+        Some
+            { Id = id
+              IssueType = stringProp root "issue_type" |> Option.defaultValue ""
+              Status = stringProp root "status" |> Option.defaultValue ""
+              ParentId = parentId }
     with ex ->
-        Log.log "Beads" $"Failed to parse bd JSON: {ex.Message}, raw input: {json}"
-        BeadsSummary.zero
+        Log.log "Beads" $"Failed to parse issues.jsonl line: {ex.Message}"
+        None
+
+/// Parse the full issues.jsonl content (one JSON object per line) into lightweight issues.
+let parseIssues (content: string) : PlanningIssue list =
+    content.Split('\n')
+    |> Array.choose (fun raw ->
+        let line = raw.Trim()
+        if line.Length = 0 then None else parseLine line)
+    |> Array.toList
+
+/// Status BeadsSummary counting ALL issue types by status (features included, unlike the planning
+/// split). Closed feeds the band's Done bucket downstream.
+let summarize (issues: PlanningIssue list) : BeadsSummary =
+    let count status = issues |> List.filter (fun i -> eqCI i.Status status) |> List.length
+    { Open = count "open"
+      InProgress = count "in_progress"
+      Blocked = count "blocked"
+      Closed = count "closed" }
 
 let getBeadsIssueList (dbPath: string) =
     async {
@@ -94,16 +129,26 @@ let getBeadsIssueList (dbPath: string) =
             return "[]"
     }
 
-let getBeadsSummary (worktreePath: string) =
+/// Reads .beads/issues.jsonl and derives BOTH the status summary (all issue types by status) and
+/// the planning split (open non-feature tasks by parent-feature status) from a SINGLE parse — no
+/// `bd` spawn, no SQLite dependency. Missing OR empty file => (zero, zero), never an exception.
+///
+/// FRESHNESS: issues.jsonl is beads' canonical JSONL export, auto-flushed after CRUD, so it can
+/// lag the live beads.db by up to the flush interval. We read it as-is and accept that lag
+/// deliberately: adding a `bd export` refresh here would reintroduce the per-refresh process spawn
+/// this parse exists to remove. If guaranteed freshness is ever required, export before reading.
+let getBeadsData (worktreePath: string) : Async<BeadsSummary * BeadsPlanning> =
     async {
-        let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
+        let jsonlPath = Path.Combine(worktreePath, ".beads", "issues.jsonl")
 
-        if File.Exists(dbPath) then
-            let! output = runBd dbPath
-            return
-                output
-                |> Option.map parseCountResponse
-                |> Option.defaultValue BeadsSummary.zero
+        if File.Exists(jsonlPath) then
+            try
+                let! content = File.ReadAllTextAsync(jsonlPath) |> Async.AwaitTask
+                let issues = parseIssues content
+                return summarize issues, Planning.classify issues
+            with ex ->
+                Log.log "Beads" $"Failed to read {jsonlPath}: {ex.Message}"
+                return BeadsSummary.zero, BeadsPlanning.zero
         else
-            return BeadsSummary.zero
+            return BeadsSummary.zero, BeadsPlanning.zero
     }

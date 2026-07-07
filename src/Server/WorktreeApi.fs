@@ -101,6 +101,7 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
+    let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
     let codingToolData =
         repo.CodingToolData
         |> Map.tryFind wt.Path
@@ -118,7 +119,7 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
-      Planning = BeadsPlanning.zero
+      Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
       LastUserMessage = codingToolData.LastUserMessage
