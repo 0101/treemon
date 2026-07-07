@@ -21,9 +21,10 @@ let private worktreeRoots = [ repoRoot ]
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
 
-// Reserve three distinct free loopback ports up front (TestUtils.getFreeTcpPorts) for the API server,
-// the canvas-doc server, and Vite — so the E2E stack never collides with a running production Treemon
-// (which owns 5000/5002) or a previous test run, and never has to kill another process to free a port.
+// Pick three distinct free loopback ports up front (TestUtils.getFreeTcpPorts binds :0, reads the
+// assigned ports, then releases them) for the API server, the canvas-doc server, and Vite — so the
+// E2E stack avoids a running production Treemon (which owns 5000/5002) or a previous test run, and
+// never has to kill another process to free a port.
 // The canvas port is threaded into the client build via CANVAS_PORT -> Vite `define` so the client's
 // iframe origin (CanvasPane.CanvasOrigin) matches this fixture's canvas-doc server.
 let private apiPort, canvasPort, vitePort =
