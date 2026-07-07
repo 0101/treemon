@@ -183,12 +183,10 @@ let private tryReadSkillArgument (req: JsonElement) =
     // Real events.jsonl encodes arguments as a nested object ({"skill":"..."}); the session-store
     // schema names it arguments_json as a JSON string. Handle both so the source doesn't matter.
     let argsElement =
-        match req.TryGetProperty("arguments") with
-        | true, a -> Some a
-        | _ ->
-            match req.TryGetProperty("arguments_json") with
-            | true, a -> Some a
-            | _ -> None
+        match req.TryGetProperty("arguments"), req.TryGetProperty("arguments_json") with
+        | (true, a), _ -> Some a
+        | _, (true, a) -> Some a
+        | _ -> None
 
     argsElement
     |> Option.bind (fun args ->

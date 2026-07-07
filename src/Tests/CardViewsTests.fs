@@ -1,9 +1,9 @@
 module Tests.CardViewsTests
 
-open System
 open NUnit.Framework
 open Shared
 open CardViews
+open Tests.WorktreeFixtures
 
 /// Tests for the per-card activity stripe (CardViews.activityStripe / cardClassName), the left
 /// color bar that adds the *what* alongside the existing binary red dot. The stripe is gated on an
@@ -13,27 +13,6 @@ open CardViews
 [<Category("Unit")>]
 [<Category("Fast")>]
 type CardViewsStripeTests() =
-
-    let baseWt: WorktreeStatus =
-        { Path = WorktreePath "/wt"
-          Branch = "b"
-          LastCommitMessage = "m"
-          LastCommitTime = DateTimeOffset.UnixEpoch
-          Beads = BeadsSummary.zero
-          Planning = BeadsPlanning.zero
-          CodingTool = CodingToolStatus.Idle
-          CodingToolProvider = None
-          CurrentSkill = None
-          LastUserMessage = None
-          Pr = PrStatus.NoPr
-          MainBehindCount = 0
-          IsDirty = false
-          WorkMetrics = None
-          HasActiveSession = false
-          HasTestFailureLog = false
-          IsMainWorktree = false
-          IsArchived = false
-          CanvasDocs = [] }
 
     /// An active-session worktree running (or not) a given skill — the only inputs the stripe reads.
     let activeWith skill = { baseWt with HasActiveSession = true; CurrentSkill = skill }

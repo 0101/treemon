@@ -17,6 +17,11 @@ type PlanningIssue =
       Status: string
       ParentId: string option }
 
+/// Case-insensitive match against a raw beads schema string (status or issue_type). Null-safe: a
+/// null left operand never matches. Shared by the planning classifier and the status summary.
+let private eqCI (a: string) (b: string) =
+    not (isNull a) && String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
+
 /// Pure classifier: partitions OPEN, non-feature issues into Planned/Queued/Loose by the status
 /// of their DIRECT parent-child parent when that parent is a feature (ONE hop, not transitive).
 /// This is the feature's core signal, so the open-vs-in_progress parent distinction must be exact.
@@ -28,15 +33,12 @@ module Planning =
     let [<Literal>] private StatusOpen = "open"
     let [<Literal>] private StatusInProgress = "in_progress"
 
-    let private eq (a: string) (b: string) =
-        not (isNull a) && String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
-
     /// Status of an issue's parent feature via one parent-child hop, or None when there is no
     /// parent, the parent is missing from the set, or the parent is not a feature.
     let private parentFeatureStatus (byId: Map<string, PlanningIssue>) (issue: PlanningIssue) =
         issue.ParentId
         |> Option.bind (fun pid -> Map.tryFind pid byId)
-        |> Option.filter (fun parent -> eq parent.IssueType FeatureType)
+        |> Option.filter (fun parent -> eqCI parent.IssueType FeatureType)
         |> Option.map (fun parent -> parent.Status)
 
     /// Partition OPEN, non-feature issues by their direct parent-feature status:
@@ -47,17 +49,13 @@ module Planning =
         let byId = issues |> List.map (fun i -> i.Id, i) |> Map.ofList
 
         issues
-        |> List.filter (fun issue -> eq issue.Status StatusOpen && not (eq issue.IssueType FeatureType))
+        |> List.filter (fun issue -> eqCI issue.Status StatusOpen && not (eqCI issue.IssueType FeatureType))
         |> List.fold (fun acc issue ->
             match parentFeatureStatus byId issue with
-            | Some status when eq status StatusOpen -> { acc with Planned = acc.Planned + 1 }
-            | Some status when eq status StatusInProgress -> { acc with Queued = acc.Queued + 1 }
+            | Some status when eqCI status StatusOpen -> { acc with Planned = acc.Planned + 1 }
+            | Some status when eqCI status StatusInProgress -> { acc with Queued = acc.Queued + 1 }
             | _ -> { acc with Loose = acc.Loose + 1 })
             BeadsPlanning.zero
-
-/// Case-insensitive match against a raw beads schema string (status or issue_type).
-let private eqCI (a: string) (b: string) =
-    not (isNull a) && String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
 
 let private stringProp (el: JsonElement) (name: string) =
     match el.TryGetProperty(name) with

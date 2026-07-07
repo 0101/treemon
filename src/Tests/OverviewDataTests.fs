@@ -1,9 +1,9 @@
 module Tests.OverviewDataTests
 
-open System
 open NUnit.Framework
 open Shared
 open OverviewData
+open Tests.WorktreeFixtures
 
 /// Tests for the pure cross-worktree aggregation (OverviewData.aggregate), the data behind the
 /// Overview band. It folds a RepoWorktrees list into: task buckets (Planned folds in Loose; Done
@@ -14,27 +14,6 @@ open OverviewData
 [<Category("Unit")>]
 [<Category("Fast")>]
 type OverviewDataTests() =
-
-    let baseWt: WorktreeStatus =
-        { Path = WorktreePath "/wt"
-          Branch = "b"
-          LastCommitMessage = "m"
-          LastCommitTime = DateTimeOffset.UnixEpoch
-          Beads = BeadsSummary.zero
-          Planning = BeadsPlanning.zero
-          CodingTool = CodingToolStatus.Idle
-          CodingToolProvider = None
-          CurrentSkill = None
-          LastUserMessage = None
-          Pr = PrStatus.NoPr
-          MainBehindCount = 0
-          IsDirty = false
-          WorkMetrics = None
-          HasActiveSession = false
-          HasTestFailureLog = false
-          IsMainWorktree = false
-          IsArchived = false
-          CanvasDocs = [] }
 
     let beads o ip b c : BeadsSummary = { Open = o; InProgress = ip; Blocked = b; Closed = c }
     let planning p q l : BeadsPlanning = { Planned = p; Queued = q; Loose = l }
@@ -55,11 +34,11 @@ type OverviewDataTests() =
 
     /// Count in a task bucket, or None when the bucket was omitted (empty).
     let taskCount kind (o: Overview) =
-        o.Tasks |> List.tryFind (fun t -> t.Kind = kind) |> Option.map (fun t -> t.Count)
+        o.Tasks |> List.tryFind (fun t -> t.Kind = kind) |> Option.map _.Count
 
     /// Count in an activity group, or None when the group was omitted (empty).
     let activityCount act (o: Overview) =
-        o.Activities |> List.tryFind (fun g -> g.Activity = act) |> Option.map (fun g -> g.Count)
+        o.Activities |> List.tryFind (fun g -> g.Activity = act) |> Option.map _.Count
 
     // ----- Task-bucket sums -----
 
@@ -158,7 +137,7 @@ type OverviewDataTests() =
     [<Test>]
     member _.``Present task buckets keep canonical Planned-Queued-InProgress-Blocked-Done order``() =
         let result = aggregate [ repo [ taskWt (beads 0 1 1 1) (planning 1 1 0) ] ]
-        let kinds = result.Tasks |> List.map (fun t -> t.Kind)
+        let kinds = result.Tasks |> List.map _.Kind
         Assert.That(
             kinds,
             Is.EqualTo(
@@ -255,7 +234,7 @@ type OverviewDataTests() =
                     [ agentWt true (Some "bd-execute")   // Executing
                       agentWt true None                  // Working
                       agentWt true (Some "investigate") ] ] // Investigating
-        let order = result.Activities |> List.map (fun g -> g.Activity)
+        let order = result.Activities |> List.map _.Activity
         Assert.That(
             order,
             Is.EqualTo([ CurrentActivity.Investigating; CurrentActivity.Executing; CurrentActivity.Working ]))

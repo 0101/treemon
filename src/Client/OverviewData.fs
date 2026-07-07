@@ -70,7 +70,7 @@ let private activityOf (wt: WorktreeStatus) =
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
-    let worktrees = repos |> List.collect (fun r -> r.Worktrees)
+    let worktrees = repos |> List.collect _.Worktrees
 
     // Task-bucket count for one kind. Only Done filters archived worktrees; every other bucket sums
     // across all worktrees. Planned folds Loose in (Loose -> Planned for display, decision #6).
@@ -78,9 +78,9 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let countFor =
         function
         | TaskBucketKind.Planned    -> sumOf (fun w -> w.Planning.Planned + w.Planning.Loose)
-        | TaskBucketKind.Queued     -> sumOf (fun w -> w.Planning.Queued)
-        | TaskBucketKind.InProgress -> sumOf (fun w -> w.Beads.InProgress)
-        | TaskBucketKind.Blocked    -> sumOf (fun w -> w.Beads.Blocked)
+        | TaskBucketKind.Queued     -> sumOf _.Planning.Queued
+        | TaskBucketKind.InProgress -> sumOf _.Beads.InProgress
+        | TaskBucketKind.Blocked    -> sumOf _.Beads.Blocked
         | TaskBucketKind.Done       -> sumOf (fun w -> if w.IsArchived then 0 else w.Beads.Closed)
 
     // Count each bucket once, in canonical order; reuse for both the omit-empties list and Scale.
@@ -96,7 +96,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let scale = counts |> List.map snd |> List.max
 
     // Activity groups: active worktrees (live session) grouped by classified activity, empties omitted.
-    let active = worktrees |> List.filter (fun w -> w.HasActiveSession)
+    let active = worktrees |> List.filter _.HasActiveSession
     let activities =
         activityOrder
         |> List.choose (fun activity ->

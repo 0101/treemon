@@ -15,8 +15,9 @@ open Shared
 type ActivityClassifierTests() =
 
     let assertAll (expected: CurrentActivity) (skills: string list) =
-        for skill in skills do
-            Assert.That(Activity.classify skill, Is.EqualTo(expected), $"skill: '{skill}'")
+        skills
+        |> List.iter (fun skill ->
+            Assert.That(Activity.classify skill, Is.EqualTo(expected), $"skill: '{skill}'"))
 
     [<Test>]
     member _.``investigate maps to Investigating``() =
