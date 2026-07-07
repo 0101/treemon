@@ -178,6 +178,28 @@ the solution compiling (no compat shims, per house rules).
   `ToggleOverviewPanel` message, `OverviewPanelOpen` model state, `saveOverviewPanelOpen` persistence.
 - Per-card stripe: an activity modifier class on `wt-card` in `CardViews.fs`.
 
+**Implementation notes (c8k — the band view, `src/Client/OverviewBand.fs`):**
+- **Bars are a run of unit cells, not an inline-width bar.** Each task bar renders `count` identical
+  fixed-size (`8×12px`) `.overview-cell` spans that touch (container `gap: 0`), so a count-N bar is
+  exactly N cells wide. This puts every bar on one true shared linear scale *structurally* — no cap,
+  no fade — while honouring **CSS-classes-only / no inline styles** (the natural `width: count/Scale%`
+  would need an inline style or CSS var, both disallowed). Consequently the view **does not read
+  `Overview.Scale`**: the scale is implicit in the cell geometry, and the widest bucket = `Scale`
+  cells by construction. `Scale` is retained on `Overview` as the documented denominator / for a
+  future non-cell renderer. Agents reuse the same rhythm as `.overview-circle` spans (one per active
+  agent) with a normal gap.
+- **Accent colour drives both mark and count via `currentColor`.** One class per category
+  (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
+  `background: currentColor`. Label stays neutral, same `0.82em`/`600` as the count — so count and
+  label differ only by colour, per spec.
+- **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
+  `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
+- **Empty-state collapse.** `renderSection` drops an all-empty lens and `view` returns `Html.none`
+  when both lenses are empty, so an opened-but-empty band adds no chrome (not even margin).
+- **Placement:** rendered in `App.fs` as the first child inside `.dashboard` (above `.repo-list`),
+  gated on `model.OverviewPanelOpen`; reflow via a `@container dashboard (min-width: 1200px)` rule
+  that flips the two sections from stacked (narrow) to side-by-side (wide).
+
 ## Decisions
 
 Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.md`. Key ones:

@@ -770,6 +770,9 @@ let view model dispatch =
                     let hasModifier = e.ctrlKey || e.altKey || e.metaKey
                     dispatch (KeyPressed (key, hasModifier)))
             prop.children [
+                if model.OverviewPanelOpen then
+                    OverviewBand.view model.Repos
+
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                     Html.div [
                         prop.className "status-bar"

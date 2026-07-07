@@ -137,6 +137,40 @@
         .progress-segment.seg-blocked { background: #fab387; }
         .progress-segment.seg-closed { background: #a6e3a1; }
 
+        /* Overview band (spec: docs/spec/beads-overview-band.md) — chrome-less cross-worktree
+           roll-up rendered inside .dashboard above .repo-list, gated on Model.OverviewPanelOpen.
+           Two sibling sections share one count+label rhythm: agents are circles (one per active
+           agent, grouped by skill); tasks are solid bars drawn as a run of identical unit cells, so
+           a count-N bar is exactly N cells wide — one true shared linear scale with no inline width.
+           No box and no title bar (the toggle button is the band's only header). */
+        .overview-band { display: flex; flex-direction: column; gap: 14px; margin-bottom: 16px; }
+        /* Reflow via the dashboard container-query: sections stack on narrow panes, sit side by
+           side once the dashboard is wide. (.dashboard carries container-name: dashboard.) */
+        @container dashboard (min-width: 1200px) {
+            .overview-band { flex-direction: row; gap: 48px; align-items: flex-start; }
+        }
+        .overview-section { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px; min-width: 0; }
+        .overview-item { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: min-content; }
+        .overview-marks { display: flex; align-items: flex-end; gap: 3px; min-height: 12px; }
+        .overview-marks.overview-bar { gap: 0; }
+        .overview-circle { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex: none; }
+        .overview-cell { width: 8px; height: 12px; background: currentColor; flex: none; }
+        .overview-meta { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+        .overview-label { font-size: 0.82em; font-weight: 600; color: #9399b2; }
+        .overview-count { font-size: 0.82em; font-weight: 600; }
+        /* Accent colour per category — drives the count text and, via currentColor, the mark fill. */
+        .task-planned { color: #f9e2af; }
+        .task-queued { color: #cba6f7; }
+        .task-inprogress { color: #89b4fa; }
+        .task-blocked { color: #fab387; }
+        .task-done { color: #a6e3a1; }
+        .activity-investigating { color: #89dceb; }
+        .activity-planning { color: #f9e2af; }
+        .activity-executing { color: #a6e3a1; }
+        .activity-reviewing { color: #cba6f7; }
+        .activity-fixing { color: #fab387; }
+        .activity-working { color: #89b4fa; }
+
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }
