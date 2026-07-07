@@ -86,7 +86,7 @@ let private parseLine (line: string) : PlanningIssue option =
                     let childMatches =
                         match stringProp edge "issue_id" with
                         | Some iid -> String.Equals(iid, id, StringComparison.Ordinal)
-                        | None -> true
+                        | None -> false // Reject malformed edge — a missing issue_id cannot match this record
 
                     if eqCI (stringProp edge "type" |> Option.defaultValue "") "parent-child" && childMatches then
                         stringProp edge "depends_on_id"

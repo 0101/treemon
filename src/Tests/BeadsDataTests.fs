@@ -35,6 +35,13 @@ type BeadsDataTests() =
     let looseTask id status =
         sprintf """{"id":"%s","status":"%s","issue_type":"task"}""" id status
 
+    // A task whose parent-child edge is MALFORMED: it omits issue_id, so the edge cannot be
+    // proven to belong to THIS record (the direction guard) and must be rejected — never a match.
+    let childTaskMissingIssueId id status parent =
+        sprintf
+            """{"id":"%s","status":"%s","issue_type":"task","dependencies":[{"depends_on_id":"%s","type":"parent-child","created_by":"unknown"}]}"""
+            id status parent
+
     [<Test>]
     member _.``parseIssues resolves ParentId from a parent-child edge (depends_on_id = parent)``() =
         let issues = parseIssues (jsonl [ feature "feat-1" "open"; childTask "task-1" "open" "feat-1" ])
@@ -52,6 +59,15 @@ type BeadsDataTests() =
     member _.``parseIssues yields no parent when the dependencies field is absent``() =
         let issues = parseIssues (jsonl [ looseTask "task-1" "open" ])
         Assert.That((List.exactlyOne issues).ParentId, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``parseIssues rejects a parent-child edge missing issue_id (cannot prove it belongs to this record)``() =
+        // A malformed edge with no issue_id must NOT match this record: without the child id we
+        // cannot prove the edge belongs here, so depends_on_id must not leak into ParentId.
+        let issues =
+            parseIssues (jsonl [ feature "feat-1" "open"; childTaskMissingIssueId "task-1" "open" "feat-1" ])
+        let task = issues |> List.find (fun i -> i.Id = "task-1")
+        Assert.That(task.ParentId, Is.EqualTo(None))
 
     [<Test>]
     member _.``parseIssues picks the parent-child edge when a record also has a blocks edge``() =
@@ -109,3 +125,15 @@ type BeadsDataTests() =
         Assert.That(planning.Loose, Is.EqualTo(1))
         Assert.That(planning.Queued, Is.EqualTo(0))
         Assert.That(planning.Planned, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``parse then classify: a parent-child edge missing issue_id does not bucket the task (stays Loose)``() =
+        // Regression guard: a malformed edge with no child issue_id must not match ANY issue.
+        // task-1 stays Loose even though a matching OPEN feature is present — with the old bug
+        // (missing issue_id treated as a match) it would have been miscounted as Planned.
+        let planning =
+            parseIssues (jsonl [ feature "feat-1" "open"; childTaskMissingIssueId "task-1" "open" "feat-1" ])
+            |> Planning.classify
+        Assert.That(planning.Loose, Is.EqualTo(1))
+        Assert.That(planning.Planned, Is.EqualTo(0))
+        Assert.That(planning.Queued, Is.EqualTo(0))
