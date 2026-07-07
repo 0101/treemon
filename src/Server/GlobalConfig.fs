@@ -231,6 +231,16 @@ let internal readCanvasPaneOpen () : bool =
 let internal writeCanvasPaneOpen (isOpen: bool) =
     updateGlobalConfig "canvas pane open state" [ "canvasPaneOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
 
+let internal readOverviewPanelOpen () : bool =
+    withConfigDocument false (fun root ->
+        match root.TryGetProperty("overviewPanelOpen") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.True -> true
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.False -> false
+        | _ -> false)
+
+let internal writeOverviewPanelOpen (isOpen: bool) =
+    updateGlobalConfig "overview panel open state" [ "overviewPanelOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
+
 let internal readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->
         let found, prop = root.TryGetProperty("canvasPosition")

@@ -374,6 +374,7 @@ let private baseDashboard: DashboardResponse =
       EditorName = "VS Code"
       CollapsedRepos = Set.empty
       CanvasPaneOpen = false
+      OverviewPanelOpen = false
       CanvasPosition = CanvasPosition.Right
       CanvasSize = CanvasSize.Ratio1To1 }
 

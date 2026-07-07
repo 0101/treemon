@@ -307,6 +307,7 @@ type DashboardResponse =
       EditorName: string
       CollapsedRepos: Set<RepoId>
       CanvasPaneOpen: bool
+      OverviewPanelOpen: bool
       CanvasPosition: CanvasPosition
       CanvasSize: CanvasSize }
 
@@ -338,6 +339,7 @@ type IWorktreeApi =
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
       saveCanvasPaneOpen: bool -> Async<unit>
+      saveOverviewPanelOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
       saveCanvasSize: CanvasSize -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
