@@ -6,7 +6,16 @@ open CanvasTypes
 open Feliz
 open Browser
 
+// The canvas-doc server origin for THIS build, injected by Vite's `define` (see vite.config.js).
+// Prod/dev default to 127.0.0.1:5002; the E2E test stack overrides CANVAS_PORT so its iframe origin
+// matches its own (dynamically chosen) canvas-doc port and never collides with a running production
+// instance on 5002. The .NET fallback keeps the module loadable from the (Fable-referencing) test
+// assembly, where the value is never exercised (that happens only in the browser).
+#if FABLE_COMPILER
+let CanvasOrigin: string = Fable.Core.JsInterop.emitJsExpr () "__CANVAS_ORIGIN__"
+#else
 let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
+#endif
 // Doc→pane message size cap, in UTF-16 code units (JS String.length): the listener below drops a
 // message when JSON.stringify(me.data).length exceeds this. The injected window.canvasSend helper
 // enforces the SAME cap doc-side (var MAX=64000 in canvasSendScript, src/Server/CanvasDocServer.fs)

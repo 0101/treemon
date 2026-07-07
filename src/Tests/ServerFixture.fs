@@ -21,8 +21,19 @@ let private worktreeRoots = [ repoRoot ]
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
 
-let serverUrl = "http://localhost:5001"
-let viteUrl = "http://localhost:5174"
+// Reserve three distinct free loopback ports up front (TestUtils.getFreeTcpPorts) for the API server,
+// the canvas-doc server, and Vite — so the E2E stack never collides with a running production Treemon
+// (which owns 5000/5002) or a previous test run, and never has to kill another process to free a port.
+// The canvas port is threaded into the client build via CANVAS_PORT -> Vite `define` so the client's
+// iframe origin (CanvasPane.CanvasOrigin) matches this fixture's canvas-doc server.
+let private apiPort, canvasPort, vitePort =
+    match TestUtils.getFreeTcpPorts 3 with
+    | [ a; c; v ] -> a, c, v
+    | other -> failwith $"Expected 3 free ports, got {List.length other}"
+
+let serverUrl = $"http://localhost:{apiPort}"
+let viteUrl = $"http://localhost:{vitePort}"
+let canvasUrl = $"http://127.0.0.1:{canvasPort}"
 
 let private memoryThreshold = 2L * 1024L * 1024L * 1024L
 
@@ -81,9 +92,6 @@ let private waitForUrl (url: string) (timeoutMs: int) : Task =
 let private startProcess fileName args workingDir envVars redirectOutput =
     TestUtils.startProcess fileName args workingDir envVars redirectOutput
 
-let private killOrphansOnPort port =
-    TestUtils.killOrphansOnPort port
-
 let startServer () =
     task {
         let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
@@ -91,7 +99,7 @@ let startServer () =
         let proc =
             startProcess
                 "dotnet"
-                $"""run --project "{serverProjectPath}" -- {rootArgs} --port 5001 --test-fixtures "{fixturesPath}" """
+                $"""run --project "{serverProjectPath}" -- {rootArgs} --port {apiPort} --canvas-port {canvasPort} --test-fixtures "{fixturesPath}" """
                 repoRoot
                 []
                 false
@@ -129,8 +137,9 @@ let startVite () =
                 "npx"
                 "vite --host"
                 repoRoot
-                [ "VITE_PORT", "5174"
-                  "API_PORT", "5001"
+                [ "VITE_PORT", string vitePort
+                  "API_PORT", string apiPort
+                  "CANVAS_PORT", string canvasPort
                   "NODE_OPTIONS", "--max-old-space-size=512" ]
                 false
 
@@ -163,12 +172,11 @@ type GlobalSetup() =
     [<OneTimeSetUp>]
     member _.Setup() =
         task {
-            killOrphansOnPort 5001
-            killOrphansOnPort 5174
             do! startServer ()
             do! compileFable ()
             do! startVite ()
-            TestContext.Out.WriteLine("Server, Fable, and Vite started successfully")
+            TestContext.Out.WriteLine(
+                $"Server ({serverUrl}), canvas-doc ({canvasUrl}), Fable, and Vite ({viteUrl}) started successfully")
         }
 
     [<OneTimeTearDown>]
