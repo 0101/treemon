@@ -72,6 +72,18 @@ let private activityClass =
     | CurrentActivity.Fixing -> "activity-fixing"
     | CurrentActivity.Working -> "activity-working"
 
+// Display label per agent group: the skill-derived activity, or the distinct Waiting group.
+let private agentLabel =
+    function
+    | AgentGroupKind.Activity activity -> activityLabel activity
+    | AgentGroupKind.Waiting -> "Waiting"
+
+// Accent-color modifier class per agent group (same currentColor scheme as activityClass).
+let private agentClass =
+    function
+    | AgentGroupKind.Activity activity -> activityClass activity
+    | AgentGroupKind.Waiting -> "activity-waiting"
+
 /// One category column shared by both sections: a run of `count` identical marks over a count+label
 /// meta line. `marksContainerClass` picks the mark spacing (circles keep a gap; the bar closes it so
 /// its cells read as one solid bar); `markClass` picks the glyph (circle vs cell). Both the marks and
@@ -99,8 +111,8 @@ let private renderColumn
                           [ Html.span [ prop.className "overview-label"; prop.text label ]
                             Html.span [ prop.className ("overview-count " + accentClass); prop.text (string count) ] ] ] ] ]
 
-let private agentColumn (group: ActivityGroup) =
-    renderColumn "overview-marks" "overview-circle" (activityClass group.Activity) (activityLabel group.Activity) group.Count
+let private agentColumn (group: AgentGroup) =
+    renderColumn "overview-marks" "overview-circle" (agentClass group.Kind) (agentLabel group.Kind) group.Count
 
 let private taskColumn (bucket: TaskBucket) =
     renderColumn "overview-marks overview-bar" "overview-cell" (taskClass bucket.Kind) (taskLabel bucket.Kind) bucket.Count
@@ -117,11 +129,11 @@ let private renderSection (extraClass: string) (columns: ReactElement list) =
 let view (repos: RepoModel list) : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
 
-    match overview.Activities, overview.Tasks with
+    match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
-    | activities, tasks ->
+    | agents, tasks ->
         Html.div
             [ prop.className "overview-band"
               prop.children
-                  [ renderSection "overview-agents" (activities |> List.map agentColumn)
+                  [ renderSection "overview-agents" (agents |> List.map agentColumn)
                     renderSection "overview-tasks" (tasks |> List.map taskColumn) ] ]

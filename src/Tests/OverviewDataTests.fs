@@ -7,9 +7,10 @@ open Tests.WorktreeFixtures
 
 /// Tests for the pure cross-worktree aggregation (OverviewData.aggregate), the data behind the
 /// Overview band. It folds a RepoWorktrees list into: task buckets (Planned folds in Loose; Done
-/// counts only non-archived worktrees; every other bucket sums across all), activity groups (active
-/// worktrees grouped by Activity.classify of their CurrentSkill), and Scale (the largest bucket
-/// count). Empty buckets and activities are omitted; both lists come back in canonical order.
+/// counts only non-archived worktrees; every other bucket sums across all), agent groups (red-dot
+/// WORKING worktrees grouped by Activity.classify of their CurrentSkill, plus a distinct Waiting
+/// group for CodingTool = WaitingForUser), and Scale (the largest bucket count). Empty buckets and
+/// groups are omitted; both lists come back in canonical order (Waiting sorts last).
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -18,11 +19,16 @@ type OverviewDataTests() =
     let beads o ip b c : BeadsSummary = { Open = o; InProgress = ip; Blocked = b; Closed = c }
     let planning p q l : BeadsPlanning = { Planned = p; Queued = q; Loose = l }
 
-    /// A worktree carrying beads/planning counts (inactive, not archived) — for task-bucket tests.
+    /// A worktree carrying beads/planning counts (Idle, not archived) — for task-bucket tests.
     let taskWt bd pl = { baseWt with Beads = bd; Planning = pl }
 
-    /// An active/inactive agent worktree running a skill — for activity-group tests.
-    let agentWt active skill = { baseWt with HasActiveSession = active; CurrentSkill = skill }
+    /// A worktree in a given CodingTool state carrying an optional skill — for agent-group tests.
+    /// Activity is derived only for red-dot (Working) worktrees; other states never contribute to
+    /// the activity groups (WaitingForUser goes to its own group, Done/Idle are excluded).
+    let agentWt tool skill = { baseWt with CodingTool = tool; CurrentSkill = skill }
+
+    /// A red-dot WORKING agent (CodingTool = Working) running `skill`.
+    let workingWt skill = agentWt CodingToolStatus.Working skill
 
     let repo (wts: WorktreeStatus list) : RepoWorktrees =
         { RepoId = RepoId "r"
@@ -36,9 +42,13 @@ type OverviewDataTests() =
     let taskCount kind (o: Overview) =
         o.Tasks |> List.tryFind (fun t -> t.Kind = kind) |> Option.map _.Count
 
-    /// Count in an activity group, or None when the group was omitted (empty).
+    /// Count in an agent group, or None when the group was omitted (empty).
+    let agentCount kind (o: Overview) =
+        o.Agents |> List.tryFind (fun g -> g.Kind = kind) |> Option.map _.Count
+
+    /// Count in a red-dot activity group, or None when omitted.
     let activityCount act (o: Overview) =
-        o.Activities |> List.tryFind (fun g -> g.Activity = act) |> Option.map _.Count
+        agentCount (AgentGroupKind.Activity act) o
 
     // ----- Task-bucket sums -----
 
@@ -73,7 +83,7 @@ type OverviewDataTests() =
     member _.``An empty repo list yields an empty roll-up``() =
         let result = aggregate []
         Assert.That(result.Tasks, Is.Empty)
-        Assert.That(result.Activities, Is.Empty)
+        Assert.That(result.Agents, Is.Empty)
         Assert.That(result.Scale, Is.EqualTo(0))
 
     // ----- Archived handling (only Done filters archived) -----
@@ -156,73 +166,128 @@ type OverviewDataTests() =
         Assert.That(result.Scale, Is.EqualTo(9))
 
     [<Test>]
-    member _.``Scale ignores activity groups - it is a task-only denominator``() =
-        // Ten active agents but the biggest task bucket is 4: Scale must track tasks, not agents.
-        let agents = List.replicate 10 (agentWt true (Some "investigate"))
+    member _.``Scale ignores agent groups - it is a task-only denominator``() =
+        // Ten red-dot agents but the biggest task bucket is 4: Scale must track tasks, not agents.
+        let agents = List.replicate 10 (workingWt (Some "investigate"))
         let tasks = taskWt (beads 0 4 0 3) BeadsPlanning.zero
         let result = aggregate [ repo (tasks :: agents) ]
         Assert.That(result.Scale, Is.EqualTo(4))
 
-    // ----- Activity groups -----
+    // ----- Agent groups (red-dot working agents + a distinct Waiting group) -----
 
     [<Test>]
-    member _.``Active worktrees group by the activity their skill classifies to``() =
+    member _.``Red-dot working worktrees group by the activity their skill classifies to``() =
         let result =
             aggregate
                 [ repo
-                    [ agentWt true (Some "investigate")   // Investigating
-                      agentWt true (Some "bd-plan")       // Planning
-                      agentWt true (Some "bd-improve") ] ] // Planning (same group)
+                    [ workingWt (Some "investigate")   // Investigating
+                      workingWt (Some "bd-plan")       // Planning
+                      workingWt (Some "bd-improve") ] ] // Planning (same group)
         Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 1))
         Assert.That(activityCount CurrentActivity.Planning result, Is.EqualTo(Some 2))
 
     [<Test>]
-    member _.``Inactive worktrees are excluded even when they carry a skill``() =
-        // Only worktrees with a live session count toward activity — an idle card never contributes,
-        // even though CurrentSkill may still be populated.
+    member _.``Only red-dot (Working) worktrees count - HasActiveSession no longer counts``() =
+        // A worktree can have a live terminal (HasActiveSession) while its coding tool is Idle/Done;
+        // v1.1 (h) keys off the red dot alone, so terminal presence must NOT create an activity group.
         let result =
             aggregate
                 [ repo
-                    [ agentWt true (Some "investigate")
-                      agentWt false (Some "investigate") ] ]
+                    [ { workingWt (Some "investigate") with HasActiveSession = true }
+                      { agentWt CodingToolStatus.Idle (Some "investigate") with HasActiveSession = true }
+                      { agentWt CodingToolStatus.Done (Some "investigate") with HasActiveSession = true } ] ]
+        // Only the red-dot worktree contributes; the two terminal-present-but-not-working ones don't.
         Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 1))
 
     [<Test>]
-    member _.``An active agent with no skill falls back to the Working group``() =
-        let result = aggregate [ repo [ agentWt true None ] ]
-        Assert.That(activityCount CurrentActivity.Working result, Is.EqualTo(Some 1))
-
-    [<Test>]
-    member _.``An active agent running an unrecognized skill falls back to Working``() =
+    member _.``Done and Idle worktrees are excluded from the activity groups even with a skill``() =
+        // Done (blue) and Idle (grey) dots are finished/parked terminals — they never contribute to
+        // an activity group, even though CurrentSkill may still be populated (last-seen skill).
         let result =
             aggregate
                 [ repo
-                    [ agentWt true (Some "totally-unknown-skill")
-                      agentWt true None ] ]
+                    [ agentWt CodingToolStatus.Done (Some "investigate")
+                      agentWt CodingToolStatus.Idle (Some "bd-plan") ] ]
+        Assert.That(result.Agents, Is.Empty)
+
+    [<Test>]
+    member _.``A red-dot agent with no skill falls back to the Working group``() =
+        let result = aggregate [ repo [ workingWt None ] ]
+        Assert.That(activityCount CurrentActivity.Working result, Is.EqualTo(Some 1))
+
+    [<Test>]
+    member _.``A red-dot agent running an unrecognized skill falls back to Working``() =
+        let result =
+            aggregate
+                [ repo
+                    [ workingWt (Some "totally-unknown-skill")
+                      workingWt None ] ]
         // Both the unknown-skill agent and the no-skill agent land in Working.
         Assert.That(activityCount CurrentActivity.Working result, Is.EqualTo(Some 2))
 
     [<Test>]
     member _.``Activity classification goes through Activity.classify (slash command with args)``() =
         // A raw Claude slash command with an argument still classifies via the shared normalizer.
-        let result = aggregate [ repo [ agentWt true (Some "/pr https://example.com/pull/1") ] ]
+        let result = aggregate [ repo [ workingWt (Some "/pr https://example.com/pull/1") ] ]
         Assert.That(activityCount CurrentActivity.Reviewing result, Is.EqualTo(Some 1))
 
     [<Test>]
-    member _.``Activities with no active agents are omitted``() =
-        let result = aggregate [ repo [ agentWt true (Some "investigate") ] ]
-        Assert.That(result.Activities |> List.length, Is.EqualTo(1))
+    member _.``Activities with no red-dot agents are omitted``() =
+        let result = aggregate [ repo [ workingWt (Some "investigate") ] ]
+        Assert.That(result.Agents |> List.length, Is.EqualTo(1))
         Assert.That(activityCount CurrentActivity.Planning result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Executing result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Reviewing result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Fixing result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Working result, Is.EqualTo(None))
+        Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(None))
 
     [<Test>]
-    member _.``No active agents yields no activity groups``() =
+    member _.``No red-dot or waiting agents yields no agent groups``() =
         let result =
-            aggregate [ repo [ agentWt false (Some "investigate"); agentWt false None ] ]
-        Assert.That(result.Activities, Is.Empty)
+            aggregate [ repo [ agentWt CodingToolStatus.Idle (Some "investigate"); agentWt CodingToolStatus.Done None ] ]
+        Assert.That(result.Agents, Is.Empty)
+
+    [<Test>]
+    member _.``WaitingForUser worktrees form a distinct Waiting group``() =
+        let result =
+            aggregate [ repo [ agentWt CodingToolStatus.WaitingForUser None
+                               agentWt CodingToolStatus.WaitingForUser None ] ]
+        Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some 2))
+
+    [<Test>]
+    member _.``WaitingForUser goes to Waiting, not an activity group, even with a recognized skill``() =
+        // A yellow-dot agent is parked on the user; its last skill must not classify it into an
+        // activity — it belongs to the Waiting group regardless of CurrentSkill.
+        let result = aggregate [ repo [ agentWt CodingToolStatus.WaitingForUser (Some "investigate") ] ]
+        Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some 1))
+        Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Working and Waiting are separate groups drawn from separate coding-tool states``() =
+        let result =
+            aggregate
+                [ repo
+                    [ workingWt (Some "investigate")                 // red dot -> Investigating
+                      agentWt CodingToolStatus.WaitingForUser None ] ] // yellow dot -> Waiting
+        Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 1))
+        Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some 1))
+
+    [<Test>]
+    member _.``The Waiting group sorts after every activity group (canonical order)``() =
+        let result =
+            aggregate
+                [ repo
+                    [ agentWt CodingToolStatus.WaitingForUser None  // Waiting
+                      workingWt (Some "bd-execute")                 // Executing
+                      workingWt (Some "investigate") ] ]            // Investigating
+        let order = result.Agents |> List.map _.Kind
+        Assert.That(
+            order,
+            Is.EqualTo(
+                [ AgentGroupKind.Activity CurrentActivity.Investigating
+                  AgentGroupKind.Activity CurrentActivity.Executing
+                  AgentGroupKind.Waiting ]))
 
     [<Test>]
     member _.``Present activity groups keep canonical order``() =
@@ -231,30 +296,34 @@ type OverviewDataTests() =
         let result =
             aggregate
                 [ repo
-                    [ agentWt true (Some "bd-execute")   // Executing
-                      agentWt true None                  // Working
-                      agentWt true (Some "investigate") ] ] // Investigating
-        let order = result.Activities |> List.map _.Activity
+                    [ workingWt (Some "bd-execute")   // Executing
+                      workingWt None                  // Working
+                      workingWt (Some "investigate") ] ] // Investigating
+        let order = result.Agents |> List.map _.Kind
         Assert.That(
             order,
-            Is.EqualTo([ CurrentActivity.Investigating; CurrentActivity.Executing; CurrentActivity.Working ]))
+            Is.EqualTo(
+                [ AgentGroupKind.Activity CurrentActivity.Investigating
+                  AgentGroupKind.Activity CurrentActivity.Executing
+                  AgentGroupKind.Activity CurrentActivity.Working ]))
 
     [<Test>]
-    member _.``Activity groups aggregate active worktrees across repos``() =
+    member _.``Agent groups aggregate red-dot and waiting worktrees across repos``() =
         let result =
             aggregate
-                [ repo [ agentWt true (Some "investigate") ]
-                  repo [ agentWt true (Some "investigate"); agentWt true (Some "fix-build") ] ]
+                [ repo [ workingWt (Some "investigate"); agentWt CodingToolStatus.WaitingForUser None ]
+                  repo [ workingWt (Some "investigate"); workingWt (Some "fix-build") ] ]
         Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 2))
         Assert.That(activityCount CurrentActivity.Fixing result, Is.EqualTo(Some 1))
+        Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some 1))
 
     [<Test>]
-    member _.``An active worktree contributes to both its task buckets and its activity group``() =
-        // The task-fold and the activity-fold must both see the same worktree: task summation must
-        // not skip active worktrees, and activity grouping must not depend on zero task counts.
+    member _.``A red-dot worktree contributes to both its task buckets and its activity group``() =
+        // The task-fold and the agent-fold must both see the same worktree: task summation must not
+        // skip working worktrees, and activity grouping must not depend on zero task counts.
         let wt =
             { baseWt with
-                HasActiveSession = true
+                CodingTool = CodingToolStatus.Working
                 Beads = beads 0 2 0 0
                 CurrentSkill = Some "investigate" }
         let result = aggregate [ repo [ wt ] ]

@@ -5,9 +5,11 @@ module OverviewData
 //   - Tasks: the five status buckets (Planned · Queued · In progress · Blocked · Done), each a
 //     cross-worktree sum. Planned folds in Loose (decision #6); Done counts only NON-archived
 //     worktrees (decision #7) — every other bucket sums across all worktrees.
-//   - Activities: active worktrees (a live session / red dot) grouped by the skill each is running,
-//     classified through the shared Shared.Activity.classify so the band and the per-card stripe
-//     agree on one source of truth.
+//   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
+//     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
+//     agents parked on the user (CodingTool = WaitingForUser, yellow dot). Terminal presence
+//     (HasActiveSession — which also covers Done/Idle/WaitingForUser) no longer inflates the counts
+//     (spec Corrections v1.1 (h)).
 // Empty buckets/groups are omitted (never surfaced as a 0), and Scale is the one true shared linear
 // scale — the largest task-bucket count — so the view sizes every bar against a single denominator.
 //
@@ -34,16 +36,25 @@ type TaskBucketKind =
 /// roll-up entirely (the band never shows a 0), so a present bucket always has Count > 0.
 type TaskBucket = { Kind: TaskBucketKind; Count: int }
 
-/// One non-empty activity group: an activity and how many active agents are running a skill that
-/// classifies to it. Empty activities are dropped, so a present group always has Count > 0.
-type ActivityGroup = { Activity: CurrentActivity; Count: int }
+/// What an agent group represents: a skill-derived activity (a red-dot WORKING agent) or the distinct
+/// "waiting for user" state (yellow dot). Modeled as a kind so the band can render the Waiting group
+/// alongside the activity groups (spec Corrections v1.1 (h)) while keeping the two header counts —
+/// N working, M waiting — separable.
+[<RequireQualifiedAccess>]
+type AgentGroupKind =
+    | Activity of CurrentActivity
+    | Waiting
 
-/// The Overview band's cross-worktree roll-up: non-empty task buckets and activity groups (both in
+/// One non-empty agent group: its kind and how many agents belong to it. Empty groups are dropped, so
+/// a present group always has Count > 0.
+type AgentGroup = { Kind: AgentGroupKind; Count: int }
+
+/// The Overview band's cross-worktree roll-up: non-empty task buckets and agent groups (both in
 /// canonical order) plus Scale — the largest task-bucket count, the single linear denominator every
 /// task bar is sized against (0 when there are no tasks at all).
 type Overview =
     { Tasks: TaskBucket list
-      Activities: ActivityGroup list
+      Agents: AgentGroup list
       Scale: int }
 
 // Canonical left-to-right order of the task bars.
@@ -63,8 +74,14 @@ let private activityOrder =
       CurrentActivity.Fixing
       CurrentActivity.Working ]
 
-/// The activity a worktree's current skill classifies to. An absent skill classifies to Working
-/// (classify normalizes "" -> Working), matching the spec's "active session, no recognized skill".
+// Canonical order of the agent groups: the activity groups (in the order above), then the Waiting
+// group LAST — matching the spec's palette enumeration where Waiting (yellow) trails Working (blue).
+let private agentGroupOrder =
+    (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting ]
+
+/// The activity a WORKING worktree's current skill classifies to. An absent skill classifies to
+/// Working (classify normalizes "" -> Working), matching the spec's "red-dot agent, no recognized
+/// skill -> generic Working group".
 let private activityOf (wt: WorktreeStatus) =
     Activity.classify (wt.CurrentSkill |> Option.defaultValue "")
 
@@ -89,19 +106,31 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let tasks =
         counts
         |> List.choose (fun (kind, count) ->
-            if count > 0 then Some { Kind = kind; Count = count } else None)
+            if count > 0 then Some { TaskBucket.Kind = kind; Count = count } else None)
 
     // One true shared scale: the largest bucket count, 0 when every bucket is empty. Empty buckets
     // are 0 and never raise the max, so this equals the max across the non-empty buckets.
     let scale = counts |> List.map snd |> List.max
 
-    // Activity groups: active worktrees (live session) grouped by classified activity, empties omitted.
-    let active = worktrees |> List.filter _.HasActiveSession
-    let activities =
-        activityOrder
-        |> List.choose (fun activity ->
-            match active |> List.filter (fun w -> activityOf w = activity) |> List.length with
-            | 0 -> None
-            | count -> Some { Activity = activity; Count = count })
+    // Agent groups: red-dot WORKING agents (CodingTool = Working) grouped by their classified
+    // activity, plus a distinct Waiting group (CodingTool = WaitingForUser). HasActiveSession is NOT
+    // used — it also covers Done/Idle/WaitingForUser terminals, which would inflate Working with idle
+    // and finished agents (spec Corrections v1.1 (h)). Empty groups omitted; Waiting sorts last.
+    let working = worktrees |> List.filter (fun w -> w.CodingTool = CodingToolStatus.Working)
+    let waitingCount =
+        worktrees |> List.filter (fun w -> w.CodingTool = CodingToolStatus.WaitingForUser) |> List.length
 
-    { Tasks = tasks; Activities = activities; Scale = scale }
+    let countForKind =
+        function
+        | AgentGroupKind.Activity activity ->
+            working |> List.filter (fun w -> activityOf w = activity) |> List.length
+        | AgentGroupKind.Waiting -> waitingCount
+
+    let agents =
+        agentGroupOrder
+        |> List.choose (fun kind ->
+            match countForKind kind with
+            | 0 -> None
+            | count -> Some { AgentGroup.Kind = kind; Count = count })
+
+    { Tasks = tasks; Agents = agents; Scale = scale }
