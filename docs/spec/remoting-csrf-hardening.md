@@ -1,17 +1,18 @@
 # Remoting CSRF / Origin Hardening
 
-Status: **Future / Deferred** — design only. Surfaced by focused-review (finding C-13 /
-A-13, *Confirmed · Low*) on the `tm-config-audit` branch. Not implemented.
+Status: **Implemented.** Surfaced by focused-review (finding C-13 / A-13, *Confirmed · Low*)
+on the `tm-config-audit` branch; shipped on `quicklaunch` once the Create-worktree auto-launch
+(see `docs/spec/worktree-monitor.md` → *Create Worktree*) turned the remoting surface into an
+agent-execution sink and raised the priority.
 
-The branch that surfaced this only **added** three endpoints (`addRoot`/`removeRoot`/
-`getRoots`) to an already-exposed surface; it did not create the gap. This spec is about
-hardening the *whole* remoting surface, not those three endpoints.
+The gap is not specific to any one endpoint — it is a property of the shared, unauthenticated
+remoting handler. The fix is a single pipeline-level guard covering the *whole* surface.
 
 ## Problem Statement
 
-The server exposes `IWorktreeApi` over Fable.Remoting with **no authentication and no
-Origin/CSRF validation**, bound to loopback. A malicious web page open in the operator's
-browser can therefore issue cross-origin `POST http://localhost:5000/IWorktreeApi/<method>`
+The server exposes `IWorktreeApi` over Fable.Remoting with **no authentication**, bound to
+loopback. Absent an Origin check (the guard this spec adds), a malicious web page open in the
+operator's browser can issue cross-origin `POST http://localhost:5000/IWorktreeApi/<method>`
 requests that the server executes as if they were same-origin — a classic localhost CSRF.
 
 The newly-added watched-roots endpoints are the *least* dangerous members of this surface.
@@ -68,43 +69,38 @@ are the high-value targets; fixing it once at the pipeline protects all of them.
 - The fix is applied **once, at the remoting pipeline**, so every method (current and future)
   is covered without per-endpoint changes.
 - **No friction for legitimate callers**: the same-origin web client and the `tm` CLI keep
-  working unchanged (or with a single, central client change).
+  working unchanged — no client change was needed.
 - Production keeps its well-known port and loud-on-conflict behavior (see
   `docs/spec/future/port-management.md`); this is orthogonal to where it binds.
 
 ## Technical Approach
 
-Add a small middleware *in front of* the Fable.Remoting handler in `buildRemotingHandler`
-(or wrapping it in the Saturn pipeline) that rejects forged cross-origin requests before they
-reach any method.
+`Server.HttpSecurity` is a small module whose core is a **pure decision function**, so the whole
+policy is unit-testable without HTTP plumbing:
 
-**Primary control — Origin/Referer allowlist (no client change):**
+- `isSameOriginRequest (origin: string option) (referer: string option)` — **Origin** is
+  authoritative when present, **Referer** consulted only when Origin is absent. A present value must
+  parse as an absolute URL whose host is loopback (`localhost`, IPv4 `127.0.0.0/8`, or IPv6 `::1` via
+  `IPAddress.IsLoopback`); anything else — a public host, a LAN IP, the literal `null` browsers emit
+  for an opaque origin, or an unparseable value — is rejected. A **missing** pair returns `true`
+  (allowed).
+- `isRequestAllowed method origin referer` — safe methods (GET/HEAD/OPTIONS) always pass; any other
+  (state-changing) method must be same-origin.
+- `csrfGuard: HttpHandler` — reads the two headers, calls `isRequestAllowed`, and returns `403` on a
+  reject (logging the origin) or falls through to the next handler.
 
-- If an `Origin` header is present and is **not** same-origin (`http://localhost:{port}` /
-  `http://127.0.0.1:{port}`), reject with `403`.
-- If `Origin` is absent, fall back to a `Referer` same-origin check.
-- Requests with **neither** header (the `tm` CLI via `HttpClient`, server-to-server) are
-  allowed — non-browser clients don't forge CSRF.
+`csrfGuard` is composed **before** the Fable.Remoting handler and **before** each state-changing canvas
+route (`POST /api/canvas/register`, `POST /api/canvas/attribute`) in `Program.fs` — the `POST` filter
+comes first, so the guard only ever evaluates the request it protects.
 
-Browsers attach `Origin` to cross-origin POSTs (and to same-origin POSTs), so the legitimate
-web client passes and the malicious page is blocked, with **zero client changes**. This is
-the lowest-friction option.
+The **missing-header carve-out** is what keeps legitimate clients working: the non-browser `tm` CLI and
+the Node canvas-bridge send neither Origin nor Referer (verified), and the same-origin SPA sends a
+loopback Origin; a cross-origin browser page sends a non-loopback Origin and is rejected. Kestrel binds
+localhost-only, so this closes the browser cross-origin vector without any client change.
 
-**Defense in depth — required custom header (one central client change):**
-
-- Require a non-simple custom request header (e.g. `x-requested-by: treemon`) on every
-  remoting call. A CORS *simple request* cannot set a custom header without triggering a
-  preflight the no-CORS server will fail, so cross-origin pages are blocked at the browser.
-- This needs the Fable.Remoting client to be configured to send the header on every call
-  (one place, via the client's header/route customization), and the `tm` CLI's `HttpClient`
-  to add the same header.
-
-Requiring `Content-Type: application/json` is **necessary but not sufficient** on its own
-(confirmed the library doesn't enforce it and `text/plain` bypasses it), so it is not the
-control — the Origin check and/or custom-header are.
-
-Recommended: ship the **Origin/Referer allowlist** first (smallest, no client change), and
-optionally add the custom-header check as belt-and-suspenders.
+Content-type enforcement was weighed as defense-in-depth but **not** added: the Origin check already
+blocks the vector, and coupling to the clients' exact content-type risks breaking the CLI (which the
+verified `text/plain` fall-through below shows the library does not constrain).
 
 ## Decisions
 
@@ -118,27 +114,26 @@ optionally add the custom-header check as belt-and-suspenders.
   CSRF is exclusively a browser-driven attack, so absence-of-Origin is safe to allow and
   avoids breaking the CLI.
 - **`application/json` enforcement is not the control.** Kept only as optional extra
-  hardening; the verified `text/plain` fall-through means it can't stand alone.
+  hardening; the verified `text/plain` fall-through means it can't stand alone, so it was not added.
+- **The canvas POST routes carry the same guard.** `register`/`attribute` are the same cross-origin
+  surface — and `attribute`'s owner sessionId flows into a `--resume` launch — so the *same*
+  `csrfGuard` fronts them; the bridge's header-less Node `fetch` still passes via the carve-out.
 
 ## Key Files
 
-- **Server**: `src/Server/Program.fs` — `buildRemotingHandler` (add the Origin/Referer
-  middleware here) and the Saturn app builder (`use_router/url/use_static/use_gzip`); the
-  loopback `serverUrl` + default port feed the same-origin allowlist value.
-- **Shared contract (context)**: `src/Shared/Types.fs` — `IWorktreeApi` (all methods covered
-  by the pipeline fix; the roots methods that surfaced this are `addRoot`/`removeRoot`/
-  `getRoots`).
-- **Implementations (context)**: `src/Server/WorktreeApi.fs` — `addRootToConfig` /
-  `removeRootFromConfig` / `writeWorktreeRoots` and the pre-existing process-launching members.
-- **Client (only if custom-header option is chosen)**: the Fable.Remoting client setup in
-  `src/Client/` (central header/route config) and the `tm` CLI `HttpClient` in
-  `src/Cli/Program.fs`.
+- **`src/Server/HttpSecurity.fs`** — the guard: pure `isSameOriginRequest` / `isRequestAllowed`
+  decision + `csrfGuard: HttpHandler`.
+- **`src/Server/Program.fs`** — composes `HttpSecurity.csrfGuard` before the remoting handler and
+  before the `POST /api/canvas/register` and `/api/canvas/attribute` routes.
+- **`src/Server/CanvasDocServer.fs`** — the canvas register/attribute handlers the guard fronts.
+- **`src/Shared/Types.fs`** — `IWorktreeApi` (every method is covered by the single pipeline guard).
+- **`src/Tests/HttpSecurityTests.fs`** — unit tests for the pure loopback / same-origin decision.
 
 ## Verification
 
-- A cross-origin `text/plain` POST to `removeRoot`/`addRoot` (and a process-launching method)
-  is rejected `403` once the middleware is in place.
-- The same-origin web client and `tm add` / `tm remove` continue to work unchanged (Origin
-  option) or after the single client header change (custom-header option).
-- Full suite stays green (Unit + Fast + E2E); E2E exercises the same-origin client path end
-  to end.
+- `HttpSecurityTests` unit-covers the pure decision: loopback Origin (localhost / 127.0.0.1 / `[::1]`,
+  any port, http or https) allowed; public host, LAN IP, opaque `null`, and unparseable rejected;
+  Referer consulted only when Origin is absent; safe methods bypass; a missing pair allowed.
+- End-to-end on a fixtures server: no-Origin (CLI / bridge) and loopback-Origin (SPA) POSTs to the
+  remoting surface and to both canvas routes → `200`; a cross-origin Origin → `403`.
+- Full suite (Unit + Fast + E2E) stays green; E2E exercises the same-origin client path end to end.

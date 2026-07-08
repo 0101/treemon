@@ -375,13 +375,14 @@
             gap: 4px; padding: 28px 18px; font-size: 0.95em; color: #a6adc8;
         }
         .modal-loading { color: #a6adc8; font-size: 0.95em; text-align: center; padding: 18px 0; }
-        .modal-input {
+        .modal-input, .modal-textarea {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
             padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
             outline: none; transition: border-color 0.15s;
         }
-        .modal-input:focus { border-color: #89b4fa; }
-        .modal-input::placeholder { color: #585b70; }
+        .modal-textarea { resize: vertical; }
+        .modal-input:focus, .modal-textarea:focus { border-color: #89b4fa; }
+        .modal-input::placeholder, .modal-textarea::placeholder { color: #585b70; }
         .modal-select {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
             padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;

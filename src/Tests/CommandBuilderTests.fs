@@ -48,7 +48,7 @@ type ResumeCommandTests() =
     [<Test>]
     member _.``Claude Resume with id includes permission flag``() =
         let inv = build (Some CodingToolProvider.Claude) (Resume (Some "abc-123"))
-        Assert.That(inv.AsShellString, Is.EqualTo("claude --dangerously-skip-permissions --resume abc-123"))
+        Assert.That(inv.AsShellString, Is.EqualTo("claude --dangerously-skip-permissions --resume 'abc-123'"))
 
     [<Test>]
     member _.``Claude Resume without id uses --continue with permission flag``() =
@@ -58,7 +58,20 @@ type ResumeCommandTests() =
     [<Test>]
     member _.``Copilot Resume with id includes yolo flag``() =
         let inv = build (Some CodingToolProvider.Copilot) (Resume (Some "abc-123"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume abc-123"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume 'abc-123'"))
+
+    // F9 (security): the resume id is interpolated into a pwsh -EncodedCommand script, so it must be
+    // single-quoted with embedded quotes doubled exactly like the Interactive prompt. Without this a
+    // hostile owner sessionId (planted via /api/canvas/attribute) could inject PowerShell.
+    [<Test>]
+    member _.``Claude Resume single-quotes and escapes the id (no command injection)``() =
+        let inv = build (Some CodingToolProvider.Claude) (Resume (Some "abc'; rm -rf ~ #"))
+        Assert.That(inv.AsShellString, Is.EqualTo("claude --dangerously-skip-permissions --resume 'abc''; rm -rf ~ #'"))
+
+    [<Test>]
+    member _.``Copilot Resume single-quotes and escapes the id (no command injection)``() =
+        let inv = build (Some CodingToolProvider.Copilot) (Resume (Some "$(calc); '"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume '$(calc); '''"))
 
     [<Test>]
     member _.``Copilot Resume without id uses --continue with yolo flag``() =
@@ -141,3 +154,88 @@ type ActionPromptTests() =
     member _.``None provider falls back to Copilot for FixPr``() =
         let result = actionPrompt None (FixPr "https://example.com/pr/1")
         Assert.That(result, Is.EqualTo("use pr skill with https://example.com/pr/1"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SkillInvocationTests() =
+
+    [<Test>]
+    member _.``Copilot wraps arg as natural-language skill invocation``() =
+        let result = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "why is the build slow"
+        Assert.That(result, Is.EqualTo("use investigate skill with why is the build slow"))
+
+    [<Test>]
+    member _.``Claude wraps arg as slash command``() =
+        let result = skillInvocation (Some CodingToolProvider.Claude) "investigate" "why is the build slow"
+        Assert.That(result, Is.EqualTo("/investigate why is the build slow"))
+
+    [<Test>]
+    member _.``None provider falls back to Copilot``() =
+        let result = skillInvocation None "investigate" "trace the memory leak"
+        Assert.That(result, Is.EqualTo("use investigate skill with trace the memory leak"))
+
+    [<Test>]
+    member _.``multi-line arg is preserved verbatim``() =
+        let arg = "first line\nsecond line"
+        let result = skillInvocation (Some CodingToolProvider.Copilot) "investigate" arg
+        Assert.That(result, Is.EqualTo("use investigate skill with first line\nsecond line"))
+
+    // Locks the refactor's byte-identical guarantee: actionPrompt's FixPr/FixBuild
+    // cases must delegate to skillInvocation with the "pr"/"fix-build" skill names.
+    [<Test>]
+    member _.``matches actionPrompt FixPr for Copilot``() =
+        let url = "https://github.com/org/repo/pull/7"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Copilot) "pr" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Copilot) (FixPr url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+    [<Test>]
+    member _.``matches actionPrompt FixPr for Claude``() =
+        let url = "https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Claude) "pr" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Claude) (FixPr url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+    [<Test>]
+    member _.``matches actionPrompt FixBuild for Copilot``() =
+        let url = "https://dev.azure.com/org/proj/_build/results?buildId=123"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Copilot) "fix-build" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Copilot) (FixBuild url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+    [<Test>]
+    member _.``matches actionPrompt FixBuild for Claude``() =
+        let url = "https://dev.azure.com/org/proj/_build/results?buildId=123"
+        let viaHelper = skillInvocation (Some CodingToolProvider.Claude) "fix-build" url
+        let viaAction = actionPrompt (Some CodingToolProvider.Claude) (FixBuild url)
+        Assert.That(viaHelper, Is.EqualTo(viaAction))
+
+// Verification coverage for tm-quicklaunch-nvb (worktree prompt -> investigate launch).
+// These reproduce the exact command-construction chain WorktreeApi.createWorktree performs on
+// auto-launch: skillInvocation wraps the user's prompt, then CodingToolCli.build renders the
+// interactive shell string. Kept as falsifiable, literal-output assertions.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type InvestigateLaunchCommandTests() =
+
+    [<Test>]
+    member _.``build wraps the Copilot investigate invocation as an interactive shell string``() =
+        let wrapped = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "clean up auth"
+        let cmd = (build (Some CodingToolProvider.Copilot) (Interactive wrapped)).AsShellString
+        Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with clean up auth'"))
+
+    // A 3-line prompt survives the whole launch-command construction intact — every line
+    // and the newlines between them remain inside the single-quoted argument (not truncated at the
+    // first newline, no line dropped).
+    [<Test>]
+    member _.``multi-line prompt survives launch command construction intact``() =
+        let prompt = "line a\nline b\nline c"
+        let wrapped = skillInvocation (Some CodingToolProvider.Copilot) "investigate" prompt
+        let cmd = (build (Some CodingToolProvider.Copilot) (Interactive wrapped)).AsShellString
+        Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with line a\nline b\nline c'"))
+        Assert.That(cmd, Does.Contain("line a"), "first line must be present")
+        Assert.That(cmd, Does.Contain("line b"), "middle line must be present")
+        Assert.That(cmd, Does.Contain("line c"), "last line must be present")
+        Assert.That(cmd, Does.Contain("line a\nline b\nline c"), "newlines between all three lines must be preserved")

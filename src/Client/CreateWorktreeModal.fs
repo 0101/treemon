@@ -9,7 +9,8 @@ type CreateWorktreeForm =
     { RepoId: RepoId
       Branches: string list
       Name: string
-      BaseBranch: string }
+      BaseBranch: string
+      Prompt: string }
 
 type ModalState =
     | Closed
@@ -24,6 +25,7 @@ type Msg =
     | BranchesLoaded of Result<string list, exn>
     | SetNewWorktreeName of string
     | SetBaseBranch of string
+    | SetPrompt of string
     | SubmitCreateWorktree
     | CreateWorktreeCompleted of Result<string list, string>
     | CloseCreateModal
@@ -58,7 +60,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
 
     | BranchesLoaded (Ok branches), LoadingBranches rid ->
         let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
-        just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch })
+        just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch; Prompt = "" })
     | BranchesLoaded (Ok _), _ -> just modal
 
     | BranchesLoaded (Error _), LoadingBranches rid -> just (CreateError (rid, "Failed to load branches"))
@@ -70,11 +72,15 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
     | SetBaseBranch branch, Open form -> just (Open { form with BaseBranch = branch })
     | SetBaseBranch _, _ -> just modal
 
+    | SetPrompt prompt, Open form -> just (Open { form with Prompt = prompt })
+    | SetPrompt _, _ -> just modal
+
     | SubmitCreateWorktree, Open form when form.Name.Trim().Length > 0 ->
         let request: CreateWorktreeRequest =
             { RepoId = RepoId.value form.RepoId
               BranchName = BranchName.create (form.Name.Trim())
-              BaseBranch = BranchName.create form.BaseBranch }
+              BaseBranch = BranchName.create form.BaseBranch
+              Prompt = (let t = form.Prompt.Trim() in if t = "" then None else Some t) }
         { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
         Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
     | SubmitCreateWorktree, _ -> just modal
@@ -132,10 +138,22 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                         prop.className "modal-select"
                         prop.value form.BaseBranch
                         prop.onChange (fun (v: string) -> dispatch (SetBaseBranch v))
+                        prop.onKeyDown (fun e ->
+                            if e.key = "Escape" then dispatch CloseCreateModal)
                         prop.children (
                             form.Branches
                             |> List.map (fun b ->
                                 Html.option [ prop.value b; prop.text b ]))
+                    ]
+                    Html.textarea [
+                        prop.className "modal-textarea"
+                        prop.rows 3
+                        prop.placeholder "Optional prompt — a non-empty value launches an investigate session in the new worktree"
+                        prop.value form.Prompt
+                        prop.onChange (fun (v: string) -> dispatch (SetPrompt v))
+                        prop.onKeyDown (fun e ->
+                            // Enter inserts a newline (default); it must not submit. Escape closes.
+                            if e.key = "Escape" then dispatch CloseCreateModal)
                     ]
                 ]
             ]
