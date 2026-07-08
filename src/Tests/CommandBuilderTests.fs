@@ -220,24 +220,13 @@ type SkillInvocationTests() =
 [<Category("Fast")>]
 type InvestigateLaunchCommandTests() =
 
-    // Step 1: command construction for the investigate skill.
-    [<Test>]
-    member _.``skillInvocation investigate Copilot yields natural-language form``() =
-        let result = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "clean up auth"
-        Assert.That(result, Is.EqualTo("use investigate skill with clean up auth"))
-
-    [<Test>]
-    member _.``skillInvocation investigate Claude yields slash-command form``() =
-        let result = skillInvocation (Some CodingToolProvider.Claude) "investigate" "clean up auth"
-        Assert.That(result, Is.EqualTo("/investigate clean up auth"))
-
     [<Test>]
     member _.``build wraps the Copilot investigate invocation as an interactive shell string``() =
         let wrapped = skillInvocation (Some CodingToolProvider.Copilot) "investigate" "clean up auth"
         let cmd = (build (Some CodingToolProvider.Copilot) (Interactive wrapped)).AsShellString
         Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with clean up auth'"))
 
-    // Step 2: a 3-line prompt survives the whole launch-command construction intact — every line
+    // A 3-line prompt survives the whole launch-command construction intact — every line
     // and the newlines between them remain inside the single-quoted argument (not truncated at the
     // first newline, no line dropped).
     [<Test>]

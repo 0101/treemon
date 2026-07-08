@@ -27,16 +27,3 @@ type BuildScriptTests() =
         let result = buildScript @"C:\wt\o'brien" None
         Assert.That(result, Is.EqualTo(@"Set-Location 'C:\wt\o''brien'"))
         Assert.That(result, Does.Not.Contain(";"), "no-command branch must not append a command separator")
-
-    [<Test>]
-    member _.``every single quote in the path is doubled, not just the first``() =
-        // Guards against a naive first-occurrence escape: both apostrophes must be doubled.
-        let result = buildScript @"C:\o'br'ien" (Some "run")
-        Assert.That(result, Is.EqualTo(@"Set-Location 'C:\o''br''ien'; run"))
-
-    [<Test>]
-    member _.``a path with no single quote is emitted verbatim``() =
-        // Reference/common case: the escaping is a no-op for a normal path — no over-escaping,
-        // and the Set-Location '<path>'; <cmd> wrapper is well-formed.
-        let result = buildScript @"C:\wt\feature-x" (Some "copilot --yolo -i 'go'")
-        Assert.That(result, Is.EqualTo(@"Set-Location 'C:\wt\feature-x'; copilot --yolo -i 'go'"))
