@@ -155,39 +155,48 @@
         .progress-segment.seg-blocked { background: #fab387; }
         .progress-segment.seg-closed { background: #a6e3a1; }
 
-        /* Overview band (spec: docs/spec/beads-overview-band.md) — chrome-less cross-worktree
-           roll-up rendered inside .dashboard above .repo-list, gated on Model.OverviewPanelOpen.
-           Two sibling sections share one count+label rhythm: agents are circles (one per active
-           agent, grouped by skill); tasks are solid bars drawn as a run of identical unit cells, so
-           a count-N bar is exactly N cells wide — one true shared linear scale with no inline width.
-           No box and no title bar (the toggle button is the band's only header). */
-        .overview-band { display: flex; flex-direction: column; gap: 14px; margin-bottom: 16px; }
-        /* Reflow via the dashboard container-query: sections stack on narrow panes, sit side by
-           side once the dashboard is wide. (.dashboard carries container-name: dashboard.) */
-        @container dashboard (min-width: 1200px) {
-            .overview-band { flex-direction: row; gap: 48px; align-items: flex-start; }
-        }
-        .overview-section { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px; min-width: 0; }
-        .overview-item { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: min-content; }
-        .overview-marks { display: flex; align-items: flex-end; gap: 3px; min-height: 12px; }
-        .overview-marks.overview-bar { gap: 0; }
-        .overview-circle { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex: none; }
-        .overview-cell { width: 8px; height: 12px; background: currentColor; flex: none; }
-        .overview-meta { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
-        .overview-label { font-size: 0.82em; font-weight: 600; color: #9399b2; }
-        .overview-count { font-size: 0.82em; font-weight: 600; }
-        /* Accent colour per category — drives the count text and, via currentColor, the mark fill. */
-        .task-planned { color: #f9e2af; }
-        .task-queued { color: #cba6f7; }
-        .task-inprogress { color: #89b4fa; }
-        .task-blocked { color: #fab387; }
-        .task-done { color: #a6e3a1; }
+        /* Overview band (spec: docs/spec/beads-overview-band.md, Corrections v1.1) — chrome-less
+           cross-worktree roll-up rendered inside .dashboard above .repo-list, gated on
+           Model.OverviewPanelOpen. Rebuilt to match the prototype's .band block exactly
+           (.agents/canvas/beads-panel-prototypes.html): two STACKED sections split by a 1px dashed
+           rule; each opens with an uppercase muted header; each category is a column with a
+           count-first meta line ABOVE its visual (count in the accent colour, label neutral, same
+           size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
+           tasks are ONE proportional bar per status on one true shared scale (width computed inline
+           from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)); a
+           muted footer caption sits under the tasks. No box/title bar beyond the prototype's
+           top/bottom hairlines (the toggle button is the header); it reflows with the dashboard
+           container-query as the category columns wrap on narrow panes. */
+        .overview-band { background: #1e1e2e; border-top: 1px solid #313244; border-bottom: 1px solid #313244; padding: 15px 16px; margin-bottom: 16px; }
+        .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
+        .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
+        /* Shared column layout — identical for both sections; only the visual row differs. Wrapping
+           here is the reflow: category columns wrap onto new rows when the dashboard pane narrows. */
+        .overview-items { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
+        .overview-item { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; flex: 0 0 auto; }
+        .overview-meta { font-size: 12.5px; color: #a6adc8; white-space: nowrap; }
+        /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
+           it tints the count text while the label keeps the neutral .overview-meta colour. */
+        .overview-count { font-weight: 400; margin-right: 3px; }
+        .overview-label { font-weight: 400; }
+        .overview-circles { display: flex; gap: 5px; }
+        .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
+        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; }
+        .overview-caption { font-size: 11px; color: #6c7086; margin-top: 11px; }
+        /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
+           count text and, via currentColor, the circle/bar fill. */
+        .task-planned { color: #fab387; }
+        .task-queued { color: #89dceb; }
+        .task-inprogress { color: #a6e3a1; }
+        .task-blocked { color: #f38ba8; }
+        .task-done { color: #cba6f7; }
         .activity-investigating { color: #89dceb; }
-        .activity-planning { color: #f9e2af; }
+        .activity-planning { color: #cba6f7; }
         .activity-executing { color: #a6e3a1; }
-        .activity-reviewing { color: #cba6f7; }
+        .activity-reviewing { color: #f5c2e7; }
         .activity-fixing { color: #fab387; }
         .activity-working { color: #89b4fa; }
+        .activity-waiting { color: #f9e2af; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }

@@ -1,25 +1,40 @@
 module OverviewBand
 
-// The chrome-less Overview band (spec: docs/spec/beads-overview-band.md).
+// The chrome-less Overview band (spec: docs/spec/beads-overview-band.md, Corrections v1.1).
 //
-// A native Feliz view — CSS classes only, no inline styles — rendered inside the dashboard, above
-// the repo list, gated by the caller on Model.OverviewPanelOpen. It consumes the pure cross-worktree
-// roll-up from OverviewData.aggregate and paints two sibling sections that share one count+label
-// rhythm:
-//   - Active agents -> one CIRCLE per active agent, grouped by the skill each is running.
-//   - Tasks         -> one solid BAR per status, drawn as a run of identical unit CELLS. Because
-//                      every cell is the same fixed CSS size, a count-N bar is exactly N cells wide,
-//                      so every bar sits on ONE true shared linear scale (no cap, no fade) WITHOUT
-//                      any inline width style — honouring the CSS-classes-only constraint. Scale is
-//                      therefore implicit in the geometry rather than read from Overview.Scale.
+// A native Feliz view rendered inside the dashboard, above the repo list, gated by the caller on
+// Model.OverviewPanelOpen. It consumes the pure cross-worktree roll-up from OverviewData.aggregate
+// and paints the prototype's `.band` block (.agents/canvas/beads-panel-prototypes.html) exactly:
+// two STACKED sections split by a 1px dashed rule, each opening with an uppercase muted header, each
+// category a column whose count+label meta line sits ABOVE its visual (count FIRST in the accent
+// colour, label neutral, same size/weight):
+//   - Active agents -> a row of ~15px CIRCLES, one per red-dot working agent, grouped by activity,
+//                      plus the distinct Waiting group.
+//   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. The bar
+//                      width is COMPUTED from Overview.Scale (count / Scale of a fixed max width,
+//                      floored at a visible minimum) and applied as an inline width — the accepted,
+//                      documented exception to the CSS-classes-only rule (a proportional width is
+//                      inherently dynamic; spec decision (g)). The old N-unit-cell workaround is gone.
+// A muted footer caption sits under the tasks.
 //
 // Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
-// fully-empty roll-up collapses to nothing at all. v1 is static — no hover/click/greenlight.
+// fully-empty roll-up collapses to Html.none. v1 is static — no hover/click/greenlight.
 
 open Shared
 open Navigation
 open Feliz
 open OverviewData
+
+/// The fixed max bar width, in px: the largest task bucket fills this and every other bar is
+/// proportional to it (matches the prototype's `380 / maxN` scale factor).
+let private barMaxPx = 380
+
+/// Floor for a bar width, in px: a count-1 bar still reads as a visible sliver (prototype min 5px).
+let private barMinPx = 5
+
+/// The muted footer caption under the task bars (verbatim from the prototype).
+let private taskCaption =
+    "one true scale — bar length ∝ task count across all categories · counts in the labels · short bars keep their full label"
 
 /// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
 /// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
@@ -43,7 +58,7 @@ let private taskLabel =
     | TaskBucketKind.Done -> "Done"
 
 // Accent-color modifier class per task bucket. The class sets `color`, which drives BOTH the count
-// text and the cell fill (the cell paints `background: currentColor`).
+// text and the bar fill (the bar paints `background: currentColor`).
 let private taskClass =
     function
     | TaskBucketKind.Planned -> "task-planned"
@@ -84,45 +99,66 @@ let private agentClass =
     | AgentGroupKind.Activity activity -> activityClass activity
     | AgentGroupKind.Waiting -> "activity-waiting"
 
-/// One category column shared by both sections: a run of `count` identical marks over a count+label
-/// meta line. `marksContainerClass` picks the mark spacing (circles keep a gap; the bar closes it so
-/// its cells read as one solid bar); `markClass` picks the glyph (circle vs cell). Both the marks and
-/// the count carry `accentClass` so they take the category colour; the label stays neutral so count
-/// and label share font size/weight and differ only by colour.
-let private renderColumn
-    (marksContainerClass: string)
-    (markClass: string)
-    (accentClass: string)
-    (label: string)
-    (count: int)
-    =
+/// The count+label meta line shown ABOVE each visual: count FIRST in the accent colour, label
+/// neutral, both the same font size/weight so they differ only by colour (prototype `.ulbl`). The
+/// accent class sets `color`, so it tints the count; the label keeps the neutral meta colour.
+let private metaLine (accentClass: string) (label: string) (count: int) =
+    Html.div
+        [ prop.className "overview-meta"
+          prop.children
+              [ Html.span [ prop.className ("overview-count " + accentClass); prop.text (string count) ]
+                Html.span [ prop.className "overview-label"; prop.text label ] ] ]
+
+/// One agent group column: the meta line above a row of ~15px circles, one per agent, tinted to the
+/// group's accent (circle fill = currentColor, driven by the accent class).
+let private agentColumn (group: AgentGroup) =
+    let accent = agentClass group.Kind
+
     Html.div
         [ prop.className "overview-item"
-          prop.key accentClass
+          prop.key accent
           prop.children
-              [ Html.div
-                    [ prop.className marksContainerClass
-                      prop.children
-                          [ for i in 1..count ->
-                                Html.span [ prop.key i; prop.className (markClass + " " + accentClass) ] ] ]
+              [ metaLine accent (agentLabel group.Kind) group.Count
                 Html.div
-                    [ prop.className "overview-meta"
+                    [ prop.className "overview-circles"
                       prop.children
-                          [ Html.span [ prop.className "overview-label"; prop.text label ]
-                            Html.span [ prop.className ("overview-count " + accentClass); prop.text (string count) ] ] ] ] ]
+                          [ for i in 1 .. group.Count ->
+                                Html.span [ prop.key i; prop.className ("overview-circle " + accent) ] ] ] ] ]
 
-let private agentColumn (group: AgentGroup) =
-    renderColumn "overview-marks" "overview-circle" (agentClass group.Kind) (agentLabel group.Kind) group.Count
+/// One task bucket column: the meta line above ONE proportional bar. The width is computed on the
+/// single shared scale — count / Scale of the fixed max width, floored at barMinPx so a count-1 bar
+/// stays visible — and applied inline (the accepted, documented CSS-classes-only exception; spec
+/// decision (g)). `scale` is the largest bucket count, so the widest bar is exactly barMaxPx and
+/// every other is proportional. Fill = currentColor via the accent class.
+let private taskColumn (scale: int) (bucket: TaskBucket) =
+    let accent = taskClass bucket.Kind
+    // scale > 0 whenever any bucket is shown; +0.5 then truncate mirrors the prototype's Math.round.
+    let px = max barMinPx (int (float bucket.Count / float scale * float barMaxPx + 0.5))
 
-let private taskColumn (bucket: TaskBucket) =
-    renderColumn "overview-marks overview-bar" "overview-cell" (taskClass bucket.Kind) (taskLabel bucket.Kind) bucket.Count
+    Html.div
+        [ prop.className "overview-item"
+          prop.key accent
+          prop.children
+              [ metaLine accent (taskLabel bucket.Kind) bucket.Count
+                Html.div [ prop.className ("overview-bar " + accent); prop.style [ style.width (length.px px) ] ] ] ]
 
-// A section renders only when it has at least one non-empty category, so an all-empty lens leaves no
-// stray container behind.
-let private renderSection (extraClass: string) (columns: ReactElement list) =
-    match columns with
-    | [] -> Html.none
-    | cols -> Html.div [ prop.className ("overview-section " + extraClass); prop.children cols ]
+/// The uppercase muted section header text. Agents extend with the waiting count only when a Waiting
+/// group is present; tasks are constant. CSS upper-cases the text, so it reads e.g.
+/// "ACTIVE AGENTS · 9 WORKING · 2 WAITING" / "TASKS · ACROSS ALL WORKTREES".
+let private agentsHeader (workingCount: int) (waitingCount: int option) =
+    match waitingCount with
+    | Some m -> sprintf "Active agents · %d working · %d waiting" workingCount m
+    | None -> sprintf "Active agents · %d working" workingCount
+
+/// A section shell: an uppercase header over the wrapping row of category columns, plus any trailing
+/// caption (the tasks section's footnote). The stacked layout + dashed separator live in CSS.
+let private section (header: string) (columns: ReactElement list) (caption: ReactElement) =
+    Html.div
+        [ prop.className "overview-section"
+          prop.children
+              [ Html.div [ prop.className "overview-header"; prop.text header ]
+                Html.div [ prop.className "overview-items"; prop.children columns ]
+                caption ] ]
 
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
 /// so the band adds no chrome (not even margin) when there is nothing to show.
@@ -132,8 +168,31 @@ let view (repos: RepoModel list) : ReactElement =
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
     | agents, tasks ->
+        // Header counts: N red-dot working agents, and M waiting (only when a Waiting group exists).
+        let workingCount =
+            agents
+            |> List.sumBy (fun g ->
+                match g.Kind with
+                | AgentGroupKind.Activity _ -> g.Count
+                | AgentGroupKind.Waiting -> 0)
+
+        let waitingCount =
+            agents
+            |> List.tryPick (fun g ->
+                match g.Kind with
+                | AgentGroupKind.Waiting -> Some g.Count
+                | AgentGroupKind.Activity _ -> None)
+
         Html.div
             [ prop.className "overview-band"
               prop.children
-                  [ renderSection "overview-agents" (agents |> List.map agentColumn)
-                    renderSection "overview-tasks" (tasks |> List.map taskColumn) ] ]
+                  [ match agents with
+                    | [] -> Html.none
+                    | groups -> section (agentsHeader workingCount waitingCount) (groups |> List.map agentColumn) Html.none
+                    match tasks with
+                    | [] -> Html.none
+                    | buckets ->
+                        section
+                            "Tasks · across all worktrees"
+                            (buckets |> List.map (taskColumn overview.Scale))
+                            (Html.div [ prop.className "overview-caption"; prop.text taskCaption ]) ] ]
