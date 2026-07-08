@@ -138,6 +138,8 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                         prop.className "modal-select"
                         prop.value form.BaseBranch
                         prop.onChange (fun (v: string) -> dispatch (SetBaseBranch v))
+                        prop.onKeyDown (fun e ->
+                            if e.key = "Escape" then dispatch CloseCreateModal)
                         prop.children (
                             form.Branches
                             |> List.map (fun b ->
