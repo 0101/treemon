@@ -27,28 +27,10 @@ let isMerged (wt: WorktreeStatus) =
     | HasPr pr -> pr.IsMerged
     | NoPr -> false
 
-/// Left color-stripe modifier class for an active worktree's current activity, or "" for no
-/// stripe. Gated on an active session (mirrors the band's active filter) so an idle card never
-/// shows a stale skill; Working / no recognized skill also yields no stripe (spec: per-card
-/// activity stripe). Activity is derived from CurrentSkill via the Shared classifier, so the
-/// stripe and the overview-band circles share one source of truth. Classes are card-scoped
-/// (act-*) and distinct from the band's activity-* accent classes (which set text color).
-let activityStripe (wt: WorktreeStatus) =
-    if wt.HasActiveSession then
-        match Activity.classify (wt.CurrentSkill |> Option.defaultValue "") with
-        | CurrentActivity.Investigating -> " act-investigating"
-        | CurrentActivity.Planning      -> " act-planning"
-        | CurrentActivity.Executing     -> " act-executing"
-        | CurrentActivity.Reviewing     -> " act-reviewing"
-        | CurrentActivity.Fixing        -> " act-fixing"
-        | CurrentActivity.Working       -> ""
-    else ""
-
 let cardClassName (wt: WorktreeStatus) =
     let ct = ctClassName wt.CodingTool
     let session = if wt.HasActiveSession then " has-session" else ""
-    let stripe = activityStripe wt
-    if isMerged wt then $"wt-card ct-{ct} merged{session}{stripe}" else $"wt-card ct-{ct}{session}{stripe}"
+    if isMerged wt then $"wt-card ct-{ct} merged{session}" else $"wt-card ct-{ct}{session}"
 
 let beadsTotal (b: BeadsSummary) = b.Open + b.InProgress + b.Blocked + b.Closed
 
