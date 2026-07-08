@@ -50,7 +50,7 @@ type CanvasInjectionThemeE2ETests() =
         task {
             let doc = "<!doctype html><html><head><title>plain</title></head><body>plain text</body></html>"
             let served = injectInto AgentDoc "plain.html" doc
-            do! this.ServeAndGoto "**/plain.html" "http://127.0.0.1:5002/wt/plain.html" served
+            do! this.ServeAndGoto "**/plain.html" $"{ServerFixture.canvasUrl}/wt/plain.html" served
 
             let! bg = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
             let! color = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).color")
@@ -67,7 +67,7 @@ type CanvasInjectionThemeE2ETests() =
         task {
             let doc = "<!doctype html><html><head><title>typo</title></head><body><h1>Title</h1><p id=p>Body copy long enough to need a measure cap for comfortable reading across the pane.</p></body></html>"
             let served = injectInto AgentDoc "typo.html" doc
-            do! this.ServeAndGoto "**/typo.html" "http://127.0.0.1:5002/wt/typo.html" served
+            do! this.ServeAndGoto "**/typo.html" $"{ServerFixture.canvasUrl}/wt/typo.html" served
 
             let! bodyFont = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).fontSize")
             let! bodyLine = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).lineHeight")
@@ -90,7 +90,7 @@ type CanvasInjectionThemeE2ETests() =
         task {
             let doc = "<!doctype html><html><head><style>body{background:rgb(0,128,0)}</style></head><body>owned</body></html>"
             let served = injectInto AgentDoc "owned.html" doc
-            do! this.ServeAndGoto "**/owned.html" "http://127.0.0.1:5002/wt/owned.html" served
+            do! this.ServeAndGoto "**/owned.html" $"{ServerFixture.canvasUrl}/wt/owned.html" served
 
             let! bg = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
             // The doc's own element rule body{} (0,0,1) must beat the injected :where(body) reset (0,0,0)
@@ -110,7 +110,7 @@ type CanvasInjectionThemeE2ETests() =
             // The dashboard fetches beads-data on load; stub it so the page settles cleanly.
             do! this.Page.RouteAsync("**/beads-data", fun route ->
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "[]")))
-            do! this.ServeAndGoto "**/beads.html" "http://127.0.0.1:5002/wt/beads.html" served
+            do! this.ServeAndGoto "**/beads.html" $"{ServerFixture.canvasUrl}/wt/beads.html" served
 
             let! bg = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).backgroundColor")
             // BeadspaceTemplate.html declares :root{--bg-deep:#1e1e2e} and body{background:var(--bg-deep)};
@@ -128,7 +128,7 @@ type CanvasInjectionThemeE2ETests() =
 // Item 2 (canvasSend tab switch) + Item 3 (doc JS error banner)
 //
 // Full-app pane E2E (server + Fable + Vite via ServerFixture.GlobalSetup). We
-// intercept the canvas-doc-server iframe requests (http://127.0.0.1:5002/.../<doc>)
+// intercept the canvas-doc-server iframe requests (ServerFixture.canvasUrl/.../<doc>)
 // and serve the REAL injected doc, so the genuine in-iframe window.canvasSend /
 // window.onerror / unhandledrejection drive the genuine Elmish pane.
 // ============================================================================

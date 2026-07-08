@@ -160,7 +160,7 @@ let update msg model =
                 | Some (scopedKey, filename) when not canvasShowingDoc ->
                     Cmd.batch [
                         if not model.Canvas.CanvasPaneOpen then Cmd.ofMsg ToggleCanvasPane
-                        Cmd.ofMsg (SetFocus (Some (Card scopedKey)))
+                        Cmd.ofMsg (SetFocusNoRetarget (Some (Card scopedKey)))
                         Cmd.ofMsg (SelectCanvasDoc (scopedKey, filename))
                     ]
                 | _ -> Cmd.none
@@ -172,24 +172,22 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
-                Mascot = { model.Mascot with EyeDirection = MascotState.randomEyeDirection () }
+                Mascot.EyeDirection = MascotState.randomEyeDirection ()
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
-                Canvas =
-                    { model.Canvas with
-                        CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
-                        CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
-                        CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
-                        PreviousCanvasHashes = currentCanvasHashes
-                        CanvasEvents = canvasEvents
-                        CanvasSendState = canvasSendState } }
+                Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
+                Canvas.CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
+                Canvas.CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
+                Canvas.PreviousCanvasHashes = currentCanvasHashes
+                Canvas.CanvasEvents = canvasEvents
+                Canvas.CanvasSendState = canvasSendState }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
                     if seeded = m.Canvas.LastViewedHashes then m
-                    else { m with Canvas = { m.Canvas with LastViewedHashes = seeded } }
+                    else { m with Canvas.LastViewedHashes = seeded }
                 else m)
             |> (fun updatedModel ->
                 let allPaths =
@@ -273,7 +271,7 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        { model with Activity = activity; Canvas = { model.Canvas with CanvasEvents = expiredEvents } },
+        { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
@@ -396,7 +394,10 @@ let update msg model =
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
 
     | SetFocus target ->
-        { model with FocusedElement = target }, Cmd.none
+        CanvasUpdate.applyFocus true target model
+
+    | SetFocusNoRetarget target ->
+        CanvasUpdate.applyFocus false target model
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
@@ -433,6 +434,9 @@ let update msg model =
                 Cmd.none
             | _ -> model, Cmd.none
         else
+        let focusWithRetarget newFocus scrollHint extra =
+            let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
+            m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
         match key with
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
@@ -442,16 +446,11 @@ let update msg model =
                 | NoAction -> Cmd.none
                 | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
                 | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
-            { model with FocusedElement = newFocus },
-            Cmd.batch [ actionCmd; scrollToFocus scrollHint newFocus ]
+            focusWithRetarget newFocus scrollHint [ actionCmd ]
         | "Home" ->
-            let newFocus = navigateToFirst model.Repos
-            { model with FocusedElement = newFocus },
-            scrollToFocus ScrollToTop newFocus
+            focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
         | "End" ->
-            let newFocus = navigateToLast model.Repos
-            { model with FocusedElement = newFocus },
-            scrollToFocus ScrollToBottom newFocus
+            focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -473,10 +472,14 @@ let update msg model =
     | FocusOverviewCard scopedKey ->
         let openPane = not model.Canvas.CanvasPaneOpen
         let repos, expanded = expandRepoOwning scopedKey model.Repos
-        { model with Repos = repos; FocusedElement = Some (Card scopedKey); Canvas = { model.Canvas with CanvasPaneOpen = true } },
+        let retargetedModel, retargetCmd =
+            { model with Repos = repos; Canvas.CanvasPaneOpen = true }
+            |> CanvasUpdate.applyFocus true (Some (Card scopedKey))
+        retargetedModel,
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
             if expanded then saveCollapsedReposCmd repos
+            retargetCmd
         ]
 
     | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
@@ -484,6 +487,14 @@ let update msg model =
     | ArchiveCanvasDoc (scopedKey, filename) -> CanvasUpdate.archiveCanvasDoc scopedKey filename model
 
     | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
+
+    | ShareCanvasDoc (scopedKey, filename) -> CanvasUpdate.shareCanvasDoc scopedKey filename model
+
+    | ShareCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.shareCanvasDocResult scopedKey filename result model
+
+    | ClipboardWriteResult (url, outcome) -> CanvasUpdate.clipboardWriteResult url outcome model
+
+    | DismissShareNotice -> CanvasUpdate.dismissShareNotice model
 
     | NavigateCanvasDoc filename -> CanvasUpdate.navigateCanvasDoc filename model
 
@@ -515,15 +526,19 @@ let update msg model =
                 |> Option.defaultValue Map.empty
                 |> Map.add filename hash
             let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
-            { model with Canvas = { model.Canvas with LastViewedHashes = updatedHashes } },
+            { model with Canvas.LastViewedHashes = updatedHashes },
             Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
-        { model with Canvas = { model.Canvas with LastViewedHashes = hashes } }, Cmd.none
+        // Merge (don't overwrite) — this races the first `DataLoaded` seeding in `init`, so a plain
+        // overwrite with an empty/partial server map would wipe already-seeded docs and make them
+        // look unviewed. `seedLastViewedHashes` keeps every server value (genuine updates still
+        // register) and only fills in docs the server doesn't know, so arrival order stops mattering.
+        { model with Canvas.LastViewedHashes = seedLastViewedHashes model.Repos hashes }, Cmd.none
 
     | BridgeLivenessLoaded liveness ->
-        { model with Canvas = { model.Canvas with BridgeLiveness = liveness } }, Cmd.none
+        { model with Canvas.BridgeLiveness = liveness }, Cmd.none
 
     | MorphActiveDoc -> CanvasUpdate.morphActiveDoc model
 

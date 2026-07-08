@@ -42,8 +42,7 @@ let userActivity (now: float) (model: Model) : Model * Cmd<Msg> =
         else
             Cmd.none
 
-    { model with
-        Activity = { model.Activity with LastActivityTime = now; ActivityLevel = ActivityLevel.Active } },
+    { model with Activity.LastActivityTime = now; Activity.ActivityLevel = ActivityLevel.Active },
     wakeUpCmd
 
 /// Activity-detection subscription: dispatches `UserActivity` on user input

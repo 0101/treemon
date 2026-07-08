@@ -55,6 +55,12 @@ are the high-value targets; fixing it once at the pipeline protects all of them.
   restart — integrity/availability, never code execution.
 - The real value of acting is the **process-launching** endpoints, where a forged call has
   materially higher impact.
+- A later endpoint — `shareCanvasDoc` (canvas doc sharing; see `docs/spec/canvas-sharing.md`
+  §"Security Posture", finding F16) — adds a **data-egress** class to this surface: a forged call
+  publishes a local canvas file to an internet-reachable blob SAS URL. It stays Low (the response is
+  CORS-unreadable and the target worktree path is machine-specific / non-enumerable), but it is the
+  first member whose forged invocation *exfiltrates* rather than only mutating or launching — a further
+  reason to land the central fix.
 
 ## Goals
 

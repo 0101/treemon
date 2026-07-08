@@ -510,6 +510,16 @@
         }
         .canvas-archive-btn .btn-icon { width: 14px; height: 14px; }
         .canvas-archive-btn:hover { color: #f38ba8; border-color: #f38ba8; opacity: 1; }
+        .canvas-share-btn {
+            flex-shrink: 0;
+            background: none; border: 1px solid #45475a; border-radius: 4px;
+            color: #7f849c; cursor: pointer;
+            padding: 2px 6px; display: flex; align-items: center;
+            transition: color 0.15s, border-color 0.15s;
+            opacity: 0.5;
+        }
+        .canvas-share-btn .btn-icon { width: 14px; height: 14px; }
+        .canvas-share-btn:hover { color: #a6e3a1; border-color: #a6e3a1; opacity: 1; }
         .canvas-launch-btn {
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
@@ -548,6 +558,20 @@
             font-size: 1em; padding: 0 4px; opacity: 0.6;
         }
         .canvas-waiting-dismiss:hover { opacity: 1; }
+        /* Share success banner ("Shared — link copied"). Green signals success and keeps it distinct
+           from the red delivery-error banner (a share failure reuses that one) and the blue waiting
+           banner. Like them it is a normal flex child of the column-layout pane, so it pushes the
+           iframe down rather than overlaying it. */
+        .canvas-share-banner {
+            display: flex; align-items: center; justify-content: space-between;
+            background: #1e3a2a; color: #a6e3a1; padding: 4px 12px;
+            font-size: 0.85em; line-height: 1.4;
+        }
+        .canvas-share-dismiss {
+            background: none; border: none; color: #a6e3a1; cursor: pointer;
+            font-size: 1em; padding: 0 4px; opacity: 0.6;
+        }
+        .canvas-share-dismiss:hover { opacity: 1; }
         /* Doc-side JS error banner. Amber accent keeps it visually distinct from the red
            message-delivery failure banner (.canvas-error-banner) and the blue waiting banner.
            As a normal flex child of the column-layout .canvas-pane it pushes the iframe down

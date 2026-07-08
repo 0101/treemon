@@ -37,8 +37,7 @@ let private updateWorktree repoId branch transform repos =
 
 // Fixture-level transforms for chaining frames
 let private withRepos f (fix: FixtureData) =
-    { fix with
-        Worktrees = { fix.Worktrees with Repos = f fix.Worktrees.Repos } }
+    { fix with Worktrees.Repos = f fix.Worktrees.Repos }
 
 let private withRetry f = withRepos (updateWorktree azDoRepoId "feature/retry-logic" f)
 let private withConfig f = withRepos (updateWorktree azDoRepoId "refactor/config-loading" f)
@@ -47,9 +46,7 @@ let private withStream f = withRepos (updateWorktree githubRepoId "feature/strea
 
 let private withCpu cpu mem (fix: FixtureData) =
     { fix with
-        Worktrees =
-            { fix.Worktrees with
-                SystemMetrics = Some { CpuPercent = cpu; MemoryUsedMb = mem; MemoryTotalMb = 32768 } } }
+        Worktrees.SystemMetrics = Some { CpuPercent = cpu; MemoryUsedMb = mem; MemoryTotalMb = 32768 } }
 
 let private withCardEvt branch cardEvt (fix: FixtureData) =
     { fix with SyncStatus = fix.SyncStatus |> Map.add branch [ cardEvt ] }

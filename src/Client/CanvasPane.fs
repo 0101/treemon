@@ -6,7 +6,16 @@ open CanvasTypes
 open Feliz
 open Browser
 
+// The canvas-doc server origin for THIS build, injected by Vite's `define` (see vite.config.js).
+// Prod/dev default to 127.0.0.1:5002; the E2E test stack overrides CANVAS_PORT so its iframe origin
+// matches its own (dynamically chosen) canvas-doc port and never collides with a running production
+// instance on 5002. The .NET fallback keeps the module loadable from the (Fable-referencing) test
+// assembly, where the value is never exercised (that happens only in the browser).
+#if FABLE_COMPILER
+let CanvasOrigin: string = Fable.Core.JsInterop.emitJsExpr () "__CANVAS_ORIGIN__"
+#else
 let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
+#endif
 // Doc→pane message size cap, in UTF-16 code units (JS String.length): the listener below drops a
 // message when JSON.stringify(me.data).length exceeds this. The injected window.canvasSend helper
 // enforces the SAME cap doc-side (var MAX=64000 in canvasSendScript, src/Server/CanvasDocServer.fs)
@@ -26,6 +35,20 @@ let private livenessDot (isAlive: bool) =
     Html.span [
         prop.className (if isAlive then "canvas-liveness-dot alive" else "canvas-liveness-dot")
         prop.title (if isAlive then "Session alive" else "No active session")
+    ]
+
+/// The Share-button glyph (the standard three-node share icon), styled like `ArchiveViews.archiveIcon`
+/// (`btn-icon`, 24×24, `currentColor`) so the Share and Archive buttons sit uniformly in the header.
+let private shareIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [
+                svg.d "M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"
+            ]
+        ]
     ]
 
 /// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
@@ -149,9 +172,10 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the seven
-/// handlers are passed by name: three share the type `string -> unit`, so positional passing let a
-/// silent argument transposition compile and surface only at runtime.
+/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the handlers
+/// are passed by name: several share the type `string -> unit` (`SelectDoc`, `OnOverviewClick`,
+/// `ArchiveDoc`, `ShareDoc`), so positional passing let a silent argument transposition compile and
+/// surface only at runtime.
 type CanvasPaneCallbacks =
     { SetPosition: CanvasPosition -> unit
       SetSize: CanvasSize -> unit
@@ -159,19 +183,47 @@ type CanvasPaneCallbacks =
       OnOverviewClick: string -> unit
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
+      ShareDoc: string -> unit
       DismissError: unit -> unit
       DismissDocError: unit -> unit
+      DismissShareNotice: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+/// The subset of the canvas `CanvasState` that `view` renders from, bundled into one record so the
+/// pane takes a single state value instead of a long, order-dependent positional list. Grouped for
+/// the same reason as `CanvasPaneCallbacks`: the signature had been growing one positional param
+/// per feature (`docError` → `size` → `shareNotice`), which invited a silent argument
+/// transposition that would compile and only surface at runtime. Built by `CanvasView.fs` from
+/// `model.Canvas.*`, mirroring how `canvasCallbacks` is assembled. Deliberately a subset record
+/// rather than `CanvasState` itself: `CanvasPane.fs` compiles before `CanvasState.fs` in
+/// `Client.fsproj`, so that type isn't nameable here.
+type CanvasPaneState =
+    { IsOpen: bool
+      Position: CanvasPosition
+      Size: CanvasSize
+      SendState: CanvasSendState
+      DocError: DocJsError option
+      ShareNotice: string option
+      BridgeLiveness: Map<string, BridgeLiveness> }
+
+let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+    let { IsOpen = isOpen
+          Position = position
+          Size = size
+          SendState = sendState
+          DocError = docError
+          ShareNotice = shareNotice
+          BridgeLiveness = bridgeLiveness } = state
     let { SetPosition = setPosition
           SetSize = setSize
           SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
+          ShareDoc = shareDoc
           DismissError = dismissError
           DismissDocError = dismissDocError
+          DismissShareNotice = dismissShareNotice
           LaunchSession = launchSession } = callbacks
     let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
@@ -225,6 +277,15 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                                 prop.title "Start a session to work on the selected canvas doc"
                                 prop.text "▶ Start session"
                             ]
+                        match activeDoc with
+                        | Some d when d.Kind = AgentDoc ->
+                            Html.button [
+                                prop.className "canvas-share-btn"
+                                prop.onClick (fun _ -> shareDoc d.Filename)
+                                prop.title "Share this doc — copies a rich link to the clipboard"
+                                prop.children [ shareIcon ]
+                            ]
+                        | _ -> ()
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
                             Html.button [
@@ -299,6 +360,25 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
             ]
         | _ -> Html.none
 
+    // Success banner shown after a doc is shared and its rich link copied to the clipboard. A share
+    // *failure* reuses the red errorBanner (CanvasSendState.Failed) above; this green notice is the
+    // Ok path and is dismissible like the others.
+    let shareBanner =
+        match shareNotice with
+        | Some msg ->
+            Html.div [
+                prop.className "canvas-share-banner"
+                prop.children [
+                    Html.span [ prop.text msg ]
+                    Html.button [
+                        prop.className "canvas-share-dismiss"
+                        prop.onClick (fun _ -> dismissShareNotice ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        | None -> Html.none
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
@@ -367,6 +447,7 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 errorBanner
                 docErrorBanner
                 waitingBanner
+                shareBanner
                 yield! iframes
             ]
         | None ->
@@ -375,6 +456,7 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 errorBanner
                 docErrorBanner
                 waitingBanner
+                shareBanner
                 overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
             ]
 

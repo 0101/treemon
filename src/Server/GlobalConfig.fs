@@ -266,6 +266,51 @@ let internal writeCanvasSize (size: CanvasSize) =
         | CanvasSize.Ratio2To1 -> "2to1"
     updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
+/// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):
+/// which PRIVATE blob container published docs land in, and the default per-doc SAS expiry. The
+/// Azure credential is deliberately NOT here — it is the `AZURE_STORAGE_CONNECTION_STRING` secret,
+/// read by `CanvasShare` straight from the environment, so no account key is ever written to the
+/// JSON file (spec docs/spec/canvas-sharing.md, Configuration).
+type CanvasShareConfig =
+    { Container: string
+      DefaultExpiryDays: int }
+
+/// Defaults for a missing `canvasShare` section or field: a conventional private-container name and
+/// the spec's 90-day SAS lifetime. With these, setting only `AZURE_STORAGE_CONNECTION_STRING` is
+/// enough to share — matching the spec's framing that the connection string is the one thing an
+/// operator must supply.
+let defaultCanvasShareConfig = { Container = "canvas-shared"; DefaultExpiryDays = 90 }
+
+/// Upper bound (10 years) on a configured `defaultExpiryDays`. A larger — or non-positive — value is
+/// treated as absent and falls back to the default, keeping the SAS expiry *bounded* (spec Decision
+/// #3) and guaranteeing `DateTimeOffset.UtcNow.AddDays(DefaultExpiryDays)` at publish can never
+/// overflow `DateTimeOffset` (year 9999 is ~2.9M days out) and orphan an already-uploaded blob.
+let internal maxCanvasShareExpiryDays = 3650
+
+/// Reads the `canvasShare` config section, falling back to `defaultCanvasShareConfig` for a missing
+/// section or field. A blank `container`, or a `defaultExpiryDays` outside `1 .. maxCanvasShareExpiryDays`,
+/// is treated as absent (a non-positive expiry would mint an already-dead link; an unbounded one would
+/// overflow `AddDays` at publish and orphan the blob), so a partial or typo'd section still yields a
+/// working config rather than a broken one.
+let internal readCanvasShareConfig () : CanvasShareConfig =
+    withConfigDocument defaultCanvasShareConfig (fun root ->
+        match root.TryGetProperty("canvasShare") with
+        | true, section when section.ValueKind = System.Text.Json.JsonValueKind.Object ->
+            let container =
+                match section.TryGetProperty("container") with
+                | true, c when c.ValueKind = System.Text.Json.JsonValueKind.String && c.GetString().Trim() <> "" ->
+                    c.GetString().Trim()
+                | _ -> defaultCanvasShareConfig.Container
+            let expiryDays =
+                match section.TryGetProperty("defaultExpiryDays") with
+                | true, e when e.ValueKind = System.Text.Json.JsonValueKind.Number ->
+                    match e.TryGetInt32() with
+                    | true, n when n > 0 && n <= maxCanvasShareExpiryDays -> n
+                    | _ -> defaultCanvasShareConfig.DefaultExpiryDays
+                | _ -> defaultCanvasShareConfig.DefaultExpiryDays
+            { Container = container; DefaultExpiryDays = expiryDays }
+        | _ -> defaultCanvasShareConfig)
+
 let internal readLastViewedHashes () : Map<string, Map<string, string>> =
     withConfigDocument Map.empty (fun root ->
         match root.TryGetProperty("lastViewedHashes") with
