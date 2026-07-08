@@ -426,11 +426,19 @@ let private executeTask
                 |> Seq.choose _.UpstreamBranch
                 |> set
 
-            // Prune the store only against a trustworthy branch enumeration; an unready/partial one
-            // yields `None`, skipping the prune so it can't wipe just-loaded merged-PR facts (F7).
+            // Prune the store only against a trustworthy branch enumeration; an unready/partial one —
+            // or one where a worktree's upstream read transiently failed — yields `None`, skipping
+            // the prune so it can't wipe just-loaded merged-PR facts (F7 / Decision #8).
             let collectedGitPaths = repo.GitData |> Map.keys |> Set.ofSeq
+
+            let readFailedPaths =
+                repo.GitData
+                |> Map.filter (fun _ gitData -> gitData.UpstreamReadFailed)
+                |> Map.keys
+                |> Set.ofSeq
+
             let knownBranchesForPrune =
-                MergedPrStore.pruneScope repo.KnownPaths collectedGitPaths knownBranches
+                MergedPrStore.pruneScope repo.KnownPaths collectedGitPaths readFailedPaths knownBranches
 
             // Reconcile the bounded live fetch with the persisted store (live wins; the store fills
             // aged-out merged branches). `PrData` becomes this effective map (spec: merged-pr-persistence.md).

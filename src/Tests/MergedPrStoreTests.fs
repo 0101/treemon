@@ -361,21 +361,22 @@ type ReconcileMergedPrsTests() =
             "a live merged PR must still be recorded even when pruning is skipped")
 
 // pruneScope decides whether the live-derived branch enumeration is trustworthy enough to prune
-// against (review F7). Pure, so these run parallel with no setup.
+// against (review F7 / Decision #8): it must be complete, non-empty, AND free of transient upstream
+// read failures on known worktrees. Pure, so these run parallel with no setup.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type MergedPrPruneScopeTests() =
 
-    // Complete: every known worktree path has collected git data -> trust the enumeration.
+    // Complete: every known worktree path has collected git data and no read failed -> trust it.
     [<Test>]
     member _.``trusts the enumeration when every known worktree has collected git data``() =
         let known = Set.ofList [ "/wt/a"; "/wt/b" ]
         let collected = Set.ofList [ "/wt/a"; "/wt/b" ]
         let branches = Set.ofList [ "feature/a"; "feature/b" ]
 
-        Assert.That(pruneScope known collected branches, Is.EqualTo(Some branches),
-            "a fully collected worktree set proves the branch enumeration - prune against it")
+        Assert.That(pruneScope known collected Set.empty branches, Is.EqualTo(Some branches),
+            "a fully collected worktree set with no read failures proves the branch enumeration - prune against it")
 
     // Partial: a worktree's git data is missing (a RefreshGit timeout never posted UpdateGit).
     [<Test>]
@@ -384,13 +385,13 @@ type MergedPrPruneScopeTests() =
         let collected = Set.ofList [ "/wt/a" ] // /wt/b's git data never arrived
         let branches = Set.ofList [ "feature/a" ]
 
-        Assert.That(pruneScope known collected branches |> Option.isNone, Is.True,
+        Assert.That(pruneScope known collected Set.empty branches |> Option.isNone, Is.True,
             "a partially collected worktree set must not be used to prune (review F7)")
 
     // Unready or a transient empty worktree list: no known worktrees -> never prune.
     [<Test>]
     member _.``refuses to prune when there are no known worktrees``() =
-        Assert.That(pruneScope Set.empty Set.empty Set.empty |> Option.isNone, Is.True,
+        Assert.That(pruneScope Set.empty Set.empty Set.empty Set.empty |> Option.isNone, Is.True,
             "an empty worktree set (unready or a transient empty list) must not prune the store")
 
     // Correlated upstream-read failure: every worktree is collected (paths complete) yet resolves
@@ -402,8 +403,34 @@ type MergedPrPruneScopeTests() =
         let collected = Set.ofList [ "/wt/a"; "/wt/b" ] // all collected...
         let branches = Set.empty // ...but every upstream read returned nothing
 
-        Assert.That(pruneScope known collected branches |> Option.isNone, Is.True,
+        Assert.That(pruneScope known collected Set.empty branches |> Option.isNone, Is.True,
             "a complete worktree set that resolved zero branches must NOT prune - it would wipe the whole store (review F7)")
+
+    // Partial upstream-read failure (Decision #8 residual): every worktree is collected and the
+    // enumeration is non-empty (feature/a resolved), but /wt/b's `git rev-parse @{u}` transiently
+    // FAILED, so feature/b never entered the set. Pruning against it would forget feature/b's
+    // aged-out merged PR. A read failure on any known worktree must therefore refuse the prune.
+    [<Test>]
+    member _.``refuses to prune when a known worktree's upstream read failed``() =
+        let known = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let collected = Set.ofList [ "/wt/a"; "/wt/b" ] // both collected...
+        let readFailed = Set.ofList [ "/wt/b" ] // ...but /wt/b's upstream read failed transiently
+        let branches = Set.ofList [ "feature/a" ] // so only feature/a resolved
+
+        Assert.That(pruneScope known collected readFailed branches |> Option.isNone, Is.True,
+            "a transient upstream read failure on a known worktree must skip the prune (Decision #8 residual)")
+
+    // A read failure on a STALE path (already removed from the known set) is irrelevant - the
+    // enumeration is still complete and trustworthy for the worktrees that remain, so prune.
+    [<Test>]
+    member _.``still prunes when the only read failure is on a stale path outside the known set``() =
+        let known = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let collected = Set.ofList [ "/wt/a"; "/wt/b" ]
+        let readFailed = Set.ofList [ "/wt/gone" ] // a stale path no longer tracked
+        let branches = Set.ofList [ "feature/a"; "feature/b" ]
+
+        Assert.That(pruneScope known collected readFailed branches, Is.EqualTo(Some branches),
+            "a read failure outside the known worktree set must not block pruning")
 
 // End-to-end integration (task tm-pr-recency-window-54z, spec docs/spec/merged-pr-persistence.md).
 // Exercises the REAL disk I/O of MergedPrStore (persistAtPath/loadAtPath) wired to the pure

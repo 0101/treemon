@@ -501,6 +501,7 @@ type SchedulerUpstreamTests() =
                   LastCommitMessage = "init"
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
+                  UpstreamReadFailed = false
                   MainBehindCount = 0
                   IsDirty = false
                   WorkMetrics = None }

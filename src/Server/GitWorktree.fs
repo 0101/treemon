@@ -17,12 +17,26 @@ type CommitInfo =
       Message: string
       Time: DateTimeOffset }
 
+/// Outcome of resolving a worktree's upstream tracking branch (`git rev-parse --abbrev-ref @{u}`).
+/// Distinguishes git's deterministic "no upstream configured" from a transient read failure
+/// (timeout, `index.lock`, IO error) so downstream prune logic never mistakes a failed read for
+/// "this branch has no upstream" and wrongly forgets a merged PR (spec merged-pr-persistence.md,
+/// Decision #8 residual).
+type UpstreamResult =
+    | Upstream of string
+    | NoUpstream
+    | UpstreamReadFailed
+
 type GitData =
     { Path: string
       Branch: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
       UpstreamBranch: string option
+      /// `true` when `git rev-parse @{u}` failed transiently (timeout/lock/IO) rather than git
+      /// deterministically reporting no upstream. Lets the merged-PR prune enumeration exclude this
+      /// worktree instead of reading a failed upstream read as "no branch" (Decision #8 residual).
+      UpstreamReadFailed: bool
       MainBehindCount: int
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
@@ -141,15 +155,48 @@ let getMainBehindCount (worktreePath: string) (mainRef: string) =
             |> Option.defaultValue 0
     }
 
-let getUpstreamBranch (worktreePath: string) =
-    async {
-        let! output = runGit worktreePath "rev-parse --abbrev-ref @{u}"
+/// git reports a genuine, stable "no upstream" deterministically via one of these fatals: the branch
+/// never configured a tracking ref ("no upstream configured"), HEAD is detached ("does not point to
+/// a branch"), or the branch is unborn / has no commits ("no such branch: '<name>'"). These are the
+/// only error states safe to treat as "this worktree contributes no branch" — each is stable and
+/// carries no merged-PR record to lose, so pruning may proceed. EVERY other stderr — a timeout, an
+/// `index.lock`, an IO error, or `ambiguous argument '@{u}': unknown revision` (an upstream that WAS
+/// configured but is now unresolvable, e.g. a merged-then-deleted remote branch after `fetch
+/// --prune`) — is a read failure whose branch is *unknown*, not absent, so we must not mistake it for
+/// "no upstream" and prune a still-valid record. See `classifyUpstream`. NOTE: these match English
+/// git output; the target (Git for Windows) ships without gettext localization, so they are stable.
+let private noUpstreamMarkers =
+    [ "no upstream configured"
+      "does not point to a branch"
+      "no such branch" ]
 
-        return
-            output
-            |> Option.bind (fun s ->
-                let trimmed = s.Trim()
-                if String.IsNullOrEmpty(trimmed) then None else Some trimmed)
+/// Pure classification of a `git rev-parse --abbrev-ref @{u}` result into the three cases the
+/// merged-PR prune logic distinguishes (spec merged-pr-persistence.md, Decision #8 residual):
+///  - `Upstream name` — configured and read cleanly;
+///  - `NoUpstream` — git deterministically reports no upstream (branch tracks nothing, detached, or
+///    unborn) — a stable state carrying no record to lose, so it is safe to prune against;
+///  - `UpstreamReadFailed` — anything else: a transient failure (timeout/lock/IO), an unrecognized
+///    error, a configured-but-unresolvable upstream, or an anomalous empty success. The upstream is
+///    *unknown*, not proven absent, so the branch must be excluded from the prune enumeration.
+/// Defaulting the unrecognized case to `UpstreamReadFailed` is deliberate: only the explicit markers
+/// are safe to prune against; everything else errs toward never forgetting a merged PR.
+let internal classifyUpstream (result: Result<string, string>) : UpstreamResult =
+    match result with
+    | Ok output ->
+        let trimmed = output.Trim()
+        if String.IsNullOrEmpty trimmed then UpstreamReadFailed else Upstream trimmed
+    | Error message ->
+        let lowered = message.ToLowerInvariant()
+
+        if noUpstreamMarkers |> List.exists (fun marker -> lowered.Contains(marker)) then
+            NoUpstream
+        else
+            UpstreamReadFailed
+
+let getUpstreamBranch (worktreePath: string) : Async<UpstreamResult> =
+    async {
+        let! result = runGitResult worktreePath "rev-parse --abbrev-ref @{u}"
+        return classifyUpstream result
     }
 
 let isDirty (worktreePath: string) =
@@ -213,12 +260,19 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         let! commitCount = commitCountChild
         let! (linesAdded, linesRemoved) = diffStatsChild
 
-        let upstreamBranch =
-            upstream
-            |> Option.map (fun u ->
-                match u.IndexOf('/') with
-                | -1 -> u
-                | i -> u[(i + 1)..])
+        // Strip the remote prefix ("origin/foo" -> "foo"); the store/PR-map key is the bare branch.
+        let stripRemote (u: string) =
+            match u.IndexOf('/') with
+            | -1 -> u
+            | i -> u[(i + 1)..]
+
+        // Surface a transient upstream read failure (vs. git's clean "no upstream") so the prune
+        // enumeration can exclude this worktree instead of mistaking it for "no branch" (Decision #8).
+        let upstreamBranch, upstreamReadFailed =
+            match upstream with
+            | Upstream u -> Some(stripRemote u), false
+            | NoUpstream -> None, false
+            | UpstreamReadFailed -> None, true
 
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with
@@ -235,6 +289,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
               LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch
+              UpstreamReadFailed = upstreamReadFailed
               MainBehindCount = mainBehind
               IsDirty = dirty
               WorkMetrics = workMetrics }

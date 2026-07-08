@@ -68,19 +68,25 @@ let reconcileMergedPrs
     effectiveMap, newPersisted
 
 /// Decides the enumeration `reconcileMergedPrs` may prune against (review F7 / Decision #8). Returns
-/// `Some knownBranches` only when it is trustworthy — every known worktree has collected `GitData`
-/// AND the set is non-empty. An empty or partial enumeration (e.g. every worktree's
-/// `git rev-parse @{u}` transiently failing to `None`) yields `None`, so pruning is skipped rather
-/// than wiping the whole store.
+/// `Some knownBranches` only when it is trustworthy:
+///  - at least one worktree is known and at least one branch resolved (non-empty);
+///  - every known worktree path has collected `GitData` (`knownPaths ⊆ collectedGitPaths`);
+///  - no known worktree's upstream read *failed* (`git rev-parse @{u}` timing out / erroring rather
+///    than git deterministically reporting no upstream) — such a worktree contributes no branch yet
+///    its record could still be live, so pruning against the incomplete set could forget it.
+/// Any of these failing yields `None`, so pruning is skipped rather than wiping just-loaded facts.
+/// A read failure on a stale path (not in `knownPaths`) is ignored — only tracked worktrees matter.
 let pruneScope
     (knownPaths: Set<string>)
     (collectedGitPaths: Set<string>)
+    (readFailedPaths: Set<string>)
     (knownBranches: Set<string>)
     : Set<string> option =
     if
         not (Set.isEmpty knownPaths)
         && not (Set.isEmpty knownBranches)
         && Set.isSubset knownPaths collectedGitPaths
+        && Set.isEmpty (Set.intersect knownPaths readFailedPaths)
     then
         Some knownBranches
     else

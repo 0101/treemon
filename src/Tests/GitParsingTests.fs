@@ -283,3 +283,72 @@ type ParseDiffStatsTests() =
     member _.``Large numbers parsed correctly``() =
         let result = parseDiffStats (Some " 50 files changed, 12345 insertions(+), 6789 deletions(-)")
         Assert.That(result, Is.EqualTo((12345, 6789)))
+
+// classifyUpstream turns a `git rev-parse --abbrev-ref @{u}` result into the three cases the
+// merged-PR prune logic needs (spec docs/spec/merged-pr-persistence.md, Decision #8 residual): a
+// clean upstream, git's deterministic "no upstream", or a transient read failure that must NOT be
+// mistaken for "no upstream". Pure, so no setup.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ClassifyUpstreamTests() =
+
+    [<Test>]
+    member _.``a clean read yields Upstream with the full tracking-ref name``() =
+        // The remote prefix is stripped later in collectWorktreeGitData, not here.
+        Assert.That(classifyUpstream (Ok "origin/main"), Is.EqualTo(Upstream "origin/main"))
+
+    [<Test>]
+    member _.``a clean read trims surrounding whitespace``() =
+        Assert.That(classifyUpstream (Ok "  origin/feature/x \n"), Is.EqualTo(Upstream "origin/feature/x"))
+
+    [<Test>]
+    member _.``an anomalous empty success is a read failure, never a no-upstream``() =
+        // exit 0 with no output should never happen for @{u}; treat it as unknown, not "no branch".
+        Assert.That(classifyUpstream (Ok "   "), Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``git's no-upstream-configured fatal is a clean NoUpstream``() =
+        Assert.That(
+            classifyUpstream (Error "fatal: no upstream configured for branch 'main'"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``a detached HEAD fatal is a clean NoUpstream``() =
+        Assert.That(
+            classifyUpstream (Error "fatal: HEAD does not point to a branch"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``an unborn branch (no such branch) is a clean NoUpstream``() =
+        // git emits this when HEAD points to a branch with no commits yet - a stable no-branch state
+        // carrying no merged-PR record, so it is safe to prune against (unlike "ambiguous argument").
+        Assert.That(
+            classifyUpstream (Error "fatal: no such branch: 'master'"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``a configured-but-unresolvable upstream is a read failure, not a no-upstream``() =
+        // git emits this when @{u} is configured but its remote-tracking ref is gone (e.g. a
+        // merged-then-deleted branch after fetch --prune). The branch is UNKNOWN, not absent, so we
+        // must skip pruning and keep its merged-PR record - not mistake it for "no branch".
+        Assert.That(
+            classifyUpstream (Error "fatal: ambiguous argument '@{u}': unknown revision or path not in the working tree."),
+            Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``no-upstream detection is case-insensitive``() =
+        Assert.That(
+            classifyUpstream (Error "FATAL: No Upstream Configured For Branch 'main'"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``a timeout is a transient read failure, not a no-upstream``() =
+        Assert.That(classifyUpstream (Error "Timed out after 60000ms"), Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``an unrecognized git error is a transient read failure``() =
+        // An index.lock / IO error must never be read as "no upstream" - that would wrongly prune.
+        Assert.That(
+            classifyUpstream (Error "fatal: Unable to create '/repo/.git/index.lock': File exists"),
+            Is.EqualTo(UpstreamReadFailed))
