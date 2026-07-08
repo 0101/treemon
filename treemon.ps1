@@ -193,6 +193,49 @@ function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
     }
 }
 
+function Get-RunLogs([string]$Channel) {
+    # Returns this scheme's per-run log files for a channel ("" = stdout, "-stderr" = stderr), newest
+    # first. Each run writes a fresh treemon-prod[-stderr].<timestamp>.log, so a new run never touches
+    # a previous log — which means a leftover server or a log still open in an editor/viewer can never
+    # block startup the way truncating one shared file could.
+    $pattern = "^treemon-prod$([regex]::Escape($Channel))\.\d{8}-\d{6}\.log$"
+    @(Get-ChildItem -Path $LogDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $pattern } |
+        Sort-Object LastWriteTime -Descending)
+}
+
+function Get-CurrentLogFile {
+    # Newest stdout run log — the file the running server is writing to. Falls back to the canonical
+    # name (which may not exist yet) so callers always have a meaningful path to report.
+    $logs = Get-RunLogs ""
+    if ($logs.Count -eq 0) { return $LogFile }
+    return $logs[0].FullName
+}
+
+function Remove-OldRunLogs([int]$Keep) {
+    # Keep only the most recent $Keep runs per channel; older logs are best-effort deleted (a log
+    # still held open elsewhere simply survives until its holder releases it).
+    foreach ($channel in @("", "-stderr")) {
+        Get-RunLogs $channel | Select-Object -Skip $Keep |
+            ForEach-Object { Remove-Item $_.FullName -ErrorAction SilentlyContinue }
+    }
+}
+
+function Set-CanvasShareEnv {
+    # Canvas sharing reads its Azure credential ONLY from the AZURE_STORAGE_CONNECTION_STRING env var
+    # (docs/spec/canvas-sharing.md). The server inherits THIS shell's environment block via
+    # Start-Process, and Windows only loads a persisted User/Machine env var into a process at launch
+    # — so deploying from a terminal opened before the var was set would start the server without it.
+    # Read the persisted value straight from the registry-backed store and propagate it, so
+    # start/restart/deploy work from any shell. The secret is only ever read from the env var, never
+    # written to a file or config.
+    if (-not $env:AZURE_STORAGE_CONNECTION_STRING) {
+        $persisted = [Environment]::GetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', 'User')
+        if (-not $persisted) { $persisted = [Environment]::GetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', 'Machine') }
+        if ($persisted) { $env:AZURE_STORAGE_CONNECTION_STRING = $persisted }
+    }
+}
+
 function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -205,7 +248,9 @@ function Start-ProductionServer([string[]]$Roots) {
     Ensure-WwwRoot
 
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
-    "" | Set-Content $LogFile
+    $stamp = Get-Date -Format yyyyMMdd-HHmmss
+    $script:LogFile = Join-Path $LogDir "treemon-prod.$stamp.log"
+    $stderrLog = Join-Path $LogDir "treemon-prod-stderr.$stamp.log"
 
     # Resolve the roots to launch with. Explicit roots (from the command line) win.
     # Filter out any $null/empty entries first: with ValueFromRemainingArguments an
@@ -240,12 +285,14 @@ function Start-ProductionServer([string[]]$Roots) {
         }
     }
 
+    Set-CanvasShareEnv
+
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $serverExe `
         -ArgumentList $serverArgs `
         -WorkingDirectory $ScriptDir `
         -RedirectStandardOutput $LogFile `
-        -RedirectStandardError (Join-Path $LogDir "treemon-prod-stderr.log") `
+        -RedirectStandardError $stderrLog `
         -NoNewWindow:$false `
         -WindowStyle Hidden `
         -PassThru
@@ -257,13 +304,15 @@ function Start-ProductionServer([string[]]$Roots) {
     if ($process.HasExited) {
         Remove-Item $PidFile -ErrorAction SilentlyContinue
         Write-Host "Production server failed to start (exit code: $($process.ExitCode))" -ForegroundColor Red
-        $stderrFile = Join-Path $LogDir "treemon-prod-stderr.log"
+        $stderrFile = $stderrLog
         if ((Test-Path $stderrFile) -and (Get-Item $stderrFile).Length -gt 0) {
             Write-Host ""
             Get-Content $stderrFile | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         }
         exit 1
     }
+
+    Remove-OldRunLogs 10
 
     # Server is up — it has resolved+persisted its effective roots into the global config. Retire
     # the legacy .treemon.config only when it is SAFE: every root it declared was actually migrated
@@ -353,16 +402,17 @@ function Show-Status {
     } else {
         Write-Host "  Monitor: (none configured)"
     }
-    Write-Host "  Log:     $LogFile"
+    Write-Host "  Log:     $(Get-CurrentLogFile)"
 }
 
 function Show-Log {
-    if (-not (Test-Path $LogFile)) {
-        Write-Host "No log file found at $LogFile" -ForegroundColor Yellow
+    $logToTail = Get-CurrentLogFile
+    if (-not (Test-Path $logToTail)) {
+        Write-Host "No log file found at $logToTail" -ForegroundColor Yellow
         return
     }
-    Write-Host "Tailing $LogFile (Ctrl+C to stop)..." -ForegroundColor Gray
-    Get-Content $LogFile -Tail 50 -Wait
+    Write-Host "Tailing $logToTail (Ctrl+C to stop)..." -ForegroundColor Gray
+    Get-Content $logToTail -Tail 50 -Wait
 }
 
 function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$ServerLabel, [string[]]$MonitorPaths) {
@@ -380,6 +430,7 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
 
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
+    Set-CanvasShareEnv
 
     $serverProcess = $null
     $viteProcess = $null

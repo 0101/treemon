@@ -51,10 +51,15 @@
     <Compile Include="CanvasAuthoringDxE2ETests.fs" />
     <Compile Include="CanvasPhase4Tests.fs" />
     <Compile Include="CanvasAwarenessTests.fs" />
+    <Compile Include="CanvasShareClientTests.fs" />
+    <Compile Include="FormattingTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
+    <Compile Include="CanvasExportTests.fs" />
+    <Compile Include="CanvasShareTests.fs" />
+    <Compile Include="CanvasShareAzuriteTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 

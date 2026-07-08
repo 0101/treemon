@@ -18,6 +18,7 @@ Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a ty
 
 - Dark theme, system font, a readable **15px / line-height 1.55** body, and a serif heading scale (`h1`…`h4`).
 - A comfortable line length (~70ch) on paragraphs and list items.
+- A **capped, centered content column** (`--page-max`, ~1100px) so diagrams, wide tables, and inputs don't stretch across a wide monitor. Need full width for a dashboard-style doc? Override with `body{max-width:none}` (or widen it with `body{--page-max:1400px}`).
 - Quiet tables (header underline + row separators, no heavy gridlines), styled `code`/`pre`, links, scrollbars, and themed form controls (`button`, `textarea`, `input`, `select`).
 - Design tokens as CSS variables — reuse these instead of inventing colors:
   `--bg-deep` `--bg-surface` `--bg-elevated` `--border` `--border-bright`
@@ -42,6 +43,8 @@ If you do set your own colors, match the dark theme — the tokens above are the
 ### Use the visual medium
 
 A canvas doc can do what markdown can't — so when a concept is visual, *show* it. Lean on real HTML/SVG: a small inline `<svg>` for a flow, timeline, or state diagram; a table for comparisons; nested lists for hierarchy. A wall of paragraphs that would read the same as a `.md` file is a missed opportunity — a diagram or a labelled flow usually explains a pipeline, schedule, or decision far faster than prose.
+
+**Size diagrams intrinsically.** Give an `<svg>` a `viewBox` plus a real pixel `width`/`height` (roughly 720–900px wide) — **don't** set `width="100%"`. The base already makes any SVG shrink to fit a narrow pane, so an intrinsic size stays crisp on small screens and, crucially, never balloons to fill a wide monitor (an unbounded `width="100%"` diagram scales up uniformly and dominates the page). For a captioned or grounded diagram, wrap it in a `<figure>` (with an optional `<figcaption>`): the base caps a `<figure>` at `--diagram-max` (900px) and centers it — that's the subtle grounding panel mentioned above, sized for you.
 
 ## Interactivity
 

@@ -206,32 +206,6 @@ let private bridgeScript =
       "})()</script>" ]
     |> String.concat ""
 
-/// Scrollbar styling + an opinionated dark-theme typography base, injected for BOTH doc kinds at the
-/// </head> slot (handleCanvasRequest). This is what lets a plain doc render on-theme and *readable*
-/// (type scale + whitespace, not boxes) with zero authored CSS; see src/Extension/skill/SKILL.md.
-///
-/// Cascade safety: the injection lands AFTER any <head> styles the doc/template already declares, so
-/// an equal-specificity element rule here would win the source-order tiebreak and stomp the doc.
-/// Every selector is therefore wrapped in :where(...) — carrying ZERO specificity like the universal
-/// `*` scrollbar rule — and no rule uses !important. Then any real doc rule (even a bare body{}) and
-/// the SystemView template's own element-SELECTOR rules (e.g. BeadspaceTemplate.html's
-/// body{background:var(--bg-deep);margin:0;padding:0}, specificity 0,0,1) override the reset
-/// (specificity 0,0,0) regardless of source order. The override is per-property and only via a rule on
-/// the element selector: a box property the template zeroes through the universal `*{margin:0;padding:0}`
-/// reset (also 0,0,0) would otherwise LOSE the source-order tiebreak to the later-injected
-/// :where(body){padding:2rem}, so the template resets margin/padding on `body` directly to keep its
-/// padding:0. The design tokens are likewise wrapped in :where(:root) so a doc's own :root{--x} wins.
-///
-/// Values are grounded, not invented: 15px / line-height 1.55 (WCAG 1.4.12 requires surviving 1.5);
-/// a hand-tuned serif type scale (h1 1.85rem / h2 1.35rem / h3 1.12rem / h4 1rem); a ~70ch measure on
-/// text elements (Bringhurst, 45–75ch). Tokens mirror the app palette (BeadspaceTemplate.html) — names
-/// and values — except --text-muted is nudged lighter (#9399b2 vs the dashboard's denser #6c7086) to
-/// clear WCAG AA contrast on long-form reading — so docs reference var(--text-muted)/var(--accent)/…
-/// instead of reinventing a palette. Tables default to a quiet bottom-border style and callouts to a
-/// semantic blockquote — steering away from heavy boxes. Form controls (button/textarea/input/select)
-/// are themed too, so the common "collect input" doc needs no control CSS.
-let private baseStyle = "<style>*{scrollbar-width:thin;scrollbar-color:rgba(88,91,112,.5) transparent}::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(88,91,112,.5);border-radius:4px}::-webkit-scrollbar-thumb:hover{background:rgba(88,91,112,.8)}:where(:root){--bg-deep:#1e1e2e;--bg-surface:#181825;--bg-elevated:#313244;--border:#45475a;--border-bright:#585b70;--text-primary:#cdd6f4;--text-secondary:#bac2de;--text-muted:#9399b2;--accent:#cba6f7;--accent-bright:#b4befe;--status-wip:#f59e0b;--status-blocked:#ef4444;--status-closed:#22c55e;--serif:ui-serif,Georgia,'Times New Roman',Times,serif}:where(body){background:var(--bg-deep);color:var(--text-primary);font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;margin:0;padding:2rem 2.25rem}:where(p,li,blockquote){max-width:70ch}:where(p,ul,ol,pre,table,blockquote){margin:0 0 1.2rem}:where(li){margin:0 0 .3rem}:where(h1,h2,h3,h4,h5,h6){font-family:var(--serif);font-weight:500;line-height:1.15;letter-spacing:-.012em;margin:2.4rem 0 .5rem}:where(h1){font-size:1.85rem;line-height:1.1;letter-spacing:-.018em;margin-top:0}:where(h2){font-size:1.35rem}:where(h3){font-size:1.12rem}:where(h4){font-size:1rem}:where(body>:first-child){margin-top:0}:where(h1+*,h2+*,h3+*,h4+*){margin-top:0}:where(a){color:var(--accent);text-decoration:none}:where(a:hover){text-decoration:underline}:where(button){font:inherit;color:var(--text-primary);background:var(--bg-elevated);border:1px solid var(--border-bright);border-radius:6px;padding:.5em 1em;cursor:pointer}:where(button:hover){background:var(--border)}:where(textarea,input,select){font:inherit;color:var(--text-primary);background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;padding:.5em .6em}:where(textarea){display:block;width:100%;box-sizing:border-box;resize:vertical}:where(small){color:var(--text-muted)}:where(blockquote){margin:1.2em 0;padding:.2em 0 .2em 1em;border-left:3px solid var(--border);color:var(--text-secondary)}:where(hr){border:none;border-top:1px solid var(--border);margin:1.6em 0}:where(code,kbd,samp,pre){font-family:'Consolas','Courier New',monospace}:where(code){background:var(--bg-elevated);padding:.1em .3em;border-radius:4px;font-size:.9em}:where(pre){background:var(--bg-surface);padding:1em;border-radius:6px;overflow:auto}:where(pre code){background:none;padding:0;font-size:inherit}:where(table){border-collapse:collapse}:where(th,td){border-bottom:1px solid var(--border);padding:.5em .7em;text-align:left;vertical-align:top}:where(th){color:var(--text-secondary);font-size:.8em;text-transform:uppercase;letter-spacing:.04em}</style>"
-
 /// Intercepts in-doc link clicks: same-origin .html links become navigate-canvas-doc messages
 /// (tab switch), everything else opens in a new tab. The target filename is taken from a.pathname
 /// (the resolved path, which never includes ?query or #hash) rather than the raw href, so a link
@@ -371,8 +345,8 @@ let private errorOverlayScript (filename: string) =
 /// them, and they post nothing back — so the bridge, canvasSend, and morph pieces are all omitted.
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
-    | SystemView -> baseStyle + linkInterceptor
-    | AgentDoc -> baseStyle + linkInterceptor + bridgeScript + canvasSendScript + canvasExpandStyle + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | SystemView -> CanvasExport.baseStyle + linkInterceptor
+    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + bridgeScript + canvasSendScript + canvasExpandStyle + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -422,10 +396,9 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
                 let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                 let html = System.Text.Encoding.UTF8.GetString(rawBytes)
                 let injection = buildInjection (CanvasDocKind.classify filename) filename
-                let injected =
-                    if html.Contains("</head>", System.StringComparison.OrdinalIgnoreCase)
-                    then html.Replace("</head>", injection + "</head>", System.StringComparison.OrdinalIgnoreCase)
-                    else injection + html
+                // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
+                // implementation so live-served and published docs can never drift.
+                let injected = CanvasExport.injectAtHead injection html
                 ctx.Response.ContentType <- "text/html; charset=utf-8"
                 ctx.Response.Headers["Cache-Control"] <- "no-cache"
                 // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames

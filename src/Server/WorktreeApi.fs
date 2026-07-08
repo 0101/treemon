@@ -21,19 +21,17 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
         // Sanitize null lists — Fable.Remoting client can't deserialize null as F# list
         let sanitized =
             { data with
-                Worktrees =
-                    { data.Worktrees with
-                        Repos =
-                            data.Worktrees.Repos
-                            |> List.map (fun r ->
-                                { r with
-                                    Worktrees =
-                                        r.Worktrees
-                                        |> List.map (fun wt ->
-                                            { wt with
-                                                CanvasDocs =
-                                                    if obj.ReferenceEquals(wt.CanvasDocs, null) then []
-                                                    else wt.CanvasDocs }) }) } }
+                Worktrees.Repos =
+                    data.Worktrees.Repos
+                    |> List.map (fun r ->
+                        { r with
+                            Worktrees =
+                                r.Worktrees
+                                |> List.map (fun wt ->
+                                    { wt with
+                                        CanvasDocs =
+                                            if obj.ReferenceEquals(wt.CanvasDocs, null) then []
+                                            else wt.CanvasDocs }) }) }
         Ok sanitized
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
@@ -67,6 +65,7 @@ let readOnlyApi
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
+      shareCanvasDoc = fun _ -> async { return Error $"Share canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
       getBridgeLiveness = fun _ -> async { return Map.empty }
@@ -90,6 +89,36 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
         Directory.CreateDirectory archiveDir |> ignore
         let destPath = Path.Combine(archiveDir, request.Filename)
         File.Move(sourcePath, destPath, overwrite = true)
+    }
+
+/// Share a canvas doc: validate the path → read the on-disk file → static-export it
+/// (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish to Azure Blob and
+/// mint a per-doc read-only SAS (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the
+/// SAS URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
+/// `CanvasExport.resolveTitle` (the doc's `<title>`, falling back to a prettified filename) because
+/// `CanvasShareResult.Title` is a plain string, not an option; the title is read from the original
+/// HTML (`buildStaticHtml` injects only at `</head>`, so it never alters the doc's `<title>`).
+let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
+    let path = WorktreePath.value request.WorktreePath
+    asyncResult {
+        let! sourcePath =
+            Server.PathUtils.validateCanvasPath path request.Filename
+            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
+
+        // Sharing is AgentDoc-only per spec (a SystemView like beads.html is server-generated,
+        // data-driven, and not shareable). The client only shows the Share button for AgentDocs;
+        // this gate enforces the same contract when the endpoint is called directly.
+        if CanvasDocKind.classify request.Filename <> AgentDoc then
+            return! Error $"Cannot share system view: {request.Filename}"
+
+        if not (File.Exists sourcePath) then
+            return! Error $"File not found: {request.Filename}"
+
+        let html = File.ReadAllText sourcePath
+        let! sasUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
+        return
+            { Url = sasUrl
+              Title = Server.CanvasExport.resolveTitle html request.Filename }
     }
 
 let private assembleFromState
@@ -345,7 +374,7 @@ let worktreeApi
             return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
 
-    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
+    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<'a, string>>) =
         let path = WorktreePath.value wtPath
         async {
             let! isValid = validatePath path
@@ -596,6 +625,9 @@ let worktreeApi
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)
+          shareCanvasDoc = fun req ->
+              withValidatedPath req.WorktreePath "shareCanvasDoc" (fun () ->
+                  shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
           getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
