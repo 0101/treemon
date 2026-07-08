@@ -362,8 +362,6 @@ type CurrentSkillTests() =
 
     [<Test>]
     member _.``A skill that finished before a new user request no longer lingers``() =
-        // v1.1 (i): a skill invoked earlier in a still-active session that has since finished must
-        // not be reported. A genuine user.message after the skill signals a new request → None.
         let content =
             [ makeUserEvent "plan the feature" "2026-03-01T10:00:00Z"
               makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"

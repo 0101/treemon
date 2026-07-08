@@ -27,7 +27,6 @@ type OverviewDataTests() =
     /// the activity groups (WaitingForUser goes to its own group, Done/Idle are excluded).
     let agentWt tool skill = { baseWt with CodingTool = tool; CurrentSkill = skill }
 
-    /// A red-dot WORKING agent (CodingTool = Working) running `skill`.
     let workingWt skill = agentWt CodingToolStatus.Working skill
 
     let repo (wts: WorktreeStatus list) : RepoWorktrees =
@@ -188,8 +187,6 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``Only red-dot (Working) worktrees count - HasActiveSession no longer counts``() =
-        // A worktree can have a live terminal (HasActiveSession) while its coding tool is Idle/Done;
-        // v1.1 (h) keys off the red dot alone, so terminal presence must NOT create an activity group.
         let result =
             aggregate
                 [ repo
