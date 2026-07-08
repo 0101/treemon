@@ -8,6 +8,17 @@ open Server.GitWorktree
 open Tests.GitTestHelpers
 
 
+/// Writes an OS-appropriate `post-fork` hook that records its branch + repo-root
+/// arguments to `pf-args.txt` inside the worktree, so tests can prove it ran there.
+let private writePostForkArgsScript (repoDir: string) =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+        let script = "param($wt, $root, $baseRef, $branch)\n\"$branch|$root\" | Out-File -FilePath (Join-Path $wt 'pf-args.txt')"
+        File.WriteAllText(Path.Combine(repoDir, "post-fork.ps1"), script)
+    else
+        let script = "#!/usr/bin/env bash\nprintf '%s|%s' \"$4\" \"$2\" > \"$1/pf-args.txt\"\n"
+        File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), script)
+
+
 // ─── resolveWorktreeCommand: pure command construction ───
 
 [<TestFixture>]
@@ -93,7 +104,7 @@ type ResolveBaseRefTests() =
         Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
 
 
-// ─── createWorktree: end-to-end against real git repos ───
+// ─── forkWorktree / runPostFork: end-to-end against real git repos ───
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -120,7 +131,7 @@ type CreateWorktreeIntegrationTests() =
         // Switch the only worktree off main so nothing has the base checked out.
         gitAssert repoDir "checkout -b canvas-review-report"
 
-        let result = createWorktree repoDir "main" "resolve-model-slugs" |> Async.RunSynchronously
+        let result = forkWorktree repoDir "main" "resolve-model-slugs" |> Async.RunSynchronously
         Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
 
         let newWt = Path.Combine(tempDir, "tm-resolve-model-slugs")
@@ -134,7 +145,7 @@ type CreateWorktreeIntegrationTests() =
         gitAssert repoDir "checkout -b feature"
         gitAssert repoDir "branch -D main"
 
-        let result = createWorktree repoDir "main" "from-origin" |> Async.RunSynchronously
+        let result = forkWorktree repoDir "main" "from-origin" |> Async.RunSynchronously
         Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
 
         let newWt = Path.Combine(tempDir, "tm-from-origin")
@@ -154,7 +165,7 @@ type CreateWorktreeIntegrationTests() =
         let upstreamTip = gitOut repoDir "rev-parse origin/main"
         Assert.That(upstreamTip, Is.Not.EqualTo(staleLocal), "test setup: origin/main must be ahead of local main")
 
-        let result = createWorktree repoDir "main" "feat" |> Async.RunSynchronously
+        let result = forkWorktree repoDir "main" "feat" |> Async.RunSynchronously
         Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
 
         let newWt = Path.Combine(tempDir, "tm-feat")
@@ -165,7 +176,7 @@ type CreateWorktreeIntegrationTests() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
 
-        let result = createWorktree repoDir "main" "happy-branch" |> Async.RunSynchronously
+        let result = forkWorktree repoDir "main" "happy-branch" |> Async.RunSynchronously
         Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
 
         let newWt = Path.Combine(tempDir, "tm-happy-branch")
@@ -178,7 +189,7 @@ type CreateWorktreeIntegrationTests() =
         initRepoOnMain repoDir
         gitAssert repoDir "checkout -b feature"
 
-        let result = createWorktree repoDir "no-such-base" "should-not-exist" |> Async.RunSynchronously
+        let result = forkWorktree repoDir "no-such-base" "should-not-exist" |> Async.RunSynchronously
         Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
         Assert.That(Directory.Exists(Path.Combine(tempDir, "tm-should-not-exist")), Is.False)
 
@@ -189,36 +200,54 @@ type CreateWorktreeIntegrationTests() =
         let scriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
         File.WriteAllText(Path.Combine(repoDir, scriptName), "# legacy fork script")
 
-        match createWorktree repoDir "main" "with-legacy" |> Async.RunSynchronously with
+        match forkWorktree repoDir "main" "with-legacy" |> Async.RunSynchronously with
         | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
-        | Ok warnings ->
+        | Ok fork ->
             Assert.That(Directory.Exists(Path.Combine(tempDir, "tm-with-legacy")), Is.True, "worktree should still be created")
-            Assert.That(warnings |> List.exists _.Contains("no longer used"), Is.True, $"Expected a legacy-fork-script warning but got: {warnings}")
+            Assert.That(fork.Warnings |> List.exists _.Contains("no longer used"), Is.True, $"Expected a legacy-fork-script warning but got: {fork.Warnings}")
 
     [<Test>]
-    member _.``runs the post-fork script inside the new worktree``() =
+    member _.``forkWorktree returns without running the post-fork script``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writePostForkArgsScript repoDir
+
+        forkWorktree repoDir "main" "no-postfork" |> Async.RunSynchronously |> ignore
+
+        let argsFile = Path.Combine(tempDir, "tm-no-postfork", "pf-args.txt")
+        Assert.That(File.Exists(argsFile), Is.False, "forkWorktree must not run post-fork — it runs in the background after the call returns")
+
+    [<Test>]
+    member _.``runPostFork runs the script inside the new worktree``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writePostForkArgsScript repoDir
+
+        match forkWorktree repoDir "main" "with-postfork" |> Async.RunSynchronously with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok fork ->
+            let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "with-postfork" |> Async.RunSynchronously
+            Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
+
+            let argsFile = Path.Combine(fork.WorktreePath, "pf-args.txt")
+            Assert.That(File.Exists(argsFile), Is.True, "post-fork script should run in the new worktree")
+            let contents = File.ReadAllText(argsFile)
+            Assert.That(contents, Does.Contain("with-postfork"), "post-fork should receive the branch name")
+            Assert.That(contents, Does.Contain("repo"), "post-fork should receive the source repo root")
+
+    [<Test>]
+    member _.``runPostFork is a no-op when no post-fork script exists``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
 
-        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-            let script = "param($wt, $root, $baseRef, $branch)\n\"$branch|$root\" | Out-File -FilePath (Join-Path $wt 'pf-args.txt')"
-            File.WriteAllText(Path.Combine(repoDir, "post-fork.ps1"), script)
-        else
-            let script = "#!/usr/bin/env bash\nprintf '%s|%s' \"$4\" \"$2\" > \"$1/pf-args.txt\"\n"
-            File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), script)
-
-        let result = createWorktree repoDir "main" "with-postfork" |> Async.RunSynchronously
-        Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
-
-        let newWt = Path.Combine(tempDir, "tm-with-postfork")
-        let argsFile = Path.Combine(newWt, "pf-args.txt")
-        Assert.That(File.Exists(argsFile), Is.True, "post-fork script should run in the new worktree")
-        let contents = File.ReadAllText(argsFile)
-        Assert.That(contents, Does.Contain("with-postfork"), "post-fork should receive the branch name")
-        Assert.That(contents, Does.Contain("repo"), "post-fork should receive the source repo root")
+        match forkWorktree repoDir "main" "no-script" |> Async.RunSynchronously with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok fork ->
+            let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "no-script" |> Async.RunSynchronously
+            Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
 
     [<Test>]
-    member _.``warns but still creates the worktree when the post-fork script fails``() =
+    member _.``runPostFork reports failure when the post-fork script exits non-zero``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
 
@@ -227,8 +256,9 @@ type CreateWorktreeIntegrationTests() =
         else
             File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), "#!/usr/bin/env bash\nexit 1\n")
 
-        match createWorktree repoDir "main" "postfork-fails" |> Async.RunSynchronously with
+        match forkWorktree repoDir "main" "postfork-fails" |> Async.RunSynchronously with
         | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
-        | Ok warnings ->
-            Assert.That(Directory.Exists(Path.Combine(tempDir, "tm-postfork-fails")), Is.True, "worktree should still be created")
-            Assert.That(warnings |> List.exists _.Contains("setup failed"), Is.True, $"Expected a post-fork failure warning but got: {warnings}")
+        | Ok fork ->
+            Assert.That(Directory.Exists(fork.WorktreePath), Is.True, "worktree should still be created")
+            let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "postfork-fails" |> Async.RunSynchronously
+            Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")

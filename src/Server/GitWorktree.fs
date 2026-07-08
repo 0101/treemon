@@ -395,36 +395,46 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
 /// `bd init`, which can far exceed the short default used for quick git probes.
 let private postForkTimeoutMs = 10 * 60 * 1000
 
-/// Runs an optional `post-fork` setup script inside the freshly created worktree,
-/// passing the worktree path, the source repo root, the base ref and the branch
-/// name. A failure is reported as a warning, never a hard error — the worktree
-/// already exists at this point.
-let private runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) =
-    async {
-        let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        let scriptName = if isWindows then "post-fork.ps1" else "post-fork.sh"
-        let scriptPath = Path.Combine(repoRoot, scriptName)
+/// Absolute path to the OS-appropriate `post-fork` setup hook when one exists in
+/// the repo root, otherwise None. Callers use this to decide whether to run — and
+/// surface a card lifecycle for — a post-fork step at all.
+let postForkScriptPath (repoRoot: string) : string option =
+    let scriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
+    let scriptPath = Path.Combine(repoRoot, scriptName)
+    if File.Exists scriptPath then Some scriptPath else None
 
-        if not (File.Exists scriptPath) then
-            return None
-        else
+/// Runs the optional `post-fork` setup script inside a freshly created worktree,
+/// passing the worktree path, the source repo root, the base ref and the branch
+/// name. Returns Ok when the script succeeds or is absent, and Error with the
+/// process failure when it exits non-zero — the worktree already exists, so a
+/// failure is never fatal, only surfaced on the card.
+let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
+    async {
+        match postForkScriptPath repoRoot with
+        | None -> return Ok ()
+        | Some scriptPath ->
             let fileName, arguments =
-                if isWindows then "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
-                else "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                    "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                else
+                    "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
 
             let! result = ProcessRunner.runResultWithTimeout postForkTimeoutMs "PostFork" fileName arguments (Some worktreePath)
-
-            return
-                match result with
-                | Ok _ -> None
-                | Error msg -> Some $"Worktree created, but '{scriptName}' setup failed: {msg}. Dependencies may be incomplete — re-run setup in the worktree."
+            return result |> Result.map ignore
     }
 
-/// Creates a new worktree, forking `branchName` from `baseBranch`. Treemon owns
-/// the forking: it fetches the base from upstream, forks from the remote-tracking
-/// ref when available, then runs an optional `post-fork` setup script. Returns any
-/// non-fatal warnings (a legacy fork script is present, or post-fork failed).
-let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) =
+type ForkResult =
+    { WorktreePath: string
+      BaseRef: string
+      Warnings: string list }
+
+/// Forks `branchName` from `baseBranch` into a `tm-`prefixed sibling of the repo
+/// root and returns as soon as `git worktree add` succeeds. Treemon owns the
+/// forking: it fetches the base from upstream and forks from the remote-tracking
+/// ref when available. The `post-fork` setup hook is intentionally NOT run here
+/// (see `runPostFork`) so callers can run it in the background without blocking.
+/// `Warnings` carries only the synchronous legacy-fork-script advisory.
+let forkWorktree (repoRoot: string) (baseBranch: string) (branchName: string) : Async<Result<ForkResult, string>> =
     asyncResult {
         let! name = validateBranchName branchName
         let! validBase = validateBranchName baseBranch
@@ -438,10 +448,11 @@ let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) 
             ProcessRunner.runResult "CreateWorktree" fileName arguments None
             |> AsyncResult.ignore
 
-        let! postForkWarning = runPostFork repoRoot worktreePath baseRef name
-
         let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
         let legacyScriptExists = File.Exists(Path.Combine(repoRoot, legacyScriptName))
 
-        return List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists; postForkWarning ]
+        return
+            { WorktreePath = worktreePath
+              BaseRef = baseRef
+              Warnings = List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists ] }
     }

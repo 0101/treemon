@@ -234,3 +234,36 @@ type ProcessMessageTests() =
 
         Assert.That(effects, Is.Empty)
         Assert.That(newState, Is.EqualTo(emptyState))
+
+    [<Test>]
+    member _.``BeginPostFork pushes a Running event under the post-fork source``() =
+        let newState, effects = processMessage emptyState (BeginPostFork "feature")
+
+        Assert.That(effects, Is.Empty)
+        let events = newState.Events |> Map.find "feature"
+        Assert.That(events.Length, Is.EqualTo(1))
+        Assert.That(events[0].Source, Is.EqualTo(postForkSource))
+        Assert.That(events[0].Status, Is.EqualTo(Some StepStatus.Running))
+
+    [<Test>]
+    member _.``CompletePostFork pushes a terminal event and clears the Running event``() =
+        let running = makeEvent postForkSource "setup" StepStatus.Running
+        let state = makeSyncState [] [ "feature", [ running ] ]
+
+        let newState, effects = processMessage state (CompletePostFork("feature", StepStatus.Succeeded))
+
+        Assert.That(effects, Is.Empty)
+        let events = newState.Events |> Map.find "feature"
+        Assert.That(events |> List.exists (fun e -> e.Status = Some StepStatus.Running), Is.False, "Running event should be cleared")
+        Assert.That(events |> List.exists (fun e -> e.Status = Some StepStatus.Succeeded), Is.True, "Terminal succeeded event should be present")
+
+    [<Test>]
+    member _.``CompletePostFork records a failure status on the terminal event``() =
+        let running = makeEvent postForkSource "setup" StepStatus.Running
+        let state = makeSyncState [] [ "feature", [ running ] ]
+
+        let newState, _ = processMessage state (CompletePostFork("feature", StepStatus.Failed "boom"))
+
+        let events = newState.Events |> Map.find "feature"
+        Assert.That(events |> List.exists (fun e -> e.Status = Some(StepStatus.Failed "boom")), Is.True)
+        Assert.That(events |> List.exists (fun e -> e.Status = Some StepStatus.Running), Is.False, "Running event should be cleared")

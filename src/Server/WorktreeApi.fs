@@ -536,9 +536,37 @@ let worktreeApi
                       |> Map.tryFind repoId
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
-                  let! warnings = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
+                  let branchName = BranchName.value req.BranchName
+                  let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
-                  return warnings
+
+                  // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
+                  // the background and surface its lifecycle on the worktree card via the sync event
+                  // log — the create call returns as soon as `git worktree add` succeeds, closing the
+                  // modal promptly. Any auto-launch that must wait for deps belongs at the end here.
+                  match GitWorktree.postForkScriptPath root with
+                  | None -> ()
+                  | Some _ ->
+                      let syncKey = scopedBranchKey repoId branchName
+                      Async.Start(
+                          async {
+                              try
+                                  syncAgent.Post(SyncEngine.BeginPostFork syncKey)
+                                  let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
+                                  let status =
+                                      match result with
+                                      | Ok () -> StepStatus.Succeeded
+                                      | Error msg ->
+                                          Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
+                                          StepStatus.Failed msg
+                                  syncAgent.Post(SyncEngine.CompletePostFork(syncKey, status))
+                                  agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                              with ex ->
+                                  Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
+                                  syncAgent.Post(SyncEngine.CompletePostFork(syncKey, StepStatus.Failed ex.Message))
+                          })
+
+                  return fork.Warnings
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->

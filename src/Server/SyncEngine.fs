@@ -40,6 +40,8 @@ type SyncMsg =
     | PushEvent of branch: string * CardEvent
     | UpdateProcessState of branch: string * SyncState
     | CompleteSync of branch: string * StepStatus
+    | BeginPostFork of branch: string
+    | CompletePostFork of branch: string * StepStatus
     | CancelSync of branch: string
     | GetAllEvents of AsyncReplyChannel<Map<string, CardEvent list>>
 
@@ -58,6 +60,10 @@ let private mkEvent source message status =
       Timestamp = DateTimeOffset.Now
       Status = Some status
       Duration = None }
+
+/// Card label for the post-fork setup hook, matching the OS-specific script name.
+let postForkSource =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
 
 let private clearRunningEvents (events: CardEvent list) =
     events |> List.filter (fun evt -> evt.Status <> Some StepStatus.Running)
@@ -110,6 +116,18 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
                       Events = state.Events |> Map.add branch cleanedEvents }
                 newState, [ DisposeCts sp.CancellationTokenSource ]
         | None -> state, []
+
+    | BeginPostFork branch ->
+        let existing = state.Events |> Map.tryFind branch |> Option.defaultValue []
+        { state with Events = state.Events |> Map.add branch (mkEvent postForkSource "setup" StepStatus.Running :: existing) }, []
+
+    | CompletePostFork (branch, status) ->
+        let cleaned =
+            state.Events
+            |> Map.tryFind branch
+            |> Option.defaultValue []
+            |> clearRunningEvents
+        { state with Events = state.Events |> Map.add branch (mkEvent postForkSource "setup" status :: cleaned) }, []
 
     | CancelSync branch ->
         match state.Processes |> Map.tryFind branch with
