@@ -214,7 +214,7 @@ type CanvasPhase4Tests() =
 
             // Send a postMessage to trigger sendCanvasMessage — with no bridge,
             // the server returns Queued, and the client should show the waiting banner
-            let canvasOrigin = "http://127.0.0.1:5002"
+            let canvasOrigin = ServerFixture.canvasUrl
             let! _ = this.Page.EvaluateAsync(
                 $"() => {{
                     window.dispatchEvent(new MessageEvent('message', {{
