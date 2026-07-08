@@ -99,7 +99,8 @@ module Activity =
         | "bd-plan" | "bd-improve" | "bd-autoimprove" | "spec-management" -> CurrentActivity.Planning
         | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
         | "pr" | "review-branch" | "reviewing-tests" | "comprehensive-review"
-        | "code-review" | "bd-review" | "contribution" -> CurrentActivity.Reviewing
+        | "code-review" | "bd-review" | "contribution"
+        | "review" | "focused-review:review" -> CurrentActivity.Reviewing
         | "fix-build" | "conflict" -> CurrentActivity.Fixing
         | _ -> CurrentActivity.Working
 

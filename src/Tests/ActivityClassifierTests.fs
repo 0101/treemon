@@ -35,7 +35,10 @@ type ActivityClassifierTests() =
     member _.``reviewing skills map to Reviewing``() =
         assertAll
             CurrentActivity.Reviewing
-            [ "pr"; "review-branch"; "reviewing-tests"; "comprehensive-review"; "code-review"; "bd-review"; "contribution" ]
+            [ "pr"; "review-branch"; "reviewing-tests"; "comprehensive-review"; "code-review"; "bd-review"; "contribution"
+              // The focused-review plugin skill: Copilot CLI emits data.name = "review" (source
+              // "plugin"); the fully-qualified "focused-review:review" is matched too for robustness.
+              "review"; "focused-review:review" ]
 
     [<Test>]
     member _.``fixing skills map to Fixing``() =

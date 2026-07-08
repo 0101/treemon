@@ -15,6 +15,78 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   patterns — no second collection, no duplicated plumbing.
 - Degrade gracefully: empty categories are simply absent, never rendered as `0`.
 
+## Corrections (v1.1 — prototype fidelity + activity accuracy)
+
+The deployed v1 diverged from the agreed prototype (`.agents/canvas/beads-panel-prototypes.html`,
+the chosen reference design) on **both** visual style and data accuracy. v1.1 makes the band match
+that prototype exactly and makes the agent-activity counts truthful. **This section supersedes any
+conflicting implementation note below.**
+
+### What v1 got wrong
+
+- **Visual** (`OverviewBand.fs` + `index.html`): marks rendered *above* the label (prototype: label
+  above the marks); count *after* the label (prototype: **count first**, e.g. `4 Investigating`);
+  **no section headers** (`ACTIVE AGENTS · N WORKING` / `TASKS · ACROSS ALL WORKTREES`); no dashed
+  separator; no footer caption; task bars drawn as **N fixed 8px unit cells** (so `Done = 477`
+  overflowed to full width while small counts were tiny squares) instead of one proportionally-scaled
+  bar on the true shared scale; and accent colours **shuffled off-palette** (Done rendered green not
+  mauve, Planning yellow not mauve, In progress blue not green …).
+- **Data** (`OverviewData.fs`): counted every worktree with `HasActiveSession` — a valid *terminal
+  window*, which includes Done/Idle/WaitingForUser (blue/grey/yellow dots) — **not** the red dot. So
+  ~21 idle/finished agents inflated **Working** and one lingering `CurrentSkill` showed **Planning**
+  when nothing was planning. `CurrentSkill` is also last-seen, not the skill running *now*.
+
+### Corrected visualization — match the prototype exactly
+
+Reference: the `.band` block in `.agents/canvas/beads-panel-prototypes.html`. Two stacked `.psec`
+sections separated by a **1px dashed** rule:
+
+1. Each section opens with a small **uppercase muted header** (`.plabel`): `ACTIVE AGENTS · N WORKING`
+   (extend with waiting when present) and `TASKS · ACROSS ALL WORKTREES`. `N` = count of red-dot
+   working agents.
+2. Each category is a **column**: a **count + label** meta line **above** its visual — **count
+   first**, coloured to the accent; label neutral; both the same font size/weight, differing only by
+   colour (e.g. `4 Investigating` over four circles, `34 Planned` over its bar).
+3. **Agents = circles** (~15px), one per agent, grouped by activity, coloured per activity.
+4. **Tasks = one solid bar** per status, **width ∝ count on one true shared scale** — the widest
+   bucket fills a fixed max width and every other bar is `count / Scale` of it (min ~5px so a `1` is
+   still visible). Use `Overview.Scale` as the denominator with a **computed width**. *An inline
+   `width` (or a CSS variable) is an accepted, documented exception to the CSS-classes-only rule — a
+   proportional width is inherently dynamic and cannot be a static class; the unit-cell workaround is
+   removed.* Because the label sits on its own line above, a short bar always keeps its full label.
+5. A muted **footer caption** under the tasks: *"one true scale — bar length ∝ task count across all
+   categories · counts in the labels · short bars keep their full label"*.
+6. **Palette (Catppuccin Mocha, exact):**
+   - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7`.
+   - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · Fixing `#fab387` · Working (fallback) `#89b4fa`.
+   - Waiting — `#f9e2af` (reuse the card's `WaitingForUser` dot colour). This frees `#f9e2af` from
+     Reviewing, which moves to Pink `#f5c2e7` so no two co-occurring agent groups share a hue
+     (Investigating teal, Planning mauve, Executing green, **Reviewing pink**, Fixing peach, Working
+     blue, **Waiting yellow** — all distinct).
+7. Empty categories stay omitted (never a `0`); an all-empty band renders nothing.
+
+### Corrected agent-activity semantics
+
+- **Working agent = red dot = `CodingTool = Working`.** The agent groups count only red-dot
+  worktrees — replacing the `HasActiveSession` filter, which counted mere terminal presence.
+- **Waiting is its own group.** Worktrees with `CodingTool = WaitingForUser` (yellow dot) form a
+  separate "Waiting for user" group, distinct from the skill-derived activities.
+- **Group working agents by the skill running *now*.** Activity is the currently-executing skill's
+  bucket. `focused-review:review` is added to the classifier → **Reviewing**. A red-dot agent with no
+  recognized skill falls to the generic **Working** group — an honest count, no longer inflated by
+  idle agents.
+- **Skill freshness is Copilot-CLI-only.** `CopilotDetector` must report `CurrentSkill` only while the
+  skill is *actively executing* — a skill invoked earlier in the same still-running session that has
+  since finished must not linger. **Claude Code and VS Code Copilot may report `None`/empty** (the
+  user runs Copilot CLI; making the others exact is out of scope — do only if trivial). This replaces
+  the "not staleness-gated" note.
+
+### Remove the per-card activity stripe
+
+Drop the `act-*` left stripe entirely: remove `activityStripe` from `CardViews.cardClassName`, delete
+the `.wt-card.act-*` CSS in `index.html` (and the stripe-only `position: relative` add if unused
+elsewhere), and remove its tests. The red dot is unchanged; the band alone now conveys the *what*.
+
 ## Expected Behavior
 
 ### The Overview band
@@ -65,7 +137,7 @@ distinct server-side bucket for fidelity but folds into **Planned** for display 
   | **Investigating** | `investigate` |
   | **Planning** | `bd-plan`, `bd-improve`, `bd-autoimprove`, `spec-management` |
   | **Executing** | `bd-execute`, `bd-phase`, `bd-autopilot`, `refactor` |
-  | **Reviewing** | `pr`, `review-branch`, `reviewing-tests`, `comprehensive-review`, `code-review`, `bd-review`, `contribution` |
+  | **Reviewing** | `pr`, `review-branch`, `reviewing-tests`, `comprehensive-review`, `code-review`, `bd-review`, `contribution`, `review` (focused-review plugin — the actual `skill.invoked` `data.name`; `focused-review:review` also mapped) |
   | **Fixing** | `fix-build`, `conflict` |
   | **Working** (fallback) | active session, no recognized skill |
 
@@ -149,9 +221,14 @@ one source of truth.
 - **Bounded horizon (accepted degradation).** Like all detector reads, the scan reaches ~1 MB back
   from EOF. A skill whose start-of-run signal has scrolled past that window degrades to `None` →
   Working — consistent with the spec's graceful-degradation goal; not gated further.
-- **Not staleness-gated.** `CurrentSkill` mirrors `getLastUserMessage` (no age gate); display
-  consumers (band circles, per-card stripe) gate on an active session, so an idle card never shows
-  a stale skill even though the field may be populated.
+- **Skill freshness (supersedes the old "not staleness-gated" note; v1.1 (i), yh5).** The Copilot
+  scan now bounds the skill to the *current request*: scanning backward, a `skill.invoked` / `skill`
+  tool-call ⇒ that skill runs now, but a **genuine `user.message` first ⇒ `None`** (a new request
+  means the prior skill finished — no more lingering). The skill's own context-injection
+  `user.message` (`source: "skill-<name>"` / `<skill-context …>` preamble) is transparent, so the
+  scan steps past it to the `skill.invoked` it belongs to. `assistant.turn_end` is **not** a boundary
+  (it interleaves mid-skill). Claude Code / VS Code surfaces are left as-is (out of scope). Display
+  consumers still gate on an active session, so an idle card never shows a skill.
 
 ### Domain changes (`src/Shared/Types.fs`)
 
@@ -185,7 +262,7 @@ the solution compiling (no compat shims, per house rules).
 - Per-card stripe: an activity modifier class on `wt-card` in `CardViews.fs`.
 
 **Implementation notes (c8k — the band view, `src/Client/OverviewBand.fs`):**
-- **Bars are a run of unit cells, not an inline-width bar.** Each task bar renders `count` identical
+- **Bars are a run of unit cells, not an inline-width bar.** *(SUPERSEDED by correction (g): render exactly ONE proportional bar per status whose width is computed from `Overview.Scale` via an inline width / CSS variable; the unit-cell design in this bullet — including the "does not read `Overview.Scale`" claim — is historical.)* Each task bar renders `count` identical
   fixed-size (`8×12px`) `.overview-cell` spans that touch (container `gap: 0`), so a count-N bar is
   exactly N cells wide. This puts every bar on one true shared linear scale *structurally* — no cap,
   no fade — while honouring **CSS-classes-only / no inline styles** (the natural `width: count/Scale%`
@@ -206,7 +283,7 @@ the solution compiling (no compat shims, per house rules).
   gated on `model.OverviewPanelOpen`; reflow via a `@container dashboard (min-width: 1200px)` rule
   that flips the two sections from stacked (narrow) to side-by-side (wide).
 
-**Implementation notes (49w — the per-card stripe, `CardViews.fs` + `index.html`):**
+**Implementation notes (49w — the per-card stripe, `CardViews.fs` + `index.html`):** *(SUPERSEDED by correction (k): the per-card stripe is REMOVED entirely — this subsection is historical context for the removal task only.)*
 - **`CardViews.activityStripe` appends a card-scoped `act-*` modifier**, gated on `HasActiveSession`
   (mirrors the band's active-only filter, since `CurrentSkill` is not staleness-gated) and derived
   from `Activity.classify (CurrentSkill |> Option.defaultValue "")`. `Working` / no skill ⇒ `""` (no
@@ -260,6 +337,37 @@ running skill from the existing session scan; per-session context usage (Extensi
   `ArchivedWorktrees` field. A `RepoModel`-based caller must recombine `Worktrees @ ArchivedWorktrees`
   before calling `aggregate`, or archived worktrees vanish entirely (silently zeroing their
   contribution to every bucket, not just `Done`).
+
+**Corrections v1.1 (supersede where they conflict):**
+- (g) **Prototype fidelity.** The band matches `.agents/canvas/beads-panel-prototypes.html` exactly
+  (section headers, count-first labels *above* the visual, dashed separator, footer caption, exact
+  Catppuccin palette). The unit-cell bar is replaced by a **true-scale proportional bar** whose width
+  is computed from `Overview.Scale` — a **computed inline width / CSS variable is an accepted
+  exception** to the CSS-classes-only rule (a proportional width cannot be a static class).
+- (h) **Working agent = red dot (`CodingTool = Working`)**, not `HasActiveSession`. `WaitingForUser`
+  (yellow) is a **separate "Waiting" group**. A red-dot agent with no recognized skill → generic
+  **Working** group (honest count).
+- (i) **Skill freshness is Copilot-CLI-only.** `CopilotDetector` reports `CurrentSkill` only while the
+  skill is actively executing now; a finished skill in a still-active session must not linger. Claude
+  Code / VS Code Copilot may report `None` (out of scope — the user runs Copilot CLI).
+  *Implemented (yh5):* Copilot CLI has **no explicit skill-finished event**, and `assistant.turn_end`
+  interleaves constantly mid-skill (even between a skill tool-call and its `skill.invoked`), so it is
+  **not** a boundary. The backward events scan instead treats the first of these as decisive: a
+  `skill.invoked` / `skill` tool-call ⇒ that skill runs now; a **genuine `user.message` ⇒ None** (a
+  new top-level or scheduled request means the prior skill's run is over). A skill's own
+  **context-injection `user.message`** — Copilot tags it `source: "skill-<name>"` with a
+  `<skill-context …>` content preamble, written right after `skill.invoked` — is part of the skill
+  *starting*, so the scan steps past it (otherwise long orchestrators like `bd-execute`, whose only
+  later user.message is that injection, would never report their skill).
+- (j) **`focused-review:review` → Reviewing** added to `Activity.classify` (verify the exact skill
+  identifier Copilot CLI emits for the plugin skill).
+  *Verified (yh5):* the plugin skill emits `skill.invoked` `data.name = "review"` (`source: "plugin"`)
+  and its `skill` tool-call arg is `{"skill":"review"}` — **not** `focused-review:review`. Both
+  `"review"` and `"focused-review:review"` are mapped to Reviewing (the former matches reality; the
+  latter kept for robustness / any fully-qualified surface). Note `review` is distinct from the
+  already-mapped `review-branch`, `bd-review`, `code-review`.
+- (k) **Per-card `act-*` stripe removed** (`CardViews` + `index.html` + tests); the red dot is
+  unchanged.
 
 ## Key Files
 

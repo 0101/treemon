@@ -273,6 +273,11 @@ let private makeSkillToolCallJsonArgs (skill: string) (timestamp: string) =
     // arguments encoded as a JSON string (arguments_json) rather than a nested object
     $"""{{"type":"assistant.message","data":{{"content":"invoking","toolRequests":[{{"toolCallId":"tc1","name":"skill","arguments_json":"{{\"skill\":\"{skill}\"}}","type":"function"}}]}},"timestamp":"{timestamp}"}}"""
 
+let private makeSkillContextEvent (name: string) (timestamp: string) =
+    // Copilot injects a skill's context as a synthetic user.message right after skill.invoked:
+    // source "skill-<name>" plus a "<skill-context …>" preamble. It must NOT end the skill's run.
+    $"""{{"type":"user.message","data":{{"source":"skill-{name}","content":"<skill-context name={name}>"}},"timestamp":"{timestamp}"}}"""
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -344,6 +349,52 @@ type CurrentSkillTests() =
 
         withTempEventsFile content (fun path ->
             Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``A skill that finished before a new user request no longer lingers``() =
+        // v1.1 (i): a skill invoked earlier in a still-active session that has since finished must
+        // not be reported. A genuine user.message after the skill signals a new request → None.
+        let content =
+            [ makeUserEvent "plan the feature" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"
+              makeAssistantEvent "planning complete" "2026-03-01T10:00:02Z"
+              makeTurnEnd "2026-03-01T10:00:03Z"
+              makeUserEvent "now something unrelated" "2026-03-01T10:05:00Z"
+              makeAssistantEvent "on it" "2026-03-01T10:05:01Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``A running skill is reported past its own skill-context injection``() =
+        // The synthetic "<skill-context>" user.message Copilot writes right after skill.invoked is
+        // part of the skill starting, not a new request, so the scan steps past it and reports the
+        // running skill (e.g. a bd-execute orchestration with no genuine user.message since).
+        let content =
+            [ makeUserEvent "/bd-execute my-feature" "2026-03-01T10:00:00Z"
+              makeSkillToolCall "bd-execute" "2026-03-01T10:00:01Z"
+              makeSkillInvoked "bd-execute" "2026-03-01T10:00:02Z"
+              makeSkillContextEvent "bd-execute" "2026-03-01T10:00:03Z"
+              makeAssistantEvent "orchestrating subagents" "2026-03-01T10:00:04Z"
+              makeTurnEnd "2026-03-01T10:00:05Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "bd-execute")))
+
+    [<Test>]
+    member _.``A skill re-invoked after a new request is reported, not the earlier finished one``() =
+        let content =
+            [ makeSkillInvoked "bd-plan" "2026-03-01T10:00:00Z"
+              makeTurnEnd "2026-03-01T10:00:01Z"
+              makeUserEvent "please review the branch" "2026-03-01T10:05:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:05:01Z"
+              makeAssistantEvent "reviewing" "2026-03-01T10:05:02Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "review")))
 
     [<Test>]
     member _.``Non-existent file yields None``() =
