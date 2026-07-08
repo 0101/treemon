@@ -28,6 +28,12 @@ type CanvasState =
       // additionally clears it so a tab switch (and switch back) never re-shows it. Distinct from
       // CanvasSendState.Failed, which models pane→session message-delivery failures.
       DocError: DocJsError option
+      // Transient success banner shown after a canvas doc is shared and its rich link copied to the
+      // clipboard (the message text, e.g. "Shared — link copied", or None when nothing to show).
+      // A share *failure* reuses the CanvasSendState.Failed error banner per spec, so only the
+      // success path needs its own state; kept distinct from CanvasSendState (message delivery) and
+      // DocError (doc JS errors) so the banners never overwrite each other.
+      ShareNotice: string option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// Initial canvas state: pane closed on the right, all maps empty, send state idle.
@@ -43,6 +49,7 @@ let empty : CanvasState =
       CanvasEvents = Map.empty
       CanvasSendState = CanvasSendState.Idle
       DocError = None
+      ShareNotice = None
       BridgeLiveness = Map.empty }
 
 let [<Literal>] private MaxLiveIframes = 3
@@ -59,8 +66,7 @@ let touchVisitedDoc (scopedKey: string) (filename: string) (visited: Map<string,
 /// (e.g. the beads dashboard) drives its own refresh and must neither be morphed (a morph stomps
 /// the live, JS-rendered dashboard back to the empty template shell) nor steal focus on change.
 let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string) : CanvasDocKind option =
-    repos
-    |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+    findWorktreeByScopedKey repos scopedKey
     |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
     |> Option.map _.Kind
 
@@ -70,8 +76,7 @@ let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string)
 let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (activeCanvasDoc: Map<string, string>) : (string * string) option =
     match focused with
     | Some (Card scopedKey) ->
-        repos
-        |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
+        findWorktreeByScopedKey repos scopedKey
         |> Option.bind (fun wt ->
             let doc =
                 activeCanvasDoc

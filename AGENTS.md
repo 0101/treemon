@@ -38,6 +38,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - **Immutable collections** — use F# `list`, `Map`, `Set` instead of `Dictionary<>`, `ResizeArray`, `List<T>` (mutable .NET types)
 - **String interpolation** — `$"text {x}"` instead of `sprintf "text %s" x`
 - **Modern indexing** — `collection[0]` not `collection.[0]` (dot-bracket obsolete since F# 6)
+- **Nested record copy-and-update** — collapse hand-nested updates with F# 7+ dotted syntax: `{ x with A.B = v }`, and multi-field `{ x with A.B = v1; A.C = v2 }`, instead of `{ x with A = { x.A with B = v } }`. Only applies when the inner record copies the *same* field of the *same* source (`x.A`); it does **not** apply inside a full record literal such as `{ A = { x.A with B = v }; C = ... }` (no outer `with`). Fable 4.28 supports this syntax.
 - **CSS over inline styles** — use `prop.className` with CSS classes, not `style.*` in Feliz views (inline styles bypass the theme)
 - **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
 

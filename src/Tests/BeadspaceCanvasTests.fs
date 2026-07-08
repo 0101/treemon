@@ -26,7 +26,7 @@ let private mockBeadsJson = """[
 type BeadspaceCanvasTests() =
     inherit PageTest()
 
-    let beadsPageUrl = "http://127.0.0.1:5002/e2e-test-worktree/beads.html"
+    let beadsPageUrl = $"{ServerFixture.canvasUrl}/e2e-test-worktree/beads.html"
 
     let beadsHtmlPath =
         Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Server", "BeadspaceTemplate.html"))

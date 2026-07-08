@@ -389,6 +389,7 @@ type SubmitCreateWorktreeRequestMappingTests() =
           resumeSession = fun _ -> failwith "unused"
           sendCanvasMessage = fun _ -> failwith "unused"
           archiveCanvasDoc = fun _ -> failwith "unused"
+          shareCanvasDoc = fun _ -> failwith "unused"
           saveLastViewedHashes = fun _ -> failwith "unused"
           loadLastViewedHashes = fun _ -> failwith "unused"
           getBridgeLiveness = fun _ -> failwith "unused"
