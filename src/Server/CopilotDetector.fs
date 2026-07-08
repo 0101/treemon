@@ -166,23 +166,43 @@ let getStatus (worktreePath: string) =
     | Some fi -> getStatusFromEventsFile fi.FullName DateTimeOffset.UtcNow
     | None -> Idle
 
-// The running skill rides the same backward events scan as the red dot, but with *freshness*:
-// Copilot CLI has no explicit "skill finished" event, so a skill counts as running-now only while
-// its invocation is the most recent thing the agent did on the CURRENT request. Scanning backward
-// from EOF, the first of these decides:
+// The running skill rides a backward events scan with *freshness*: Copilot CLI has no explicit
+// "skill finished" event, so a skill counts as running-now only while its invocation is the most
+// recent thing the agent did on the CURRENT request. Scanning backward from EOF, the first decisive
+// event wins:
 //   * a `skill.invoked` event (data.name), or the `skill` tool-call that requested it
 //     (arguments.skill) -> that skill is running now; or
 //   * a genuine `user.message` (a new top-level or scheduled request) -> the prior skill's run is
 //     over, so report nothing. This is what stops a finished skill from lingering across turns
 //     (the v1.1 (i) correction) — a bd-plan that finished before the user moved on no longer shows.
-// A skill's own context-injection `user.message` (Copilot tags it `source: "skill-<name>"` with a
-// `<skill-context …>` content preamble, written right after skill.invoked) is part of the skill
-// starting, NOT a new request, so the scan steps past it. Because skill.invoked is written after its
-// tool-call, recency prefers skill.invoked and falls back to the tool-call for a skill that is still
-// starting. The raw name is surfaced; Shared.Activity.classify normalizes it.
-type private SkillScan =
-    | SkillRunning of string
-    | RequestBoundary
+// Two `user.message` shapes are NOT request boundaries and stay transparent:
+//   * a skill's own context injection (Copilot tags it `source: "skill-<name>"` AND a
+//     `<skill-context …>` content preamble, written right after skill.invoked) — part of the skill
+//     *starting* (see isSkillContextMessage); and
+//   * an `ask_user` reply — the agent asked a question mid-skill (an assistant.message requesting
+//     the `ask_user` tool → WaitingForUser), the user answered, and the SAME skill resumes on the
+//     next turn. A per-line pick cannot tell an ask_user reply from a new request (both are a plain
+//     `source:""` user.message), so the scan is *stateful*: a candidate boundary is only confirmed
+//     once the first assistant.message older than it is seen — if that older assistant.message was
+//     the outstanding ask_user request, the candidate was its reply and is discarded (the skill is
+//     still running). This needs consecutive events, so it reads the whole bounded tail rather than
+//     riding scanBackward's overlapping (boundary-line-duplicating) chunks.
+// Because skill.invoked is written after its tool-call, recency prefers skill.invoked and falls back
+// to the tool-call for a skill that is still starting. The raw name is surfaced; Shared.Activity
+// .classify normalizes it.
+
+/// One event's bearing on skill freshness, scanning newest→oldest. Events with no bearing
+/// (turn_start/turn_end, tool/hook events, the ask_user tool-execution rows, system messages) parse
+/// to None and are skipped.
+type private SkillEvent =
+    /// `skill.invoked` or a `skill` tool-call — the skill running on the current request.
+    | SkillSignal of string
+    /// An assistant.message whose toolRequests include `ask_user` (the request the user replies to).
+    | AssistantAskUser
+    /// Any other assistant.message (ordinary work — decisive when confirming a pending boundary).
+    | AssistantWork
+    /// A plain user.message: a genuine new request UNLESS it turns out to be an ask_user reply.
+    | UserRequest
 
 let private tryReadSkillArgument (req: JsonElement) =
     let skillFromObject (obj: JsonElement) =
@@ -212,9 +232,13 @@ let private tryReadSkillArgument (req: JsonElement) =
         | _ -> None)
 
 /// A user.message that is a skill's own context injection (written immediately after skill.invoked)
-/// rather than a genuine new request. Copilot CLI tags these with a `source` of `skill-<name>` and a
-/// `<skill-context …>` content preamble; either marker identifies one, so the freshness scan treats
-/// it as transparent and keeps looking back for the skill signal it belongs to.
+/// rather than a genuine new request. Copilot CLI tags these with BOTH a `source` of `skill-<name>`
+/// and a `<skill-context …>` content preamble. Both markers are required (focused-review F4): the
+/// `source` alone is system-controlled and trustworthy, but a normal user message could legitimately
+/// begin with the literal text "<skill-context", so requiring the content check without the
+/// system-set source would let such a message masquerade as an injection, skip the request boundary,
+/// and resurrect a stale/finished skill. Requiring both keeps the real injection transparent while a
+/// user-typed lookalike stays a genuine boundary.
 let private isSkillContextMessage (data: JsonElement) =
     let sourceIsSkill =
         match data.TryGetProperty("source") with
@@ -228,9 +252,30 @@ let private isSkillContextMessage (data: JsonElement) =
             c.GetString().TrimStart().StartsWith("<skill-context", StringComparison.OrdinalIgnoreCase)
         | _ -> false
 
-    sourceIsSkill || contentIsSkillContext
+    sourceIsSkill && contentIsSkillContext
 
-let private tryParseSkill (line: string) : SkillScan option =
+let private assistantMessageEvent (data: JsonElement) : SkillEvent =
+    match data.TryGetProperty("toolRequests") with
+    | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
+        // A single assistant.message can carry several tool calls; a `skill` call wins (the skill is
+        // starting), otherwise an `ask_user` call marks the request the user will reply to.
+        let toolNamed (name: string) (req: JsonElement) =
+            match req.TryGetProperty("name") with
+            | true, n when n.ValueKind = JsonValueKind.String -> n.GetString() = name
+            | _ -> false
+
+        let skill =
+            reqs.EnumerateArray()
+            |> Seq.tryPick (fun req -> if toolNamed "skill" req then tryReadSkillArgument req else None)
+
+        match skill with
+        | Some name -> SkillSignal name
+        | None ->
+            let hasAskUser = reqs.EnumerateArray() |> Seq.exists (toolNamed "ask_user")
+            if hasAskUser then AssistantAskUser else AssistantWork
+    | _ -> AssistantWork
+
+let private classifySkillEvent (line: string) : SkillEvent option =
     try
         use doc = JsonDocument.Parse(line)
         let root = doc.RootElement
@@ -244,40 +289,63 @@ let private tryParseSkill (line: string) : SkillScan option =
                     match data.TryGetProperty("name") with
                     | true, n when n.ValueKind = JsonValueKind.String ->
                         let name = n.GetString()
-                        if String.IsNullOrWhiteSpace(name) then None else Some(SkillRunning name)
+                        if String.IsNullOrWhiteSpace(name) then None else Some(SkillSignal name)
                     | _ -> None
                 | _ -> None
             | "assistant.message" ->
                 match root.TryGetProperty("data") with
-                | true, data ->
-                    match data.TryGetProperty("toolRequests") with
-                    | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
-                        reqs.EnumerateArray()
-                        |> Seq.tryPick (fun req ->
-                            let isSkillCall =
-                                match req.TryGetProperty("name") with
-                                | true, n -> n.GetString() = "skill"
-                                | _ -> false
-                            if isSkillCall then tryReadSkillArgument req |> Option.map SkillRunning else None)
-                    | _ -> None
-                | _ -> None
+                | true, data -> Some(assistantMessageEvent data)
+                | _ -> Some AssistantWork
             | "user.message" ->
-                // A genuine new request ends the prior skill's run; the skill's own context
-                // injection does not (the scan steps past it, staying on the skill it belongs to).
+                // A skill's own context injection is transparent (part of the skill starting); every
+                // other user.message is a candidate request boundary — the stateful scan below then
+                // decides whether it is a genuine new request or an ask_user reply.
                 match root.TryGetProperty("data") with
                 | true, data when isSkillContextMessage data -> None
-                | _ -> Some RequestBoundary
+                | _ -> Some UserRequest
             | _ -> None
         | _ -> None
     with ex ->
         Log.log "Copilot" $"Failed to parse skill event: {ex.Message}"
         None
 
+/// Where the newest→oldest scan stands: normally searching for the skill signal, or holding a
+/// candidate request boundary until the next older classified event resolves it. The candidate is
+/// discarded (skill still running) only if that older event is the outstanding ask_user request;
+/// any other older event — ordinary assistant work, a skill signal, or another user request —
+/// confirms it as a genuine boundary.
+type private ScanState =
+    | Searching
+    | PendingBoundary
+
+let private scanSkill (events: SkillEvent seq) : string option =
+    // Pulls events lazily so classifySkillEvent's JSON parse stops as soon as a decision is reached
+    // (the skill signal usually sits within the newest handful of events); the loop is tail-recursive.
+    use e = events.GetEnumerator()
+
+    let rec loop state =
+        if not (e.MoveNext()) then
+            None // reached the tail horizon / file start without a live skill signal
+        else
+            match state, e.Current with
+            | Searching, SkillSignal name -> Some name
+            | Searching, UserRequest -> loop PendingBoundary
+            | Searching, (AssistantAskUser | AssistantWork) -> loop Searching
+            // The candidate boundary is an ask_user reply iff the assistant.message just before it
+            // requested ask_user; then the same skill resumes, so drop the boundary and keep looking.
+            | PendingBoundary, AssistantAskUser -> loop Searching
+            // Any other decisive event older than the candidate confirms it as a genuine boundary.
+            | PendingBoundary, (SkillSignal _ | AssistantWork | UserRequest) -> None
+
+    loop Searching
+
 let internal getCurrentSkillFromEventsFile (eventsPath: string) : string option =
-    match FileUtils.scanBackward "Copilot" eventsPath tryParseSkill with
-    | Some(SkillRunning name) -> Some name
-    | Some RequestBoundary
-    | None -> None
+    // Bounded to a ~1 MB tail (matching scanBackward's horizon); a skill whose start scrolled past it
+    // degrades to None → Working, an accepted graceful degradation.
+    FileUtils.readTailLines "Copilot" eventsPath (1024 * 1024)
+    |> List.rev // newest → oldest
+    |> Seq.choose classifySkillEvent // lazy: parsed on demand, stops when scanSkill decides
+    |> scanSkill
 
 let getCurrentSkill (worktreePath: string) : string option =
     getSessionDirsForPath worktreePath

@@ -359,6 +359,17 @@ running skill from the existing session scan; per-session context usage (Extensi
   `<skill-context …>` content preamble, written right after `skill.invoked` — is part of the skill
   *starting*, so the scan steps past it (otherwise long orchestrators like `bd-execute`, whose only
   later user.message is that injection, would never report their skill).
+  *Hardened (hsg, focused-review F4/F5):* a context injection is recognized only when **both**
+  markers are present (`source: "skill-<name>"` **and** the `<skill-context …>` content) — source
+  alone is system-controlled, but requiring only the content let a normal user message that merely
+  *begins* "<skill-context" masquerade as one and resurrect a finished skill. And a **`user.message`
+  that is an `ask_user` reply is not a boundary**: mid-skill the agent may ask the user a question
+  (an `assistant.message` requesting the `ask_user` tool → WaitingForUser) and the same skill resumes
+  after the answer. Since that reply is a plain `source:""` user.message indistinguishable per-line
+  from a new request, the scan is **stateful** (newest→oldest): a candidate boundary is discarded
+  only if the first assistant.message older than it was that outstanding `ask_user` request. This
+  reads the whole bounded (~1 MB) tail (`FileUtils.readTailLines`) rather than `scanBackward`'s
+  overlapping chunks, which can re-emit a boundary line and so cannot carry the scan state.
 - (j) **`focused-review:review` → Reviewing** added to `Activity.classify` (verify the exact skill
   identifier Copilot CLI emits for the plugin skill).
   *Verified (yh5):* the plugin skill emits `skill.invoked` `data.name = "review"` (`source: "plugin"`)

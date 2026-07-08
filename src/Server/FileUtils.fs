@@ -3,14 +3,18 @@ module Server.FileUtils
 open System
 open System.IO
 
-let readLastLines (logTag: string) (filePath: string) (maxLines: int) =
+/// Reads the tail of a text file (up to maxBytes back from EOF) as clean, non-empty, trimmed lines
+/// in file order (oldest→newest). A leading partial line is dropped unless the read reached the file
+/// start. Unlike scanBackward this returns the whole tail so callers can run a *stateful* scan
+/// (e.g. threading a small state machine over consecutive events) — scanBackward's overlapping
+/// chunks can re-emit a boundary line and so only suit stateless first-match picks.
+let readTailLines (logTag: string) (filePath: string) (maxBytes: int) : string list =
     try
         use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-        if stream.Length = 0L then []
+        let length = stream.Length
+        if length = 0L then []
         else
-            let bufferSize = 64 * 1024
-            let length = stream.Length
-            let start = Math.Max(0L, length - int64 bufferSize)
+            let start = Math.Max(0L, length - int64 maxBytes)
             stream.Seek(start, SeekOrigin.Begin) |> ignore
 
             use reader = new StreamReader(stream)
@@ -26,12 +30,15 @@ let readLastLines (logTag: string) (filePath: string) (maxLines: int) =
             linesToProcess
             |> Array.map _.Trim()
             |> Array.filter (fun s -> s.Length > 0)
-            |> Array.rev
-            |> Array.truncate maxLines
             |> Array.toList
     with ex ->
         Log.log logTag $"Failed to read JSONL {filePath}: {ex.Message}"
         []
+
+let readLastLines (logTag: string) (filePath: string) (maxLines: int) =
+    readTailLines logTag filePath (64 * 1024)
+    |> List.rev
+    |> List.truncate maxLines
 
 let refreshIfStale (maxAge: TimeSpan) (cache: 'T ref) (getAge: 'T -> DateTimeOffset) (rebuild: unit -> 'T) =
     let current = cache.Value

@@ -278,6 +278,16 @@ let private makeSkillContextEvent (name: string) (timestamp: string) =
     // source "skill-<name>" plus a "<skill-context …>" preamble. It must NOT end the skill's run.
     $"""{{"type":"user.message","data":{{"source":"skill-{name}","content":"<skill-context name={name}>"}},"timestamp":"{timestamp}"}}"""
 
+let private makeAskUserEvent (question: string) (timestamp: string) =
+    // An assistant.message requesting the ask_user tool: the agent parks on the user (WaitingForUser)
+    // mid-skill; the user's next user.message is the reply, not a new request.
+    $"""{{"type":"assistant.message","data":{{"content":"{question}","toolRequests":[{{"toolCallId":"tc-ask","name":"ask_user","type":"function"}}]}},"timestamp":"{timestamp}"}}"""
+
+let private makeAskUserToolComplete (timestamp: string) =
+    // The ask_user tool-execution row that sits between the ask_user request and the reply; the skill
+    // scan must ignore it (only the assistant.message request marks the boundary as an ask_user one).
+    $"""{{"type":"tool.execution_complete","data":{{"name":"ask_user"}},"timestamp":"{timestamp}"}}"""
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -395,6 +405,78 @@ type CurrentSkillTests() =
 
         withTempEventsFile content (fun path ->
             Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "review")))
+
+    [<Test>]
+    member _.``A running skill is reported across an ask_user reply that resumes it``() =
+        // focused-review F5: mid-skill the agent asks the user a question (ask_user → WaitingForUser);
+        // the user's reply is a plain user.message with no new skill.invoked, and the SAME skill
+        // resumes on the next turn. That reply must NOT be treated as a request boundary — the skill
+        // is still running, so it is still reported (not collapsed to generic Working).
+        let content =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillToolCall "review" "2026-03-01T10:00:01Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:02Z"
+              makeSkillContextEvent "review" "2026-03-01T10:00:03Z"
+              makeAssistantEvent "let me look at the diff" "2026-03-01T10:00:04Z"
+              makeAskUserEvent "which file should I focus on?" "2026-03-01T10:00:05Z"
+              makeAskUserToolComplete "2026-03-01T10:01:00Z"
+              makeUserEvent "the auth module" "2026-03-01T10:01:01Z"
+              makeAssistantEvent "reviewing the auth module" "2026-03-01T10:01:02Z"
+              makeTurnEnd "2026-03-01T10:01:03Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "review")))
+
+    [<Test>]
+    member _.``A genuine new request after ordinary work still ends the prior skill``() =
+        // The ask_user-awareness must not over-fire: when the assistant.message just before the new
+        // user.message was ordinary work (no ask_user), the user.message IS a genuine boundary and
+        // the earlier skill's run is over.
+        let content =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeAssistantEvent "review complete" "2026-03-01T10:00:02Z"
+              makeTurnEnd "2026-03-01T10:00:03Z"
+              makeUserEvent "now bump the version" "2026-03-01T10:05:00Z"
+              makeAssistantEvent "on it" "2026-03-01T10:05:01Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``A user message merely beginning with skill-context text is a genuine boundary``() =
+        // focused-review F4: a normal user.message whose text happens to start with "<skill-context"
+        // (but with no system-set skill source) must NOT masquerade as a skill's context injection.
+        // If it did, it would skip the request boundary and resurrect the finished skill below it.
+        let content =
+            [ makeUserEvent "/bd-plan the feature" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"
+              makeAssistantEvent "planning complete" "2026-03-01T10:00:02Z"
+              makeTurnEnd "2026-03-01T10:00:03Z"
+              makeUserEvent "<skill-context> is a tag I want you to document" "2026-03-01T10:05:00Z"
+              makeAssistantEvent "sure, documenting it" "2026-03-01T10:05:01Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``An unanswered ask_user mid-skill still reports the running skill``() =
+        // The agent invoked a skill and is now parked on the user (ask_user is the last thing, no
+        // reply yet → WaitingForUser). The skill is paused, not finished, so it is still reported;
+        // the Waiting grouping is handled separately by CodingTool status, not by CurrentSkill.
+        let content =
+            [ makeUserEvent "/investigate the flake" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "investigate" "2026-03-01T10:00:01Z"
+              makeSkillContextEvent "investigate" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "digging in" "2026-03-01T10:00:03Z"
+              makeAskUserEvent "can you share the failing run URL?" "2026-03-01T10:00:04Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "investigate")))
 
     [<Test>]
     member _.``Non-existent file yields None``() =
