@@ -142,14 +142,6 @@ let private taskColumn (scale: int) (bucket: TaskBucket) =
               [ metaLine accent (taskLabel bucket.Kind) bucket.Count
                 Html.div [ prop.className ("overview-bar " + accent); prop.style [ style.width (length.px px) ] ] ] ]
 
-/// The uppercase muted section header text. Agents extend with the waiting count only when a Waiting
-/// group is present; tasks are constant. CSS upper-cases the text, so it reads e.g.
-/// "ACTIVE AGENTS · 9 WORKING · 2 WAITING" / "TASKS · ACROSS ALL WORKTREES".
-let private agentsHeader (workingCount: int) (waitingCount: int option) =
-    match waitingCount with
-    | Some m -> sprintf "Active agents · %d working · %d waiting" workingCount m
-    | None -> sprintf "Active agents · %d working" workingCount
-
 /// A section shell: an uppercase header over the wrapping row of category columns, plus any trailing
 /// caption (the tasks section's footnote). The stacked layout + dashed separator live in CSS.
 let private section (header: string) (columns: ReactElement list) (caption: ReactElement) =
@@ -188,7 +180,19 @@ let view (repos: RepoModel list) : ReactElement =
               prop.children
                   [ match agents with
                     | [] -> Html.none
-                    | groups -> section (agentsHeader workingCount waitingCount) (groups |> List.map agentColumn) Html.none
+                    | groups ->
+                        // Uppercase muted section header (CSS upper-cases it): count of red-dot
+                        // working agents, extended with the waiting count only when a Waiting group
+                        // is present, e.g. "ACTIVE AGENTS · 9 WORKING · 2 WAITING". Per the "never
+                        // render a 0" invariant, the "N working" fragment is dropped when none are
+                        // working (a Waiting-only band reads "ACTIVE AGENTS · 2 WAITING").
+                        let header =
+                            match waitingCount with
+                            | Some m when workingCount > 0 -> $"Active agents · {workingCount} working · {m} waiting"
+                            | Some m -> $"Active agents · {m} waiting"
+                            | None -> $"Active agents · {workingCount} working"
+
+                        section header (groups |> List.map agentColumn) Html.none
                     match tasks with
                     | [] -> Html.none
                     | buckets ->
