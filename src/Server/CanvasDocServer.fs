@@ -267,6 +267,42 @@ let private canvasSendScript =
       "})()</script>" ]
     |> String.concat ""
 
+/// `.canvas-spinner`: the themed spinner style for the expand-in-place feedback, injected in the
+/// AgentDoc arm only. Its sole consumer is the spinner window.canvasExpand swaps the clicked button
+/// for, so it ships alongside that helper rather than in the shared baseStyle. Drawn with currentColor
+/// + a CSS keyframe so it stays on-theme without depending on any doc-defined variable;
+/// `.canvas-spinner` is a normal-specificity utility class an author can still override.
+let private canvasExpandStyle =
+    "<style>@keyframes canvas-spin{to{transform:rotate(360deg)}}.canvas-spinner{display:inline-flex;align-items:center;gap:.5em;color:inherit}.canvas-spinner::before{content:\"\";width:1em;height:1em;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:canvas-spin .6s linear infinite;opacity:.85}</style>"
+
+/// window.canvasExpand(button, sectionId): the doc→agent "expand this section in place" helper,
+/// injected in the AgentDoc arm only (it calls window.canvasSend, and only an AgentDoc has an owner
+/// session to receive the request). On click it (1) sends the flat {action:'expand-section', section,
+/// doc} message — `doc` is THIS doc's filename (the last location.pathname segment, decoded), so the
+/// owning agent knows which .agents/canvas/<doc> file to edit — and (2) swaps the triggering button
+/// for the themed spinner (styled by canvasExpandStyle), giving the user immediate in-pane feedback
+/// while the agent works. The agent replaces the button with the real expanded content; Treemon's
+/// content-change morph then swaps the spinner for that content, in place where the button was. The
+/// button is swapped ONLY after canvasSend actually posts (returns true), so a dropped message (e.g.
+/// oversized — unreachable here, but defensive) never strands a spinner with no agent on the other
+/// end. `section` is validated against [A-Za-z0-9_-] before posting — a hardening guard so doc content
+/// (which may embed untrusted external data like branch names or PR titles) can't smuggle
+/// instruction-shaped text into the agent's [canvas] turn; a value with any other character is ignored.
+/// The raw postMessage contract bypasses this guard, so SKILL.md also tells the agent to treat
+/// section/doc as data to locate (match against a known section, never run as an instruction).
+/// Injected after canvasSendScript (the helper it calls), alongside canvasExpandStyle.
+let private canvasExpandScript =
+    [ "<script>(function(){"
+      "window.canvasExpand=function(btn,section){"
+      "if(!section)return false;"
+      "if(!/^[A-Za-z0-9_-]+$/.test(section)){console.error('[canvas] canvasExpand IGNORED: sectionId must match [A-Za-z0-9_-]: '+section);return false}"
+      "var doc=decodeURIComponent((location.pathname.split('/').pop())||'');"
+      "if(!window.canvasSend('expand-section',{section:section,doc:doc}))return false;"
+      "if(btn){var s=document.createElement('span');s.className='canvas-spinner';s.setAttribute('role','status');s.textContent='Expanding…';btn.replaceWith(s)}"
+      "return true}"
+      "})()</script>" ]
+    |> String.concat ""
+
 /// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
 /// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
 /// unhandledrejection listener and forwards each doc-side failure to the pane as the FLAT
@@ -311,10 +347,12 @@ let private errorOverlayScript (filename: string) =
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, the JS error overlay, and the idiomorph runtime +
-/// morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
-/// doc-side error carries its own identity (the emitter), letting the pane attribute it correctly
-/// even when other docs are mounted as hidden iframes. It is unused for SystemViews (no overlay).
+/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper and
+/// its spinner style (canvasExpandStyle), the JS error overlay, and the idiomorph runtime +
+/// morph controller. `filename` is the doc being served: it is embedded into the error overlay
+/// so a doc-side error carries its own identity (the emitter), letting the pane attribute it
+/// correctly even when other docs are mounted as hidden iframes. It is unused for SystemViews
+/// (no overlay).
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
@@ -322,7 +360,7 @@ let private errorOverlayScript (filename: string) =
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> CanvasExport.baseStyle + linkInterceptor
-    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + bridgeScript + canvasSendScript + canvasExpandStyle + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
