@@ -165,8 +165,8 @@
            tasks are ONE proportional bar per status on one true shared scale (width computed inline
            from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)); a
            muted footer caption sits under the tasks. No box/title bar beyond the prototype's
-           top/bottom hairlines (the toggle button is the header); it reflows with the dashboard
-           container-query as the category columns wrap on narrow panes. */
+           top/bottom hairlines (the toggle button is the header); it reflows purely via
+           .overview-items flex-wrap as the category columns wrap onto new rows on narrow panes. */
         .overview-band { background: #1e1e2e; border-top: 1px solid #313244; border-bottom: 1px solid #313244; padding: 15px 16px; margin-bottom: 16px; }
         .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
