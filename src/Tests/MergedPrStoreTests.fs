@@ -13,7 +13,7 @@ let private withTempDir (action: string -> unit) =
     try action tempDir
     finally try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
-let private mk id title url : MergedPrRecord = { Id = id; Title = title; Url = url }
+let private mk id title url : MergedPrRecord = { Id = id; Title = title; Url = url; HeadSha = "" }
 
 let private sampleStore =
     Map.ofList
@@ -37,6 +37,37 @@ type MergedPrStorePersistenceTests() =
             let loaded = loadAtPath path
             Assert.That(loaded, Is.EqualTo(sampleStore),
                 "loaded store must equal what was persisted, across repos and branches"))
+
+    [<Test>]
+    member _.``persist then load preserves a record's head_sha``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+
+            let stamped =
+                Map.ofList
+                    [ RepoId "C:/code/repo-a",
+                      Map.ofList
+                          [ "feature/x",
+                            { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "abc123def456" } ] ]
+
+            runAsync (persistAtPath path stamped)
+
+            Assert.That(loadAtPath path, Is.EqualTo(stamped),
+                "a non-empty head_sha must survive a persist -> load round-trip"))
+
+    [<Test>]
+    member _.``load of a legacy file without head_sha defaults HeadSha to empty``() =
+        withTempDir (fun dir ->
+            let path = Path.Combine(dir, "merged-prs.json")
+            // A legacy file predating HeadSha: its records carry only id/title/url, no head_sha.
+            File.WriteAllText(
+                path,
+                """{ "C:/code/repo-a": { "feature/x": { "id": 12, "title": "Add X", "url": "https://example.test/pull/12" } } }""")
+
+            let record = loadAtPath path |> Map.find (RepoId "C:/code/repo-a") |> Map.find "feature/x"
+
+            Assert.That(record, Is.EqualTo(mk 12 "Add X" "https://example.test/pull/12"),
+                "a record with no head_sha must load with HeadSha = \"\" (legacy/unverified)"))
 
     [<Test>]
     member _.``load of an absent file returns an empty store``() =

@@ -3,13 +3,16 @@ module Server.MergedPrStore
 open System.IO
 open Shared
 
-/// One persisted merged-PR fact — the minimal fields the merged badge renders (`Id`/`Title`/`Url`).
+/// One persisted merged-PR fact — the minimal fields the merged badge renders (`Id`/`Title`/`Url`)
+/// plus `HeadSha`, the worktree tip commit at record time (the merged-record identity, Decision #11).
 /// Volatile PR data (builds, comments, conflicts, draft) is deliberately never stored; only the
-/// terminal "merged" fact survives the bounded GitHub fetch window and server restarts.
+/// terminal "merged" fact survives the bounded GitHub fetch window and server restarts. An empty
+/// `HeadSha` means legacy/unverified (pre-existing on-disk data, or a tolerant-load default).
 type MergedPrRecord =
     { Id: int
       Title: string
-      Url: string }
+      Url: string
+      HeadSha: string }
 
 /// Reconstructs the `PrInfo` a persisted record stands in for. Only the merged fact is stored, so
 /// volatile fields get inert defaults; the badge renders from `IsMerged`/`Title`/`Url` (Decision #7).
@@ -45,7 +48,9 @@ let reconcileMergedPrs
             (fun acc branch status ->
                 match status with
                 | HasPr pr when pr.IsMerged ->
-                    acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url }
+                    // Stopgap identity: the real per-branch worktree-tip stamp is supplied by the
+                    // identity-gate task (tm-pr-recency-window-ehu), which threads worktreeHeads in.
+                    acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = "" }
                 | _ -> acc)
             persisted
 
@@ -114,6 +119,7 @@ let internal persistAtPath (path: string) (state: Map<RepoId, Map<string, Merged
                 writer.WriteNumber("id", record.Id)
                 writer.WriteString("title", record.Title)
                 writer.WriteString("url", record.Url)
+                writer.WriteString("head_sha", record.HeadSha)
                 writer.WriteEndObject())
 
             writer.WriteEndObject())
@@ -133,10 +139,18 @@ let internal loadAtPath (path: string) : Map<RepoId, Map<string, MergedPrRecord>
                         (fun acc branchProp ->
                             let el = branchProp.Value
 
+                            // Read head_sha tolerantly: a missing (legacy file) or non-string
+                            // (corrupt) value defaults to "" — an empty HeadSha = legacy/unverified.
+                            let headSha =
+                                match el.TryGetProperty("head_sha") with
+                                | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String -> v.GetString()
+                                | _ -> ""
+
                             let record =
                                 { Id = el.GetProperty("id").GetInt32()
                                   Title = el.GetProperty("title").GetString()
-                                  Url = el.GetProperty("url").GetString() }
+                                  Url = el.GetProperty("url").GetString()
+                                  HeadSha = headSha }
 
                             acc |> Map.add branchProp.Name record)
                         Map.empty
