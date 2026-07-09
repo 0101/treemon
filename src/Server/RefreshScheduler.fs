@@ -446,9 +446,12 @@ let private executeTask
             let! persisted = MergedPrStore.getForRepo repoId
 
             // Current worktree tips keyed by upstream branch name, so the reconcile can identity-gate
-            // each persisted record: a record is surfaced only when its `HeadSha` matches the branch's
-            // present tip, and evicted when a present-but-differing tip proves a reused-name incarnation
-            // (spec: merged-pr-persistence.md, Decision #11).
+            // each persisted record: a record is surfaced only when its `HeadSha` matches one of the
+            // branch's present tips, and evicted when a present, non-empty tip set does NOT contain it
+            // (a reused-name incarnation). A SET per branch (not a single tip) is required because
+            // several worktrees can track the SAME upstream branch at different tips; collapsing them
+            // via `Map.ofSeq` would keep one arbitrary tip and evict records whose still-valid tip lost
+            // the collapse (spec: merged-pr-persistence.md, Decision #11 / review F2).
             let worktreeHeads =
                 repo.GitData
                 |> Map.values
@@ -456,6 +459,8 @@ let private executeTask
                     match GitWorktree.upstreamBranchName gitData.Upstream with
                     | Some branch when gitData.HeadCommit <> "" -> Some(branch, gitData.HeadCommit)
                     | _ -> None)
+                |> Seq.groupBy fst
+                |> Seq.map (fun (branch, pairs) -> branch, pairs |> Seq.map snd |> Set.ofSeq)
                 |> Map.ofSeq
 
             let effectiveMap, newPersisted =

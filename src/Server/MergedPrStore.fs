@@ -31,31 +31,38 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
 /// effective map and the new persisted records (equal to `persisted` when nothing moved, so the
 /// caller can skip the write, Decision #6):
 ///  - upserts every live `HasPr { IsMerged = true }` (keeping only `Id`/`Title`/`Url`, stamping
-///    `HeadSha` from `worktreeHeads` — the branch's current worktree tip, Decision #11) — but ONLY
-///    when that tip is present and non-empty; a merge observed while the tip is unknown is NOT
-///    written (never stamp an unverifiable `HeadSha = ""` the identity gate can't evict, review F1);
+///    `HeadSha` from `worktreeHeads` — one of the branch's current worktree tips, Decision #11) —
+///    but ONLY when that branch has at least one present, non-empty tip; a merge observed while the
+///    tip is unknown is NOT written (never stamp an unverifiable `HeadSha = ""` the identity gate
+///    can't evict, review F1);
 ///  - identity-gates by tip BEFORE the name-prune: a record is evicted only on a confirmed mismatch
-///    (non-empty `HeadSha` AND a present-but-differing tip = a reused-name incarnation); a match, a
-///    missing tip, or an empty (legacy) `HeadSha` is kept (Decision #11);
+///    (non-empty `HeadSha` AND a present, non-empty tip SET that does NOT contain it = a reused-name
+///    incarnation); a match against ANY observed tip, an absent/empty tip set, or an empty (legacy)
+///    `HeadSha` is kept (Decision #11);
 ///  - overlays a reconstructed merged `HasPr` for persisted branches the live map lacks — a live
 ///    `HasPr` always wins, the overlay is fallback-only, and surviving records are match-or-legacy
 ///    so the fallback is safe (Decision #3);
 ///  - prunes to `knownBranches` only when `Some` (a complete, non-empty enumeration). `None` SKIPS
 ///    pruning so an empty/partial set can never wipe just-loaded facts (review F7 / Decision #8).
-/// `worktreeHeads` maps branch -> its current worktree tip SHA (the identity source, Decision #11).
+/// `worktreeHeads` maps branch -> the SET of its current worktree tip SHAs (the identity source,
+/// Decision #11). A set (not a single SHA) is required because several worktrees can track the SAME
+/// upstream branch at different tips; collapsing them to one arbitrary tip would evict records whose
+/// still-valid tip lost the collapse (review F2). Identity is therefore "match ANY observed tip".
 let reconcileMergedPrs
     (livePrMap: Map<string, PrStatus>)
     (persisted: Map<string, MergedPrRecord>)
-    (worktreeHeads: Map<string, string>)
+    (worktreeHeads: Map<string, Set<string>>)
     (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
     // Upsert every branch observed as merged — provider ground truth, always safe and additive —
-    // but ONLY when its current worktree tip is known (present and non-empty). When the tip is
-    // unknown (getLastCommit failed transiently at observation time, so worktreeHeads omits the
-    // branch or carries ""), leave any existing record untouched: never overwrite it with an
+    // but ONLY when it has at least one present, non-empty worktree tip. When no tip is known
+    // (getLastCommit failed transiently at observation time, so worktreeHeads omits the branch or
+    // carries an empty set), leave any existing record untouched: never overwrite it with an
     // unverifiable `HeadSha = ""`, which the identity gate below would permanently exempt from
-    // eviction, letting a later reused branch name resurrect a stale merged badge (review F1).
+    // eviction, letting a later reused branch name resurrect a stale merged badge (review F1). When
+    // several worktrees share the branch we stamp one of its current tips (the gate accepts ANY of
+    // the branch's observed tips, so a same-branch multi-worktree setup won't false-evict, F2).
     let upserted =
         livePrMap
         |> Map.fold
@@ -63,15 +70,16 @@ let reconcileMergedPrs
                 match status with
                 | HasPr pr when pr.IsMerged ->
                     match Map.tryFind branch worktreeHeads with
-                    | Some headSha when headSha <> "" ->
-                        acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = headSha }
+                    | Some tips when not (Set.isEmpty tips) ->
+                        acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = Set.minElement tips }
                     | _ -> acc
                 | _ -> acc)
             persisted
 
     // Identity gate (Decision #11), BEFORE the name-prune: keep a record when its `HeadSha` is empty
-    // (legacy/unverified), when its branch has no current tip, or when the tip matches exactly; evict
-    // only on a confirmed mismatch (non-empty `HeadSha` AND a present tip that differs = reused name).
+    // (legacy/unverified), when its branch has no observed tip (absent, or a present-but-empty set),
+    // or when ANY observed tip matches it; evict only on a confirmed mismatch (non-empty `HeadSha`
+    // AND a present, non-empty tip set that does NOT contain it = a reused-name incarnation, F2).
     let identityFiltered =
         upserted
         |> Map.filter (fun branch record ->
@@ -80,7 +88,7 @@ let reconcileMergedPrs
             else
                 match Map.tryFind branch worktreeHeads with
                 | None -> true
-                | Some tip -> record.HeadSha = tip)
+                | Some tips -> Set.isEmpty tips || Set.contains record.HeadSha tips)
 
     // Prune only against a trustworthy enumeration (`Some`); `None` leaves the store intact (F7).
     let newPersisted =

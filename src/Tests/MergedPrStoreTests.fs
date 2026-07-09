@@ -301,7 +301,7 @@ type ReconcileMergedPrsTests() =
     member _.``upserts a newly observed live merged PR, persisting only Id/Title/Url``() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-77" ]
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-77" ] ]
 
         let _, newPersisted = reconcileMergedPrs live Map.empty worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
@@ -314,7 +314,7 @@ type ReconcileMergedPrsTests() =
     member _.``upsert refreshes an existing record from the live merged PR``() =
         let persisted = Map.ofList [ "feature/x", mk 1 "stale" "https://example.test/pull/1" ]
         let live = Map.ofList [ "feature/x", mergedLivePr 2 "renamed" "https://example.test/pull/2" ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-2" ]
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-2" ] ]
 
         let _, newPersisted = reconcileMergedPrs live persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
@@ -330,7 +330,7 @@ type ReconcileMergedPrsTests() =
         let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-12" }
         let persisted = Map.ofList [ "feature/x", record ]
         let live = Map.ofList [ "feature/x", mergedLivePr 12 "Add X" "https://example.test/pull/12" ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-12" ]
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-12" ] ]
 
         let effective, newPersisted = reconcileMergedPrs live persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
@@ -387,7 +387,7 @@ type ReconcileMergedPrsTests() =
     member _.``still upserts a live merged PR when the enumeration is untrusted (review F7)``() =
         let live =
             Map.ofList [ "feature/new", mergedLivePr 88 "Just merged" "https://example.test/pull/88" ]
-        let worktreeHeads = Map.ofList [ "feature/new", "sha-88" ]
+        let worktreeHeads = Map.ofList [ "feature/new", Set.ofList [ "sha-88" ] ]
 
         let _, newPersisted = reconcileMergedPrs live Map.empty worktreeHeads None
 
@@ -402,7 +402,7 @@ type ReconcileMergedPrsTests() =
     member _.``evicts a persisted record when the branch's worktree tip proves a different incarnation (Decision #11)``() =
         let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X" }
         let persisted = Map.ofList [ "feature/x", record ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-Y" ] // present tip differs from the record
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Y" ] ] // present tip differs from the record
 
         let effective, newPersisted =
             reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
@@ -418,7 +418,7 @@ type ReconcileMergedPrsTests() =
     member _.``keeps and overlays a persisted record when the worktree tip matches exactly (Decision #11)``() =
         let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X" }
         let persisted = Map.ofList [ "feature/x", record ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-X" ] // present tip == the record's HeadSha
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-X" ] ] // present tip == the record's HeadSha
 
         let effective, newPersisted =
             reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
@@ -434,7 +434,7 @@ type ReconcileMergedPrsTests() =
     member _.``keeps and overlays a legacy record with an empty HeadSha regardless of the worktree tip (Decision #11)``() =
         let record = mk 12 "Add X" "https://example.test/pull/12" // HeadSha = "" (legacy/unverified)
         let persisted = Map.ofList [ "feature/x", record ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-Y" ] // a present, differing tip must NOT evict
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Y" ] ] // a present, differing tip must NOT evict
 
         let effective, newPersisted =
             reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
@@ -444,13 +444,51 @@ type ReconcileMergedPrsTests() =
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a legacy record keeps the prior name-only overlay until re-observed live and re-stamped")
 
+    // (review F2) Identity gate with a MULTI-TIP branch: several worktrees can track the SAME upstream
+    // branch at different tips. worktreeHeads therefore carries a SET of tips per branch, and identity
+    // is "match ANY observed tip". A persisted record whose HeadSha matches ONE of the two observed
+    // tips is the same incarnation on one of those worktrees, so it must be KEPT and overlaid — never
+    // evicted because the other worktree happens to sit on a different tip. (Before this fix,
+    // worktreeHeads was built with Map.ofSeq, silently keeping only the last (branch,tip) pair; if that
+    // arbitrary survivor differed from the record's HeadSha, the record was wrongly evicted.)
+    [<Test>]
+    member _.``keeps and overlays a record whose HeadSha matches one of two observed tips for the branch (review F2)``() =
+        let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X1" }
+        let persisted = Map.ofList [ "feature/x", record ]
+        // Two worktrees track feature/x at different tips; the record matches the SECOND one.
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-X2"; "sha-X1" ] ]
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(Map.tryFind "feature/x" newPersisted, Is.EqualTo(Some record),
+            "a record matching ANY observed tip of a multi-worktree branch must survive the identity gate (review F2)")
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
+            "a still-valid multi-tip record must be overlaid, not lost to an arbitrary Map.ofSeq collapse (review F2)")
+
+    // (review F2) The eviction side of the multi-tip gate: a record whose HeadSha matches NEITHER of
+    // the branch's present tips is a confirmed reused-name incarnation and must still be evicted.
+    [<Test>]
+    member _.``evicts a record whose HeadSha matches none of the branch's observed tips (review F2)``() =
+        let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-OLD" }
+        let persisted = Map.ofList [ "feature/x", record ]
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-X1"; "sha-X2" ] ] // neither matches sha-OLD
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(newPersisted |> Map.containsKey "feature/x", Is.False,
+            "a non-empty HeadSha absent from a present, non-empty tip set is a confirmed mismatch -> evict (review F2)")
+        Assert.That(effective |> Map.containsKey "feature/x", Is.False,
+            "an evicted multi-tip mismatch must never be overlaid into the effective map (review F2)")
+
     // (Decision #11) Upsert stamps identity: a newly observed live merged PR is recorded with the
     // branch's current worktree tip from worktreeHeads, giving the record its commit identity.
     [<Test>]
     member _.``stamps a newly observed live merged PR with its worktree tip from worktreeHeads (Decision #11)``() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
-        let worktreeHeads = Map.ofList [ "feature/x", "sha-Z" ]
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Z" ] ]
 
         let _, newPersisted =
             reconcileMergedPrs live Map.empty worktreeHeads (Some(Set.ofList [ "feature/x" ]))
@@ -617,7 +655,7 @@ type MergedPrStoreEndToEndTests() =
             let path = Path.Combine(dir, "merged-prs.json")
 
             // observe + persist (a verified worktree tip is required to record the merge, review F1)
-            let worktreeHeads = Map.ofList [ branch, "sha-42" ]
+            let worktreeHeads = Map.ofList [ branch, Set.ofList [ "sha-42" ] ]
             let _, observed = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty worktreeHeads (known branch)
             persistStore path (Map.ofList [ repo, observed ])
 
