@@ -98,13 +98,7 @@ let private extractTextFromMessage (root: JsonElement) =
         | _ -> None
     | _ -> None
 
-let private tryParseTimestamp (root: JsonElement) =
-    match root.TryGetProperty("timestamp") with
-    | true, ts ->
-        match DateTimeOffset.TryParse(ts.GetString()) with
-        | true, dto -> Some dto
-        | _ -> None
-    | _ -> None
+let private tryParseTimestamp (root: JsonElement) = JsonHelpers.tryTimestamp root
 
 let private tryParseEntryKind (line: string) =
     try

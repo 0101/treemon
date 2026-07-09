@@ -259,12 +259,7 @@ type private ForwardEvent =
     | TurnEnded
 
 let private readMessageTimestamp (root: JsonElement) : DateTimeOffset =
-    match root.TryGetProperty("timestamp") with
-    | true, ts when ts.ValueKind = JsonValueKind.String ->
-        match DateTimeOffset.TryParse(ts.GetString()) with
-        | true, v -> v
-        | _ -> DateTimeOffset.MinValue
-    | _ -> DateTimeOffset.MinValue
+    JsonHelpers.tryTimestamp root |> Option.defaultValue DateTimeOffset.MinValue
 
 /// A message's text + timestamp, or None when the content is absent/blank (matching the backward
 /// tryParse*Content helpers, which skip empty-content messages).
