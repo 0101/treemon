@@ -139,7 +139,7 @@ let private assembleFromState
               LastUserMessage = None
               LastAssistantMessage = None
               LastMessageProvider = None }
-    let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
+    let upstreamBranch = gitData |> Option.bind (fun gd -> GitWorktree.upstreamBranchName gd.Upstream)
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
     { Path = PathUtils.toWorktreePath wt.Path
@@ -416,7 +416,7 @@ let worktreeApi
 
                   let post = syncAgent.Post
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
-                  let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
+                  let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind (fun gd -> GitWorktree.upstreamBranchName gd.Upstream)
                   let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
                   Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
               }

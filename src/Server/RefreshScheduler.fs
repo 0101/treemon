@@ -423,7 +423,7 @@ let private executeTask
             let knownBranches =
                 repo.GitData
                 |> Map.values
-                |> Seq.choose _.UpstreamBranch
+                |> Seq.choose (fun gitData -> GitWorktree.upstreamBranchName gitData.Upstream)
                 |> set
 
             // Prune the store only against a trustworthy branch enumeration; an unready/partial one —
@@ -433,7 +433,7 @@ let private executeTask
 
             let readFailedPaths =
                 repo.GitData
-                |> Map.filter (fun _ gitData -> gitData.UpstreamReadFailed)
+                |> Map.filter (fun _ gitData -> gitData.Upstream = GitWorktree.UpstreamReadFailed)
                 |> Map.keys
                 |> Set.ofSeq
 

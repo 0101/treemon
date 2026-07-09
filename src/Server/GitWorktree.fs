@@ -30,16 +30,27 @@ type UpstreamResult =
 type GitData =
     { Path: string
       Branch: string
+      /// The worktree tip commit hash (from `getLastCommit`), used as the identity stamp for a
+      /// merged-PR record so a reused branch name cannot resurrect a prior incarnation's badge
+      /// (spec merged-pr-persistence.md, Decision #11). Empty when no commit could be read.
+      HeadCommit: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
-      UpstreamBranch: string option
-      /// `true` when `git rev-parse @{u}` failed transiently (timeout/lock/IO) rather than git
-      /// deterministically reporting no upstream. Lets the merged-PR prune enumeration exclude this
-      /// worktree instead of reading a failed upstream read as "no branch" (Decision #8 residual).
-      UpstreamReadFailed: bool
+      /// Resolved upstream tracking state. `Upstream` carries the remote-stripped branch name;
+      /// `UpstreamReadFailed` marks a transient read (timeout/lock/IO) rather than git deterministically
+      /// reporting no upstream, so the merged-PR prune enumeration can exclude this worktree instead of
+      /// reading a failed read as "no branch" (Decision #8 residual).
+      Upstream: UpstreamResult
       MainBehindCount: int
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
+
+/// The remote-stripped upstream branch name, present only when a tracking branch was read successfully.
+let upstreamBranchName =
+    function
+    | Upstream u -> Some u
+    | NoUpstream
+    | UpstreamReadFailed -> None
 
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
@@ -266,13 +277,14 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
             | -1 -> u
             | i -> u[(i + 1)..]
 
-        // Surface a transient upstream read failure (vs. git's clean "no upstream") so the prune
-        // enumeration can exclude this worktree instead of mistaking it for "no branch" (Decision #8).
-        let upstreamBranch, upstreamReadFailed =
+        // Store the remote-stripped upstream state, preserving the DU so a transient read failure
+        // (vs. git's clean "no upstream") stays distinct and the prune enumeration can exclude this
+        // worktree instead of mistaking it for "no branch" (Decision #8).
+        let upstreamState =
             match upstream with
-            | Upstream u -> Some(stripRemote u), false
-            | NoUpstream -> None, false
-            | UpstreamReadFailed -> None, true
+            | Upstream u -> Upstream(stripRemote u)
+            | NoUpstream -> NoUpstream
+            | UpstreamReadFailed -> UpstreamReadFailed
 
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with
@@ -286,10 +298,10 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         return
             { Path = worktreePath
               Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
+              HeadCommit = commit |> Option.map _.Hash |> Option.defaultValue ""
               LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
-              UpstreamBranch = upstreamBranch
-              UpstreamReadFailed = upstreamReadFailed
+              Upstream = upstreamState
               MainBehindCount = mainBehind
               IsDirty = dirty
               WorkMetrics = workMetrics }
