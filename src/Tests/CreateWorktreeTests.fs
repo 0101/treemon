@@ -385,6 +385,7 @@ type SubmitCreateWorktreeRequestMappingTests() =
           reportActivity = fun _ -> failwith "unused"
           saveCollapsedRepos = fun _ -> failwith "unused"
           saveCanvasPaneOpen = fun _ -> failwith "unused"
+          saveOverviewPanelOpen = fun _ -> failwith "unused"
           saveCanvasPosition = fun _ -> failwith "unused"
           saveCanvasSize = fun _ -> failwith "unused"
           resumeSession = fun _ -> failwith "unused"
