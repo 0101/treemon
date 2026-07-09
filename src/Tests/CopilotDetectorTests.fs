@@ -479,3 +479,267 @@ type CurrentSkillTests() =
     [<Test>]
     member _.``Non-existent file yields None``() =
         Assert.That(getCurrentSkillFromEventsFile (Path.Combine(fixtureDir, "nonexistent", "events.jsonl")), Is.EqualTo(None))
+
+
+let private makeSubagentStarted (toolCallId: string) (timestamp: string) =
+    // A Task/sub-agent's events (assistant/tool/hook rows and even its own skill.invoked) run between
+    // its subagent.started and the matching subagent.completed, keyed by an identical toolCallId.
+    $"""{{"type":"subagent.started","data":{{"toolCallId":"{toolCallId}","agent":"bd-phase-executor"}},"timestamp":"{timestamp}"}}"""
+
+let private makeSubagentCompleted (toolCallId: string) (timestamp: string) =
+    $"""{{"type":"subagent.completed","data":{{"toolCallId":"{toolCallId}"}},"timestamp":"{timestamp}"}}"""
+
+/// The exact event streams of the CurrentSkillTests scenarios, paired with the skill each should
+/// report. Used to prove the forward fold is equivalent to the backward scanSkill (and returns the
+/// same known-good values) on every no-sub-agent scenario.
+let private skillEquivalenceScenarios: (string * string list * string option) list =
+    [ "skill.invoked event yields data.name",
+      [ makeUserEvent "please fix the build" "2026-03-01T10:00:00Z"
+        makeSkillToolCall "fix-build" "2026-03-01T10:00:01Z"
+        makeSkillInvoked "fix-build" "2026-03-01T10:00:02Z" ],
+      Some "fix-build"
+
+      "skill tool-call arguments.skill used when no skill.invoked follows",
+      [ makeUserEvent "investigate this" "2026-03-01T10:00:00Z"
+        makeSkillToolCall "investigate" "2026-03-01T10:00:01Z" ],
+      Some "investigate"
+
+      "most recent skill wins across multiple invocations",
+      [ makeSkillToolCall "investigate" "2026-03-01T10:00:00Z"
+        makeSkillInvoked "investigate" "2026-03-01T10:00:01Z"
+        makeSkillToolCall "bd-execute" "2026-03-01T10:05:00Z" ],
+      Some "bd-execute"
+
+      "non-skill tool-call after skill.invoked is skipped",
+      [ makeSkillInvoked "fix-build" "2026-03-01T10:00:00Z"
+        makeAssistantEvent "editing a file" "2026-03-01T10:00:01Z"
+        makeToolEvent "2026-03-01T10:00:02Z"
+        makeTurnEnd "2026-03-01T10:00:03Z" ],
+      Some "fix-build"
+
+      "arguments encoded as a JSON string still yields skill",
+      [ makeSkillToolCallJsonArgs "refactor" "2026-03-01T10:00:00Z" ],
+      Some "refactor"
+
+      "session with no skill signal yields None",
+      [ makeUserEvent "hello" "2026-03-01T10:00:00Z"
+        makeAssistantEvent "hi" "2026-03-01T10:00:01Z"
+        makeTurnEnd "2026-03-01T10:00:02Z" ],
+      None
+
+      "a skill that finished before a new user request no longer lingers",
+      [ makeUserEvent "plan the feature" "2026-03-01T10:00:00Z"
+        makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"
+        makeAssistantEvent "planning complete" "2026-03-01T10:00:02Z"
+        makeTurnEnd "2026-03-01T10:00:03Z"
+        makeUserEvent "now something unrelated" "2026-03-01T10:05:00Z"
+        makeAssistantEvent "on it" "2026-03-01T10:05:01Z" ],
+      None
+
+      "a running skill is reported past its own skill-context injection",
+      [ makeUserEvent "/bd-execute my-feature" "2026-03-01T10:00:00Z"
+        makeSkillToolCall "bd-execute" "2026-03-01T10:00:01Z"
+        makeSkillInvoked "bd-execute" "2026-03-01T10:00:02Z"
+        makeSkillContextEvent "bd-execute" "2026-03-01T10:00:03Z"
+        makeAssistantEvent "orchestrating subagents" "2026-03-01T10:00:04Z"
+        makeTurnEnd "2026-03-01T10:00:05Z" ],
+      Some "bd-execute"
+
+      "a skill re-invoked after a new request is reported",
+      [ makeSkillInvoked "bd-plan" "2026-03-01T10:00:00Z"
+        makeTurnEnd "2026-03-01T10:00:01Z"
+        makeUserEvent "please review the branch" "2026-03-01T10:05:00Z"
+        makeSkillInvoked "review" "2026-03-01T10:05:01Z"
+        makeAssistantEvent "reviewing" "2026-03-01T10:05:02Z" ],
+      Some "review"
+
+      "a running skill is reported across an ask_user reply that resumes it",
+      [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+        makeSkillToolCall "review" "2026-03-01T10:00:01Z"
+        makeSkillInvoked "review" "2026-03-01T10:00:02Z"
+        makeSkillContextEvent "review" "2026-03-01T10:00:03Z"
+        makeAssistantEvent "let me look at the diff" "2026-03-01T10:00:04Z"
+        makeAskUserEvent "which file should I focus on?" "2026-03-01T10:00:05Z"
+        makeAskUserToolComplete "2026-03-01T10:01:00Z"
+        makeUserEvent "the auth module" "2026-03-01T10:01:01Z"
+        makeAssistantEvent "reviewing the auth module" "2026-03-01T10:01:02Z"
+        makeTurnEnd "2026-03-01T10:01:03Z" ],
+      Some "review"
+
+      "a genuine new request after ordinary work still ends the prior skill",
+      [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+        makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+        makeAssistantEvent "review complete" "2026-03-01T10:00:02Z"
+        makeTurnEnd "2026-03-01T10:00:03Z"
+        makeUserEvent "now bump the version" "2026-03-01T10:05:00Z"
+        makeAssistantEvent "on it" "2026-03-01T10:05:01Z" ],
+      None
+
+      "a user message merely beginning with skill-context text is a genuine boundary",
+      [ makeUserEvent "/bd-plan the feature" "2026-03-01T10:00:00Z"
+        makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"
+        makeAssistantEvent "planning complete" "2026-03-01T10:00:02Z"
+        makeTurnEnd "2026-03-01T10:00:03Z"
+        makeUserEvent "<skill-context> is a tag I want you to document" "2026-03-01T10:05:00Z"
+        makeAssistantEvent "sure, documenting it" "2026-03-01T10:05:01Z" ],
+      None
+
+      "an unanswered ask_user mid-skill still reports the running skill",
+      [ makeUserEvent "/investigate the flake" "2026-03-01T10:00:00Z"
+        makeSkillInvoked "investigate" "2026-03-01T10:00:01Z"
+        makeSkillContextEvent "investigate" "2026-03-01T10:00:02Z"
+        makeAssistantEvent "digging in" "2026-03-01T10:00:03Z"
+        makeAskUserEvent "can you share the failing run URL?" "2026-03-01T10:00:04Z" ],
+      Some "investigate" ]
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ForwardFoldTests() =
+
+    [<Test>]
+    member _.``Forward fold CurrentSkill matches backward scanSkill on every CurrentSkill scenario``() =
+        // Equivalence: the forward fold (oldest→newest) must report the same running skill the backward
+        // scanSkill does on every scenario that has no sub-agent nesting (depth stays 0, so the gating
+        // the fold adds is a no-op).
+        for name, events, expected in skillEquivalenceScenarios do
+            let forward = (scanSessionEvents events).CurrentSkill
+
+            withTempEventsFile (String.concat Environment.NewLine events) (fun path ->
+                let backward = getCurrentSkillFromEventsFile path
+                Assert.That(forward, Is.EqualTo(backward), $"forward vs backward mismatch: {name}")
+                Assert.That(forward, Is.EqualTo(expected), $"forward vs expected mismatch: {name}"))
+
+    [<Test>]
+    member _.``skill.invoked megabytes before the tail is still detected by the forward fold``() =
+        // The whole point: with ~2 MB of autonomous tool output after it, the skill.invoked scrolls
+        // past the backward scan's ~1 MB tail (which then degrades to None), but the forward fold sees
+        // the entire stream and still reports the skill.
+        let events =
+            [ makeUserEvent "/investigate the flake" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "investigate" "2026-03-01T10:00:01Z" ]
+            @ (List.init 1000 (fun _ -> makeLargeToolEvent 2000 "2026-03-01T10:00:05Z"))
+            @ [ makeAssistantEvent "still grinding" "2026-03-01T10:30:00Z"
+                makeTurnEnd "2026-03-01T10:30:01Z" ]
+
+        let forward = (scanSessionEvents events).CurrentSkill
+        Assert.That(forward, Is.EqualTo(Some "investigate"))
+
+        withTempEventsFile (String.concat Environment.NewLine events) (fun path ->
+            // Sanity: confirm this stream really does defeat the bounded backward scan the fold replaces.
+            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``A skill-context injection is never recorded as the last user message``() =
+        let events =
+            [ makeUserEvent "/bd-execute my-feature" "2026-03-01T10:00:00Z"
+              makeSkillToolCall "bd-execute" "2026-03-01T10:00:01Z"
+              makeSkillInvoked "bd-execute" "2026-03-01T10:00:02Z"
+              makeSkillContextEvent "bd-execute" "2026-03-01T10:00:03Z"
+              makeAssistantEvent "orchestrating subagents" "2026-03-01T10:00:04Z"
+              makeTurnEnd "2026-03-01T10:00:05Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.CurrentSkill, Is.EqualTo(Some "bd-execute"))
+
+        match scan.LastUserMessage with
+        | Some(text, _) ->
+            Assert.That(text, Is.EqualTo("/bd-execute my-feature"))
+            Assert.That(text, Does.Not.Contain("skill-context"))
+        | None -> Assert.Fail("Expected the genuine pre-skill prompt as LastUserMessage")
+
+    [<Test>]
+    member _.``An ask_user reply keeps the running skill and is recorded as the last user message``() =
+        let events =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeSkillContextEvent "review" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "let me look at the diff" "2026-03-01T10:00:03Z"
+              makeAskUserEvent "which file should I focus on?" "2026-03-01T10:00:04Z"
+              makeAskUserToolComplete "2026-03-01T10:01:00Z"
+              makeUserEvent "the auth module" "2026-03-01T10:01:01Z"
+              makeAssistantEvent "reviewing the auth module" "2026-03-01T10:01:02Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.CurrentSkill, Is.EqualTo(Some "review"))
+        Assert.That(scan.LastUserMessage |> Option.map fst, Is.EqualTo(Some "the auth module"))
+
+    [<Test>]
+    member _.``A sub-agent's skill.invoked does not overwrite the user's top-level skill``() =
+        // Mirrors the Step 0 finding: a sub-agent's skill.invoked bubbles into the parent stream,
+        // nested inside its subagent.started/…completed bracket. Depth gating keeps the top-level
+        // bd-execute reported rather than the deeper vs-local-development.
+        let events =
+            [ makeUserEvent "/bd-execute AITestAgent-9ce" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "bd-execute" "2026-03-01T10:00:01Z"
+              makeSkillContextEvent "bd-execute" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "spawning a sub-agent" "2026-03-01T10:00:03Z"
+              makeSubagentStarted "toolu_01FNMZ" "2026-03-01T10:05:00Z"
+              makeAssistantEvent "sub-agent working" "2026-03-01T10:05:01Z"
+              makeSkillInvoked "vs-local-development" "2026-03-01T10:05:02Z"
+              makeAssistantEvent "sub-agent still working" "2026-03-01T10:05:03Z"
+              makeSubagentCompleted "toolu_01FNMZ" "2026-03-01T10:10:00Z"
+              makeAssistantEvent "back at the top level" "2026-03-01T10:10:01Z"
+              makeTurnEnd "2026-03-01T10:10:02Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.CurrentSkill, Is.EqualTo(Some "bd-execute"))
+
+    [<Test>]
+    member _.``A top-level skill invoked after a sub-agent block is still reported``() =
+        // Depth returns to 0 on subagent.completed, so a genuine top-level skill afterwards is set.
+        let events =
+            [ makeUserEvent "/bd-execute the feature" "2026-03-01T10:00:00Z"
+              makeSubagentStarted "toolu_a" "2026-03-01T10:00:01Z"
+              makeSkillInvoked "vs-local-development" "2026-03-01T10:00:02Z"
+              makeSubagentCompleted "toolu_a" "2026-03-01T10:00:03Z"
+              makeSkillInvoked "bd-execute" "2026-03-01T10:00:04Z"
+              makeAssistantEvent "orchestrating" "2026-03-01T10:00:05Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.CurrentSkill, Is.EqualTo(Some "bd-execute"))
+
+    [<Test>]
+    member _.``Sub-agent depth never goes negative on an unmatched completed``() =
+        // A subagent.completed with no open bracket (e.g. the started event scrolled off before a full
+        // rescan window) must not drive depth below 0 and start gating top-level skills.
+        let events =
+            [ makeSubagentCompleted "orphan" "2026-03-01T10:00:00Z"
+              makeUserEvent "/investigate the flake" "2026-03-01T10:00:01Z"
+              makeSkillInvoked "investigate" "2026-03-01T10:00:02Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.SubagentDepth, Is.EqualTo(0))
+        Assert.That(scan.CurrentSkill, Is.EqualTo(Some "investigate"))
+
+    [<Test>]
+    member _.``Folding in appended batches equals folding the whole stream at once``() =
+        // The incremental cache appends new bytes onto the prior fold state; that must match a full
+        // rescan. Split a scenario's events into two batches and fold the second onto the first.
+        let events =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeSkillContextEvent "review" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "let me look at the diff" "2026-03-01T10:00:03Z"
+              makeAskUserEvent "which file should I focus on?" "2026-03-01T10:00:04Z"
+              makeUserEvent "the auth module" "2026-03-01T10:01:01Z"
+              makeAssistantEvent "reviewing the auth module" "2026-03-01T10:01:02Z"
+              makeTurnEnd "2026-03-01T10:01:03Z" ]
+
+        let whole = scanSessionEvents events
+
+        let firstBatch, secondBatch = List.splitAt 4 events
+        let incremental = foldSessionEvents (scanSessionEvents firstBatch) secondBatch
+
+        Assert.That(incremental, Is.EqualTo(whole))
+
+    [<Test>]
+    member _.``Empty stream yields the empty scan state``() =
+        let scan = scanSessionEvents []
+        Assert.That(scan.CurrentSkill, Is.EqualTo(None))
+        Assert.That(scan.LastUserMessage, Is.EqualTo(None))
+        Assert.That(scan.LastAssistantMessage, Is.EqualTo(None))
+        Assert.That(scan.RawStatus, Is.EqualTo(Idle))
+        Assert.That(scan.SubagentDepth, Is.EqualTo(0))
+

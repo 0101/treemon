@@ -127,6 +127,22 @@ during implementation.
   the only signal that it belongs to a sub-agent is the enclosing subagent bracket. Without
   `SubagentDepth` gating a forward fold would let the deeper, later sub-agent skill overwrite the
   top-level one. So the fold must gate `skill.invoked` on `depth = 0`.
+- **`SessionScanCache` carries only the six fold fields** (`CurrentSkill`, `LastUserMessage`,
+  `LastAssistantMessage`, `RawStatus`, `LastAssistantWasAskUser`, `SubagentDepth`). The byte-offset
+  bookkeeping (`Length`) from Technical Approach 2 is layered on by the incremental-cache task, not
+  baked into the fold state — the fold itself stays a pure `state → event → state` function
+  (`foldSessionEvents` / `scanSessionEvents` in `CopilotDetector.fs`).
+- **Injection and `turn_start` still drive `RawStatus`.** A `<skill-context>` injection is transparent
+  to `CurrentSkill` and `LastUserMessage` but, like any `user.message`, still sets `RawStatus =
+  Working`; `assistant.turn_start` also sets `Working`. This keeps `RawStatus` equivalent to today's
+  backward status scan (`tryParseEventKind`), which maps every `user.message`/`turn_start` to
+  `Working`. `skill.invoked` alone does **not** change `RawStatus` (the backward status scan ignores
+  it too) — the following `assistant.message` sets the status.
+- **Forward equivalence is by shared classifiers.** `classifyForwardEvent` reuses the same
+  `skillInvokedName` / `assistantMessageEvent` / `isSkillContextMessage` helpers as the backward
+  `classifySkillEvent` (the `skill.invoked` name extraction was factored into `skillInvokedName` so
+  both read it identically), so `CurrentSkill` provably matches `scanSkill` on every no-sub-agent
+  scenario — asserted by `ForwardFoldTests` against the full `CurrentSkillTests` scenario set.
 
 ## Step 0 — investigate before coding
 

@@ -275,6 +275,15 @@ let private assistantMessageEvent (data: JsonElement) : SkillEvent =
             if hasAskUser then AssistantAskUser else AssistantWork
     | _ -> AssistantWork
 
+/// The skill name carried by a `skill.invoked` event's `data.name` (blank/absent → None). Shared by
+/// the backward `classifySkillEvent` and the forward `classifyForwardEvent` so both read it identically.
+let private skillInvokedName (data: JsonElement) : string option =
+    match data.TryGetProperty("name") with
+    | true, n when n.ValueKind = JsonValueKind.String ->
+        let name = n.GetString()
+        if String.IsNullOrWhiteSpace(name) then None else Some name
+    | _ -> None
+
 let private classifySkillEvent (line: string) : SkillEvent option =
     try
         use doc = JsonDocument.Parse(line)
@@ -285,12 +294,7 @@ let private classifySkillEvent (line: string) : SkillEvent option =
             match typeProp.GetString() with
             | "skill.invoked" ->
                 match root.TryGetProperty("data") with
-                | true, data ->
-                    match data.TryGetProperty("name") with
-                    | true, n when n.ValueKind = JsonValueKind.String ->
-                        let name = n.GetString()
-                        if String.IsNullOrWhiteSpace(name) then None else Some(SkillSignal name)
-                    | _ -> None
+                | true, data -> skillInvokedName data |> Option.map SkillSignal
                 | _ -> None
             | "assistant.message" ->
                 match root.TryGetProperty("data") with
@@ -351,6 +355,167 @@ let getCurrentSkill (worktreePath: string) : string option =
     getSessionDirsForPath worktreePath
     |> findMostRecentEventsFile
     |> Option.bind (fun fi -> getCurrentSkillFromEventsFile fi.FullName)
+
+// --- Forward fold (oldest→newest) -------------------------------------------------------------
+// events.jsonl is append-only, so the same skill/message/status determination the backward scans do
+// can be expressed as a FORWARD fold that carries state and is fed each new line as the file grows —
+// which is what an incremental, append-aware cache needs (wired up separately). The fold is pure; it
+// reuses the very classifiers the backward path uses (skillInvokedName / assistantMessageEvent /
+// isSkillContextMessage) so `CurrentSkill` stays equivalent to `scanSkill` on any session that has no
+// sub-agent nesting. It ADDS two things the ~1 MB backward scans could not do:
+//   * `SubagentDepth` gating — a `skill.invoked` emitted inside a subagent.started/…completed bracket
+//     is the SUB-agent's, not the user's, and must not overwrite the top-level skill (see spec Step 0);
+//   * a genuine-only `LastUserMessage` — a `<skill-context>` injection is never recorded as the last
+//     user message (it stays transparent, exactly as it is for skill detection).
+// Because the fold sees the WHOLE stream (not a tail window), a skill.invoked megabytes back is still
+// detected.
+
+/// The running per-session state produced by folding events oldest→newest. This is the "cache" the
+/// incremental scanner keeps per session (byte-offset bookkeeping is layered on separately).
+type SessionScanCache =
+    { CurrentSkill: string option
+      /// Genuine user prompts only — never a `<skill-context>` injection. Raw (untruncated) text.
+      LastUserMessage: (string * DateTimeOffset) option
+      /// Last non-empty assistant message. Raw (untruncated) text.
+      LastAssistantMessage: (string * DateTimeOffset) option
+      /// Status implied by the newest decisive event, before the mtime grace/staleness wrapper.
+      RawStatus: CodingToolStatus
+      /// Was the most recent assistant.message an `ask_user` request? Distinguishes a user reply
+      /// (skill resumes) from a genuine new request (skill's run is over).
+      LastAssistantWasAskUser: bool
+      SubagentDepth: int }
+
+let internal emptySessionScan =
+    { CurrentSkill = None
+      LastUserMessage = None
+      LastAssistantMessage = None
+      RawStatus = Idle
+      LastAssistantWasAskUser = false
+      SubagentDepth = 0 }
+
+/// One event's bearing on the forward fold. Reuses the same classification as the backward
+/// `classifySkillEvent`, and adds the events that scan ignored but the fold needs: sub-agent brackets,
+/// turn boundaries, and the message text/timestamp recorded for LastUserMessage / LastAssistantMessage.
+type private ForwardEvent =
+    /// subagent.started — a sub-agent's events (incl. its own skill.invoked) follow until its
+    /// matching subagent.completed; depth gating stops them from being read as the parent's.
+    | SubagentStarted
+    | SubagentCompleted
+    /// A `skill.invoked` event — sets the running skill (only at depth 0). Status is unchanged, as the
+    /// backward status scan also ignores skill.invoked.
+    | SkillInvoked of string
+    /// A genuine (non-injection) user.message — a request boundary; content is None when the message
+    /// carries no text (still a boundary, just nothing to record as LastUserMessage).
+    | GenuineUserMessage of (string * DateTimeOffset) option
+    /// A `<skill-context>` injection user.message — transparent to skill/LastUserMessage, but still
+    /// marks the agent as Working like any user.message (matches the backward status scan).
+    | InjectionUserMessage
+    /// An assistant.message: whether it requested `ask_user`, the skill it started (a `skill` tool-call,
+    /// depth-0 only), and its text content when non-empty.
+    | AssistantMessage of isAskUser: bool * skill: string option * content: (string * DateTimeOffset) option
+    | TurnStarted
+    | TurnEnded
+
+let private readMessageTimestamp (root: JsonElement) : DateTimeOffset =
+    match root.TryGetProperty("timestamp") with
+    | true, ts when ts.ValueKind = JsonValueKind.String ->
+        match DateTimeOffset.TryParse(ts.GetString()) with
+        | true, v -> v
+        | _ -> DateTimeOffset.MinValue
+    | _ -> DateTimeOffset.MinValue
+
+/// A message's text + timestamp, or None when the content is absent/blank (matching the backward
+/// tryParse*Content helpers, which skip empty-content messages).
+let private readMessageContent (data: JsonElement) (ts: DateTimeOffset) : (string * DateTimeOffset) option =
+    match data.TryGetProperty("content") with
+    | true, c when c.ValueKind = JsonValueKind.String ->
+        let text = c.GetString()
+        if String.IsNullOrWhiteSpace(text) then None else Some(text, ts)
+    | _ -> None
+
+let private classifyForwardEvent (line: string) : ForwardEvent option =
+    try
+        use doc = JsonDocument.Parse(line)
+        let root = doc.RootElement
+
+        match root.TryGetProperty("type") with
+        | true, typeProp ->
+            let data () =
+                match root.TryGetProperty("data") with
+                | true, d -> Some d
+                | _ -> None
+
+            match typeProp.GetString() with
+            | "subagent.started" -> Some SubagentStarted
+            | "subagent.completed" -> Some SubagentCompleted
+            | "assistant.turn_start" -> Some TurnStarted
+            | "assistant.turn_end" -> Some TurnEnded
+            | "skill.invoked" -> data () |> Option.bind skillInvokedName |> Option.map SkillInvoked
+            | "assistant.message" ->
+                let content = data () |> Option.bind (fun d -> readMessageContent d (readMessageTimestamp root))
+                let kind = data () |> Option.map assistantMessageEvent |> Option.defaultValue AssistantWork
+                match kind with
+                | SkillSignal name -> Some(AssistantMessage(false, Some name, content))
+                | AssistantAskUser -> Some(AssistantMessage(true, None, content))
+                | AssistantWork
+                | UserRequest -> Some(AssistantMessage(false, None, content))
+            | "user.message" ->
+                match data () with
+                | Some d when isSkillContextMessage d -> Some InjectionUserMessage
+                | Some d -> Some(GenuineUserMessage(readMessageContent d (readMessageTimestamp root)))
+                // No `data` → not an injection → a genuine (content-less) boundary, matching the
+                // backward classifySkillEvent's `| _ -> Some UserRequest` fall-through.
+                | None -> Some(GenuineUserMessage None)
+            | _ -> None
+        | _ -> None
+    with ex ->
+        Log.log "Copilot" $"Failed to classify forward event: {ex.Message}"
+        None
+
+let private foldForwardEvent (state: SessionScanCache) (ev: ForwardEvent) : SessionScanCache =
+    match ev with
+    | SubagentStarted -> { state with SubagentDepth = state.SubagentDepth + 1 }
+    | SubagentCompleted -> { state with SubagentDepth = max 0 (state.SubagentDepth - 1) }
+    | SkillInvoked name ->
+        // Gate on depth 0: a sub-agent's skill.invoked must not overwrite the user's top-level skill.
+        if state.SubagentDepth = 0 then
+            { state with CurrentSkill = Some name; LastAssistantWasAskUser = false }
+        else
+            state
+    | InjectionUserMessage ->
+        // Transparent to skill + LastUserMessage; still Working like any user.message.
+        { state with RawStatus = Working }
+    | GenuineUserMessage content ->
+        // An ask_user reply resumes the same skill; any other genuine request ends the prior skill.
+        let skill = if state.LastAssistantWasAskUser then state.CurrentSkill else None
+        { state with
+            CurrentSkill = skill
+            LastUserMessage = (match content with Some c -> Some c | None -> state.LastUserMessage)
+            LastAssistantWasAskUser = false
+            RawStatus = Working }
+    | AssistantMessage(isAskUser, skill, content) ->
+        let withSkill =
+            match skill with
+            | Some name when state.SubagentDepth = 0 -> { state with CurrentSkill = Some name }
+            | _ -> state
+        { withSkill with
+            LastAssistantMessage = (match content with Some c -> Some c | None -> withSkill.LastAssistantMessage)
+            LastAssistantWasAskUser = isAskUser
+            RawStatus = (if isAskUser then WaitingForUser else Working) }
+    | TurnStarted -> { state with RawStatus = Working }
+    | TurnEnded -> { state with RawStatus = Done }
+
+/// Fold event lines (oldest→newest) onto an existing state. Unknown/irrelevant lines are skipped.
+/// Pure and append-friendly: folding a later batch onto the state from an earlier batch yields the
+/// same result as folding the whole stream at once, which is what the incremental cache relies on.
+let internal foldSessionEvents (initial: SessionScanCache) (lines: string seq) : SessionScanCache =
+    lines
+    |> Seq.choose classifyForwardEvent
+    |> Seq.fold foldForwardEvent initial
+
+/// Full forward scan of a complete event stream from the empty state.
+let internal scanSessionEvents (lines: string seq) : SessionScanCache =
+    foldSessionEvents emptySessionScan lines
 
 let private tryParseAssistantContent (line: string) =
     try
