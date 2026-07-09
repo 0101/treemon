@@ -246,7 +246,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", record ]
 
         let effective, newPersisted =
-            reconcileMergedPrs Map.empty persisted (Some(Set.ofList [ "feature/x" ]))
+            reconcileMergedPrs Map.empty persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a known branch absent from the live map must be overlaid with the reconstructed merged PR")
@@ -260,7 +260,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", record ]
         let live = Map.ofList [ "feature/x", NoPr ]
 
-        let effective, _ = reconcileMergedPrs live persisted (Some(Set.ofList [ "feature/x" ]))
+        let effective, _ = reconcileMergedPrs live persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a live NoPr is not a HasPr, so the persisted record must be overlaid")
@@ -273,7 +273,7 @@ type ReconcileMergedPrsTests() =
         let liveOpen = openLivePr 55
 
         let effective, _ =
-            reconcileMergedPrs (Map.ofList [ "feature/x", liveOpen ]) persisted (Some(Set.ofList [ "feature/x" ]))
+            reconcileMergedPrs (Map.ofList [ "feature/x", liveOpen ]) persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some liveOpen),
             "live HasPr always wins; the overlay only fills branches the live map is missing")
@@ -287,7 +287,7 @@ type ReconcileMergedPrsTests() =
                   "feature/gone", mk 2 "Gone" "https://example.test/pull/2" ]
 
         let effective, newPersisted =
-            reconcileMergedPrs Map.empty persisted (Some(Set.ofList [ "feature/x" ]))
+            reconcileMergedPrs Map.empty persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(newPersisted |> Map.containsKey "feature/gone", Is.False,
             "a branch outside knownBranches must be pruned from the store")
@@ -302,7 +302,7 @@ type ReconcileMergedPrsTests() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
 
-        let _, newPersisted = reconcileMergedPrs live Map.empty (Some(Set.ofList [ "feature/x" ]))
+        let _, newPersisted = reconcileMergedPrs live Map.empty Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
             Is.EqualTo(Some(mk 77 "Freshly merged" "https://example.test/pull/77")),
@@ -314,7 +314,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", mk 1 "stale" "https://example.test/pull/1" ]
         let live = Map.ofList [ "feature/x", mergedLivePr 2 "renamed" "https://example.test/pull/2" ]
 
-        let _, newPersisted = reconcileMergedPrs live persisted (Some(Set.ofList [ "feature/x" ]))
+        let _, newPersisted = reconcileMergedPrs live persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
             Is.EqualTo(Some(mk 2 "renamed" "https://example.test/pull/2")),
@@ -329,7 +329,7 @@ type ReconcileMergedPrsTests() =
         let persisted = Map.ofList [ "feature/x", record ]
         let live = Map.ofList [ "feature/x", mergedLivePr 12 "Add X" "https://example.test/pull/12" ]
 
-        let effective, newPersisted = reconcileMergedPrs live persisted (Some(Set.ofList [ "feature/x" ]))
+        let effective, newPersisted = reconcileMergedPrs live persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(newPersisted, Is.EqualTo(persisted),
             "re-upserting an identical merged PR must leave the store structurally unchanged (Decision #6)")
@@ -346,7 +346,7 @@ type ReconcileMergedPrsTests() =
         let live = Map.ofList [ "feature/y", openLivePr 9 ]
         let known = Set.ofList [ "feature/x"; "feature/y" ]
 
-        let effective, newPersisted = reconcileMergedPrs live persisted (Some known)
+        let effective, newPersisted = reconcileMergedPrs live persisted Map.empty (Some known)
 
         Assert.That(newPersisted, Is.EqualTo(persisted),
             "no new merged PRs and nothing to prune -> the store is unchanged (Decision #6 no-op write)")
@@ -367,7 +367,7 @@ type ReconcileMergedPrsTests() =
                 [ "feature/x", mk 1 "X" "https://example.test/pull/1"
                   "feature/y", mk 2 "Y" "https://example.test/pull/2" ]
 
-        let effective, newPersisted = reconcileMergedPrs Map.empty persisted None
+        let effective, newPersisted = reconcileMergedPrs Map.empty persisted Map.empty None
 
         Assert.That(newPersisted, Is.EqualTo(persisted),
             "None must skip pruning entirely - the just-loaded store must survive intact, never wiped (review F7)")
@@ -385,11 +385,75 @@ type ReconcileMergedPrsTests() =
         let live =
             Map.ofList [ "feature/new", mergedLivePr 88 "Just merged" "https://example.test/pull/88" ]
 
-        let _, newPersisted = reconcileMergedPrs live Map.empty None
+        let _, newPersisted = reconcileMergedPrs live Map.empty Map.empty None
 
         Assert.That(Map.tryFind "feature/new" newPersisted,
             Is.EqualTo(Some(mk 88 "Just merged" "https://example.test/pull/88")),
             "a live merged PR must still be recorded even when pruning is skipped")
+
+    // (Decision #11) Identity gate — EVICT: a record whose branch has a PRESENT but DIFFERENT
+    // worktree tip is a reused-name incarnation. It must be dropped from the store AND never overlaid,
+    // so a recreated branch never resurrects a prior branch's merged badge.
+    [<Test>]
+    member _.``evicts a persisted record when the branch's worktree tip proves a different incarnation (Decision #11)``() =
+        let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X" }
+        let persisted = Map.ofList [ "feature/x", record ]
+        let worktreeHeads = Map.ofList [ "feature/x", "sha-Y" ] // present tip differs from the record
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(newPersisted |> Map.containsKey "feature/x", Is.False,
+            "a confirmed mismatch (non-empty HeadSha vs a present differing tip) must evict the record")
+        Assert.That(effective |> Map.containsKey "feature/x", Is.False,
+            "an evicted reused-name record must never be overlaid into the effective map")
+
+    // (Decision #11) Identity gate — KEEP on exact tip match: an aged-out branch (no live PR) still
+    // sitting on its recorded tip is the same incarnation, so its badge is overlaid and the record kept.
+    [<Test>]
+    member _.``keeps and overlays a persisted record when the worktree tip matches exactly (Decision #11)``() =
+        let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X" }
+        let persisted = Map.ofList [ "feature/x", record ]
+        let worktreeHeads = Map.ofList [ "feature/x", "sha-X" ] // present tip == the record's HeadSha
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(Map.tryFind "feature/x" newPersisted, Is.EqualTo(Some record),
+            "an exact tip match is the same incarnation, so the record survives the identity gate")
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
+            "a tip-matched aged-out record is overlaid as its reconstructed merged PR")
+
+    // (Decision #11) Identity gate — LEGACY: a record with an empty HeadSha is unverified (pre-existing
+    // on-disk data). It keeps the prior name-only overlay even when a present tip would otherwise differ.
+    [<Test>]
+    member _.``keeps and overlays a legacy record with an empty HeadSha regardless of the worktree tip (Decision #11)``() =
+        let record = mk 12 "Add X" "https://example.test/pull/12" // HeadSha = "" (legacy/unverified)
+        let persisted = Map.ofList [ "feature/x", record ]
+        let worktreeHeads = Map.ofList [ "feature/x", "sha-Y" ] // a present, differing tip must NOT evict
+
+        let effective, newPersisted =
+            reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(Map.tryFind "feature/x" newPersisted, Is.EqualTo(Some record),
+            "a legacy (empty HeadSha) record is unverified and must be kept, never evicted")
+        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
+            "a legacy record keeps the prior name-only overlay until re-observed live and re-stamped")
+
+    // (Decision #11) Upsert stamps identity: a newly observed live merged PR is recorded with the
+    // branch's current worktree tip from worktreeHeads, giving the record its commit identity.
+    [<Test>]
+    member _.``stamps a newly observed live merged PR with its worktree tip from worktreeHeads (Decision #11)``() =
+        let live =
+            Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
+        let worktreeHeads = Map.ofList [ "feature/x", "sha-Z" ]
+
+        let _, newPersisted =
+            reconcileMergedPrs live Map.empty worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(Map.tryFind "feature/x" newPersisted,
+            Is.EqualTo(Some { mk 77 "Freshly merged" "https://example.test/pull/77" with HeadSha = "sha-Z" }),
+            "the upsert must stamp HeadSha from worktreeHeads[branch] as the record's commit identity")
 
 // pruneScope decides whether the live-derived branch enumeration is trustworthy enough to prune
 // against (review F7 / Decision #8): it must be complete, non-empty, AND free of transient upstream
@@ -517,17 +581,17 @@ type MergedPrStoreEndToEndTests() =
             let path = Path.Combine(dir, "merged-prs.json")
 
             // observe + persist
-            let _, observed = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty (known branch)
+            let _, observed = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty Map.empty (known branch)
             persistStore path (Map.ofList [ repo, observed ])
 
             // simulated restart + aged-out fallback (empty live map)
             let afterRestart = loadAtPath path |> Map.find repo
-            let effective, still = reconcileMergedPrs Map.empty afterRestart (known branch)
+            let effective, still = reconcileMergedPrs Map.empty afterRestart Map.empty (known branch)
             Assert.That(Map.tryFind branch effective, Is.EqualTo(Some(reconstructed record42)),
                 "full lifecycle FAIL: aged-out branch must stay merged after reload")
 
             // prune once the branch is no longer known, persist, confirm the file is empty of it
-            let _, pruned = reconcileMergedPrs Map.empty still (known "feature/other")
+            let _, pruned = reconcileMergedPrs Map.empty still Map.empty (known "feature/other")
             persistStore path (Map.ofList [ repo, pruned ])
             Assert.That(recordOnDisk path |> Option.isNone, Is.True,
                 "full lifecycle FAIL: pruned branch must be absent from the reloaded file"))

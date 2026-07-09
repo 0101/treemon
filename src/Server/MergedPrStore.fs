@@ -30,35 +30,55 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
 /// Pure reconciliation (no I/O) of the live PR map with the persisted merged records. Returns the
 /// effective map and the new persisted records (equal to `persisted` when nothing moved, so the
 /// caller can skip the write, Decision #6):
-///  - upserts every live `HasPr { IsMerged = true }` (keeping only `Id`/`Title`/`Url`);
+///  - upserts every live `HasPr { IsMerged = true }` (keeping only `Id`/`Title`/`Url`, stamping
+///    `HeadSha` from `worktreeHeads` — the branch's current worktree tip, Decision #11);
+///  - identity-gates by tip BEFORE the name-prune: a record is evicted only on a confirmed mismatch
+///    (non-empty `HeadSha` AND a present-but-differing tip = a reused-name incarnation); a match, a
+///    missing tip, or an empty (legacy) `HeadSha` is kept (Decision #11);
 ///  - overlays a reconstructed merged `HasPr` for persisted branches the live map lacks — a live
-///    `HasPr` always wins, the overlay is fallback-only (Decision #3);
+///    `HasPr` always wins, the overlay is fallback-only, and surviving records are match-or-legacy
+///    so the fallback is safe (Decision #3);
 ///  - prunes to `knownBranches` only when `Some` (a complete, non-empty enumeration). `None` SKIPS
 ///    pruning so an empty/partial set can never wipe just-loaded facts (review F7 / Decision #8).
+/// `worktreeHeads` maps branch -> its current worktree tip SHA (the identity source, Decision #11).
 let reconcileMergedPrs
     (livePrMap: Map<string, PrStatus>)
     (persisted: Map<string, MergedPrRecord>)
+    (worktreeHeads: Map<string, string>)
     (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
     // Upsert every branch observed as merged — provider ground truth, always safe and additive.
+    // Stamp `HeadSha` from the branch's current worktree tip (empty when unknown = legacy/unverified).
     let upserted =
         livePrMap
         |> Map.fold
             (fun acc branch status ->
                 match status with
                 | HasPr pr when pr.IsMerged ->
-                    // Stopgap identity: the real per-branch worktree-tip stamp is supplied by the
-                    // identity-gate task (tm-pr-recency-window-ehu), which threads worktreeHeads in.
-                    acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = "" }
+                    let headSha = Map.tryFind branch worktreeHeads |> Option.defaultValue ""
+                    acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = headSha }
                 | _ -> acc)
             persisted
+
+    // Identity gate (Decision #11), BEFORE the name-prune: keep a record when its `HeadSha` is empty
+    // (legacy/unverified), when its branch has no current tip, or when the tip matches exactly; evict
+    // only on a confirmed mismatch (non-empty `HeadSha` AND a present tip that differs = reused name).
+    let identityFiltered =
+        upserted
+        |> Map.filter (fun branch record ->
+            if record.HeadSha = "" then
+                true
+            else
+                match Map.tryFind branch worktreeHeads with
+                | None -> true
+                | Some tip -> record.HeadSha = tip)
 
     // Prune only against a trustworthy enumeration (`Some`); `None` leaves the store intact (F7).
     let newPersisted =
         match knownBranches with
-        | Some branches -> upserted |> Map.filter (fun branch _ -> Set.contains branch branches)
-        | None -> upserted
+        | Some branches -> identityFiltered |> Map.filter (fun branch _ -> Set.contains branch branches)
+        | None -> identityFiltered
 
     // Overlay persisted merged PRs for branches the live map lacks as `HasPr`; a live `HasPr` wins.
     let effectiveMap =

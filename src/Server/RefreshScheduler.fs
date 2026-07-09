@@ -446,7 +446,10 @@ let private executeTask
             let! persisted = MergedPrStore.getForRepo repoId
 
             let effectiveMap, newPersisted =
-                MergedPrStore.reconcileMergedPrs livePrMap persisted knownBranchesForPrune
+                // Compile stopgap: `worktreeHeads` is `Map.empty` here, so identity-gating is inert
+                // in production (every record treated as legacy) — behavior is unchanged until
+                // tm-pr-recency-window-sa2 builds the real branch->tip map from `repo.GitData`.
+                MergedPrStore.reconcileMergedPrs livePrMap persisted Map.empty knownBranchesForPrune
 
             if newPersisted <> persisted then
                 MergedPrStore.setForRepo repoId newPersisted
