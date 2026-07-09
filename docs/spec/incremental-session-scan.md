@@ -143,6 +143,18 @@ during implementation.
   `classifySkillEvent` (the `skill.invoked` name extraction was factored into `skillInvokedName` so
   both read it identically), so `CurrentSkill` provably matches `scanSkill` on every no-sub-agent
   scenario — asserted by `ForwardFoldTests` against the full `CurrentSkillTests` scenario set.
+- **The cache value wraps the fold state with a `Length`.** `CopilotDetector.SessionScanEntry`
+  = `{ State: SessionScanCache; Length: int64 }` in a `ConcurrentDictionary<eventsPath, entry>` (the
+  sole mutable boundary). `getSessionScanForFile` folds bytes `[entry.Length, fi.Length)` onto
+  `entry.State`, or full-rescans from the empty state when there is no cache or `entry.Length >
+  fi.Length` (rotation). `FileUtils.readByteRangeLines` finds the **last `\n` byte (0x0A)** in the
+  range — UTF-8-safe, since `\n` never occurs as a continuation byte — treats everything up to it as
+  complete lines and returns the offset just past it, leaving a partial trailing line unconsumed.
+- **Pruning is throttled.** `getSessionScan` runs `pruneSessionScanCache now` at most every 5 min
+  (a `lastPrune` ref), dropping entries whose file is missing or whose mtime is past the 2 h Idle
+  cutoff. `getSessionScanForFile` / `pruneSessionScanCache` / `peekSessionScanCacheLength` are
+  `internal` so `IncrementalSessionScanTests` can drive them over temp files (incremental==full,
+  partial-line, rotation reset, pruning) without the workspace-index path resolution.
 
 ## Step 0 — investigate before coding
 

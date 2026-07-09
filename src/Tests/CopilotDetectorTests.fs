@@ -743,3 +743,118 @@ type ForwardFoldTests() =
         Assert.That(scan.RawStatus, Is.EqualTo(Idle))
         Assert.That(scan.SubagentDepth, Is.EqualTo(0))
 
+
+/// Join event lines the way a real events.jsonl is written: every line, including the last, is
+/// terminated by a newline. A line with no trailing newline is a partial (still-being-written) line.
+let private joinedLines (events: string list) =
+    (String.concat Environment.NewLine events) + Environment.NewLine
+
+let private lastUser (scan: SessionScanCache option) =
+    scan |> Option.bind _.LastUserMessage |> Option.map fst
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type IncrementalSessionScanTests() =
+
+    let sampleSession () =
+        [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+          makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+          makeSkillContextEvent "review" "2026-03-01T10:00:02Z"
+          makeAssistantEvent "let me look at the diff" "2026-03-01T10:00:03Z"
+          makeAskUserEvent "which file should I focus on?" "2026-03-01T10:00:04Z"
+          makeUserEvent "the auth module" "2026-03-01T10:01:01Z"
+          makeAssistantEvent "reviewing the auth module" "2026-03-01T10:01:02Z"
+          makeTurnEnd "2026-03-01T10:01:03Z" ]
+
+    [<Test>]
+    member _.``Incremental fold across appended batches equals a full scan``() =
+        // The core guarantee: folding a later batch onto the cached state from an earlier batch must
+        // match a full rescan of the whole stream — exercised through the file + cache boundary.
+        let events = sampleSession ()
+        let batch1, batch2 = List.splitAt 4 events
+
+        withTempEventsFile (joinedLines batch1) (fun path ->
+            let first = getSessionScanForFile path
+            Assert.That(first, Is.EqualTo(Some(scanSessionEvents batch1)))
+
+            File.AppendAllText(path, joinedLines batch2)
+            let second = getSessionScanForFile path
+
+            Assert.That(second, Is.EqualTo(Some(scanSessionEvents events)))
+            // The whole file (all lines newline-terminated) has been consumed.
+            Assert.That(peekSessionScanCacheLength path, Is.EqualTo(Some(FileInfo(path).Length))))
+
+    [<Test>]
+    member _.``A partial trailing line is not folded until its newline arrives``() =
+        let batch1 =
+            [ makeUserEvent "first question" "2026-03-01T10:00:00Z"
+              makeAssistantEvent "first answer" "2026-03-01T10:00:01Z"
+              makeTurnEnd "2026-03-01T10:00:02Z" ]
+
+        withTempEventsFile (joinedLines batch1) (fun path ->
+            let afterBatch1 = getSessionScanForFile path
+            Assert.That(lastUser afterBatch1, Is.EqualTo(Some "first question"))
+            let consumedAfterBatch1 = peekSessionScanCacheLength path
+
+            // A line appended WITHOUT its terminating newline is partial: not parsed, offset unmoved.
+            File.AppendAllText(path, makeUserEvent "second question" "2026-03-01T10:05:00Z")
+            let afterPartial = getSessionScanForFile path
+            Assert.That(lastUser afterPartial, Is.EqualTo(Some "first question"))
+            Assert.That(peekSessionScanCacheLength path, Is.EqualTo(consumedAfterBatch1))
+
+            // Completing the line with a newline folds it in on the next scan.
+            File.AppendAllText(path, Environment.NewLine)
+            let afterComplete = getSessionScanForFile path
+            Assert.That(lastUser afterComplete, Is.EqualTo(Some "second question")))
+
+    [<Test>]
+    member _.``A shrunk (rotated) file triggers a full rescan, not a stale incremental fold``() =
+        let original =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeAssistantEvent "reviewing" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "still reviewing" "2026-03-01T10:00:03Z"
+              makeTurnEnd "2026-03-01T10:00:04Z" ]
+
+        withTempEventsFile (joinedLines original) (fun path ->
+            let before = getSessionScanForFile path
+            Assert.That(before |> Option.bind _.CurrentSkill, Is.EqualTo(Some "review"))
+
+            // Rotation: the file is replaced by a shorter one. The cached offset now exceeds the new
+            // length, so the cached fold must be discarded and the new file scanned from zero — had the
+            // shrink gone undetected the read range would be empty and the stale "review" skill linger.
+            let rotated = [ makeUserEvent "brand new session" "2026-03-01T11:00:00Z" ]
+            File.WriteAllText(path, joinedLines rotated)
+
+            let after = getSessionScanForFile path
+            Assert.That(after, Is.EqualTo(Some(scanSessionEvents rotated)))
+            Assert.That(after |> Option.bind _.CurrentSkill, Is.EqualTo(None))
+            Assert.That(lastUser after, Is.EqualTo(Some "brand new session"))
+            Assert.That(peekSessionScanCacheLength path, Is.EqualTo(Some(FileInfo(path).Length))))
+
+    [<Test>]
+    member _.``Pruning drops entries whose file has gone stale past the 2h idle cutoff``() =
+        withTempEventsFile (joinedLines (sampleSession ())) (fun path ->
+            getSessionScanForFile path |> ignore
+            Assert.That(peekSessionScanCacheLength path |> Option.isSome, Is.True)
+
+            // A fresh file (mtime ~now) is kept.
+            pruneSessionScanCache DateTimeOffset.UtcNow
+            Assert.That(peekSessionScanCacheLength path |> Option.isSome, Is.True)
+
+            // Evaluated 3 h past the file's mtime, the entry is older than the 2 h Idle cutoff → pruned.
+            pruneSessionScanCache (DateTimeOffset.UtcNow.AddHours(3.0))
+            Assert.That(peekSessionScanCacheLength path, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``Pruning drops entries whose file has vanished``() =
+        withTempEventsFile (joinedLines (sampleSession ())) (fun path ->
+            getSessionScanForFile path |> ignore
+            Assert.That(peekSessionScanCacheLength path |> Option.isSome, Is.True)
+
+            File.Delete(path)
+            pruneSessionScanCache DateTimeOffset.UtcNow
+            Assert.That(peekSessionScanCacheLength path, Is.EqualTo(None)))
+

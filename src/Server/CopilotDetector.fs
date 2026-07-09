@@ -1,6 +1,7 @@
 module Server.CopilotDetector
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.IO
 open System.Text.Json
@@ -516,6 +517,83 @@ let internal foldSessionEvents (initial: SessionScanCache) (lines: string seq) :
 /// Full forward scan of a complete event stream from the empty state.
 let internal scanSessionEvents (lines: string seq) : SessionScanCache =
     foldSessionEvents emptySessionScan lines
+
+// --- Incremental per-session cache ------------------------------------------------------------
+// Because the forward fold is append-friendly, we cache each session's fold state alongside the byte
+// offset consumed so far and, on each query, fold only the bytes appended since — O(new bytes) rather
+// than re-reading up to a 200 MB file every refresh. The ConcurrentDictionary is the sole mutable
+// boundary (mirroring the workspaceIndex ref+Dictionary pattern); the fold stays pure. Re-reading
+// appended bytes is idempotent, so a racing double-read is harmless (last-write-wins).
+
+type private SessionScanEntry =
+    { State: SessionScanCache
+      /// Absolute byte offset of the end of the last complete (newline-terminated) line folded.
+      /// A partial trailing line beyond this offset stays unconsumed until its newline arrives.
+      Length: int64 }
+
+let private sessionScanCache =
+    ConcurrentDictionary<string, SessionScanEntry>(StringComparer.OrdinalIgnoreCase)
+
+/// Fold the bytes appended to a single events file since its cached offset, or full-rescan from zero
+/// when there is no cache or the file shrank (rotation/truncation makes the cached offset meaningless).
+let internal getSessionScanForFile (eventsPath: string) : SessionScanCache option =
+    try
+        let fi = FileInfo(eventsPath)
+        if not fi.Exists then None
+        else
+            let fileLength = fi.Length
+            // Reuse the cached state only while the file has not shrunk (append-only); otherwise the
+            // offsets no longer line up (rotation) so fold the whole file from the empty state.
+            let baseState, startOffset =
+                match sessionScanCache.TryGetValue(eventsPath) with
+                | true, entry when entry.Length <= fileLength -> entry.State, entry.Length
+                | _ -> emptySessionScan, 0L
+
+            let lines, newLength =
+                FileUtils.readByteRangeLines "Copilot" eventsPath startOffset fileLength
+
+            let newState = foldSessionEvents baseState lines
+            sessionScanCache[eventsPath] <- { State = newState; Length = newLength }
+            Some newState
+    with ex ->
+        Log.log "Copilot" $"Failed incremental session scan of {eventsPath}: {ex.Message}"
+        None
+
+/// Drop cache entries whose events file has vanished or gone idle (mtime older than the 2 h Idle
+/// cutoff) so the dictionary only tracks live sessions.
+let internal pruneSessionScanCache (now: DateTimeOffset) =
+    sessionScanCache.Keys
+    |> Seq.toList
+    |> List.filter (fun path ->
+        try
+            let fi = FileInfo(path)
+            not fi.Exists
+            || (now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)) > TimeSpan.FromHours(2.0)
+        with _ -> true)
+    |> List.iter (fun path -> sessionScanCache.TryRemove(path) |> ignore)
+
+/// The cached byte offset for an events file, if any — exposed for tests to assert the incremental
+/// offset bookkeeping (partial-line handling, truncation resets, pruning).
+let internal peekSessionScanCacheLength (eventsPath: string) : int64 option =
+    match sessionScanCache.TryGetValue(eventsPath) with
+    | true, entry -> Some entry.Length
+    | false, _ -> None
+
+let private prunePeriod = TimeSpan.FromMinutes(5.0)
+let private lastPrune = ref DateTimeOffset.MinValue
+
+/// The forward-fold state for a worktree's most-recent Copilot session, updated incrementally from the
+/// events file so CurrentSkill / LastUserMessage / LastAssistantMessage / RawStatus are correct at any
+/// session size. Replaces the four separate ~1 MB backward scans (wired up by a later task).
+let getSessionScan (worktreePath: string) : SessionScanCache option =
+    let now = DateTimeOffset.UtcNow
+    if now - lastPrune.Value > prunePeriod then
+        lastPrune.Value <- now
+        pruneSessionScanCache now
+
+    getSessionDirsForPath worktreePath
+    |> findMostRecentEventsFile
+    |> Option.bind (fun fi -> getSessionScanForFile fi.FullName)
 
 let private tryParseAssistantContent (line: string) =
     try

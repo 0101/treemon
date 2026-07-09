@@ -40,6 +40,40 @@ let readLastLines (logTag: string) (filePath: string) (maxLines: int) =
     |> List.rev
     |> List.truncate maxLines
 
+/// Reads bytes [startOffset, endOffset) of a file and returns the complete (newline-terminated)
+/// lines within that range — cleaned, non-empty, trimmed, oldest→newest — together with the absolute
+/// byte offset just past the last consumed newline. A trailing partial line (bytes after the last
+/// newline, not yet terminated) is left unconsumed: excluded from both the returned lines and the
+/// returned offset, so a later append can complete it. When the range holds no newline at all,
+/// returns ([], startOffset). This is what the append-aware incremental session scan folds each cycle.
+let readByteRangeLines (logTag: string) (filePath: string) (startOffset: int64) (endOffset: int64) : string list * int64 =
+    try
+        if endOffset <= startOffset then ([], startOffset)
+        else
+            use stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+            stream.Seek(startOffset, SeekOrigin.Begin) |> ignore
+            let count = int (endOffset - startOffset)
+            let buffer = Array.zeroCreate count
+            stream.ReadExactly(buffer, 0, count)
+
+            // A '\n' byte (0x0A) never occurs as a UTF-8 continuation byte, so the last one marks the
+            // end of the last complete line even for multi-byte content; everything after it is partial.
+            match Array.tryFindIndexBack (fun (b: byte) -> b = 0x0Auy) buffer with
+            | None -> ([], startOffset)
+            | Some lastNewline ->
+                let consumed = lastNewline + 1
+                let lines =
+                    System.Text.Encoding.UTF8
+                        .GetString(buffer, 0, consumed)
+                        .Split([| '\r'; '\n' |], StringSplitOptions.None)
+                    |> Array.map _.Trim()
+                    |> Array.filter (fun s -> s.Length > 0)
+                    |> Array.toList
+                (lines, startOffset + int64 consumed)
+    with ex ->
+        Log.log logTag $"Failed to read byte range of {filePath}: {ex.Message}"
+        ([], startOffset)
+
 let refreshIfStale (maxAge: TimeSpan) (cache: 'T ref) (getAge: 'T -> DateTimeOffset) (rebuild: unit -> 'T) =
     let current = cache.Value
     let age = DateTimeOffset.UtcNow - getAge current
