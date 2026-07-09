@@ -120,7 +120,7 @@ type LastMessageTests() =
     // The last assistant message now comes off the incremental forward-fold scan rather than a
     // dedicated backward read; getSessionScanForFile.LastAssistantMessage is the (text, timestamp) pair.
     let lastAssistant (name: string) =
-        getSessionScanForFile (eventsPath name) |> Option.bind (fun s -> s.LastAssistantMessage)
+        getSessionScanForFile (eventsPath name) |> Option.bind _.LastAssistantMessage
 
     [<Test>]
     member _.``Extracts last assistant message from done session``() =
@@ -144,7 +144,7 @@ type LastMessageTests() =
     member _.``Returns None for non-existent file``() =
         let msg =
             getSessionScanForFile (Path.Combine(fixtureDir, "nonexistent", "events.jsonl"))
-            |> Option.bind (fun s -> s.LastAssistantMessage)
+            |> Option.bind _.LastAssistantMessage
         Assert.That(msg, Is.EqualTo(None))
 
     [<Test>]
@@ -411,9 +411,10 @@ type ForwardFoldTests() =
         // sub-agent nesting (depth stays 0, so the gating the fold adds is a no-op). skillEquivalenceScenarios
         // carries the known-good expected skill for each — the scenarios the removed backward scan was
         // verified against, now the fold's baseline.
-        for name, events, expected in skillEquivalenceScenarios do
+        skillEquivalenceScenarios
+        |> List.iter (fun (name, events, expected) ->
             let forward = (scanSessionEvents events).CurrentSkill
-            Assert.That(forward, Is.EqualTo(expected), $"forward vs expected mismatch: {name}")
+            Assert.That(forward, Is.EqualTo(expected), $"forward vs expected mismatch: {name}"))
 
     [<Test>]
     member _.``skill.invoked megabytes before the tail is still detected by the forward fold``() =
