@@ -39,6 +39,7 @@
     <Compile Include="CommandBuilderTests.fs" />
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
+    <Compile Include="SessionManagerBuildScriptTests.fs" />
     <Compile Include="ConfigWriterTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
@@ -63,6 +64,7 @@
     <Compile Include="OverviewDataTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
+    <Compile Include="HttpSecurityTests.fs" />
     <Compile Include="CanvasExportTests.fs" />
     <Compile Include="CanvasShareTests.fs" />
     <Compile Include="CanvasShareAzuriteTests.fs" />

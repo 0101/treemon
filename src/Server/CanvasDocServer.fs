@@ -30,6 +30,18 @@ type AttributeOutcome =
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
+/// Defense-in-depth for the F9 command-injection class: a declared owner sessionId is eventually
+/// interpolated into a launched `--resume {id}` command (via CanvasDocOwnership.getOwner ->
+/// CodingToolCli.build Resume). CodingToolCli now single-quote-escapes that value at the sink, but
+/// we additionally refuse to *store* an owner id outside the safe set real provider session ids use
+/// (ASCII alphanumerics, '-', '_' — GUIDs and provider UUIDs all qualify), so a hostile id carrying
+/// ';', a newline, or '$(...)' never enters the ownership store in the first place.
+let private isSafeSessionIdChar (c: char) =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
+
+let internal isValidSessionId (sessionId: string) =
+    not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
+
 let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
     let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
     return
@@ -110,6 +122,8 @@ let attributeOwnership
             return Invalid "missing filename"
         elif System.String.IsNullOrWhiteSpace sessionId then
             return Invalid "missing sessionId"
+        elif not (isValidSessionId sessionId) then
+            return Invalid "invalid sessionId format"
         else
             let worktreePath = worktreePath |> Server.PathUtils.normalizePath
             let! isKnown = isKnownWorktree agent worktreePath

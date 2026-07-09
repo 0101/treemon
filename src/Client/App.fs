@@ -722,6 +722,14 @@ let viewAppHeader model dispatch =
         ]
     ]
 
+let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
+    let target = e.target
+    if isNull (box target) then
+        false
+    else
+        let tag: string = target?tagName
+        tag = "INPUT" || tag = "TEXTAREA" || tag = "SELECT" || target?isContentEditable = true
+
 let view model dispatch =
     let canvasPositionClass =
         match model.Canvas.CanvasPosition with
@@ -777,13 +785,14 @@ let view model dispatch =
             prop.tabIndex 0
             prop.autoFocus true
             prop.onKeyDown (fun e ->
-                match e.key with
-                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                    e.preventDefault()
-                    dispatch (KeyPressed (e.key, false))
-                | key ->
-                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                    dispatch (KeyPressed (key, hasModifier)))
+                if not (isEditableEventTarget e) then
+                    match e.key with
+                    | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                        e.preventDefault()
+                        dispatch (KeyPressed (e.key, false))
+                    | key ->
+                        let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                        dispatch (KeyPressed (key, hasModifier)))
             prop.children [
                 if model.OverviewPanelOpen then
                     OverviewBand.view model.Repos

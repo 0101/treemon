@@ -74,7 +74,8 @@ type WrapperTypeSerializationTests() =
         let original =
             { RepoId = "my-repo"
               BranchName = BranchName.create "feature/new"
-              BaseBranch = BranchName.create "main" }
+              BaseBranch = BranchName.create "main"
+              Prompt = None }
 
         let result = roundTrip original
         Assert.That(result.BranchName, Is.EqualTo(original.BranchName))

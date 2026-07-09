@@ -231,7 +231,8 @@ type LaunchRequest =
 type CreateWorktreeRequest =
     { RepoId: string
       BranchName: BranchName
-      BaseBranch: BranchName }
+      BaseBranch: BranchName
+      Prompt: string option }
 
 /// Non-fatal advisories surfaced after a worktree is created (e.g. a legacy fork
 /// script is present, or the post-fork setup hook failed). Empty means a clean create.

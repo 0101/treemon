@@ -15,6 +15,8 @@ open Shared
 [<Category("Fast")>]
 type ReadUpstreamRemoteTests() =
 
+    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
+    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
     let mutable tempDir = ""
 
     [<SetUp>]
@@ -160,6 +162,8 @@ type ReadUpstreamRemoteTests() =
 [<Category("Fast")>]
 type ReadBaseBranchTests() =
 
+    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
+    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
     let mutable tempDir = ""
 
     [<SetUp>]
@@ -332,6 +336,76 @@ type ReadBaseBranchTests() =
 
         let result = readBaseBranch tempDir
         Assert.That(result, Is.EqualTo("main"))
+
+
+// ─── TreemonConfig: readDefaultSkill ───
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReadDefaultSkillTests() =
+
+    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
+    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
+    let mutable tempDir = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-test-{Guid.NewGuid()}")
+        Directory.CreateDirectory(tempDir) |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        if Directory.Exists(tempDir) then
+            Directory.Delete(tempDir, recursive = true)
+
+    [<Test>]
+    member _.``readDefaultSkill returns configured value``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "review" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("review"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns unknown skill value as-is (no validation)``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "not-a-real-skill" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("not-a-real-skill"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns value with spaces as-is (no validation)``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "odd value" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("odd value"))
+
+    [<Test>]
+    member _.``readDefaultSkill returns dash-prefixed value as-is (no validation)``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "defaultSkill": "--all" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("--all"))
+
+    [<Test>]
+    member _.``readDefaultSkill coexists with other fields``() =
+        File.WriteAllText(
+            Path.Combine(tempDir, ".treemon.json"),
+            """{ "archivedBranches": ["old"], "defaultSkill": "review", "baseBranch": "dev" }""")
+
+        let result = readDefaultSkill tempDir
+        Assert.That(result, Is.EqualTo("review"))
+
+        let branch = readBaseBranch tempDir
+        Assert.That(branch, Is.EqualTo("dev"), "Other fields should still be readable")
 
 
 // ─── Git command construction: mainRef, fetch, merge targets ───
