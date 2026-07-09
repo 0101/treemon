@@ -16,6 +16,7 @@
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="IdleDetectionTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
+    <Compile Include="FileUtilsTests.fs" />
     <Compile Include="ClaudeDetectorTests.fs" />
     <Compile Include="ClaudeSessionReplayTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
