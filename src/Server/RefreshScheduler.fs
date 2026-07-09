@@ -445,11 +445,21 @@ let private executeTask
             let! livePrMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
             let! persisted = MergedPrStore.getForRepo repoId
 
+            // Current worktree tips keyed by upstream branch name, so the reconcile can identity-gate
+            // each persisted record: a record is surfaced only when its `HeadSha` matches the branch's
+            // present tip, and evicted when a present-but-differing tip proves a reused-name incarnation
+            // (spec: merged-pr-persistence.md, Decision #11).
+            let worktreeHeads =
+                repo.GitData
+                |> Map.values
+                |> Seq.choose (fun gitData ->
+                    match GitWorktree.upstreamBranchName gitData.Upstream with
+                    | Some branch when gitData.HeadCommit <> "" -> Some(branch, gitData.HeadCommit)
+                    | _ -> None)
+                |> Map.ofSeq
+
             let effectiveMap, newPersisted =
-                // Compile stopgap: `worktreeHeads` is `Map.empty` here, so identity-gating is inert
-                // in production (every record treated as legacy) — behavior is unchanged until
-                // tm-pr-recency-window-sa2 builds the real branch->tip map from `repo.GitData`.
-                MergedPrStore.reconcileMergedPrs livePrMap persisted Map.empty knownBranchesForPrune
+                MergedPrStore.reconcileMergedPrs livePrMap persisted worktreeHeads knownBranchesForPrune
 
             if newPersisted <> persisted then
                 MergedPrStore.setForRepo repoId newPersisted
