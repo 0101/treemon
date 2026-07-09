@@ -80,7 +80,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 #### Copilot CLI Status Detection
 
-Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.message`, `assistant.turn_start`, `assistant.turn_end`, `assistant.message`. Status is determined by scanning backward from the end of the file to the first recognized event.
+Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.message`, `assistant.turn_start`, `assistant.turn_end`, `assistant.message`. Status is determined by an incremental forward scan of the file — events are folded oldest-to-newest through an append-aware per-session cache, so the last recognized event wins regardless of session size (see [incremental-session-scan.md](incremental-session-scan.md)).
 
 **Temporal adjustments** (applied after raw status is determined from events):
 
