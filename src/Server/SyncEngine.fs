@@ -61,12 +61,22 @@ let private mkEvent source message status =
       Status = Some status
       Duration = None }
 
-/// Card label for the post-fork setup hook, matching the OS-specific script name.
-let postForkSource =
-    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
+/// Card label for the post-fork setup hook, reusing GitWorktree's single source
+/// of truth for the OS-specific script name so the label always tracks the hook.
+let postForkSource = GitWorktree.postForkScriptName
 
-let private clearRunningEvents (events: CardEvent list) =
-    events |> List.filter (fun evt -> evt.Status <> Some StepStatus.Running)
+let private isPostForkEvent (evt: CardEvent) = evt.Source = postForkSource
+
+/// Removes only the running events matching the predicate, leaving every other
+/// event untouched — including running markers owned by the *other* lifecycle.
+/// Post-fork and sync share one per-branch event bag, so each lifecycle must
+/// clear its own running markers without clobbering the other's in-flight state.
+let private clearRunningEventsWhere (predicate: CardEvent -> bool) (events: CardEvent list) =
+    events |> List.filter (fun evt -> not (evt.Status = Some StepStatus.Running && predicate evt))
+
+let private clearRunningSyncEvents = clearRunningEventsWhere (isPostForkEvent >> not)
+
+let private clearRunningPostForkEvents = clearRunningEventsWhere isPostForkEvent
 
 let private isProcessRunning (state: SyncAgentState) (branch: string) =
     state.Processes
@@ -82,9 +92,10 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
         else
             let cts = new CancellationTokenSource()
             let sp = { State = SyncState.Running SyncStep.CheckClean; CancellationTokenSource = cts }
+            let existing = state.Events |> Map.tryFind branch |> Option.defaultValue []
             let newState =
                 { Processes = state.Processes |> Map.add branch sp
-                  Events = state.Events |> Map.add branch [ mkEvent "sync" "Sync starting" StepStatus.Running ] }
+                  Events = state.Events |> Map.add branch (mkEvent "sync" "Sync starting" StepStatus.Running :: clearRunningSyncEvents existing) }
             reply.Reply(Ok cts.Token)
             newState, []
 
@@ -110,7 +121,7 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
                     state.Events
                     |> Map.tryFind branch
                     |> Option.defaultValue []
-                    |> clearRunningEvents
+                    |> clearRunningSyncEvents
                 let newState =
                     { Processes = state.Processes |> Map.remove branch
                       Events = state.Events |> Map.add branch cleanedEvents }
@@ -126,7 +137,7 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
             state.Events
             |> Map.tryFind branch
             |> Option.defaultValue []
-            |> clearRunningEvents
+            |> clearRunningPostForkEvents
         { state with Events = state.Events |> Map.add branch (mkEvent postForkSource "setup" status :: cleaned) }, []
 
     | CancelSync branch ->
@@ -136,7 +147,7 @@ let processMessage (state: SyncAgentState) (msg: SyncMsg) : SyncAgentState * Sid
             | SyncState.Running _ ->
                 let finalSp = { sp with State = SyncState.Cancelled }
                 let existing = state.Events |> Map.tryFind branch |> Option.defaultValue []
-                let cleanedEvents = clearRunningEvents existing
+                let cleanedEvents = clearRunningSyncEvents existing
                 let newState =
                     { Processes = state.Processes |> Map.add branch finalSp
                       Events = state.Events |> Map.add branch (mkEvent "sync" "Sync cancelled" StepStatus.Cancelled :: cleanedEvents) }

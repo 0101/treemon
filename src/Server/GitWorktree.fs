@@ -395,12 +395,16 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
 /// `bd init`, which can far exceed the short default used for quick git probes.
 let private postForkTimeoutMs = 10 * 60 * 1000
 
+/// OS-appropriate `post-fork` setup hook file name. Single source of truth for
+/// the script name — the card label (`SyncEngine.postForkSource`) reuses this.
+let postForkScriptName =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
+
 /// Absolute path to the OS-appropriate `post-fork` setup hook when one exists in
 /// the repo root, otherwise None. Callers use this to decide whether to run — and
 /// surface a card lifecycle for — a post-fork step at all.
 let postForkScriptPath (repoRoot: string) : string option =
-    let scriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
-    let scriptPath = Path.Combine(repoRoot, scriptName)
+    let scriptPath = Path.Combine(repoRoot, postForkScriptName)
     if File.Exists scriptPath then Some scriptPath else None
 
 /// Runs the optional `post-fork` setup script inside a freshly created worktree,

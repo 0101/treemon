@@ -267,3 +267,56 @@ type ProcessMessageTests() =
         let events = newState.Events |> Map.find "feature"
         Assert.That(events |> List.exists (fun e -> e.Status = Some(StepStatus.Failed "boom")), Is.True)
         Assert.That(events |> List.exists (fun e -> e.Status = Some StepStatus.Running), Is.False, "Running event should be cleared")
+
+    [<Test>]
+    member _.``BeginSync preserves an unacknowledged post-fork terminal event``() =
+        let postForkFailed = makeEvent postForkSource "setup" (StepStatus.Failed "install failed")
+        let state = makeSyncState [] [ "feature", [ postForkFailed ] ]
+
+        let _replyResult, newState, _effects = processBeginSync state "feature"
+
+        let events = newState.Events |> Map.find "feature"
+        Assert.That(
+            events |> List.exists (fun e -> e.Source = postForkSource && e.Status = Some(StepStatus.Failed "install failed")),
+            Is.True,
+            "Post-fork failure event must survive a following BeginSync")
+        Assert.That(events[0].Source, Is.EqualTo("sync"), "Fresh sync running event should be prepended")
+        Assert.That(events[0].Status, Is.EqualTo(Some StepStatus.Running))
+
+    [<Test>]
+    member _.``CompletePostFork preserves a running sync event on the shared branch key``() =
+        let syncRunning = makeEvent "sync" "syncing" StepStatus.Running
+        let postForkRunning = makeEvent postForkSource "setup" StepStatus.Running
+        let state = makeSyncState [] [ "feature", [ syncRunning; postForkRunning ] ]
+
+        let newState, _effects = processMessage state (CompletePostFork("feature", StepStatus.Succeeded))
+
+        let events = newState.Events |> Map.find "feature"
+        Assert.That(
+            events |> List.exists (fun e -> e.Source = "sync" && e.Status = Some StepStatus.Running),
+            Is.True,
+            "A concurrent sync's running event must not be cleared by post-fork completion")
+        Assert.That(
+            events |> List.exists (fun e -> e.Source = postForkSource && e.Status = Some StepStatus.Running),
+            Is.False,
+            "The post-fork running event should be cleared")
+        Assert.That(events |> List.exists (fun e -> e.Status = Some StepStatus.Succeeded), Is.True)
+
+    [<Test>]
+    member _.``CompleteSync preserves a running post-fork event on the shared branch key``() =
+        let sp, _cts = makeRunningProcess ()
+        let syncRunning = makeEvent "sync" "syncing" StepStatus.Running
+        let postForkRunning = makeEvent postForkSource "setup" StepStatus.Running
+        let state = makeSyncState [ "feature", sp ] [ "feature", [ syncRunning; postForkRunning ] ]
+
+        let newState, _effects = processMessage state (CompleteSync("feature", StepStatus.Succeeded))
+
+        let events = newState.Events |> Map.find "feature"
+        Assert.That(
+            events |> List.exists (fun e -> e.Source = postForkSource && e.Status = Some StepStatus.Running),
+            Is.True,
+            "A concurrent post-fork's running event must not be cleared by sync completion")
+        Assert.That(
+            events |> List.exists (fun e -> e.Source = "sync" && e.Status = Some StepStatus.Running),
+            Is.False,
+            "The sync running event should be cleared")
