@@ -31,7 +31,9 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
 /// effective map and the new persisted records (equal to `persisted` when nothing moved, so the
 /// caller can skip the write, Decision #6):
 ///  - upserts every live `HasPr { IsMerged = true }` (keeping only `Id`/`Title`/`Url`, stamping
-///    `HeadSha` from `worktreeHeads` — the branch's current worktree tip, Decision #11);
+///    `HeadSha` from `worktreeHeads` — the branch's current worktree tip, Decision #11) — but ONLY
+///    when that tip is present and non-empty; a merge observed while the tip is unknown is NOT
+///    written (never stamp an unverifiable `HeadSha = ""` the identity gate can't evict, review F1);
 ///  - identity-gates by tip BEFORE the name-prune: a record is evicted only on a confirmed mismatch
 ///    (non-empty `HeadSha` AND a present-but-differing tip = a reused-name incarnation); a match, a
 ///    missing tip, or an empty (legacy) `HeadSha` is kept (Decision #11);
@@ -48,16 +50,22 @@ let reconcileMergedPrs
     (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
-    // Upsert every branch observed as merged — provider ground truth, always safe and additive.
-    // Stamp `HeadSha` from the branch's current worktree tip (empty when unknown = legacy/unverified).
+    // Upsert every branch observed as merged — provider ground truth, always safe and additive —
+    // but ONLY when its current worktree tip is known (present and non-empty). When the tip is
+    // unknown (getLastCommit failed transiently at observation time, so worktreeHeads omits the
+    // branch or carries ""), leave any existing record untouched: never overwrite it with an
+    // unverifiable `HeadSha = ""`, which the identity gate below would permanently exempt from
+    // eviction, letting a later reused branch name resurrect a stale merged badge (review F1).
     let upserted =
         livePrMap
         |> Map.fold
             (fun acc branch status ->
                 match status with
                 | HasPr pr when pr.IsMerged ->
-                    let headSha = Map.tryFind branch worktreeHeads |> Option.defaultValue ""
-                    acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = headSha }
+                    match Map.tryFind branch worktreeHeads with
+                    | Some headSha when headSha <> "" ->
+                        acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = headSha }
+                    | _ -> acc
                 | _ -> acc)
             persisted
 
