@@ -46,6 +46,7 @@
     <Compile Include="VsCodeCopilotDetectorTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
+    <Compile Include="OverviewBandE2ETests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPaneTests.fs" />
