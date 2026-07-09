@@ -39,7 +39,7 @@ module Planning =
         issue.ParentId
         |> Option.bind (fun pid -> Map.tryFind pid byId)
         |> Option.filter (fun parent -> eqCI parent.IssueType FeatureType)
-        |> Option.map (fun parent -> parent.Status)
+        |> Option.map _.Status
 
     /// Partition OPEN, non-feature issues by their direct parent-feature status:
     ///   open feature parent        => Planned
@@ -57,46 +57,45 @@ module Planning =
             | _ -> { acc with Loose = acc.Loose + 1 })
             BeadsPlanning.zero
 
-let private stringProp (el: JsonElement) (name: string) =
-    match el.TryGetProperty(name) with
-    | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString())
-    | _ -> None
-
 /// Parse one issues.jsonl line into the lightweight model. The parent-child parent is resolved
 /// from an inline dependency edge ONLY: a "parent-child" edge carries issue_id = this record (the
 /// child) and depends_on_id = its parent feature, so we take depends_on_id. A "blocks" edge is
 /// deliberately ignored and NEVER populates ParentId (the planning classifier relies on this).
 /// Returns None for a blank/malformed line (logged, then skipped) so one bad row can't nuke the
-/// whole collection.
+/// whole collection. A row with no `id` is a malformed row and is skipped (never counted).
 let private parseLine (line: string) : PlanningIssue option =
     try
         use doc = JsonDocument.Parse(line)
         let root = doc.RootElement
-        let id = stringProp root "id" |> Option.defaultValue ""
 
-        let parentId =
-            match root.TryGetProperty("dependencies") with
-            | true, deps when deps.ValueKind = JsonValueKind.Array ->
-                deps.EnumerateArray()
-                |> Seq.tryPick (fun edge ->
-                    // Guard the edge direction: it must belong to THIS record as the child
-                    // (issue_id = id); depends_on_id is then the parent we want.
-                    let childMatches =
-                        match stringProp edge "issue_id" with
-                        | Some iid -> String.Equals(iid, id, StringComparison.Ordinal)
-                        | None -> false // Reject malformed edge — a missing issue_id cannot match this record
+        match JsonHelpers.tryStringValue "id" root with
+        | Some id when not (String.IsNullOrWhiteSpace id) ->
+            let parentId =
+                match root.TryGetProperty("dependencies") with
+                | true, deps when deps.ValueKind = JsonValueKind.Array ->
+                    deps.EnumerateArray()
+                    |> Seq.tryPick (fun edge ->
+                        // Guard the edge direction: it must belong to THIS record as the child
+                        // (issue_id = id); depends_on_id is then the parent we want.
+                        let childMatches =
+                            match JsonHelpers.tryStringValue "issue_id" edge with
+                            | Some iid -> String.Equals(iid, id, StringComparison.Ordinal)
+                            | None -> false // Reject malformed edge — a missing issue_id cannot match this record
 
-                    if eqCI (stringProp edge "type" |> Option.defaultValue "") "parent-child" && childMatches then
-                        stringProp edge "depends_on_id"
-                    else
-                        None)
-            | _ -> None
+                        if eqCI (JsonHelpers.tryStringValue "type" edge |> Option.defaultValue "") "parent-child" && childMatches then
+                            JsonHelpers.tryStringValue "depends_on_id" edge
+                        else
+                            None)
+                | _ -> None
 
-        Some
-            { Id = id
-              IssueType = stringProp root "issue_type" |> Option.defaultValue ""
-              Status = stringProp root "status" |> Option.defaultValue ""
-              ParentId = parentId }
+            Some
+                { Id = id
+                  IssueType = JsonHelpers.tryStringValue "issue_type" root |> Option.defaultValue ""
+                  Status = JsonHelpers.tryStringValue "status" root |> Option.defaultValue ""
+                  ParentId = parentId }
+        | _ ->
+            Log.log "Beads" $"Skipping issues.jsonl row with no id: {line}"
+            None
     with ex ->
         Log.log "Beads" $"Failed to parse issues.jsonl line: {ex.Message}"
         None

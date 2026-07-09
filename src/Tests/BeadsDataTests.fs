@@ -17,30 +17,24 @@ type BeadsDataTests() =
     let jsonl (lines: string list) = String.concat "\n" lines
 
     let feature id status =
-        sprintf """{"id":"%s","status":"%s","issue_type":"feature"}""" id status
+        $$"""{"id":"{{id}}","status":"{{status}}","issue_type":"feature"}"""
 
     // A task carrying a single parent-child edge to its parent feature.
     let childTask id status parent =
-        sprintf
-            """{"id":"%s","status":"%s","issue_type":"task","dependencies":[{"issue_id":"%s","depends_on_id":"%s","type":"parent-child","created_by":"unknown"}]}"""
-            id status id parent
+        $$"""{"id":"{{id}}","status":"{{status}}","issue_type":"task","dependencies":[{"issue_id":"{{id}}","depends_on_id":"{{parent}}","type":"parent-child","created_by":"unknown"}]}"""
 
     // A task whose ONLY edge is a blocks edge (blocked-by a blocker) — must NOT become a parent.
     let blockedTask id status blocker =
-        sprintf
-            """{"id":"%s","status":"%s","issue_type":"task","dependencies":[{"issue_id":"%s","depends_on_id":"%s","type":"blocks","created_by":"unknown"}]}"""
-            id status id blocker
+        $$"""{"id":"{{id}}","status":"{{status}}","issue_type":"task","dependencies":[{"issue_id":"{{id}}","depends_on_id":"{{blocker}}","type":"blocks","created_by":"unknown"}]}"""
 
     // A task with no dependencies field at all.
     let looseTask id status =
-        sprintf """{"id":"%s","status":"%s","issue_type":"task"}""" id status
+        $$"""{"id":"{{id}}","status":"{{status}}","issue_type":"task"}"""
 
     // A task whose parent-child edge is MALFORMED: it omits issue_id, so the edge cannot be
     // proven to belong to THIS record (the direction guard) and must be rejected — never a match.
     let childTaskMissingIssueId id status parent =
-        sprintf
-            """{"id":"%s","status":"%s","issue_type":"task","dependencies":[{"depends_on_id":"%s","type":"parent-child","created_by":"unknown"}]}"""
-            id status parent
+        $$"""{"id":"{{id}}","status":"{{status}}","issue_type":"task","dependencies":[{"depends_on_id":"{{parent}}","type":"parent-child","created_by":"unknown"}]}"""
 
     [<Test>]
     member _.``parseIssues resolves ParentId from a parent-child edge (depends_on_id = parent)``() =
@@ -81,6 +75,15 @@ type BeadsDataTests() =
     member _.``parseIssues skips blank lines and parses every record``() =
         let content = jsonl [ feature "feat-1" "open"; ""; childTask "task-1" "open" "feat-1"; "   " ]
         Assert.That(parseIssues content |> List.length, Is.EqualTo(2))
+
+    [<Test>]
+    member _.``parseIssues skips a row with no id (malformed, not counted)``() =
+        // A row that is valid JSON but has no "id" is malformed and must be skipped, not counted
+        // as a phantom task. The sibling valid row still parses.
+        let noId = """{"status":"open","issue_type":"task"}"""
+        let issues = parseIssues (jsonl [ noId; looseTask "task-1" "open" ])
+        Assert.That(issues |> List.length, Is.EqualTo(1))
+        Assert.That((List.exactlyOne issues).Id, Is.EqualTo("task-1"))
 
     [<Test>]
     member _.``parseIssues of empty content is empty``() =

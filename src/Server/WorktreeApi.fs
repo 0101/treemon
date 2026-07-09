@@ -33,8 +33,9 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
                                             if obj.ReferenceEquals(wt.CanvasDocs, null) then []
                                             else wt.CanvasDocs
                                         Planning =
-                                            if obj.ReferenceEquals(wt.Planning, null) then BeadsPlanning.zero
-                                            else wt.Planning }) }) }
+                                            wt.Planning
+                                            |> Option.ofObj
+                                            |> Option.defaultValue BeadsPlanning.zero }) }) }
         Ok sanitized
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"

@@ -10,7 +10,6 @@ module Tests.OverviewBandE2ETests
 open System
 open System.Diagnostics
 open System.IO
-open System.Net.Http
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
@@ -33,63 +32,22 @@ let private viteUrl = $"http://localhost:{vitePort}"
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
 
-let private tryGet (client: HttpClient) (url: string) =
-    async {
-        try
-            let! response = client.GetAsync(url) |> Async.AwaitTask
-            return int response.StatusCode < 500
-        with _ ->
-            return false
-    }
-
-let rec private pollUntilReady (client: HttpClient) (url: string) (deadline: DateTime) =
-    async {
-        if DateTime.UtcNow > deadline then
-            failwith $"Timed out waiting for {url}"
-        else
-            let! ok = tryGet client url
-            if not ok then
-                do! Async.Sleep(500)
-                return! pollUntilReady client url deadline
-    }
-
-let private waitForUrl (url: string) (timeoutMs: int) =
-    async {
-        use client = new HttpClient()
-        let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
-        do! pollUntilReady client url deadline
-    }
-    |> Async.StartAsTask
-
 let private startServer () =
     task {
         TestUtils.killOrphansOnPort serverPort
         let proc =
-            TestUtils.startProcess
-                "dotnet"
-                $"""run --project "{serverProjectPath}" -- "{repoRoot}" --port {serverPort} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" """
-                repoRoot
-                []
-                false
+            TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath
         serverProcess.Value <- Some proc
-        do! waitForUrl serverUrl 30000
+        do! TestUtils.waitForUrl serverUrl 30000
     }
 
 let private startVite () =
     task {
         TestUtils.killOrphansOnPort vitePort
         let proc =
-            TestUtils.startProcess
-                "npx"
-                "vite --host"
-                repoRoot
-                [ "VITE_PORT", string vitePort
-                  "API_PORT", string serverPort
-                  "CANVAS_PORT", string canvasPort
-                  "NODE_OPTIONS", "--max-old-space-size=512" ]
-                false
+            TestUtils.startViteProcess repoRoot vitePort serverPort canvasPort
         viteProcess.Value <- Some proc
-        do! waitForUrl viteUrl 15000
+        do! TestUtils.waitForUrl viteUrl 15000
     }
 
 // Hex #rrggbb -> the "rgb(r, g, b)" string a browser's getComputedStyle returns, so colour
@@ -187,8 +145,19 @@ let private cardProbeJs =
 type OverviewBandE2ETests() =
     inherit PageTest()
 
-    let mutable probe: JObject = null
-    let mutable cardProbe: JObject = null
+    // DOM snapshots captured once per test in [<SetUp>] (OpenOverview) and read by every [<Test>].
+    // NUnit's fixture lifecycle mutates these across the setup/test boundary, so they must be
+    // mutable instance fields; an immutable binding can't bridge SetUp -> test body. Option makes
+    // the "not captured yet" state explicit instead of a null, and the require* accessors below
+    // fail loudly if a test body runs without SetUp.
+    let mutable probe: JObject option = None
+    let mutable cardProbe: JObject option = None
+
+    let requireProbe () =
+        probe |> Option.defaultWith (fun () -> failwith "band probe not captured (SetUp did not run)")
+
+    let requireCardProbe () =
+        cardProbe |> Option.defaultWith (fun () -> failwith "card probe not captured (SetUp did not run)")
 
     override this.ContextOptions() =
         let opts = base.ContextOptions()
@@ -226,9 +195,9 @@ type OverviewBandE2ETests() =
             do! this.Page.Locator(".overview-band .overview-bar").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! json = this.Page.EvaluateAsync<string>(bandProbeJs)
-            probe <- JObject.Parse(json)
+            probe <- Some(JObject.Parse(json))
             let! cardJson = this.Page.EvaluateAsync<string>(cardProbeJs)
-            cardProbe <- JObject.Parse(cardJson)
+            cardProbe <- Some(JObject.Parse(cardJson))
             TestContext.Out.WriteLine($"band probe: {json}")
             TestContext.Out.WriteLine($"card probe: {cardJson}")
         }
@@ -236,6 +205,7 @@ type OverviewBandE2ETests() =
     // Step 1: band placement + two headed sections.
     [<Test>]
     member _.``Step 1 - band sits in dashboard above repo-list with two headed sections``() =
+        let probe = requireProbe ()
         Assert.That(probe.Value<bool>("hasBand"), Is.True, ".overview-band must render")
         Assert.That(probe.Value<bool>("insideDash"), Is.True, ".overview-band must be inside .dashboard")
         Assert.That(probe.Value<bool>("bandBeforeRepoList"), Is.True, ".overview-band must precede .repo-list in DOM order")
@@ -251,13 +221,15 @@ type OverviewBandE2ETests() =
     // Step 2: meta line above circles, count before label.
     [<Test>]
     member _.``Step 2 - agent column meta line sits above circles, count first``() =
+        let probe = requireProbe ()
         Assert.That(probe.Value<bool>("metaBeforeCircles"), Is.True, "count+label meta line must precede the circles")
         Assert.That(probe.Value<bool>("countBeforeLabel"), Is.True, "count must precede label (count-first)")
 
     // Step 3: one proportional bar per status, no unit cells, no overflow.
     [<Test>]
     member _.``Step 3 - one proportional bar per status, widest fits the band``() =
-        let bars = (probe.["bars"] :?> JArray) |> Seq.cast<JObject> |> List.ofSeq
+        let probe = requireProbe ()
+        let bars = (probe["bars"] :?> JArray) |> Seq.cast<JObject> |> List.ofSeq
         Assert.That(bars.Length, Is.EqualTo(3), "three non-empty task buckets -> three bars")
 
         let widthOf label =
@@ -289,7 +261,8 @@ type OverviewBandE2ETests() =
     // Step 4: exact accent palette on tasks and agents.
     [<Test>]
     member _.``Step 4 - accent colours match the Catppuccin palette``() =
-        let colors = probe.["colors"] :?> JObject
+        let probe = requireProbe ()
+        let colors = probe["colors"] :?> JObject
         Assert.That(colors.Value<string>("taskDone"), Is.EqualTo(rgb "#cba6f7"), "Done = mauve")
         Assert.That(colors.Value<string>("taskInProgress"), Is.EqualTo(rgb "#a6e3a1"), "In progress = green")
         Assert.That(colors.Value<string>("taskPlanned"), Is.EqualTo(rgb "#fab387"), "Planned = peach")
@@ -300,6 +273,7 @@ type OverviewBandE2ETests() =
     // Step 6: zero-count buckets are omitted, never rendered as 0.
     [<Test>]
     member _.``Step 6 - zero-count status and activity are omitted``() =
+        let probe = requireProbe ()
         Assert.That(probe.Value<bool>("blockedPresent"), Is.False, "zero-count Blocked bucket must not render")
         Assert.That(probe.Value<bool>("queuedPresent"), Is.False, "zero-count Queued bucket must not render")
         Assert.That(probe.Value<bool>("fixingPresent"), Is.False, "zero-count Fixing activity must not render")
@@ -309,6 +283,7 @@ type OverviewBandE2ETests() =
     // Step 7 (correction k): per-card activity stripe removed; red dot intact.
     [<Test>]
     member _.``Step 7 - worktree cards carry no activity stripe, red dot unchanged``() =
+        let cardProbe = requireCardProbe ()
         Assert.That(cardProbe.Value<int>("cardCount"), Is.GreaterThanOrEqualTo(6), "worktree cards render in the grid")
         Assert.That(cardProbe.Value<bool>("anyActClass"), Is.False, "no .wt-card carries an act-* activity-stripe modifier")
         Assert.That(cardProbe.Value<string>("beforeContent"), Is.EqualTo("none"), "no left ::before activity stripe is painted")

@@ -77,11 +77,9 @@ type CurrentActivity =
 module Activity =
     // First whitespace-delimited token — a Claude slash command can carry args
     // (ClaudeDetector surfaces "<cmd> <args>", e.g. "pr https://..."), so only the command
-    // itself is significant. Split never yields an empty array, but tryHead stays defensive.
+    // itself is significant. Split never yields an empty array.
     let private firstToken (s: string) =
-        s.Split([| ' '; '\t'; '\n'; '\r' |])
-        |> Array.tryHead
-        |> Option.defaultValue ""
+        s.Split([| ' '; '\t'; '\n'; '\r' |])[0]
 
     /// Classify a running skill/command name into an activity bucket, per the
     /// beads-overview-band spec table. The name is normalized first — trimmed, reduced to its
