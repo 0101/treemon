@@ -31,6 +31,7 @@
     <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
     <Compile Include="ComponentsTests.fs" />
+    <Compile Include="CardViewsTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />

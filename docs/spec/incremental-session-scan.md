@@ -114,8 +114,16 @@ user runs Copilot CLI).
 
 The server now yields a genuine `LastUserMessage` (never `<skill-context>`) and a correct
 `CurrentSkill`. In `CardViews.fs`, when `CurrentSkill` is `Some`, surface the skill label (e.g.
-`▶ investigate`) as/next to the user line; otherwise show `LastUserMessage`. Exact styling to confirm
-during implementation.
+`▶ investigate`) as/next to the user line; otherwise show `LastUserMessage`.
+
+Implemented as a pure render decision `cardUserLine (wt) : CardUserLine` (`Skill name | Message
+(prompt, ts) | Empty`) so the skill-vs-message choice is unit-testable without rendering React
+(`CardViewsTests.fs`). `userLineView` renders it: the skill case is a `▶ <skill>` label reusing the
+`.user-prompt` class plus `.skill-line` / `.skill-indicator` / `.skill-name` (CSS-class based, no
+inline styles). An empty/whitespace `CurrentSkill` falls through to `LastUserMessage`; a running
+skill takes precedence over any message. `hasContent` (footer padding) now keys off `cardUserLine`
+so a skill-only card still gets the `has-content` footer. Note: the card CSS source of truth is
+`src/Client/index.html` — `wwwroot/index.html` is a gitignored build output.
 
 ## Decisions
 

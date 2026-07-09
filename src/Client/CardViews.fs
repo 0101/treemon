@@ -510,6 +510,46 @@ let canResumeSession (wt: WorktreeStatus) =
     && wt.CodingTool <> Working
     && wt.CodingTool <> WaitingForUser
 
+/// What the card's "user line" should surface. Kept as a pure decision (not a ReactElement) so the
+/// skill-vs-message choice is unit-testable without rendering React. When a skill is running we show
+/// the skill; otherwise the genuine last user message. The server now yields a real LastUserMessage
+/// (never a `<skill-context>` injection), so there is no injection text to filter out on the client.
+[<RequireQualifiedAccess>]
+type CardUserLine =
+    | Skill of name: string
+    | Message of prompt: string * ts: System.DateTimeOffset
+    | Empty
+
+let cardUserLine (wt: WorktreeStatus) : CardUserLine =
+    match wt.CurrentSkill with
+    | Some skill when not (System.String.IsNullOrWhiteSpace skill) -> CardUserLine.Skill(skill.Trim())
+    | _ ->
+        match wt.LastUserMessage with
+        | Some (prompt, ts) -> CardUserLine.Message(prompt, ts)
+        | None -> CardUserLine.Empty
+
+/// Renders the card user line: a `▶ <skill>` label while a skill runs, otherwise the last user
+/// message. CSS-class based (no inline styles); the skill label reuses `.user-prompt` for layout.
+let userLineView (wt: WorktreeStatus) =
+    match cardUserLine wt with
+    | CardUserLine.Skill name ->
+        Html.div [
+            prop.className "user-prompt skill-line"
+            prop.children [
+                Html.span [ prop.className "skill-indicator"; prop.text "▶" ]
+                Html.span [ prop.className "skill-name"; prop.text name ]
+            ]
+        ]
+    | CardUserLine.Message (prompt, ts) ->
+        Html.div [
+            prop.className "user-prompt"
+            prop.children [
+                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                Html.span [ prop.text prompt ]
+            ]
+        ]
+    | CardUserLine.Empty -> Html.none
+
 let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
@@ -552,7 +592,8 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
 let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
-    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
+    let hasUserLine = match cardUserLine wt with CardUserLine.Empty -> false | _ -> true
+    let hasContent = hasUserLine || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key (WorktreePath.value wt.Path)
@@ -600,17 +641,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
             Html.div [
                 prop.className footerClass
                 prop.children [
-                    if List.isEmpty canvasEvents then
-                        match wt.LastUserMessage with
-                        | Some (prompt, ts) ->
-                            Html.div [
-                                prop.className "user-prompt"
-                                prop.children [
-                                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                                    Html.span [ prop.text prompt ]
-                                ]
-                            ]
-                        | None -> ()
+                    if List.isEmpty canvasEvents then userLineView wt
 
                     eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
                     canvasEventLog callbacks scopedKey canvasEvents
