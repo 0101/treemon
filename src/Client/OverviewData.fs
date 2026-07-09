@@ -2,9 +2,12 @@ module OverviewData
 
 // Pure cross-worktree aggregation behind the Overview band (spec: docs/spec/beads-overview-band.md).
 // Folds every monitored worktree into the band's two aggregate lenses:
-//   - Tasks: the five status buckets (Planned · Queued · In progress · Blocked · Done), each a
-//     cross-worktree sum. Planned folds in Loose (decision #6); Done counts only NON-archived
-//     worktrees (decision #7) — every other bucket sums across all worktrees.
+//   - Tasks: the status buckets (Planned · Queued · In progress · Blocked · Done · Unattended), each
+//     a cross-worktree sum. Planned folds in Loose (decision #6); Done counts only NON-archived
+//     worktrees (decision #7). In progress and Queued count only where the worktree has an ACTIVE
+//     agent (CodingTool = Working or WaitingForUser); on an inactive worktree those tasks are likely
+//     stale beads status and fold into the muted Unattended catch-all instead. Every other bucket
+//     sums across all worktrees.
 //   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
 //     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
 //     agents parked on the user (CodingTool = WaitingForUser, yellow dot). Terminal presence
@@ -31,6 +34,7 @@ type TaskBucketKind =
     | InProgress
     | Blocked
     | Done
+    | Unattended
 
 /// One non-empty task bucket: its kind and cross-worktree count. Empty buckets are dropped from the
 /// roll-up entirely (the band never shows a 0), so a present bucket always has Count > 0.
@@ -57,13 +61,15 @@ type Overview =
       Agents: AgentGroup list
       Scale: int }
 
-// Canonical left-to-right order of the task bars.
+// Canonical left-to-right order of the task bars. Unattended trails Done: it is the muted
+// catch-all for In-progress/Queued tasks whose worktree has no active agent.
 let private taskOrder =
     [ TaskBucketKind.Planned
       TaskBucketKind.Queued
       TaskBucketKind.InProgress
       TaskBucketKind.Blocked
-      TaskBucketKind.Done ]
+      TaskBucketKind.Done
+      TaskBucketKind.Unattended ]
 
 // Canonical order of the activity groups (mirrors the spec's activity table).
 let private activityOrder =
@@ -89,16 +95,24 @@ let private activityOf (wt: WorktreeStatus) =
 let aggregate (repos: RepoWorktrees list) : Overview =
     let worktrees = repos |> List.collect _.Worktrees
 
-    // Task-bucket count for one kind. Only Done filters archived worktrees; every other bucket sums
-    // across all worktrees. Planned folds Loose in (Loose -> Planned for display, decision #6).
+    // Task-bucket count for one kind. In-progress and Queued only count toward their live buckets
+    // when their worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser); on an
+    // inactive worktree (Done/Idle) they are likely stale beads status nobody is working, so they
+    // fold into the muted Unattended catch-all instead. Only Done filters archived worktrees; every
+    // other bucket sums across all worktrees. Planned folds Loose in (Loose -> Planned, decision #6).
+    let isActive w =
+        w.CodingTool = CodingToolStatus.Working || w.CodingTool = CodingToolStatus.WaitingForUser
+
     let sumOf f = worktrees |> List.sumBy f
+    let sumWhere pred f = worktrees |> List.filter pred |> List.sumBy f
     let countFor =
         function
         | TaskBucketKind.Planned    -> sumOf (fun w -> w.Planning.Planned + w.Planning.Loose)
-        | TaskBucketKind.Queued     -> sumOf _.Planning.Queued
-        | TaskBucketKind.InProgress -> sumOf _.Beads.InProgress
+        | TaskBucketKind.Queued     -> sumWhere isActive _.Planning.Queued
+        | TaskBucketKind.InProgress -> sumWhere isActive _.Beads.InProgress
         | TaskBucketKind.Blocked    -> sumOf _.Beads.Blocked
         | TaskBucketKind.Done       -> sumOf (fun w -> if w.IsArchived then 0 else w.Beads.Closed)
+        | TaskBucketKind.Unattended -> sumWhere (isActive >> not) (fun w -> w.Beads.InProgress + w.Planning.Queued)
 
     // Count each bucket once, in canonical order; reuse for both the omit-empties list and Scale.
     let counts = taskOrder |> List.map (fun kind -> kind, countFor kind)

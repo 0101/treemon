@@ -54,16 +54,16 @@ sections separated by a **1px dashed** rule:
    `width` (or a CSS variable) is an accepted, documented exception to the CSS-classes-only rule — a
    proportional width is inherently dynamic and cannot be a static class; the unit-cell workaround is
    removed.* Because the label sits on its own line above, a short bar always keeps its full label.
-5. A muted **footer caption** under the tasks: *"one true scale — bar length ∝ task count across all
-   categories · counts in the labels · short bars keep their full label"*.
-6. **Palette (Catppuccin Mocha, exact):**
-   - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7`.
-   - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · Fixing `#fab387` · Working (fallback) `#89b4fa`.
+5. **Palette (Catppuccin Mocha, exact):**
+   - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7` · Unattended `#7f849c` (muted grey).
+   - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · Fixing `#fab387` · Working (fallback) `#ff0000` (matches the card's `Working` red dot).
    - Waiting — `#f9e2af` (reuse the card's `WaitingForUser` dot colour). This frees `#f9e2af` from
      Reviewing, which moves to Pink `#f5c2e7` so no two co-occurring agent groups share a hue
      (Investigating teal, Planning mauve, Executing green, **Reviewing pink**, Fixing peach, Working
-     blue, **Waiting yellow** — all distinct).
-7. Empty categories stay omitted (never a `0`); an all-empty band renders nothing.
+     red, **Waiting yellow** — all distinct).
+6. Empty categories stay omitted (never a `0`); an all-empty band renders nothing.
+7. **Chrome-less:** no border/hairlines around the band and **no footer caption** — the toggle
+   button is the only header.
 
 ### Corrected agent-activity semantics
 
@@ -104,8 +104,8 @@ elsewhere), and remove its tests. The red dot is unchanged; the band alone now c
   1. **Active agents** — **circles**, one per active agent, **grouped by the running skill** (no
      per-agent status dot on the circle).
   2. **Tasks** — solid **bars**, one per status (**Planned · Queued · In progress · Blocked ·
-     Done**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column keeps
-     its label width so a short bar still shows its full label.
+     Done · Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each
+     column keeps its label width so a short bar still shows its full label.
 - **Empty categories are omitted** — a status or activity with zero items renders no label and no
   bar/circle group (never a `0`).
 - Category counts use the **same font size/weight** as their label, distinguished only by color.
@@ -116,10 +116,11 @@ elsewhere), and remove its tests. The red dot is unchanged; the band alone now c
 | Bucket | Definition |
 |---|---|
 | **Planned** | Open tasks under an **open** feature (planning done, awaiting go-ahead) **plus** loose open tasks (no/closed/blocked parent). |
-| **Queued** | Open tasks under an **in_progress** feature (execution underway, next-up). |
-| **In progress** | Tasks with status `in_progress` (`Beads.InProgress`). |
+| **Queued** | Open tasks under an **in_progress** feature (execution underway, next-up) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
+| **In progress** | Tasks with status `in_progress` (`Beads.InProgress`) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
 | **Blocked** | Tasks with status `blocked` (`Beads.Blocked`). |
 | **Done** | Σ closed **issues** (any type) across **non-archived** worktrees (`Beads.Closed` where `not IsArchived`). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed issues drop out when the worktree is merged/deleted. Only filter is `not IsArchived`. |
+| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Done` or `Idle`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
 
 The **Planned/Queued/Loose** split derives from the **parent-child dependency graph + feature
 status**: for each open task, find its parent feature (parent-child edge) and read that feature's
@@ -340,8 +341,8 @@ running skill from the existing session scan; per-session context usage (Extensi
 
 **Corrections v1.1 (supersede where they conflict):**
 - (g) **Prototype fidelity.** The band matches `.agents/canvas/beads-panel-prototypes.html` exactly
-  (section headers, count-first labels *above* the visual, dashed separator, footer caption, exact
-  Catppuccin palette). The unit-cell bar is replaced by a **true-scale proportional bar** whose width
+  (section headers, count-first labels *above* the visual, dashed separator, exact Catppuccin
+  palette). The unit-cell bar is replaced by a **true-scale proportional bar** whose width
   is computed from `Overview.Scale` — a **computed inline width / CSS variable is an accepted
   exception** to the CSS-classes-only rule (a proportional width cannot be a static class).
 - (h) **Working agent = red dot (`CodingTool = Working`)**, not `HasActiveSession`. `WaitingForUser`
@@ -379,6 +380,18 @@ running skill from the existing session scan; per-session context usage (Extensi
   already-mapped `review-branch`, `bd-review`, `code-review`.
 - (k) **Per-card `act-*` stripe removed** (`CardViews` + `index.html` + tests); the red dot is
   unchanged.
+
+**Corrections v1.2:**
+- (l) **Chrome trimmed.** The band drops its top/bottom border hairlines and the task footer caption
+  — it is fully chrome-less (the toggle button is the only header).
+- (m) **Generic Working agent = red.** The fallback **Working** activity circle uses `#ff0000`, the
+  same red as the card's `Working` dot (was blue `#89b4fa`).
+- (n) **In-progress / Queued gated on an active agent → new Unattended bucket.** `In progress`
+  (`Beads.InProgress`) and `Queued` count toward their live bars only when their worktree has an
+  **active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree
+  (`Done`/`Idle`) they are likely stale beads status nobody is working, so they fold into a single
+  muted **Unattended** catch-all bucket (accent `#7f849c`) that trails Done in canonical order.
+  Planned/Blocked/Done are unaffected (they count across all worktrees).
 
 ## Key Files
 

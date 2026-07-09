@@ -154,7 +154,6 @@ let private bandProbeJs =
           agentReviewing: bg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
           agentWaiting: bg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle'))
         },
-        caption: (band.querySelector('.overview-caption') || {}).textContent || '',
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
         queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
         fixingPresent: !!itemByLabel(agentsSec, 'Fixing'),
@@ -297,11 +296,6 @@ type OverviewBandE2ETests() =
         Assert.That(colors.Value<string>("agentPlanning"), Is.EqualTo(rgb "#cba6f7"), "agent Planning = mauve")
         Assert.That(colors.Value<string>("agentReviewing"), Is.EqualTo(rgb "#f5c2e7"), "agent Reviewing = pink")
         Assert.That(colors.Value<string>("agentWaiting"), Is.EqualTo(rgb "#f9e2af"), "Waiting = yellow")
-
-    // Step 5: footer caption.
-    [<Test>]
-    member _.``Step 5 - footer caption mentions one true scale``() =
-        Assert.That(probe.Value<string>("caption"), Does.Contain("one true scale"), "caption present under the task bars")
 
     // Step 6: zero-count buckets are omitted, never rendered as 0.
     [<Test>]

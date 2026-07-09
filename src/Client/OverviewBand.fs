@@ -15,7 +15,6 @@ module OverviewBand
 //                      floored at a visible minimum) and applied as an inline width — the accepted,
 //                      documented exception to the CSS-classes-only rule (a proportional width is
 //                      inherently dynamic; spec decision (g)). The old N-unit-cell workaround is gone.
-// A muted footer caption sits under the tasks.
 //
 // Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
 // fully-empty roll-up collapses to Html.none. v1 is static — no hover/click/greenlight.
@@ -31,10 +30,6 @@ let private barMaxPx = 380
 
 /// Floor for a bar width, in px: a count-1 bar still reads as a visible sliver (prototype min 5px).
 let private barMinPx = 5
-
-/// The muted footer caption under the task bars (verbatim from the prototype).
-let private taskCaption =
-    "one true scale — bar length ∝ task count across all categories · counts in the labels · short bars keep their full label"
 
 /// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
 /// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
@@ -56,6 +51,7 @@ let private taskLabel =
     | TaskBucketKind.InProgress -> "In progress"
     | TaskBucketKind.Blocked -> "Blocked"
     | TaskBucketKind.Done -> "Done"
+    | TaskBucketKind.Unattended -> "Unattended"
 
 // Accent-color modifier class per task bucket. The class sets `color`, which drives BOTH the count
 // text and the bar fill (the bar paints `background: currentColor`).
@@ -66,6 +62,7 @@ let private taskClass =
     | TaskBucketKind.InProgress -> "task-inprogress"
     | TaskBucketKind.Blocked -> "task-blocked"
     | TaskBucketKind.Done -> "task-done"
+    | TaskBucketKind.Unattended -> "task-unattended"
 
 // Display label per activity bucket, in the aggregate's canonical order.
 let private activityLabel =
@@ -142,15 +139,14 @@ let private taskColumn (scale: int) (bucket: TaskBucket) =
               [ metaLine accent (taskLabel bucket.Kind) bucket.Count
                 Html.div [ prop.className ("overview-bar " + accent); prop.style [ style.width (length.px px) ] ] ] ]
 
-/// A section shell: an uppercase header over the wrapping row of category columns, plus any trailing
-/// caption (the tasks section's footnote). The stacked layout + dashed separator live in CSS.
-let private section (header: string) (columns: ReactElement list) (caption: ReactElement) =
+/// A section shell: an uppercase header over the wrapping row of category columns. The stacked
+/// layout + dashed separator live in CSS.
+let private section (header: string) (columns: ReactElement list) =
     Html.div
         [ prop.className "overview-section"
           prop.children
               [ Html.div [ prop.className "overview-header"; prop.text header ]
-                Html.div [ prop.className "overview-items"; prop.children columns ]
-                caption ] ]
+                Html.div [ prop.className "overview-items"; prop.children columns ] ] ]
 
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
 /// so the band adds no chrome (not even margin) when there is nothing to show.
@@ -192,11 +188,10 @@ let view (repos: RepoModel list) : ReactElement =
                             | Some m -> $"Active agents · {m} waiting"
                             | None -> $"Active agents · {workingCount} working"
 
-                        section header (groups |> List.map agentColumn) Html.none
+                        section header (groups |> List.map agentColumn)
                     match tasks with
                     | [] -> Html.none
                     | buckets ->
                         section
                             "Tasks · across all worktrees"
-                            (buckets |> List.map (taskColumn overview.Scale))
-                            (Html.div [ prop.className "overview-caption"; prop.text taskCaption ]) ] ]
+                            (buckets |> List.map (taskColumn overview.Scale)) ] ]

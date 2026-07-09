@@ -7,10 +7,12 @@ open Tests.WorktreeFixtures
 
 /// Tests for the pure cross-worktree aggregation (OverviewData.aggregate), the data behind the
 /// Overview band. It folds a RepoWorktrees list into: task buckets (Planned folds in Loose; Done
-/// counts only non-archived worktrees; every other bucket sums across all), agent groups (red-dot
-/// WORKING worktrees grouped by Activity.classify of their CurrentSkill, plus a distinct Waiting
-/// group for CodingTool = WaitingForUser), and Scale (the largest bucket count). Empty buckets and
-/// groups are omitted; both lists come back in canonical order (Waiting sorts last).
+/// counts only non-archived worktrees; In-progress and Queued count only where the worktree has an
+/// ACTIVE agent — Working or WaitingForUser — otherwise folding into the muted Unattended catch-all;
+/// every other bucket sums across all), agent groups (red-dot WORKING worktrees grouped by
+/// Activity.classify of their CurrentSkill, plus a distinct Waiting group for CodingTool =
+/// WaitingForUser), and Scale (the largest bucket count). Empty buckets and groups are omitted; both
+/// lists come back in canonical order (Unattended trails Done; Waiting sorts last).
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -19,8 +21,12 @@ type OverviewDataTests() =
     let beads o ip b c : BeadsSummary = { Open = o; InProgress = ip; Blocked = b; Closed = c }
     let planning p q l : BeadsPlanning = { Planned = p; Queued = q; Loose = l }
 
-    /// A worktree carrying beads/planning counts (Idle, not archived) — for task-bucket tests.
+    /// A worktree carrying beads/planning counts, INACTIVE (Idle, not archived): its In-progress and
+    /// Queued fold into Unattended. Use activeTaskWt when those should count toward the live buckets.
     let taskWt bd pl = { baseWt with Beads = bd; Planning = pl }
+
+    /// Like taskWt but in an ACTIVE red-dot Working state, so its In-progress/Queued count live.
+    let activeTaskWt bd pl = { taskWt bd pl with CodingTool = CodingToolStatus.Working }
 
     /// A worktree in a given CodingTool state carrying an optional skill — for agent-group tests.
     /// Activity is derived only for red-dot (Working) worktrees; other states never contribute to
@@ -56,20 +62,22 @@ type OverviewDataTests() =
         let result =
             aggregate
                 [ repo
-                    [ taskWt (beads 3 2 1 4) (planning 2 1 1)
-                      taskWt (beads 0 1 0 2) (planning 1 2 0) ]
-                  repo [ taskWt (beads 1 0 3 5) (planning 0 1 2) ] ]
+                    [ activeTaskWt (beads 3 2 1 4) (planning 2 1 1)
+                      activeTaskWt (beads 0 1 0 2) (planning 1 2 0) ]
+                  repo [ activeTaskWt (beads 1 0 3 5) (planning 0 1 2) ] ]
 
         // Planned = Σ(Planning.Planned + Planning.Loose) = (2+1)+(1+0)+(0+2)
         Assert.That(taskCount TaskBucketKind.Planned result, Is.EqualTo(Some 6))
-        // Queued = Σ Planning.Queued = 1+2+1
+        // Queued = Σ Planning.Queued (active worktrees) = 1+2+1
         Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 4))
-        // InProgress = Σ Beads.InProgress = 2+1+0
+        // InProgress = Σ Beads.InProgress (active worktrees) = 2+1+0
         Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 3))
         // Blocked = Σ Beads.Blocked = 1+0+3
         Assert.That(taskCount TaskBucketKind.Blocked result, Is.EqualTo(Some 4))
         // Done = Σ Beads.Closed = 4+2+5
         Assert.That(taskCount TaskBucketKind.Done result, Is.EqualTo(Some 11))
+        // Every worktree is active, so nothing is Unattended.
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(None))
 
     [<Test>]
     member _.``Planned folds Loose in on top of Planned``() =
@@ -101,11 +109,12 @@ type OverviewDataTests() =
     member _.``Only Done filters archived - every other bucket still counts archived worktrees``() =
         // Locks decision #7: the archived filter is scoped to Done alone. An archived worktree's
         // open/in_progress/blocked/planned work still rolls up; only its Closed count is dropped.
+        // Both worktrees are active so In-progress/Queued stay in their live buckets (not Unattended).
         let result =
             aggregate
                 [ repo
-                    [ { taskWt (beads 0 5 2 7) (planning 3 4 0) with IsArchived = false }
-                      { taskWt (beads 0 6 8 100) (planning 9 10 1) with IsArchived = true } ] ]
+                    [ { activeTaskWt (beads 0 5 2 7) (planning 3 4 0) with IsArchived = false }
+                      { activeTaskWt (beads 0 6 8 100) (planning 9 10 1) with IsArchived = true } ] ]
         Assert.That(taskCount TaskBucketKind.Planned result, Is.EqualTo(Some 13))    // (3+0)+(9+1)
         Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 14))     // 4+10
         Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 11)) // 5+6
@@ -119,7 +128,7 @@ type OverviewDataTests() =
         let result =
             aggregate
                 [ repo
-                    [ { taskWt (beads 0 3 0 0) BeadsPlanning.zero with IsArchived = false }
+                    [ { activeTaskWt (beads 0 3 0 0) BeadsPlanning.zero with IsArchived = false }
                       { taskWt (beads 0 0 0 100) BeadsPlanning.zero with IsArchived = true } ] ]
         Assert.That(result.Scale, Is.EqualTo(3))                          // not 100
         Assert.That(taskCount TaskBucketKind.Done result, Is.EqualTo(None))
@@ -128,7 +137,7 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``A bucket with a zero count is omitted, not rendered as a 0``() =
-        // Only Done is non-zero: the other four buckets must be absent from Tasks.
+        // Only Done is non-zero: the other buckets must be absent from Tasks.
         let result = aggregate [ repo [ taskWt (beads 0 0 0 3) BeadsPlanning.zero ] ]
         Assert.That(result.Tasks |> List.length, Is.EqualTo(1))
         Assert.That(taskCount TaskBucketKind.Done result, Is.EqualTo(Some 3))
@@ -136,6 +145,7 @@ type OverviewDataTests() =
         Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(None))
         Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(None))
         Assert.That(taskCount TaskBucketKind.Blocked result, Is.EqualTo(None))
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(None))
 
     [<Test>]
     member _.``All-zero worktrees produce no task buckets``() =
@@ -145,7 +155,8 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``Present task buckets keep canonical Planned-Queued-InProgress-Blocked-Done order``() =
-        let result = aggregate [ repo [ taskWt (beads 0 1 1 1) (planning 1 1 0) ] ]
+        // Active worktree so In-progress/Queued stay live and all five ordered buckets are present.
+        let result = aggregate [ repo [ activeTaskWt (beads 0 1 1 1) (planning 1 1 0) ] ]
         let kinds = result.Tasks |> List.map _.Kind
         Assert.That(
             kinds,
@@ -155,6 +166,76 @@ type OverviewDataTests() =
                   TaskBucketKind.InProgress
                   TaskBucketKind.Blocked
                   TaskBucketKind.Done ]))
+
+    // ----- In-progress / Queued active-gating + Unattended catch-all -----
+
+    [<Test>]
+    member _.``In-progress and Queued on an inactive worktree fold into Unattended, not their live buckets``() =
+        // Idle worktree: nobody is actively working, so its In-progress/Queued are likely stale beads
+        // status and collapse into the single Unattended bucket.
+        let result = aggregate [ repo [ taskWt (beads 0 3 0 0) (planning 0 2 0) ] ]
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(None))
+        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(None))
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(Some 5)) // 3 + 2
+
+    [<Test>]
+    member _.``A Working worktree keeps its In-progress and Queued live, nothing is Unattended``() =
+        let result = aggregate [ repo [ activeTaskWt (beads 0 3 0 0) (planning 0 2 0) ] ]
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 3))
+        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 2))
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``A WaitingForUser worktree also counts as active and keeps its In-progress and Queued live``() =
+        // Decision: an agent parked on the user (yellow dot) still counts as actively worked.
+        let wt =
+            { taskWt (beads 0 4 0 0) (planning 0 1 0) with CodingTool = CodingToolStatus.WaitingForUser }
+        let result = aggregate [ repo [ wt ] ]
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 4))
+        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 1))
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Done and Idle worktrees route their In-progress and Queued into Unattended``() =
+        let result =
+            aggregate
+                [ repo
+                    [ { taskWt (beads 0 2 0 0) (planning 0 3 0) with CodingTool = CodingToolStatus.Done }
+                      { taskWt (beads 0 1 0 0) BeadsPlanning.zero with CodingTool = CodingToolStatus.Idle } ] ]
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(Some 6)) // (2+3)+(1+0)
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(None))
+        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Unattended holds only inactive worktrees' work while active worktrees fill the live buckets``() =
+        let result =
+            aggregate
+                [ repo
+                    [ activeTaskWt (beads 0 5 0 0) (planning 0 2 0) // active -> live buckets
+                      { taskWt (beads 0 4 0 0) (planning 0 3 0) with CodingTool = CodingToolStatus.Idle } ] ] // inactive -> Unattended
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 5)) // active only
+        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 2))     // active only
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(Some 7)) // inactive 4+3
+
+    [<Test>]
+    member _.``Unattended trails Done in canonical order``() =
+        let result =
+            aggregate
+                [ repo
+                    [ activeTaskWt (beads 0 2 0 3) BeadsPlanning.zero // active: InProgress + Done
+                      { taskWt (beads 0 4 0 0) BeadsPlanning.zero with CodingTool = CodingToolStatus.Idle } ] ] // Unattended
+        let kinds = result.Tasks |> List.map _.Kind
+        Assert.That(
+            kinds,
+            Is.EqualTo([ TaskBucketKind.InProgress; TaskBucketKind.Done; TaskBucketKind.Unattended ]))
+
+    [<Test>]
+    member _.``Unattended counts toward the shared Scale``() =
+        // Idle worktree: InProgress 8 -> Unattended 8; Done 3. Scale tracks the largest bucket = 8.
+        let result =
+            aggregate [ repo [ { taskWt (beads 0 8 0 3) BeadsPlanning.zero with CodingTool = CodingToolStatus.Idle } ] ]
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(Some 8))
+        Assert.That(result.Scale, Is.EqualTo(8))
 
     // ----- Scale (one true shared linear scale) -----
 

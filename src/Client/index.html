@@ -145,11 +145,10 @@
            count-first meta line ABOVE its visual (count in the accent colour, label neutral, same
            size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
            tasks are ONE proportional bar per status on one true shared scale (width computed inline
-           from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)); a
-           muted footer caption sits under the tasks. No box/title bar beyond the prototype's
-           top/bottom hairlines (the toggle button is the header); it reflows purely via
+           from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)). No
+           box/title bar or hairlines (the toggle button is the header); it reflows purely via
            .overview-items flex-wrap as the category columns wrap onto new rows on narrow panes. */
-        .overview-band { background: #1e1e2e; border-top: 1px solid #313244; border-bottom: 1px solid #313244; padding: 15px 16px; margin-bottom: 16px; }
+        .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
         .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
         /* Shared column layout — identical for both sections; only the visual row differs. Wrapping
@@ -164,7 +163,6 @@
         .overview-circles { display: flex; gap: 5px; }
         .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
         .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; }
-        .overview-caption { font-size: 11px; color: #6c7086; margin-top: 11px; }
         /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
            count text and, via currentColor, the circle/bar fill. */
         .task-planned { color: #fab387; }
@@ -172,12 +170,13 @@
         .task-inprogress { color: #a6e3a1; }
         .task-blocked { color: #f38ba8; }
         .task-done { color: #cba6f7; }
+        .task-unattended { color: #7f849c; }
         .activity-investigating { color: #89dceb; }
         .activity-planning { color: #cba6f7; }
         .activity-executing { color: #a6e3a1; }
         .activity-reviewing { color: #f5c2e7; }
         .activity-fixing { color: #fab387; }
-        .activity-working { color: #89b4fa; }
+        .activity-working { color: #ff0000; }
         .activity-waiting { color: #f9e2af; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
