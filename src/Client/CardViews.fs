@@ -521,12 +521,10 @@ type CardUserLine =
     | Empty
 
 let cardUserLine (wt: WorktreeStatus) : CardUserLine =
-    match wt.CurrentSkill with
-    | Some skill when not (System.String.IsNullOrWhiteSpace skill) -> CardUserLine.Skill(skill.Trim())
-    | _ ->
-        match wt.LastUserMessage with
-        | Some (prompt, ts) -> CardUserLine.Message(prompt, ts)
-        | None -> CardUserLine.Empty
+    match wt.CurrentSkill, wt.LastUserMessage with
+    | Some skill, _ when not (System.String.IsNullOrWhiteSpace skill) -> CardUserLine.Skill(skill.Trim())
+    | _, Some (prompt, ts) -> CardUserLine.Message(prompt, ts)
+    | _, None -> CardUserLine.Empty
 
 /// Renders the card user line: a `▶ <skill>` label while a skill runs, otherwise the last user
 /// message. CSS-class based (no inline styles); the skill label reuses `.user-prompt` for layout.
