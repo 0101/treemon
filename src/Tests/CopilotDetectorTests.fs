@@ -117,35 +117,41 @@ type WorkspaceParsingTests() =
 [<Category("Fast")>]
 type LastMessageTests() =
 
+    // The last assistant message now comes off the incremental forward-fold scan rather than a
+    // dedicated backward read; getSessionScanForFile.LastAssistantMessage is the (text, timestamp) pair.
+    let lastAssistant (name: string) =
+        getSessionScanForFile (eventsPath name) |> Option.bind (fun s -> s.LastAssistantMessage)
+
     [<Test>]
     member _.``Extracts last assistant message from done session``() =
-        let msg = getLastMessageFromEventsFile (eventsPath "done-session")
+        let msg = lastAssistant "done-session"
         Assert.That(msg.IsSome, Is.True)
-        Assert.That(msg.Value.Message, Does.Contain("simple web server"))
-        Assert.That(msg.Value.Source, Is.EqualTo("copilot"))
+        Assert.That(fst msg.Value, Does.Contain("simple web server"))
 
     [<Test>]
     member _.``Extracts last assistant message from working-with-tools session``() =
-        let msg = getLastMessageFromEventsFile (eventsPath "working-with-tools")
+        let msg = lastAssistant "working-with-tools"
         Assert.That(msg.IsSome, Is.True)
-        Assert.That(msg.Value.Message, Does.Contain("refactor"))
+        Assert.That(fst msg.Value, Does.Contain("refactor"))
 
     [<Test>]
     member _.``Extracts last assistant message from ask-user session``() =
-        let msg = getLastMessageFromEventsFile (eventsPath "ask-user-session")
+        let msg = lastAssistant "ask-user-session"
         Assert.That(msg.IsSome, Is.True)
-        Assert.That(msg.Value.Message, Does.Contain("deployment target"))
+        Assert.That(fst msg.Value, Does.Contain("deployment target"))
 
     [<Test>]
     member _.``Returns None for non-existent file``() =
-        let msg = getLastMessageFromEventsFile (Path.Combine(fixtureDir, "nonexistent", "events.jsonl"))
+        let msg =
+            getSessionScanForFile (Path.Combine(fixtureDir, "nonexistent", "events.jsonl"))
+            |> Option.bind (fun s -> s.LastAssistantMessage)
         Assert.That(msg, Is.EqualTo(None))
 
     [<Test>]
     member _.``Timestamp is parsed from event``() =
-        let msg = getLastMessageFromEventsFile (eventsPath "done-session")
+        let msg = lastAssistant "done-session"
         Assert.That(msg.IsSome, Is.True)
-        Assert.That(msg.Value.Timestamp.Year, Is.EqualTo(2026))
+        Assert.That((snd msg.Value).Year, Is.EqualTo(2026))
 
 
 let private makeUserEvent (text: string) (timestamp: string) =
@@ -171,21 +177,19 @@ let private withTempEventsFile content action =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type ScanForUserMessageTests() =
+type LastUserMessageTests() =
 
     [<Test>]
     member _.``Finds user message near end of file``() =
-        let content =
+        let events =
             [ makeUserEvent "hello copilot" "2026-03-01T10:00:00Z"
               makeAssistantEvent "hi there" "2026-03-01T10:00:01Z"
               makeTurnEnd "2026-03-01T10:00:02Z" ]
-            |> String.concat Environment.NewLine
 
-        withTempEventsFile content (fun path ->
-            let result = scanForUserMessage path
-            Assert.That(result.IsSome, Is.True)
-            let text, _ = result.Value
-            Assert.That(text, Is.EqualTo("hello copilot")))
+        let result = (scanSessionEvents events).LastUserMessage
+        Assert.That(result.IsSome, Is.True)
+        let text, _ = result.Value
+        Assert.That(text, Is.EqualTo("hello copilot"))
 
     [<Test>]
     member _.``Finds user message buried under many tool events``() =
@@ -195,35 +199,30 @@ type ScanForUserMessageTests() =
                 makeToolEvent ts)
             |> Seq.toList
 
-        let content =
+        let events =
             [ makeUserEvent "my deep question" "2026-03-01T10:00:00Z" ]
             @ toolEvents
             @ [ makeAssistantEvent "done" "2026-03-01T10:05:00Z"
                 makeTurnEnd "2026-03-01T10:05:01Z" ]
-            |> String.concat Environment.NewLine
 
-        withTempEventsFile content (fun path ->
-            let result = scanForUserMessage path
-            Assert.That(result.IsSome, Is.True)
-            let text, _ = result.Value
-            Assert.That(text, Is.EqualTo("my deep question")))
+        let result = (scanSessionEvents events).LastUserMessage
+        Assert.That(result.IsSome, Is.True)
+        let text, _ = result.Value
+        Assert.That(text, Is.EqualTo("my deep question"))
 
     [<Test>]
-    member _.``Returns None for empty file``() =
-        withTempEventsFile "" (fun path ->
-            let result = scanForUserMessage path
-            Assert.That(result, Is.EqualTo(None)))
+    member _.``Returns None for empty stream``() =
+        let result = (scanSessionEvents List.empty).LastUserMessage
+        Assert.That(result, Is.EqualTo(None))
 
     [<Test>]
     member _.``Returns None when no user message exists``() =
-        let content =
+        let events =
             [ makeAssistantEvent "orphan message" "2026-03-01T10:00:00Z"
               makeTurnEnd "2026-03-01T10:00:01Z" ]
-            |> String.concat Environment.NewLine
 
-        withTempEventsFile content (fun path ->
-            let result = scanForUserMessage path
-            Assert.That(result, Is.EqualTo(None)))
+        let result = (scanSessionEvents events).LastUserMessage
+        Assert.That(result, Is.EqualTo(None))
 
 
 [<TestFixture>]
@@ -287,198 +286,6 @@ let private makeAskUserToolComplete (timestamp: string) =
     // The ask_user tool-execution row that sits between the ask_user request and the reply; the skill
     // scan must ignore it (only the assistant.message request marks the boundary as an ask_user one).
     $"""{{"type":"tool.execution_complete","data":{{"name":"ask_user"}},"timestamp":"{timestamp}"}}"""
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type CurrentSkillTests() =
-
-    [<Test>]
-    member _.``skill.invoked event yields data.name``() =
-        let content =
-            [ makeUserEvent "please fix the build" "2026-03-01T10:00:00Z"
-              makeSkillToolCall "fix-build" "2026-03-01T10:00:01Z"
-              makeSkillInvoked "fix-build" "2026-03-01T10:00:02Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "fix-build")))
-
-    [<Test>]
-    member _.``skill tool-call arguments.skill is used when no skill.invoked follows``() =
-        let content =
-            [ makeUserEvent "investigate this" "2026-03-01T10:00:00Z"
-              makeSkillToolCall "investigate" "2026-03-01T10:00:01Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "investigate")))
-
-    [<Test>]
-    member _.``Most recent skill wins across multiple invocations``() =
-        let content =
-            [ makeSkillToolCall "investigate" "2026-03-01T10:00:00Z"
-              makeSkillInvoked "investigate" "2026-03-01T10:00:01Z"
-              makeSkillToolCall "bd-execute" "2026-03-01T10:05:00Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "bd-execute")))
-
-    [<Test>]
-    member _.``Non-skill tool-call after skill.invoked is skipped``() =
-        // A regular assistant.message with a non-skill tool-call sits between the skill signal and
-        // EOF; the backward scan must step past it and still return the running skill.
-        let content =
-            [ makeSkillInvoked "fix-build" "2026-03-01T10:00:00Z"
-              makeAssistantEvent "editing a file" "2026-03-01T10:00:01Z"
-              makeToolEvent "2026-03-01T10:00:02Z"
-              makeTurnEnd "2026-03-01T10:00:03Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "fix-build")))
-
-    [<Test>]
-    member _.``arguments encoded as a JSON string still yields skill``() =
-        let content =
-            [ makeSkillToolCallJsonArgs "refactor" "2026-03-01T10:00:00Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "refactor")))
-
-    [<Test>]
-    member _.``Session with no skill signal yields None``() =
-        let content =
-            [ makeUserEvent "hello" "2026-03-01T10:00:00Z"
-              makeAssistantEvent "hi" "2026-03-01T10:00:01Z"
-              makeTurnEnd "2026-03-01T10:00:02Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
-
-    [<Test>]
-    member _.``A skill that finished before a new user request no longer lingers``() =
-        let content =
-            [ makeUserEvent "plan the feature" "2026-03-01T10:00:00Z"
-              makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"
-              makeAssistantEvent "planning complete" "2026-03-01T10:00:02Z"
-              makeTurnEnd "2026-03-01T10:00:03Z"
-              makeUserEvent "now something unrelated" "2026-03-01T10:05:00Z"
-              makeAssistantEvent "on it" "2026-03-01T10:05:01Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
-
-    [<Test>]
-    member _.``A running skill is reported past its own skill-context injection``() =
-        // The synthetic "<skill-context>" user.message Copilot writes right after skill.invoked is
-        // part of the skill starting, not a new request, so the scan steps past it and reports the
-        // running skill (e.g. a bd-execute orchestration with no genuine user.message since).
-        let content =
-            [ makeUserEvent "/bd-execute my-feature" "2026-03-01T10:00:00Z"
-              makeSkillToolCall "bd-execute" "2026-03-01T10:00:01Z"
-              makeSkillInvoked "bd-execute" "2026-03-01T10:00:02Z"
-              makeSkillContextEvent "bd-execute" "2026-03-01T10:00:03Z"
-              makeAssistantEvent "orchestrating subagents" "2026-03-01T10:00:04Z"
-              makeTurnEnd "2026-03-01T10:00:05Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "bd-execute")))
-
-    [<Test>]
-    member _.``A skill re-invoked after a new request is reported, not the earlier finished one``() =
-        let content =
-            [ makeSkillInvoked "bd-plan" "2026-03-01T10:00:00Z"
-              makeTurnEnd "2026-03-01T10:00:01Z"
-              makeUserEvent "please review the branch" "2026-03-01T10:05:00Z"
-              makeSkillInvoked "review" "2026-03-01T10:05:01Z"
-              makeAssistantEvent "reviewing" "2026-03-01T10:05:02Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "review")))
-
-    [<Test>]
-    member _.``A running skill is reported across an ask_user reply that resumes it``() =
-        // focused-review F5: mid-skill the agent asks the user a question (ask_user → WaitingForUser);
-        // the user's reply is a plain user.message with no new skill.invoked, and the SAME skill
-        // resumes on the next turn. That reply must NOT be treated as a request boundary — the skill
-        // is still running, so it is still reported (not collapsed to generic Working).
-        let content =
-            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
-              makeSkillToolCall "review" "2026-03-01T10:00:01Z"
-              makeSkillInvoked "review" "2026-03-01T10:00:02Z"
-              makeSkillContextEvent "review" "2026-03-01T10:00:03Z"
-              makeAssistantEvent "let me look at the diff" "2026-03-01T10:00:04Z"
-              makeAskUserEvent "which file should I focus on?" "2026-03-01T10:00:05Z"
-              makeAskUserToolComplete "2026-03-01T10:01:00Z"
-              makeUserEvent "the auth module" "2026-03-01T10:01:01Z"
-              makeAssistantEvent "reviewing the auth module" "2026-03-01T10:01:02Z"
-              makeTurnEnd "2026-03-01T10:01:03Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "review")))
-
-    [<Test>]
-    member _.``A genuine new request after ordinary work still ends the prior skill``() =
-        // The ask_user-awareness must not over-fire: when the assistant.message just before the new
-        // user.message was ordinary work (no ask_user), the user.message IS a genuine boundary and
-        // the earlier skill's run is over.
-        let content =
-            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
-              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
-              makeAssistantEvent "review complete" "2026-03-01T10:00:02Z"
-              makeTurnEnd "2026-03-01T10:00:03Z"
-              makeUserEvent "now bump the version" "2026-03-01T10:05:00Z"
-              makeAssistantEvent "on it" "2026-03-01T10:05:01Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
-
-    [<Test>]
-    member _.``A user message merely beginning with skill-context text is a genuine boundary``() =
-        // focused-review F4: a normal user.message whose text happens to start with "<skill-context"
-        // (but with no system-set skill source) must NOT masquerade as a skill's context injection.
-        // If it did, it would skip the request boundary and resurrect the finished skill below it.
-        let content =
-            [ makeUserEvent "/bd-plan the feature" "2026-03-01T10:00:00Z"
-              makeSkillInvoked "bd-plan" "2026-03-01T10:00:01Z"
-              makeAssistantEvent "planning complete" "2026-03-01T10:00:02Z"
-              makeTurnEnd "2026-03-01T10:00:03Z"
-              makeUserEvent "<skill-context> is a tag I want you to document" "2026-03-01T10:05:00Z"
-              makeAssistantEvent "sure, documenting it" "2026-03-01T10:05:01Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
-
-    [<Test>]
-    member _.``An unanswered ask_user mid-skill still reports the running skill``() =
-        // The agent invoked a skill and is now parked on the user (ask_user is the last thing, no
-        // reply yet → WaitingForUser). The skill is paused, not finished, so it is still reported;
-        // the Waiting grouping is handled separately by CodingTool status, not by CurrentSkill.
-        let content =
-            [ makeUserEvent "/investigate the flake" "2026-03-01T10:00:00Z"
-              makeSkillInvoked "investigate" "2026-03-01T10:00:01Z"
-              makeSkillContextEvent "investigate" "2026-03-01T10:00:02Z"
-              makeAssistantEvent "digging in" "2026-03-01T10:00:03Z"
-              makeAskUserEvent "can you share the failing run URL?" "2026-03-01T10:00:04Z" ]
-            |> String.concat Environment.NewLine
-
-        withTempEventsFile content (fun path ->
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(Some "investigate")))
-
-    [<Test>]
-    member _.``Non-existent file yields None``() =
-        Assert.That(getCurrentSkillFromEventsFile (Path.Combine(fixtureDir, "nonexistent", "events.jsonl")), Is.EqualTo(None))
 
 
 let private makeSubagentStarted (toolCallId: string) (timestamp: string) =
@@ -599,23 +406,20 @@ let private skillEquivalenceScenarios: (string * string list * string option) li
 type ForwardFoldTests() =
 
     [<Test>]
-    member _.``Forward fold CurrentSkill matches backward scanSkill on every CurrentSkill scenario``() =
-        // Equivalence: the forward fold (oldest→newest) must report the same running skill the backward
-        // scanSkill does on every scenario that has no sub-agent nesting (depth stays 0, so the gating
-        // the fold adds is a no-op).
+    member _.``Forward fold CurrentSkill matches the expected skill on every CurrentSkill scenario``() =
+        // The forward fold (oldest→newest) reports the running skill correctly on every scenario without
+        // sub-agent nesting (depth stays 0, so the gating the fold adds is a no-op). skillEquivalenceScenarios
+        // carries the known-good expected skill for each — the scenarios the removed backward scan was
+        // verified against, now the fold's baseline.
         for name, events, expected in skillEquivalenceScenarios do
             let forward = (scanSessionEvents events).CurrentSkill
-
-            withTempEventsFile (String.concat Environment.NewLine events) (fun path ->
-                let backward = getCurrentSkillFromEventsFile path
-                Assert.That(forward, Is.EqualTo(backward), $"forward vs backward mismatch: {name}")
-                Assert.That(forward, Is.EqualTo(expected), $"forward vs expected mismatch: {name}"))
+            Assert.That(forward, Is.EqualTo(expected), $"forward vs expected mismatch: {name}")
 
     [<Test>]
     member _.``skill.invoked megabytes before the tail is still detected by the forward fold``() =
-        // The whole point: with ~2 MB of autonomous tool output after it, the skill.invoked scrolls
-        // past the backward scan's ~1 MB tail (which then degrades to None), but the forward fold sees
-        // the entire stream and still reports the skill.
+        // The whole point: with ~2 MB of autonomous tool output after it, the skill.invoked would scroll
+        // past the ~1 MB tail the removed backward scan read (degrading it to None), but the forward fold
+        // sees the entire stream and still reports the skill.
         let events =
             [ makeUserEvent "/investigate the flake" "2026-03-01T10:00:00Z"
               makeSkillInvoked "investigate" "2026-03-01T10:00:01Z" ]
@@ -625,10 +429,6 @@ type ForwardFoldTests() =
 
         let forward = (scanSessionEvents events).CurrentSkill
         Assert.That(forward, Is.EqualTo(Some "investigate"))
-
-        withTempEventsFile (String.concat Environment.NewLine events) (fun path ->
-            // Sanity: confirm this stream really does defeat the bounded backward scan the fold replaces.
-            Assert.That(getCurrentSkillFromEventsFile path, Is.EqualTo(None)))
 
     [<Test>]
     member _.``A skill-context injection is never recorded as the last user message``() =

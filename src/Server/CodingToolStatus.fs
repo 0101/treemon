@@ -98,12 +98,12 @@ let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) 
       Status = ClaudeDetector.getStatusFromEnumeratedFiles files
       Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
 
-let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) : SessionResults =
+let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) (copilot: CopilotDetector.CopilotRefreshData) : SessionResults =
     { Claude = getClaudeResult claudeFiles
       CopilotCli =
         { Provider = Copilot
-          Status = CopilotDetector.getStatus worktreePath
-          Mtime = CopilotDetector.getSessionMtime worktreePath }
+          Status = copilot.Status
+          Mtime = copilot.Mtime }
       VsCodeCopilot =
         { Provider = Copilot
           Status = VsCodeCopilotDetector.getStatus worktreePath
@@ -112,7 +112,10 @@ let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInf
 let getRefreshData (worktreePath: string) : CodingToolResult =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
-    let results = gatherResultsFromFiles worktreePath claudeFiles
+    // ONE incremental Copilot CLI session scan per refresh; every Copilot field below is derived from
+    // it, instead of the four separate ~1 MB backward scans (status / skill / last user / last message).
+    let copilot = CopilotDetector.getRefreshData worktreePath
+    let results = gatherResultsFromFiles worktreePath claudeFiles copilot
 
     let status, provider =
         resolveStatus configured [ results.Claude; results.CopilotCli; results.VsCodeCopilot ]
@@ -125,7 +128,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             let msg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
             msg, msg |> Option.map (fun _ -> Claude)
         | Some Copilot ->
-            let cliMsg = CopilotDetector.getLastUserMessage worktreePath
+            let cliMsg = copilot.LastUserMessage
             let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
 
             let msg =
@@ -137,7 +140,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | None ->
             let winner =
                 [ ClaudeDetector.getLastUserMessageFromFiles claudeFiles |> Option.map (fun m -> Claude, m)
-                  CopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m)
+                  copilot.LastUserMessage |> Option.map (fun m -> Copilot, m)
                   VsCodeCopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m) ]
                 |> List.choose id
                 |> List.sortByDescending (fun (_, (_, ts)) -> ts)
@@ -149,14 +152,14 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | Some Claude ->
             ClaudeDetector.getLastMessageFromFiles claudeFiles
         | Some Copilot ->
-            [ CopilotDetector.getLastMessage worktreePath
+            [ copilot.LastMessage
               VsCodeCopilotDetector.getLastMessage worktreePath ]
             |> List.choose id
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
         | None ->
             [ ClaudeDetector.getLastMessageFromFiles claudeFiles
-              CopilotDetector.getLastMessage worktreePath
+              copilot.LastMessage
               VsCodeCopilotDetector.getLastMessage worktreePath ]
             |> List.choose id
             |> List.sortByDescending _.Timestamp
@@ -167,7 +170,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | Some Claude -> ClaudeDetector.getCurrentSkillFromFiles claudeFiles
         | Some Copilot ->
             pickActiveSkill
-                [ results.CopilotCli, (fun () -> CopilotDetector.getCurrentSkill worktreePath)
+                [ results.CopilotCli, (fun () -> copilot.CurrentSkill)
                   results.VsCodeCopilot, (fun () -> VsCodeCopilotDetector.getCurrentSkill worktreePath) ]
         | None -> None
 

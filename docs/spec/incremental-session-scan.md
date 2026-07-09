@@ -95,17 +95,20 @@ the additions are `SubagentDepth` gating and genuine-only `LastUserMessage`.
 
 ### 3. Wiring (CopilotDetector.fs / CodingToolStatus.fs)
 
-Add `getSessionScan (worktreePath) : SessionScanCache option` over the most-recent events file and
-derive each field from it, **replacing the four separate 1 MB scans**:
+Add `getRefreshData (worktreePath) : CopilotRefreshData` which resolves the most-recent events file,
+runs **one** incremental `getSessionScanForFile` over it, and returns everything
+`CodingToolStatus` needs assembled from that single scan, **replacing the four separate 1 MB scans**:
 - `getCurrentSkill` → `scan.CurrentSkill`
-- `getLastUserMessage` → `scan.LastUserMessage`
-- `getLastMessage` → `scan.LastAssistantMessage`
-- `getStatusFromEventsFile` → keep the mtime grace/staleness wrapper but feed it `scan.RawStatus`
-  instead of a fresh backward scan.
+- `getLastUserMessage` → `scan.LastUserMessage` (truncated to 120)
+- `getLastMessage` → `scan.LastAssistantMessage` (truncated to 80, wrapped in a `CardEvent`)
+- `getStatus` → the mtime grace/staleness wrapper (`applyStatusFreshness`) fed `scan.RawStatus`
+  instead of a fresh backward scan; `getSessionMtime` → the resolved file's mtime.
 
-`CodingToolStatus.fs` assembles `CodingToolData` from **one scan per worktree per refresh** instead
-of four calls. Claude / VS Code Copilot detectors are unchanged (out of scope — the user runs Copilot
-CLI).
+`CodingToolStatus.fs` assembles `CodingToolData` from **one `getRefreshData` call per worktree per
+refresh** instead of four calls. A path-based `getStatusFromEventsFile (eventsPath) (now)` is retained
+for the status unit tests (it does a full `File.ReadLines` forward scan so a static fixture without a
+trailing newline is still read). Claude / VS Code Copilot detectors are unchanged (out of scope — the
+user runs Copilot CLI).
 
 ### 4. Client display
 
@@ -139,10 +142,12 @@ during implementation.
   `Working`. `skill.invoked` alone does **not** change `RawStatus` (the backward status scan ignores
   it too) — the following `assistant.message` sets the status.
 - **Forward equivalence is by shared classifiers.** `classifyForwardEvent` reuses the same
-  `skillInvokedName` / `assistantMessageEvent` / `isSkillContextMessage` helpers as the backward
+  `skillInvokedName` / `assistantMessageEvent` / `isSkillContextMessage` helpers as the former backward
   `classifySkillEvent` (the `skill.invoked` name extraction was factored into `skillInvokedName` so
-  both read it identically), so `CurrentSkill` provably matches `scanSkill` on every no-sub-agent
-  scenario — asserted by `ForwardFoldTests` against the full `CurrentSkillTests` scenario set.
+  both read it identically), so `CurrentSkill` matches the removed `scanSkill` on every no-sub-agent
+  scenario — asserted by `ForwardFoldTests` against the `skillEquivalenceScenarios` set (the scenarios
+  the removed backward scan was validated against, now the fold's baseline; the old backward-only
+  `CurrentSkillTests` were dropped as redundant).
 - **The cache value wraps the fold state with a `Length`.** `CopilotDetector.SessionScanEntry`
   = `{ State: SessionScanCache; Length: int64 }` in a `ConcurrentDictionary<eventsPath, entry>` (the
   sole mutable boundary). `getSessionScanForFile` folds bytes `[entry.Length, fi.Length)` onto
@@ -150,11 +155,17 @@ during implementation.
   fi.Length` (rotation). `FileUtils.readByteRangeLines` finds the **last `\n` byte (0x0A)** in the
   range — UTF-8-safe, since `\n` never occurs as a continuation byte — treats everything up to it as
   complete lines and returns the offset just past it, leaving a partial trailing line unconsumed.
-- **Pruning is throttled.** `getSessionScan` runs `pruneSessionScanCache now` at most every 5 min
+- **Pruning is throttled.** `getRefreshData` runs `pruneSessionScanCache now` at most every 5 min
   (a `lastPrune` ref), dropping entries whose file is missing or whose mtime is past the 2 h Idle
   cutoff. `getSessionScanForFile` / `pruneSessionScanCache` / `peekSessionScanCacheLength` are
   `internal` so `IncrementalSessionScanTests` can drive them over temp files (incremental==full,
   partial-line, rotation reset, pruning) without the workspace-index path resolution.
+- **`getRefreshData` supersedes a standalone `getSessionScan` accessor.** Rather than expose a bare
+  `getSessionScan (worktreePath) : SessionScanCache option` and re-derive each field at the call site,
+  the single entry point returns a `CopilotRefreshData` record (`Status`, `Mtime`, `CurrentSkill`,
+  `LastUserMessage`, pre-truncated `LastMessage : CardEvent option`) so `CodingToolStatus` does no
+  Copilot parsing of its own. This also folds the resolve-the-session step (previously repeated by
+  `getStatus` and `getSessionMtime` separately) into one resolution, removing a TOCTOU between the two.
 
 ## Step 0 — investigate before coding
 
