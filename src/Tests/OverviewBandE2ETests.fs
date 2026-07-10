@@ -23,9 +23,14 @@ let private serverProjectPath = Path.Combine(repoRoot, "src", "Server")
 let private fixturePath =
     Path.Combine(repoRoot, "src", "Tests", "fixtures", "overview-band.json")
 
-let private serverPort = 5087
-let private canvasPort = 5088
-let private vitePort = 5187
+// Distinct free loopback ports (reserved once at fixture load) instead of fixed ports, so the suite
+// never collides with — or kills — a running production instance or a parallel test run. Distinctness
+// is only guaranteed within this single reservation, so the fixture below is [<NonParallelizable>].
+let private serverPort, canvasPort, vitePort =
+    match TestUtils.getFreeTcpPorts 3 with
+    | [ s; c; v ] -> s, c, v
+    | other -> failwith $"expected 3 free ports, got {other.Length}"
+
 let private serverUrl = $"http://localhost:{serverPort}"
 let private viteUrl = $"http://localhost:{vitePort}"
 
@@ -34,7 +39,6 @@ let private viteProcess: Process option ref = ref None
 
 let private startServer () =
     task {
-        TestUtils.killOrphansOnPort serverPort
         let proc =
             TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath
         serverProcess.Value <- Some proc
@@ -43,7 +47,6 @@ let private startServer () =
 
 let private startVite () =
     task {
-        TestUtils.killOrphansOnPort vitePort
         let proc =
             TestUtils.startViteProcess repoRoot vitePort serverPort canvasPort
         viteProcess.Value <- Some proc
@@ -142,22 +145,23 @@ let private cardProbeJs =
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("OverviewBandE2E")>]
+[<NonParallelizable>]
 type OverviewBandE2ETests() =
     inherit PageTest()
 
     // DOM snapshots captured once per test in [<SetUp>] (OpenOverview) and read by every [<Test>].
-    // NUnit's fixture lifecycle mutates these across the setup/test boundary, so they must be
-    // mutable instance fields; an immutable binding can't bridge SetUp -> test body. Option makes
-    // the "not captured yet" state explicit instead of a null, and the require* accessors below
-    // fail loudly if a test body runs without SetUp.
-    let mutable probe: JObject option = None
-    let mutable cardProbe: JObject option = None
+    // NUnit's fixture lifecycle sets these across the setup/test boundary, so they are held in ref
+    // cells (immutable bindings, matching the module's serverProcess/viteProcess pattern) rather than
+    // `let mutable`. Option makes the "not captured yet" state explicit instead of a null, and the
+    // require* accessors below fail loudly if a test body runs without SetUp.
+    let probe: JObject option ref = ref None
+    let cardProbe: JObject option ref = ref None
 
     let requireProbe () =
-        probe |> Option.defaultWith (fun () -> failwith "band probe not captured (SetUp did not run)")
+        probe.Value |> Option.defaultWith (fun () -> failwith "band probe not captured (SetUp did not run)")
 
     let requireCardProbe () =
-        cardProbe |> Option.defaultWith (fun () -> failwith "card probe not captured (SetUp did not run)")
+        cardProbe.Value |> Option.defaultWith (fun () -> failwith "card probe not captured (SetUp did not run)")
 
     override this.ContextOptions() =
         let opts = base.ContextOptions()
@@ -195,9 +199,9 @@ type OverviewBandE2ETests() =
             do! this.Page.Locator(".overview-band .overview-bar").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! json = this.Page.EvaluateAsync<string>(bandProbeJs)
-            probe <- Some(JObject.Parse(json))
+            probe.Value <- Some(JObject.Parse(json))
             let! cardJson = this.Page.EvaluateAsync<string>(cardProbeJs)
-            cardProbe <- Some(JObject.Parse(cardJson))
+            cardProbe.Value <- Some(JObject.Parse(cardJson))
             TestContext.Out.WriteLine($"band probe: {json}")
             TestContext.Out.WriteLine($"card probe: {cardJson}")
         }
