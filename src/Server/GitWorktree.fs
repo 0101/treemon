@@ -402,8 +402,8 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
 /// `bd init`, which can far exceed the short default used for quick git probes.
 let private postForkTimeoutMs = 10 * 60 * 1000
 
-/// OS-appropriate `post-fork` setup hook file name. Single source of truth for
-/// the script name — the card label (`SyncEngine.postForkSource`) reuses this.
+/// Card label for the post-fork setup hook. Single source of truth for the
+/// OS-specific script name so file resolution always tracks the hook.
 let postForkScriptName =
     if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
 

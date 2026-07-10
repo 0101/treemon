@@ -357,6 +357,7 @@ let private updateArchivedBranches
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
+    (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (worktreeRoots: string list)
     (testFixtures: string option)
@@ -413,12 +414,18 @@ let worktreeApi
                   let provider = resolveProvider state ctx.Worktree.Path
 
                   let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
+                  cardLog.Post(CardEventLog.SyncStarted syncKey)
 
-                  let post = syncAgent.Post
+                  let sinks : SyncEngine.PipelineSinks =
+                      { PushEvent = fun key event -> cardLog.Post(CardEventLog.SyncStep (key, event))
+                        SetProcessState = fun key state -> syncAgent.Post(SyncEngine.UpdateProcessState (key, state))
+                        Complete = fun key ->
+                            syncAgent.Post(SyncEngine.CompleteSync key)
+                            cardLog.Post(CardEventLog.SyncEnded key) }
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
                   let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
                   let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
+                  Async.Start(SyncEngine.executeSyncPipeline sinks syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath
@@ -432,7 +439,9 @@ let worktreeApi
                       Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
                   | Some ({ Branch = Some branch } as ctx) ->
                       let syncKey = scopedBranchKey ctx.RepoId branch
-                      syncAgent.Post(SyncEngine.CancelSync syncKey)
+                      let! wasRunning = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.CancelSync (syncKey, reply))
+                      if wasRunning then
+                          cardLog.Post(CardEventLog.SyncCancelled syncKey)
               }
           getSyncStatus = fun () ->
               async {
@@ -449,7 +458,7 @@ let worktreeApi
                               syncKey, wt.Path))
                       |> Map.ofList
 
-                  let! syncEvents = syncAgent.PostAndAsyncReply(SyncEngine.GetAllEvents)
+                  let! syncEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
 
                   let allKeys =
                       [ yield! syncEvents |> Map.keys
@@ -588,7 +597,7 @@ let worktreeApi
                       Async.Start(
                           async {
                               try
-                                  syncAgent.Post(SyncEngine.BeginPostFork syncKey)
+                                  cardLog.Post(CardEventLog.PostForkStarted syncKey)
                                   let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
                                   let status =
                                       match result with
@@ -596,11 +605,11 @@ let worktreeApi
                                       | Error msg ->
                                           Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
                                           StepStatus.Failed msg
-                                  syncAgent.Post(SyncEngine.CompletePostFork(syncKey, status))
+                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, status))
                                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
                               with ex ->
                                   Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
-                                  syncAgent.Post(SyncEngine.CompletePostFork(syncKey, StepStatus.Failed ex.Message))
+                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, StepStatus.Failed ex.Message))
                               launchPromptSession ()
                           })
 

@@ -212,6 +212,8 @@ type StepStatus =
 
 module EventSource =
     let [<Literal>] Test = "Test"
+    let [<Literal>] Sync = "sync"
+    let [<Literal>] PostFork = "post-fork"
 
 type CardEvent =
     { Source: string

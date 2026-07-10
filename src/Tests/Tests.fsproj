@@ -24,6 +24,7 @@
     <Compile Include="CopilotDetectorTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
+    <Compile Include="CardEventLogTests.fs" />
     <Compile Include="UpstreamRemoteTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
     <Compile Include="CreateWorktreeServerTests.fs" />
