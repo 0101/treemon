@@ -26,7 +26,8 @@ type ReadByteRangeLinesTests() =
         // ~270 KB — several 64 KB read chunks — with every line newline-terminated. This is the
         // large-range read the finding is about; the pre-fix single Array.zeroCreate of this range was
         // the LOH spike, and its `int (endOffset - startOffset)` cast the overflow on a multi-GB file.
-        let expected = [ for i in 1..2000 -> sprintf "{\"i\":%d,\"pad\":\"%s\"}" i (String('x', 120)) ]
+        let expected =
+            List.init 2000 (fun i -> $"{{\"i\":{i + 1},\"pad\":\"{String('x', 120)}\"}}")
         let content = (String.concat "\n" expected) + "\n"
 
         withTempFile content (fun path ->
