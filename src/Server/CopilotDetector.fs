@@ -206,7 +206,8 @@ let private skillInvokedName (data: JsonElement) : string option =
 // isSkillContextMessage) so `CurrentSkill` stays equivalent to `scanSkill` on any session that has no
 // sub-agent nesting. It ADDS two things the ~1 MB backward scans could not do:
 //   * `SubagentDepth` gating — a `skill.invoked` emitted inside a subagent.started/…completed bracket
-//     is the SUB-agent's, not the user's, and must not overwrite the top-level skill (see spec Step 0);
+//     is the SUB-agent's, not the user's, and must not overwrite the top-level skill (see the
+//     depth-gating note on foldForwardEvent below);
 //   * a genuine-only `LastUserMessage` — a `<skill-context>` injection is never recorded as the last
 //     user message (it stays transparent, exactly as it is for skill detection).
 // Because the fold sees the WHOLE stream (not a tail window), a skill.invoked megabytes back is still
@@ -310,6 +311,15 @@ let private classifyForwardEvent (line: string) : ForwardEvent option =
         None
 
 let private foldForwardEvent (state: SessionScanCache) (ev: ForwardEvent) : SessionScanCache =
+    // Sub-agent skill gating rests on one observed fact about the parent events.jsonl: a sub-agent's
+    // own `skill.invoked` is written into the PARENT file, nested between the matching
+    // `subagent.started`/`subagent.completed` (which share a toolCallId), and carries no depth/parent
+    // marker of its own — the enclosing bracket is the only signal it belongs to a sub-agent. So
+    // without depth tracking a newest-wins fold would let a deep sub-agent skill (megabytes in)
+    // overwrite the top-level skill the user actually invoked. `SubagentDepth` counts the brackets and
+    // `SkillInvoked` only sets CurrentSkill at depth 0. (Confirmed on a real 20.7 MB bd-execute
+    // session: top-level `bd-execute` at ~85 KB; a sub-agent's `vs-local-development` at ~8.8 MB sat
+    // inside a subagent bracket and would otherwise have won.)
     match ev with
     | SubagentStarted -> { state with SubagentDepth = state.SubagentDepth + 1 }
     | SubagentCompleted -> { state with SubagentDepth = max 0 (state.SubagentDepth - 1) }
