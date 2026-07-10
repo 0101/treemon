@@ -49,12 +49,7 @@ type SideEffect =
     | DisposeCts of CancellationTokenSource
     | LogMessage of string
 
-let private mkEvent source message status =
-    { Source = source
-      Message = message
-      Timestamp = DateTimeOffset.Now
-      Status = Some status
-      Duration = None }
+let private mkEvent = EventUtils.makeCardEvent
 
 let private isProcessRunning (state: SyncAgentState) (branch: string) =
     state.Processes

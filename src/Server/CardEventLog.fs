@@ -29,12 +29,7 @@ type CardEventLogMsg =
     | PostForkEnded of key: string * status: StepStatus
     | GetAll of AsyncReplyChannel<Map<string, CardEvent list>>
 
-let private mkEvent source message status =
-    { Source = source
-      Message = message
-      Timestamp = DateTimeOffset.Now
-      Status = Some status
-      Duration = None }
+let private mkEvent = EventUtils.makeCardEvent
 
 let private isPostForkEvent (evt: CardEvent) = evt.Source = EventSource.PostFork
 let private isRunning (evt: CardEvent) = evt.Status = Some StepStatus.Running
@@ -67,15 +62,18 @@ let processMessage (state: CardEventLogState) (msg: CardEventLogMsg) : CardEvent
     | PostForkEnded (key, status) ->
         let cleared = branchEvents key state |> clearRunningPostFork
         setBranchEvents key (mkEvent EventSource.PostFork "setup" status :: cleared) state
-    | GetAll reply ->
-        reply.Reply(state.Events)
-        state
+    | GetAll _ -> state
 
 let createAgent () : MailboxProcessor<CardEventLogMsg> =
     MailboxProcessor.Start(fun inbox ->
         let rec loop state =
             async {
                 let! msg = inbox.Receive()
-                return! loop (processMessage state msg)
+                match msg with
+                | GetAll reply ->
+                    reply.Reply(state.Events)
+                    return! loop state
+                | _ ->
+                    return! loop (processMessage state msg)
             }
         loop { Events = Map.empty })
