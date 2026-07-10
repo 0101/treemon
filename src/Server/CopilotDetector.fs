@@ -85,12 +85,15 @@ let getLastSessionId (worktreePath: string) =
 
 let private graceWindow = TimeSpan.FromSeconds(15.0)
 let private stalenessTimeout = TimeSpan.FromMinutes(30.0)
+/// Past this age a session is Idle. Also the point at which its cache entry is prunable and — since it
+/// can never read as anything but Idle — the point at which getRefreshData stops scanning it at all.
+let private idleAgeCutoff = TimeSpan.FromHours(2.0)
 
 /// The mtime freshness wrapper over a raw fold status: a just-finished turn still reads Working during
 /// the grace window, a long-quiet Working goes Idle, and anything past the 2 h cutoff is Idle. Shared
 /// by getStatusFromEventsFile (path-based, for tests) and getRefreshData (the worktree refresh path).
 let private applyStatusFreshness (fileAge: TimeSpan) (rawStatus: CodingToolStatus) : CodingToolStatus =
-    if fileAge > TimeSpan.FromHours(2.0) then
+    if fileAge > idleAgeCutoff then
         Idle
     else
         match rawStatus with
@@ -414,7 +417,7 @@ let internal pruneSessionScanCache (now: DateTimeOffset) =
         try
             let fi = FileInfo(path)
             not fi.Exists
-            || (now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)) > TimeSpan.FromHours(2.0)
+            || (now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)) > idleAgeCutoff
         with _ -> true)
     |> List.iter (fun path -> sessionScanCache.TryRemove(path) |> ignore)
 
@@ -439,7 +442,7 @@ let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) 
             Idle
         else
             let fileAge = now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if fileAge > TimeSpan.FromHours(2.0) then
+            if fileAge > idleAgeCutoff then
                 Idle
             else
                 (scanSessionEvents (File.ReadLines eventsPath)).RawStatus
@@ -480,6 +483,14 @@ let getRefreshData (worktreePath: string) : CopilotRefreshData =
     | None -> emptyRefreshData
     | Some fi ->
         let mtime = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+
+        // Past the Idle cutoff the file can only read as Idle, so skip the scan entirely. This also
+        // stops the prune/rescan thrash the cache would otherwise cause: pruning evicts a stale entry
+        // every 5 min, and without this guard the very next refresh would full-rescan the (possibly
+        // 200 MB+) file just to discard the result as Idle.
+        if now - mtime > idleAgeCutoff then
+            { emptyRefreshData with Mtime = Some mtime }
+        else
 
         match getSessionScanForFile fi.FullName with
         | None -> { emptyRefreshData with Mtime = Some mtime }
