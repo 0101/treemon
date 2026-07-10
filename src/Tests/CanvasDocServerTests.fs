@@ -460,3 +460,42 @@ type AttributeOwnershipTests() =
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
             Assert.That(owner, Is.EqualTo(None: string option),
                         "A rejected declaration must record no ownership"))
+
+    // F9 (security, defense-in-depth): a sessionId carrying shell/PowerShell metacharacters must be
+    // rejected before it is stored, because a stored owner id is later interpolated into a launched
+    // `--resume {id}` command. The worktree IS known, so only the hostile sessionId can reject.
+    [<TestCase("abc'; rm -rf ~ #")>]
+    [<TestCase("$(calc)")>]
+    [<TestCase("a b")>]
+    [<TestCase("id\nnewline")>]
+    [<TestCase("semi;colon")>]
+    member _.``a sessionId with unsafe characters is rejected and records no ownership``(hostileSid: string) =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-unsafe-sid"
+            let agent = agentKnowing worktree
+
+            let outcome = runAsync (attributeOwnership agent worktree "a.html" hostileSid)
+
+            match outcome with
+            | Invalid _ -> ()
+            | other -> Assert.Fail($"An unsafe sessionId must be Invalid, got {other}")
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(None: string option),
+                        "A rejected sessionId must record no ownership"))
+
+    // A realistic provider session id (GUID-like: alphanumerics + hyphens) must still be accepted,
+    // so the charset guard does not regress the normal resume flow.
+    [<Test>]
+    member _.``a GUID-like sessionId is accepted``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-guid-sid"
+            let agent = agentKnowing worktree
+            let sessionId = System.Guid.NewGuid().ToString()
+
+            let outcome = runAsync (attributeOwnership agent worktree "a.html" sessionId)
+            Assert.That(outcome, Is.EqualTo(Attributed), "A GUID sessionId must be accepted")
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(Some sessionId),
+                        "An accepted declaration must record the owner"))

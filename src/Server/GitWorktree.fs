@@ -27,6 +27,13 @@ type GitData =
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
+/// Result of a successful worktree creation: the path of the new worktree (so
+/// callers can act on the exact location — e.g. launch a session there) alongside
+/// any non-fatal warnings surfaced during creation.
+type CreateWorktreeResult =
+    { WorktreePath: string
+      Warnings: CreateWorktreeWarnings }
+
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
 

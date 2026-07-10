@@ -540,12 +540,49 @@ let worktreeApi
                   let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
 
+                  // Fire-and-forget: when a prompt was supplied, spawn a tracked coding-agent
+                  // window in the new worktree seeded with the config-driven skill invocation.
+                  // Reuses SessionManager.launchAction (spawns+tracks when no window exists yet).
+                  // A blank prompt is a no-op. Deferred until post-fork finishes below so the
+                  // session starts with dependencies already installed.
+                  let launchPromptSession () =
+                      match req.Prompt with
+                      | Some prompt when not (String.IsNullOrWhiteSpace prompt) ->
+                          let newPath = fork.WorktreePath
+                          // Provider is read directly from .treemon.json — the new worktree first (its
+                          // config exists once create returns and can differ from the root working
+                          // copy), then the root as fallback. This intentionally does NOT go through
+                          // resolveProvider (the scheduler-state routing the other launch sites use): a
+                          // just-created worktree is not yet in KnownPaths/CodingToolData, so
+                          // resolveProvider would return None here. Keep this a direct config read.
+                          let provider =
+                              CodingToolStatus.readConfiguredProvider newPath
+                              |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
+                          let skill = TreemonConfig.readDefaultSkill root
+                          let wrapped = CodingToolStatus.skillInvocation provider skill prompt
+                          let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
+                          // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
+                          // throws on timeout, and Async.Ignore would swallow the Error case — an
+                          // unguarded Async.Start could fault silently.
+                          async {
+                              try
+                                  match! SessionManager.launchAction sessionAgent (WorktreePath newPath) cmd with
+                                  | Ok () -> ()
+                                  | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
+                              with ex ->
+                                  Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
+                          }
+                          |> Async.Start
+                      | _ -> ()
+
                   // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
                   // the background and surface its lifecycle on the worktree card via the sync event
                   // log — the create call returns as soon as `git worktree add` succeeds, closing the
-                  // modal promptly. Any auto-launch that must wait for deps belongs at the end here.
+                  // modal promptly. The prompt auto-launch waits for deps, so it runs once post-fork
+                  // finishes (success or failure); with no post-fork script there is nothing to wait
+                  // for, so launch immediately.
                   match GitWorktree.postForkScriptPath root with
-                  | None -> ()
+                  | None -> launchPromptSession ()
                   | Some _ ->
                       let syncKey = scopedBranchKey repoId branchName
                       Async.Start(
@@ -564,6 +601,7 @@ let worktreeApi
                               with ex ->
                                   Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
                                   syncAgent.Post(SyncEngine.CompletePostFork(syncKey, StepStatus.Failed ex.Message))
+                              launchPromptSession ()
                           })
 
                   return fork.Warnings

@@ -100,5 +100,9 @@ let readBaseBranch (repoRoot: string) : string =
             None)
     |> Option.defaultValue "main"
 
+let readDefaultSkill (repoRoot: string) : string =
+    readStringConfig repoRoot "defaultSkill"
+    |> Option.defaultValue "investigate"
+
 let readTestCommand (repoRoot: string) : string option =
     readStringConfig repoRoot "testCommand"

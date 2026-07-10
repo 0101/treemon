@@ -135,6 +135,11 @@ type CreateWorktreeIntegrationTests() =
         Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
 
         let newWt = Path.Combine(tempDir, "tm-resolve-model-slugs")
+
+        match result with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok r -> Assert.That(r.WorktreePath, Is.EqualTo(newWt), "createWorktree should return the new worktree path")
+
         Assert.That(Directory.Exists(newWt), Is.True, "new worktree should be created as a sibling of the repo")
         Assert.That(gitOut newWt "rev-parse --abbrev-ref HEAD", Is.EqualTo("resolve-model-slugs"))
         Assert.That(gitOut newWt "rev-parse HEAD", Is.EqualTo(gitOut repoDir "rev-parse main"), "forked from main's tip")
