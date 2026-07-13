@@ -37,8 +37,9 @@ same boilerplate:
   introduce with more space above than below).
 - **Type scale** — serif headings (`ui-serif`) at weight 500 (`h1` 1.85rem, `h2` 1.35rem, `h3` 1.12rem,
   `h4` 1rem) so hierarchy reads from size, the serif/sans contrast, and margin, not borders.
-- **Measure** — `p`/`li`/`blockquote` capped at ~70ch (Bringhurst's 45–75ch), on text elements
-  only so tables and dashboard layouts stay full-width.
+- **Single-column page** — a ~800px page cap (`--page-max`) with no separate prose measure, so text
+  and figures share one column width (widen with `body{--page-max:1200px}` or drop the cap with
+  `body{max-width:none}`).
 - **Design tokens** — the app palette (`--bg-*`, `--border`, `--text-*`, `--accent`, `--status-*`),
   mirrored from `BeadspaceTemplate.html`, exposed via `:where(:root)` so docs reference
   `var(--text-muted)` etc. instead of reinventing a palette (`--text-muted` is nudged lighter than
@@ -136,7 +137,7 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
 
 ### Server injection — `src/Server/CanvasDocServer.fs`
 - **Base CSS reset:** extend the `baseStyle` string literal — the typographic base, the type scale,
-  the ~70ch measure, the `:where(:root)` design tokens, and the quiet table/blockquote/form-control
+  the ~800px single-column page cap, the `:where(:root)` design tokens, and the quiet table/blockquote/form-control
   defaults. Wrap every selector (including `:root`) in `:where(...)` (zero specificity), no
   `!important`, so doc rules and the `SystemView` template's own element-selector rules win the
   cascade despite the reset being injected after them at `</head>`. This per-property override holds

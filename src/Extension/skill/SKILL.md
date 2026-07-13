@@ -17,8 +17,7 @@ Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files 
 Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a typographic base into every doc** — so most docs need little or no CSS of their own. Out of the box you get:
 
 - Dark theme, system font, a readable **15px / line-height 1.55** body, and a serif heading scale (`h1`…`h4`).
-- A comfortable line length (~70ch) on paragraphs and list items.
-- A **capped, centered content column** (`--page-max`, ~1100px) so diagrams, wide tables, and inputs don't stretch across a wide monitor. Need full width for a dashboard-style doc? Override with `body{max-width:none}` (or widen it with `body{--page-max:1400px}`).
+- A **single, capped content column** (`--page-max`, ~800px) in which text and figures share one width — so prose, diagrams, wide tables, and inputs line up at one column instead of stranding text at a narrow measure. Need full width for a dashboard-style doc? Override with `body{max-width:none}` (or widen it with `body{--page-max:1200px}`).
 - Quiet tables (header underline + row separators, no heavy gridlines), styled `code`/`pre`, links, scrollbars, and themed form controls (`button`, `textarea`, `input`, `select`).
 - Design tokens as CSS variables — reuse these instead of inventing colors:
   `--bg-deep` `--bg-surface` `--bg-elevated` `--border` `--border-bright`
