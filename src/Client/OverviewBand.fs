@@ -28,19 +28,6 @@ open Feliz
 open OverviewData
 open AppTypes
 
-/// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
-/// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
-/// filter can still see them (spec decision (f)). Recombine here — the single aggregate call site —
-/// so archived worktrees keep contributing to every non-Done bucket instead of silently vanishing.
-/// Public so App.fs's DataLoaded stale-selection check reuses the exact same recombine (decision (f)).
-let toRepoWorktrees (repo: RepoModel) : RepoWorktrees =
-    { RepoId = repo.RepoId
-      RootFolderName = repo.Name
-      Worktrees = repo.Worktrees @ repo.ArchivedWorktrees
-      IsReady = repo.IsReady
-      Provider = repo.Provider
-      BaseBranch = repo.BaseBranch }
-
 // Display label per task bucket, in the aggregate's canonical left-to-right order.
 let private taskLabel =
     function
@@ -285,6 +272,17 @@ let private section (header: string) (columns: ReactElement list) (breakdown: Re
               [ Html.div [ prop.className "overview-header"; prop.text header ]
                 Html.div [ prop.className "overview-items"; prop.children columns ]
                 breakdown ] ]
+
+/// Whether an Overview drill-down selection still maps to a present (non-empty) group in the given
+/// repos' fresh roll-up. Empty groups are dropped by aggregate, so a selection is stale once its
+/// group's count hits 0 — App's DataLoaded reducer uses this to clear the selection and close the
+/// panel. Lives here because it runs the exact same `repos |> List.map toRepoWorktrees |>
+/// OverviewData.aggregate` pipeline the view does — a pure Overview data query, not App/Elmish state.
+let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
+    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    match selection with
+    | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
+    | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
 
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
 /// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the

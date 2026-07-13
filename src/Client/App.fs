@@ -26,14 +26,8 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
 
-// Whether an Overview drill-down selection still maps to a present (non-empty) group in the given
-// repos' fresh roll-up. Empty groups are dropped by aggregate, so a selection is stale once its
-// group's count hits 0 — DataLoaded uses this to clear the selection and close the panel.
-let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
-    let overview = repos |> List.map OverviewBand.toRepoWorktrees |> OverviewData.aggregate
-    match selection with
-    | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
-    | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
+// Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
+// OverviewBand.overviewSelectionPresent (same pure roll-up pipeline as the band view).
 
 let init () =
     { Repos = []
@@ -199,7 +193,7 @@ let update msg model =
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
                 // the selected group (its count fell to 0), clear it so the panel closes.
                 match m.SelectedOverviewGroup with
-                | Some selection when not (overviewSelectionPresent selection m.Repos) ->
+                | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) ->
                     { m with SelectedOverviewGroup = None }
                 | _ -> m)
             |> (fun m ->
