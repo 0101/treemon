@@ -31,8 +31,8 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 - The breakdown panel appears **inside its own section**:
   - Agent-group breakdown renders **between the Active agents row and the Tasks section**.
   - Task-bucket breakdown renders **directly below the Tasks row**.
-- Within each section, the group columns stay on a **single line**, scrolling **horizontally** when
-  the pane is too narrow — so the breakdown always renders directly under its group's row.
+- Within each section, the group columns **wrap** to the next line when the pane is too narrow (a
+  row-gap keeps wrapped lines legible), instead of a horizontal scrollbar.
 - The panel closes when: the group is re-clicked, the panel's **✕** button is clicked, or **Esc** is
   pressed while a group is selected.
 - Selection is **ephemeral** session state — it does not persist across reloads (unlike the band's
@@ -142,7 +142,8 @@ type OverviewSelection =
   ✕, repo-grouped members, agent chips vs. task bars (task bar width = `member.Contribution * barMaxPx / overview.Scale`, floored at the existing visible minimum).
 - CSS additions near the existing `.overview-*` rules (`index.html`): the selected black tab
   (rounded top corners), the `.overview-breakdown` panel, `.overview-chips`/chip, the task
-  `name + bar` rows, the close button, and `.overview-items` single-line + horizontal scroll. Follow
+  `name + bar` rows, the close button, and `.overview-items` wrapping (`flex-wrap: wrap`, no
+  horizontal scrollbar). Follow
   the existing Catppuccin palette and the CSS-classes-only rule (the proportional bar width is the
   already-documented inline-width exception).
 
@@ -163,7 +164,7 @@ Locked during prototyping (see the canvas prototype doc):
 - **Panel placement: inside the band**, directly under the selected group's section row.
 - **Single-select**; re-click / ✕ / Esc closes.
 - **Ephemeral** selection (not persisted).
-- **Groups on one line** per section, horizontal scroll on narrow panes.
+- **Groups wrap** to the next line per section on narrow panes (no horizontal scrollbar).
 - **Agent breakdown** = borderless activity-colored `[● name]` chips; **task breakdown** = `name + bar`
   rows on the band's shared task scale.
 - **No new E2E tests.** Verification = existing E2E suite stays green + `OverviewData` membership unit

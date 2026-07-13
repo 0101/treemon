@@ -259,7 +259,7 @@ let private taskBreakdown
     let sub = $"{tasksPart} · {worktreesPart}"
     breakdownPanel accent (taskLabel bucket.Kind) sub (fun () -> onSelectGroup (OverviewSelection.Tasks bucket.Kind)) repoBlocks
 
-/// A section shell: an uppercase header over the single-line row of category columns, plus the
+/// A section shell: an uppercase header over the (wrapping) row of category columns, plus the
 /// (optional) drill-down breakdown panel rendered INSIDE the section, flush beneath its row — so the
 /// agent breakdown sits between the agents row and the Tasks section, and the task breakdown sits
 /// directly below the Tasks row (Html.none when nothing in this section is selected). The stacked
