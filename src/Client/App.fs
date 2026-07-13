@@ -220,16 +220,19 @@ let update msg model =
                     else Cmd.none
                 let autoExpandSaveCmd =
                     if autoExpanded then saveCollapsedReposCmd updatedModel.Repos else Cmd.none
-                // Record AgentDocs that changed on disk while mounted-but-hidden, so their next reveal
-                // gets a catch-up morph (selectCanvasDoc). The active visible doc is excluded — it is
-                // morphed in place immediately by morphCmd above, so it never falls out of sync.
+                // Record AgentDocs that changed on disk while mounted-but-hidden, so their next
+                // reveal gets a catch-up morph (selectCanvasDoc). Only currently mounted, hidden docs
+                // earn a mark (markStale); the active visible doc is excluded (morphed in place by
+                // morphCmd above), and never-opened / LRU-evicted docs have no live iframe to sync.
+                // pruneStaleToMounted then GCs any marks whose iframe has since unmounted (eviction,
+                // archive, or removed worktree), keeping the set bounded to live hidden iframes.
                 let staleHiddenDocs =
-                    if not isFirstLoad && updatedModel.Canvas.CanvasPaneOpen then
-                        let activeVisible = CanvasUpdate.activeVisibleDoc updatedModel
-                        agentChangedDocs
-                        |> List.filter (fun d -> Some d <> activeVisible)
-                        |> List.fold (fun acc d -> Set.add d acc) updatedModel.Canvas.StaleHiddenDocs
-                    else updatedModel.Canvas.StaleHiddenDocs
+                    let marked =
+                        if not isFirstLoad && updatedModel.Canvas.CanvasPaneOpen then
+                            let activeVisible = CanvasUpdate.activeVisibleDoc updatedModel
+                            CanvasState.markStale agentChangedDocs activeVisible updatedModel.Canvas.VisitedCanvasDocs updatedModel.Canvas.StaleHiddenDocs
+                        else updatedModel.Canvas.StaleHiddenDocs
+                    marked |> CanvasState.pruneStaleToMounted updatedModel.Canvas.VisitedCanvasDocs
                 let updatedModel = { updatedModel with Canvas.StaleHiddenDocs = staleHiddenDocs }
                 updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd; autoExpandSaveCmd ])
 

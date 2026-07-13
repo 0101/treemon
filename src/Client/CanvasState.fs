@@ -69,6 +69,34 @@ let touchVisitedDoc (scopedKey: string) (filename: string) (visited: Map<string,
     let capped = if updated.Length > MaxLiveIframes then updated |> List.take MaxLiveIframes else updated
     visited |> Map.add scopedKey capped
 
+/// True when (scopedKey, filename) currently has a mounted iframe — i.e. it is in the visited
+/// (LRU-capped) set for its scoped key. `StaleHiddenDocs` marks are only meaningful for such docs.
+let private isMounted (visited: Map<string, string list>) (scopedKey: string) (filename: string) =
+    visited |> Map.tryFind scopedKey |> Option.defaultValue [] |> List.contains filename
+
+/// Record AgentDocs that changed on disk while mounted-but-hidden, so their next reveal gets a
+/// catch-up morph. Only a doc that actually has a mounted, hidden iframe earns a mark: it must be
+/// in `visited` (so an unmounted, never-opened or LRU-evicted doc is excluded) and must not be the
+/// active visible doc (which is morphed in place, never via StaleHiddenDocs). Marking anything else
+/// would leave a mark with no live iframe behind it, which later drives a spurious switch-back morph.
+let markStale
+    (changed: (string * string) list)
+    (activeVisible: (string * string) option)
+    (visited: Map<string, string list>)
+    (stale: Set<string * string>) : Set<string * string> =
+    changed
+    |> List.filter (fun (scopedKey, filename) ->
+        Some (scopedKey, filename) <> activeVisible && isMounted visited scopedKey filename)
+    |> List.fold (fun acc d -> Set.add d acc) stale
+
+/// Drop stale marks for docs that no longer have a mounted iframe (evicted past the LRU cap,
+/// archived, or gone from the repo). Once an iframe unmounts, a later fresh mount already loads
+/// current disk content, so the mark is obsolete; keeping it would morph the fresh mount needlessly.
+/// This is the single garbage-collector for the `StaleHiddenDocs` invariant "a mark implies a
+/// mounted hidden iframe".
+let pruneStaleToMounted (visited: Map<string, string list>) (stale: Set<string * string>) : Set<string * string> =
+    stale |> Set.filter (fun (scopedKey, filename) -> isMounted visited scopedKey filename)
+
 /// Look up a canvas doc's kind by scoped key + filename. Used to gate session-document
 /// machinery (morph signaling, idle auto-display focus-steal) to AgentDoc only: a SystemView
 /// (e.g. the beads dashboard) drives its own refresh and must neither be morphed (a morph stomps

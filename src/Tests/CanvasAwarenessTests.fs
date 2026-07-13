@@ -1208,11 +1208,13 @@ type SelectCanvasDocMorphGatingTests() =
 
     // Run the SelectCanvasDoc Cmd and collect the messages it dispatches. Its Cmd is a batch of
     // Cmd.ofMsg (MarkDocViewed + optional MorphActiveDoc), so forcing the effects neither builds the
-    // Remoting proxy nor touches Fable.Core.JS.
+    // Remoting proxy nor touches Fable.Core.JS. Elmish effects are (dispatch -> unit) callbacks that
+    // return no value, so collecting what they dispatch needs a local accumulator — a scoped
+    // `let mutable`, not a ResizeArray (see review/rules/immutability.md).
     let dispatchedMsgs cmd : Msg list =
-        let captured = ResizeArray<Msg>()
-        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
-        List.ofSeq captured
+        let mutable captured = []
+        cmd |> List.iter (fun effect -> effect (fun m -> captured <- m :: captured))
+        List.rev captured
 
     let model docs =
         { defaultModel with
@@ -1243,15 +1245,17 @@ type SelectCanvasDocMorphGatingTests() =
             "morphing brings the iframe back in sync with disk, so its stale mark is cleared")
 
     [<Test>]
-    member _.``selecting a not-yet-visited doc does not morph``() =
+    member _.``selecting a not-yet-visited doc does not morph and clears any leftover stale mark``() =
         let m =
             { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] with
                 Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
                 // Even if erroneously flagged stale, a fresh mount loads current content — no morph.
                 Canvas.StaleHiddenDocs = Set.ofList [ "r/feat", "b.html" ] }
-        let _, cmd = update (SelectCanvasDoc ("r/feat", "b.html")) m
+        let updated, cmd = update (SelectCanvasDoc ("r/feat", "b.html")) m
         Assert.That(dispatchedMsgs cmd |> List.contains MorphActiveDoc, Is.False,
             "a doc opened for the first time mounts fresh with current content, so it never morphs")
+        Assert.That(updated.Canvas.StaleHiddenDocs |> Set.contains ("r/feat", "b.html"), Is.False,
+            "a fresh mount is in sync with disk, so a leftover mark must be cleared or it would drive a spurious morph on a later switch-back")
 
     [<Test>]
     member _.``a stale SystemView is never morphed on switch-back``() =
@@ -1262,3 +1266,51 @@ type SelectCanvasDocMorphGatingTests() =
         let _, cmd = update (SelectCanvasDoc ("r/feat", "beads.html")) m
         Assert.That(dispatchedMsgs cmd |> List.contains MorphActiveDoc, Is.False,
             "a SystemView is served without a morph controller, so it must never receive a morph signal")
+
+
+// ── StaleHiddenDocs population / prune lifecycle ─────────────────────
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type StaleHiddenDocsLifecycleTests() =
+
+    let visited = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+
+    [<Test>]
+    member _.``markStale marks a mounted-but-hidden changed doc``() =
+        let result = markStale [ "r/feat", "b.html" ] (Some ("r/feat", "a.html")) visited Set.empty
+        Assert.That(result |> Set.contains ("r/feat", "b.html"), Is.True,
+            "a hidden doc with a live iframe that changed on disk must be marked for a catch-up morph")
+
+    [<Test>]
+    member _.``markStale ignores a changed doc that has no mounted iframe``() =
+        let result = markStale [ "r/feat", "never-opened.html" ] (Some ("r/feat", "a.html")) visited Set.empty
+        Assert.That(result, Is.Empty,
+            "a never-opened / evicted doc has no live iframe to fall out of sync, so it must not be marked")
+
+    [<Test>]
+    member _.``markStale excludes the active visible doc``() =
+        let result = markStale [ "r/feat", "a.html" ] (Some ("r/feat", "a.html")) visited Set.empty
+        Assert.That(result, Is.Empty,
+            "the active visible doc is morphed in place, never via StaleHiddenDocs")
+
+    [<Test>]
+    member _.``pruneStaleToMounted drops marks for docs that are no longer mounted``() =
+        let stale = Set.ofList [ "r/feat", "b.html"; "r/feat", "evicted.html"; "gone/wt", "x.html" ]
+        let result = pruneStaleToMounted visited stale
+        Assert.That(result |> Set.contains ("r/feat", "b.html"), Is.True, "a still-mounted doc keeps its mark")
+        Assert.That(result |> Set.contains ("r/feat", "evicted.html"), Is.False, "an evicted doc's mark is GC'd")
+        Assert.That(result |> Set.contains ("gone/wt", "x.html"), Is.False, "a mark for a removed worktree is GC'd")
+
+    [<Test>]
+    member _.``archiving a doc prunes its stale mark so a same-name regenerated doc is not poisoned``() =
+        let m =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] ] ]
+                FocusedElement = Some (Card "r/feat")
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+                Canvas.StaleHiddenDocs = Set.ofList [ "r/feat", "a.html" ] }
+        let updated, _ = update (ArchiveCanvasDocResult ("r/feat", "a.html", Ok ())) m
+        Assert.That(updated.Canvas.StaleHiddenDocs |> Set.contains ("r/feat", "a.html"), Is.False,
+            "archive must prune StaleHiddenDocs like the sibling doc-keyed caches, or an orphan mark poisons a later same-name doc")

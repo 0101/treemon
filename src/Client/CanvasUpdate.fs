@@ -80,10 +80,10 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         Canvas.DocError = None
         Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
         Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs
-        // Morphing brings the iframe back in sync with disk, so drop its stale mark.
-        Canvas.StaleHiddenDocs =
-            if shouldMorph then model.Canvas.StaleHiddenDocs |> Set.remove (scopedKey, filename)
-            else model.Canvas.StaleHiddenDocs },
+        // Drop the selected doc's stale mark on every reveal, not only when morphing: a fresh mount
+        // already loads current disk content and a catch-up morph re-syncs a stale one, so either way
+        // the doc is in sync after this reveal. Safe because `shouldMorph` reads the pre-update set.
+        Canvas.StaleHiddenDocs = model.Canvas.StaleHiddenDocs |> Set.remove (scopedKey, filename) },
     Cmd.batch [
         Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
         if shouldMorph then Cmd.ofMsg MorphActiveDoc
@@ -166,7 +166,14 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
             | _ ->
                 if List.isEmpty filtered then model.Canvas.VisitedCanvasDocs |> Map.remove scopedKey
                 else model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered
-        { model with Repos = repos; Canvas.ActiveCanvasDoc = activeDoc; Canvas.VisitedCanvasDocs = visitedDocs }, Cmd.none
+        { model with
+            Repos = repos
+            Canvas.ActiveCanvasDoc = activeDoc
+            Canvas.VisitedCanvasDocs = visitedDocs
+            // The archived doc's iframe is gone, so prune its stale mark too — otherwise an orphan
+            // mark would poison a later same-name regenerated doc with a spurious morph. Mirrors the
+            // sibling ActiveCanvasDoc/VisitedCanvasDocs cleanup above.
+            Canvas.StaleHiddenDocs = model.Canvas.StaleHiddenDocs |> Set.remove (scopedKey, filename) }, Cmd.none
     | Error msg ->
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
         model, Cmd.none
