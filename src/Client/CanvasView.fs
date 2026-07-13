@@ -98,4 +98,9 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           ShareNotice = model.Canvas.ShareNotice
           BridgeLiveness = model.Canvas.BridgeLiveness }
 
-    CanvasPane.view canvasState (focusedWorktreeCanvasDoc model) model.Repos unviewedByScopedKey focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+    let canvasAwareness: CanvasPane.CanvasPaneAwareness =
+        { UnviewedByScopedKey = unviewedByScopedKey
+          UnviewedFilenames = focusedUnviewedFilenames
+          VisitedDocs = focusedVisitedDocs }
+
+    CanvasPane.view canvasState (focusedWorktreeCanvasDoc model) model.Repos canvasAwareness canvasCallbacks

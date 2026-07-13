@@ -136,8 +136,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                             prop.text repoName
                         ]
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
-                            // The unviewed set for this worktree, from the same badge-source map
-                            // (`unviewedDocsByScopedKey`); empty for worktrees with nothing unviewed.
+                            // From the badge-source map (`unviewedDocsByScopedKey`), so overview highlights and the badge count agree.
                             let unviewedSet = unviewedByScopedKey |> Map.tryFind scopedKey |> Option.defaultValue Set.empty
                             Html.div [
                                 prop.className "canvas-overview-entry"
@@ -215,7 +214,17 @@ type CanvasPaneState =
       ShareNotice: string option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
-let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (unviewedByScopedKey: Map<string, Set<string>>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+/// The awareness/doc slices `view` renders from, bundled into one record for the same reason as
+/// `CanvasPaneState`/`CanvasPaneCallbacks`: to stop `view`'s signature growing a fresh positional
+/// param per awareness feature (several are collection-typed, which invited a silent argument
+/// transposition that would compile and surface only at runtime). Built by `CanvasView.fs`
+/// alongside `canvasState`/`canvasCallbacks`.
+type CanvasPaneAwareness =
+    { UnviewedByScopedKey: Map<string, Set<string>>
+      UnviewedFilenames: Set<string>
+      VisitedDocs: string list }
+
+let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (awareness: CanvasPaneAwareness) (callbacks: CanvasPaneCallbacks) =
     let { IsOpen = isOpen
           Position = position
           Size = size
@@ -234,6 +243,9 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           DismissDocError = dismissDocError
           DismissShareNotice = dismissShareNotice
           LaunchSession = launchSession } = callbacks
+    let { UnviewedByScopedKey = unviewedByScopedKey
+          UnviewedFilenames = unviewedFilenames
+          VisitedDocs = visitedDocs } = awareness
     let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
             prop.className (if isActive then $"{baseClass} active" else baseClass)
