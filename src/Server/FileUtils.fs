@@ -58,58 +58,56 @@ let readByteRangeLines (logTag: string) (filePath: string) (startOffset: int64) 
             // events.jsonl larger than Int32.MaxValue would otherwise overflow `int (endOffset -
             // startOffset)`: a 2-4 GB range wraps negative (Array.zeroCreate throws), a >4 GB range
             // wraps to a small positive count (ReadExactly silently reads a truncated prefix). Even
-            // below 2 GB the single whole-range buffer is a Large-Object-Heap spike. The reused 64 KB
+            // below 2 GB the single whole-range buffer is a Large-Object-Heap spike. Each 64 KB chunk
             // buffer stays off the LOH, and the int64 offset arithmetic below never narrows to int32.
             //
-            // Complete (newline-terminated) lines are decoded and collected as we go; the bytes after
-            // the final '\n' stay unconsumed (partial trailing line) so a later append can complete
-            // them. A '\n' byte (0x0A) — like '\r' (0x0D) — never occurs as a UTF-8 continuation byte,
-            // so cutting each chunk at its last '\n' and carrying the remainder is UTF-8-safe and yields
-            // the same lines/offset as decoding the whole consumed range at once.
+            // Complete (newline-terminated) lines are decoded as we go; the bytes after the final '\n'
+            // stay unconsumed (partial trailing line, carried across the chunk boundary) so a later
+            // append can complete them. A '\n' byte (0x0A) — like '\r' (0x0D) — never occurs as a UTF-8
+            // continuation byte, so cutting each chunk at its last '\n' and carrying the remainder is
+            // UTF-8-safe and yields the same lines/offset as decoding the whole consumed range at once.
             let chunkSize = 64 * 1024
-            let readBuffer = Array.zeroCreate chunkSize
-            let lines = ResizeArray<string>()
-            let carry = ResizeArray<byte>() // partial line bytes carried across a chunk boundary
+            let rangeLength = endOffset - startOffset
 
-            let addLinesFrom (region: byte[]) (regionLen: int) =
+            // Complete lines within a byte region (carry ++ chunk up to its last '\n'): decoded,
+            // trimmed, blanks dropped, oldest→newest.
+            let linesFrom (region: byte[]) : string list =
                 System.Text.Encoding.UTF8
-                    .GetString(region, 0, regionLen)
+                    .GetString(region)
                     .Split([| '\r'; '\n' |], StringSplitOptions.None)
-                |> Array.iter (fun s ->
+                |> Array.choose (fun s ->
                     let trimmed = s.Trim()
-                    if trimmed.Length > 0 then lines.Add trimmed)
+                    if trimmed.Length > 0 then Some trimmed else None)
+                |> List.ofArray
 
-            let mutable remaining = endOffset - startOffset
-            let mutable processed = 0L // bytes read from the range so far
-            let mutable lastNewlineEnd = 0L // offset past the last consumed '\n', relative to startOffset
-            let mutable stop = false
-
-            while remaining > 0L && not stop do
-                let toRead = int (min (int64 chunkSize) remaining)
-                let read = stream.Read(readBuffer, 0, toRead)
-                if read <= 0 then
-                    stop <- true // range claimed more bytes than the file now holds; stop gracefully
+            // Tail-recursive fold over the chunks (no mutation / loop): carries the partial-line bytes,
+            // the collected lines (reversed), the bytes processed from the range, and the offset just
+            // past the last consumed '\n' (relative to startOffset).
+            let rec readChunks (carry: byte[]) (linesRev: string list) (processed: int64) (lastNewlineEnd: int64) =
+                if processed >= rangeLength then (linesRev, lastNewlineEnd)
                 else
-                    match System.Array.LastIndexOf(readBuffer, 0x0Auy, read - 1, read) with
-                    | lastNl when lastNl >= 0 ->
-                        // carried partial line ++ this chunk up to and including its last '\n' = complete lines
-                        let regionLen = carry.Count + lastNl + 1
-                        let region = Array.zeroCreate regionLen
-                        carry.CopyTo(region, 0)
-                        Array.blit readBuffer 0 region carry.Count (lastNl + 1)
-                        addLinesFrom region regionLen
-                        carry.Clear()
-                        if lastNl + 1 < read then
-                            carry.AddRange(Seq.ofArray (Array.sub readBuffer (lastNl + 1) (read - lastNl - 1)))
-                        lastNewlineEnd <- processed + int64 (lastNl + 1)
-                    | _ ->
-                        // no '\n' in this chunk: the whole chunk extends the current partial line
-                        carry.AddRange(Seq.ofArray (Array.sub readBuffer 0 read))
+                    let toRead = int (min (int64 chunkSize) (rangeLength - processed))
+                    let buffer = Array.zeroCreate toRead
+                    let read = stream.Read(buffer, 0, toRead)
+                    if read <= 0 then
+                        (linesRev, lastNewlineEnd) // range claimed more bytes than the file now holds
+                    else
+                        match System.Array.LastIndexOf(buffer, 0x0Auy, read - 1, read) with
+                        | lastNl when lastNl >= 0 ->
+                            // carried partial line ++ this chunk up to and including its last '\n'
+                            let region = Array.append carry buffer[..lastNl]
+                            let nextCarry = buffer[lastNl + 1 .. read - 1]
+                            readChunks
+                                nextCarry
+                                (List.rev (linesFrom region) @ linesRev)
+                                (processed + int64 read)
+                                (processed + int64 (lastNl + 1))
+                        | _ ->
+                            // no '\n' in this chunk: the whole chunk extends the current partial line
+                            readChunks (Array.append carry buffer[..read - 1]) linesRev (processed + int64 read) lastNewlineEnd
 
-                    processed <- processed + int64 read
-                    remaining <- remaining - int64 read
-
-            (List.ofSeq lines, startOffset + lastNewlineEnd)
+            let linesRev, lastNewlineEnd = readChunks [||] [] 0L 0L
+            (List.rev linesRev, startOffset + lastNewlineEnd)
     with ex ->
         Log.log logTag $"Failed to read byte range of {filePath}: {ex.Message}"
         ([], startOffset)

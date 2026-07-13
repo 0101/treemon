@@ -10,11 +10,14 @@ module OverviewBand
 // colour, label neutral, same size/weight):
 //   - Active agents -> a row of ~15px CIRCLES, one per red-dot working agent, grouped by activity,
 //                      plus the distinct Waiting group.
-//   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. The bar
-//                      width is COMPUTED from Overview.Scale (count / Scale of a fixed max width,
-//                      floored at a visible minimum) and applied as an inline width — the accepted,
-//                      documented exception to the CSS-classes-only rule (a proportional width is
-//                      inherently dynamic; spec decision (g)). The old N-unit-cell workaround is gone.
+//   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. Each bar
+//                      carries an inline `--bar-fill` custom property = count / Overview.Scale (its
+//                      share of the largest bucket); CSS multiplies that by a RESPONSIVE shared max
+//                      (`min(380px, 80cqi)`) so every bar shrinks together on a narrow dashboard pane
+//                      while the shared scale and the count-1 min-width floor hold. The inline custom
+//                      property is the accepted, documented exception to the CSS-classes-only rule (a
+//                      proportional width is inherently dynamic; spec decision (g)). The old N-unit-cell
+//                      workaround is gone.
 //
 // Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
 // fully-empty roll-up collapses to Html.none. v1 is static — no hover/click/greenlight.
@@ -23,13 +26,6 @@ open Shared
 open Navigation
 open Feliz
 open OverviewData
-
-/// The fixed max bar width, in px: the largest task bucket fills this and every other bar is
-/// proportional to it (matches the prototype's `380 / maxN` scale factor).
-let private barMaxPx = 380
-
-/// Floor for a bar width, in px: a count-1 bar still reads as a visible sliver (prototype min 5px).
-let private barMinPx = 5
 
 /// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
 /// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
@@ -118,26 +114,29 @@ let private agentColumn (group: AgentGroup) =
               [ metaLine accent (agentLabel group.Kind) group.Count
                 Html.div
                     [ prop.className "overview-circles"
-                      prop.children
-                          [ for i in 1 .. group.Count ->
-                                Html.span [ prop.key i; prop.className ("overview-circle " + accent) ] ] ] ] ]
+                      prop.children (
+                          List.init group.Count (fun i ->
+                              Html.span [ prop.key i; prop.className ("overview-circle " + accent) ]) ) ] ] ]
 
-/// One task bucket column: the meta line above ONE proportional bar. The width is computed on the
-/// single shared scale — count / Scale of the fixed max width, floored at barMinPx so a count-1 bar
-/// stays visible — and applied inline (the accepted, documented CSS-classes-only exception; spec
-/// decision (g)). `scale` is the largest bucket count, so the widest bar is exactly barMaxPx and
-/// every other is proportional. Fill = currentColor via the accent class.
+/// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
+/// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by
+/// the responsive shared max (`min(380px, 80cqi)`) and floors it at a visible `min-width`, so every
+/// bar scales together and a narrow dashboard pane can never make one overflow (the accepted,
+/// documented CSS-classes-only exception; spec decision (g)). `scale` is the largest bucket count, so
+/// the widest bar's fill is 1. Fill = currentColor via the accent class.
 let private taskColumn (scale: int) (bucket: TaskBucket) =
     let accent = taskClass bucket.Kind
-    // scale > 0 whenever any bucket is shown; +0.5 then truncate mirrors the prototype's Math.round.
-    let px = max barMinPx (int (float bucket.Count / float scale * float barMaxPx + 0.5))
+    // scale > 0 whenever any bucket is shown; Fable stringifies the float with a '.' separator.
+    let fill = float bucket.Count / float scale
 
     Html.div
         [ prop.className "overview-item"
           prop.key accent
           prop.children
               [ metaLine accent (taskLabel bucket.Kind) bucket.Count
-                Html.div [ prop.className ("overview-bar " + accent); prop.style [ style.width (length.px px) ] ] ] ]
+                Html.div
+                    [ prop.className ("overview-bar " + accent)
+                      prop.style [ style.custom ("--bar-fill", string fill) ] ] ] ]
 
 /// A section shell: an uppercase header over the wrapping row of category columns. The stacked
 /// layout + dashed separator live in CSS.

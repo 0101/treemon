@@ -85,12 +85,15 @@ let getLastSessionId (worktreePath: string) =
 
 let private graceWindow = TimeSpan.FromSeconds(15.0)
 let private stalenessTimeout = TimeSpan.FromMinutes(30.0)
+/// Past this age a session is Idle. Also the point at which its cache entry is prunable and — since it
+/// can never read as anything but Idle — the point at which getRefreshData stops scanning it at all.
+let private idleAgeCutoff = TimeSpan.FromHours(2.0)
 
 /// The mtime freshness wrapper over a raw fold status: a just-finished turn still reads Working during
 /// the grace window, a long-quiet Working goes Idle, and anything past the 2 h cutoff is Idle. Shared
 /// by getStatusFromEventsFile (path-based, for tests) and getRefreshData (the worktree refresh path).
 let private applyStatusFreshness (fileAge: TimeSpan) (rawStatus: CodingToolStatus) : CodingToolStatus =
-    if fileAge > TimeSpan.FromHours(2.0) then
+    if fileAge > idleAgeCutoff then
         Idle
     else
         match rawStatus with
@@ -206,7 +209,8 @@ let private skillInvokedName (data: JsonElement) : string option =
 // isSkillContextMessage) so `CurrentSkill` stays equivalent to `scanSkill` on any session that has no
 // sub-agent nesting. It ADDS two things the ~1 MB backward scans could not do:
 //   * `SubagentDepth` gating — a `skill.invoked` emitted inside a subagent.started/…completed bracket
-//     is the SUB-agent's, not the user's, and must not overwrite the top-level skill (see spec Step 0);
+//     is the SUB-agent's, not the user's, and must not overwrite the top-level skill (see the
+//     depth-gating note on foldForwardEvent below);
 //   * a genuine-only `LastUserMessage` — a `<skill-context>` injection is never recorded as the last
 //     user message (it stays transparent, exactly as it is for skill detection).
 // Because the fold sees the WHOLE stream (not a tail window), a skill.invoked megabytes back is still
@@ -310,6 +314,15 @@ let private classifyForwardEvent (line: string) : ForwardEvent option =
         None
 
 let private foldForwardEvent (state: SessionScanCache) (ev: ForwardEvent) : SessionScanCache =
+    // Sub-agent skill gating rests on one observed fact about the parent events.jsonl: a sub-agent's
+    // own `skill.invoked` is written into the PARENT file, nested between the matching
+    // `subagent.started`/`subagent.completed` (which share a toolCallId), and carries no depth/parent
+    // marker of its own — the enclosing bracket is the only signal it belongs to a sub-agent. So
+    // without depth tracking a newest-wins fold would let a deep sub-agent skill (megabytes in)
+    // overwrite the top-level skill the user actually invoked. `SubagentDepth` counts the brackets and
+    // `SkillInvoked` only sets CurrentSkill at depth 0. (Confirmed on a real 20.7 MB bd-execute
+    // session: top-level `bd-execute` at ~85 KB; a sub-agent's `vs-local-development` at ~8.8 MB sat
+    // inside a subagent bracket and would otherwise have won.)
     match ev with
     | SubagentStarted -> { state with SubagentDepth = state.SubagentDepth + 1 }
     | SubagentCompleted -> { state with SubagentDepth = max 0 (state.SubagentDepth - 1) }
@@ -404,7 +417,7 @@ let internal pruneSessionScanCache (now: DateTimeOffset) =
         try
             let fi = FileInfo(path)
             not fi.Exists
-            || (now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)) > TimeSpan.FromHours(2.0)
+            || (now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)) > idleAgeCutoff
         with _ -> true)
     |> List.iter (fun path -> sessionScanCache.TryRemove(path) |> ignore)
 
@@ -429,7 +442,7 @@ let internal getStatusFromEventsFile (eventsPath: string) (now: DateTimeOffset) 
             Idle
         else
             let fileAge = now - DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
-            if fileAge > TimeSpan.FromHours(2.0) then
+            if fileAge > idleAgeCutoff then
                 Idle
             else
                 (scanSessionEvents (File.ReadLines eventsPath)).RawStatus
@@ -470,6 +483,14 @@ let getRefreshData (worktreePath: string) : CopilotRefreshData =
     | None -> emptyRefreshData
     | Some fi ->
         let mtime = DateTimeOffset(fi.LastWriteTimeUtc, TimeSpan.Zero)
+
+        // Past the Idle cutoff the file can only read as Idle, so skip the scan entirely. This also
+        // stops the prune/rescan thrash the cache would otherwise cause: pruning evicts a stale entry
+        // every 5 min, and without this guard the very next refresh would full-rescan the (possibly
+        // 200 MB+) file just to discard the result as Idle.
+        if now - mtime > idleAgeCutoff then
+            { emptyRefreshData with Mtime = Some mtime }
+        else
 
         match getSessionScanForFile fi.FullName with
         | None -> { emptyRefreshData with Mtime = Some mtime }
