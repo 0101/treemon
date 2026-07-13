@@ -136,7 +136,9 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
 ## Technical Approach
 
 ### Server injection — `src/Server/CanvasDocServer.fs`
-- **Base CSS reset:** extend the `baseStyle` string literal — the typographic base, the type scale,
+- **Base CSS reset:** extend the shared `baseStyle` string literal (it lives in
+  `src/Server/CanvasExport.fs`, referenced by both the live server and the static export) — the
+  typographic base, the type scale,
   the ~800px single-column page cap, the `:where(:root)` design tokens, and the quiet table/blockquote/form-control
   defaults. Wrap every selector (including `:root`) in `:where(...)` (zero specificity), no
   `!important`, so doc rules and the `SystemView` template's own element-selector rules win the
