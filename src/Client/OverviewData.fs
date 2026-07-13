@@ -36,9 +36,22 @@ type TaskBucketKind =
     | Done
     | Unattended
 
-/// One non-empty task bucket: its kind and cross-worktree count. Empty buckets are dropped from the
-/// roll-up entirely (the band never shows a 0), so a present bucket always has Count > 0.
-type TaskBucket = { Kind: TaskBucketKind; Count: int }
+/// One worktree's membership in a group, carrying everything the drill-down panel needs: the focus
+/// key (WorktreePath.value — the same key arrow-nav focuses on), the branch label, the owning repo's
+/// RootFolderName (preserved before the aggregate flattens repos away), and Contribution — how much
+/// this worktree adds to the group's Count (agent group: always 1; task bucket: this worktree's task
+/// count in the bucket). A worktree is a group member iff its Contribution > 0.
+type GroupMember =
+    { ScopedKey: string
+      Branch: string
+      RepoName: string
+      Contribution: int }
+
+/// One non-empty task bucket: its kind, cross-worktree count, and the member worktrees that make it
+/// up (built from the SAME per-worktree predicate as the count, so Count = Σ member Contribution can
+/// never diverge). Empty buckets are dropped from the roll-up entirely (the band never shows a 0), so
+/// a present bucket always has Count > 0 and a non-empty Members list.
+type TaskBucket = { Kind: TaskBucketKind; Count: int; Members: GroupMember list }
 
 /// What an agent group represents: a skill-derived activity (a red-dot WORKING agent) or the distinct
 /// "waiting for user" state (yellow dot). Modeled as a kind so the band can render the Waiting group
@@ -49,9 +62,10 @@ type AgentGroupKind =
     | Activity of CurrentActivity
     | Waiting
 
-/// One non-empty agent group: its kind and how many agents belong to it. Empty groups are dropped, so
-/// a present group always has Count > 0.
-type AgentGroup = { Kind: AgentGroupKind; Count: int }
+/// One non-empty agent group: its kind, how many agents belong to it, and the member worktrees
+/// (each contributing 1, so Count = Members.Length). Empty groups are dropped, so a present group
+/// always has Count > 0 and a non-empty Members list.
+type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list }
 
 /// The Overview band's cross-worktree roll-up: non-empty task buckets and agent groups (both in
 /// canonical order) plus Scale — the largest task-bucket count, the single linear denominator every
@@ -93,58 +107,81 @@ let private activityOf (wt: WorktreeStatus) =
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
-    let worktrees = repos |> List.collect _.Worktrees
+    // Tag each worktree with its owning repo's RootFolderName BEFORE flattening, so every GroupMember
+    // can carry its RepoName. Repo order and within-repo worktree order are preserved, so member
+    // lists come back in the band's repo/worktree order.
+    let taggedWorktrees =
+        repos |> List.collect (fun r -> r.Worktrees |> List.map (fun w -> r.RootFolderName, w))
 
-    // Task-bucket count for one kind. In-progress and Queued only count toward their live buckets
-    // when their worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser); on an
-    // inactive worktree (Done/Idle) they are likely stale beads status nobody is working, so they
-    // fold into the muted Unattended catch-all instead. Only Done filters archived worktrees; every
-    // other bucket sums across all worktrees. Planned folds Loose in (Loose -> Planned, decision #6).
+    let memberOf repoName (w: WorktreeStatus) contribution =
+        { ScopedKey = WorktreePath.value w.Path
+          Branch = w.Branch
+          RepoName = repoName
+          Contribution = contribution }
+
+    // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
+    // live buckets when their worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser);
+    // on an inactive worktree (Done/Idle) they are likely stale beads status nobody is working, so
+    // they fold into the muted Unattended catch-all instead. Only Done filters archived worktrees;
+    // every other bucket sums across all worktrees. Planned folds Loose in (Loose -> Planned,
+    // decision #6). This single per-worktree predicate is the one source of truth: the bucket Count
+    // sums it and Members keep every worktree whose contribution is > 0 — they can never diverge.
     let isActive w =
         w.CodingTool = CodingToolStatus.Working || w.CodingTool = CodingToolStatus.WaitingForUser
 
-    let sumOf f = worktrees |> List.sumBy f
-    let sumWhere pred f = worktrees |> List.filter pred |> List.sumBy f
-    let countFor =
-        function
-        | TaskBucketKind.Planned    -> sumOf (fun w -> w.Planning.Planned + w.Planning.Loose)
-        | TaskBucketKind.Queued     -> sumWhere isActive _.Planning.Queued
-        | TaskBucketKind.InProgress -> sumWhere isActive _.Beads.InProgress
-        | TaskBucketKind.Blocked    -> sumOf _.Beads.Blocked
-        | TaskBucketKind.Done       -> sumOf (fun w -> if w.IsArchived then 0 else w.Beads.Closed)
-        | TaskBucketKind.Unattended -> sumWhere (isActive >> not) (fun w -> w.Beads.InProgress + w.Planning.Queued)
+    let contributionFor kind (w: WorktreeStatus) =
+        match kind with
+        | TaskBucketKind.Planned    -> w.Planning.Planned + w.Planning.Loose
+        | TaskBucketKind.Queued     -> if isActive w then w.Planning.Queued else 0
+        | TaskBucketKind.InProgress -> if isActive w then w.Beads.InProgress else 0
+        | TaskBucketKind.Blocked    -> w.Beads.Blocked
+        | TaskBucketKind.Done       -> if w.IsArchived then 0 else w.Beads.Closed
+        | TaskBucketKind.Unattended -> if isActive w then 0 else w.Beads.InProgress + w.Planning.Queued
 
-    // Count each bucket once, in canonical order; reuse for both the omit-empties list and Scale.
-    let counts = taskOrder |> List.map (fun kind -> kind, countFor kind)
+    // Members of one task bucket, in repo/worktree order: every worktree whose contribution is > 0.
+    let taskMembersFor kind =
+        taggedWorktrees
+        |> List.choose (fun (repoName, w) ->
+            match contributionFor kind w with
+            | c when c > 0 -> Some(memberOf repoName w c)
+            | _ -> None)
+
+    // Build members once per bucket, in canonical order; the count is Σ contribution over them.
+    let taskGroups =
+        taskOrder
+        |> List.map (fun kind ->
+            let members = taskMembersFor kind
+            kind, members, members |> List.sumBy _.Contribution)
 
     let tasks =
-        counts
-        |> List.choose (fun (kind, count) ->
-            if count > 0 then Some { TaskBucket.Kind = kind; Count = count } else None)
+        taskGroups
+        |> List.choose (fun (kind, members, count) ->
+            if count > 0 then Some { TaskBucket.Kind = kind; Count = count; Members = members } else None)
 
     // One true shared scale: the largest bucket count, 0 when every bucket is empty. Empty buckets
     // are 0 and never raise the max, so this equals the max across the non-empty buckets.
-    let scale = counts |> List.map snd |> List.max
+    let scale = taskGroups |> List.map (fun (_, _, count) -> count) |> List.max
 
     // Agent groups: red-dot WORKING agents (CodingTool = Working) grouped by their classified
     // activity, plus a distinct Waiting group (CodingTool = WaitingForUser). HasActiveSession is NOT
     // used — it also covers Done/Idle/WaitingForUser terminals, which would inflate Working with idle
-    // and finished agents (spec Corrections v1.1 (h)). Empty groups omitted; Waiting sorts last.
-    let working = worktrees |> List.filter (fun w -> w.CodingTool = CodingToolStatus.Working)
-    let waitingCount =
-        worktrees |> List.filter (fun w -> w.CodingTool = CodingToolStatus.WaitingForUser) |> List.length
-
-    let countForKind =
-        function
-        | AgentGroupKind.Activity activity ->
-            working |> List.filter (fun w -> activityOf w = activity) |> List.length
-        | AgentGroupKind.Waiting -> waitingCount
+    // and finished agents (spec Corrections v1.1 (h)). Each member contributes 1, so Count =
+    // Members.Length. Empty groups omitted; Waiting sorts last.
+    let agentMembersFor kind =
+        taggedWorktrees
+        |> List.choose (fun (repoName, w) ->
+            let isMember =
+                match kind with
+                | AgentGroupKind.Activity activity ->
+                    w.CodingTool = CodingToolStatus.Working && activityOf w = activity
+                | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
+            if isMember then Some(memberOf repoName w 1) else None)
 
     let agents =
         agentGroupOrder
         |> List.choose (fun kind ->
-            match countForKind kind with
-            | 0 -> None
-            | count -> Some { AgentGroup.Kind = kind; Count = count })
+            match agentMembersFor kind with
+            | [] -> None
+            | members -> Some { AgentGroup.Kind = kind; Count = List.length members; Members = members })
 
     { Tasks = tasks; Agents = agents; Scale = scale }
