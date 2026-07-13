@@ -26,7 +26,6 @@ open Shared
 open Navigation
 open Feliz
 open OverviewData
-open AppTypes
 
 // Display label per task bucket, in the aggregate's canonical left-to-right order.
 let private taskLabel =
@@ -144,7 +143,7 @@ let private plural (n: int) (word: string) = $"""{n} {word}{if n = 1 then "" els
 /// Grouping on RepoId — not the display name — keeps two distinct repos that happen to share a folder
 /// name in separate blocks (matches how the rest of the client keys repo identity). Each entry is the
 /// repo's stable id (for React keys), its display name, and its members in order.
-let private membersByRepo (members: GroupMember list) : (string * string * GroupMember list) list =
+let private membersByRepo (members: GroupMember list) : (RepoId * string * GroupMember list) list =
     members
     |> List.fold (fun acc m ->
         match acc with
@@ -197,7 +196,7 @@ let private agentBreakdown
         |> List.map (fun (repoId, repoName, members) ->
             Html.div
                 [ prop.className "overview-bd-repo"
-                  prop.key repoId
+                  prop.key (RepoId.value repoId)
                   prop.children
                       [ repoNameLabel repoName
                         Html.div
@@ -235,7 +234,7 @@ let private taskBreakdown
         |> List.map (fun (repoId, repoName, members) ->
             Html.div
                 [ prop.className "overview-bd-repo"
-                  prop.key repoId
+                  prop.key (RepoId.value repoId)
                   prop.children (
                       repoNameLabel repoName
                       :: (members

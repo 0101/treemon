@@ -46,7 +46,7 @@ type TaskBucketKind =
 type GroupMember =
     { ScopedKey: string
       Branch: string
-      RepoId: string
+      RepoId: RepoId
       RepoName: string
       Contribution: int }
 
@@ -77,6 +77,14 @@ type Overview =
     { Tasks: TaskBucket list
       Agents: AgentGroup list
       Scale: int }
+
+/// Which Overview-band group the drill-down panel is currently showing. Single-select across both
+/// sections (at most one is set): an agent group (Active agents section) or a task bucket (Tasks
+/// section). Ephemeral session state — never persisted (unlike OverviewPanelOpen).
+[<RequireQualifiedAccess>]
+type OverviewSelection =
+    | Agents of AgentGroupKind
+    | Tasks of TaskBucketKind
 
 // Canonical left-to-right order of the task bars. Unattended trails Done: it is the muted
 // catch-all for In-progress/Queued tasks whose worktree has no active agent.
@@ -116,7 +124,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     // come back in the band's repo/worktree order.
     let taggedWorktrees =
         repos
-        |> List.collect (fun r -> r.Worktrees |> List.map (fun w -> RepoId.value r.RepoId, r.RootFolderName, w))
+        |> List.collect (fun r -> r.Worktrees |> List.map (fun w -> r.RepoId, r.RootFolderName, w))
 
     let memberOf repoId repoName (w: WorktreeStatus) contribution =
         { ScopedKey = WorktreePath.value w.Path

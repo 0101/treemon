@@ -14,14 +14,6 @@ open OverviewData
 open Elmish
 open Fable.Remoting.Client
 
-/// Which Overview-band group the drill-down panel is currently showing. Single-select across both
-/// sections (at most one is set): an agent group (Active agents section) or a task bucket (Tasks
-/// section). Ephemeral session state — never persisted (unlike OverviewPanelOpen).
-[<RequireQualifiedAccess>]
-type OverviewSelection =
-    | Agents of AgentGroupKind
-    | Tasks of TaskBucketKind
-
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
