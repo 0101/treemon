@@ -221,15 +221,22 @@ let internal removeRootFromConfig (path: string) : Result<unit, string> =
         else
             writeWorktreeRoots remaining)
 
-let internal readCanvasPaneOpen () : bool =
+let private readBoolProperty (name: string) : bool =
     withConfigDocument false (fun root ->
-        match root.TryGetProperty("canvasPaneOpen") with
+        match root.TryGetProperty(name) with
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.True -> true
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.False -> false
         | _ -> false)
 
+let internal readCanvasPaneOpen () : bool = readBoolProperty "canvasPaneOpen"
+
 let internal writeCanvasPaneOpen (isOpen: bool) =
     updateGlobalConfig "canvas pane open state" [ "canvasPaneOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
+
+let internal readOverviewPanelOpen () : bool = readBoolProperty "overviewPanelOpen"
+
+let internal writeOverviewPanelOpen (isOpen: bool) =
+    updateGlobalConfig "overview panel open state" [ "overviewPanelOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
 
 let internal readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->

@@ -81,6 +81,70 @@ type PickActiveProviderTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type PickActiveSkillTests() =
+
+    // Regression for tm-planning-box-nle: CurrentSkill must follow the ACTIVE surface, not raw mtime.
+    // VS Code Copilot is Working with an OLDER session while the CLI is Idle with a NEWER session.
+    // The idle CLI's newer mtime must NOT win — the skill comes from the active VS Code surface,
+    // matching how resolveStatus/pickActiveProvider resolve the status.
+    [<Test>]
+    member _.``VS Code Working (older mtime) wins skill over CLI Idle (newer mtime)``() =
+        let cliIdleNewer = makeResult Copilot Idle (Some (baseTime.AddMinutes(5.0)))
+        let vsCodeWorkingOlder = makeResult Copilot Working (Some baseTime)
+
+        let skill =
+            pickActiveSkill
+                [ cliIdleNewer, (fun () -> Some "cli-skill")
+                  vsCodeWorkingOlder, (fun () -> Some "vscode-skill") ]
+
+        Assert.That(skill, Is.EqualTo(Some "vscode-skill"))
+
+    [<Test>]
+    member _.``Only the winning surface is scanned for its skill``() =
+        let cliIdleNewer = makeResult Copilot Idle (Some (baseTime.AddMinutes(5.0)))
+        let vsCodeWorkingOlder = makeResult Copilot Working (Some baseTime)
+
+        let skill =
+            pickActiveSkill
+                [ cliIdleNewer, (fun () -> failwith "idle/losing surface must not be scanned")
+                  vsCodeWorkingOlder, (fun () -> Some "vscode-skill") ]
+
+        Assert.That(skill, Is.EqualTo(Some "vscode-skill"))
+
+    [<Test>]
+    member _.``Most recent active surface wins when both are non-Idle``() =
+        let cliWorkingOlder = makeResult Copilot Working (Some baseTime)
+        let vsCodeWorkingNewer = makeResult Copilot Working (Some (baseTime.AddMinutes(5.0)))
+
+        let skill =
+            pickActiveSkill
+                [ cliWorkingOlder, (fun () -> Some "cli-skill")
+                  vsCodeWorkingNewer, (fun () -> Some "vscode-skill") ]
+
+        Assert.That(skill, Is.EqualTo(Some "vscode-skill"))
+
+    [<Test>]
+    member _.``Returns None when all surfaces are Idle``() =
+        let cliIdle = makeResult Copilot Idle (Some (baseTime.AddMinutes(5.0)))
+        let vsCodeIdle = makeResult Copilot Idle (Some baseTime)
+
+        let skill =
+            pickActiveSkill
+                [ cliIdle, (fun () -> Some "cli-skill")
+                  vsCodeIdle, (fun () -> Some "vscode-skill") ]
+
+        Assert.That(skill, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Returns None for empty surface list``() =
+        let skill = pickActiveSkill []
+
+        Assert.That(skill, Is.EqualTo(None))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type ResolveStatusTests() =
 
     [<Test>]

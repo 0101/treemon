@@ -34,6 +34,21 @@ type BeadsSummary =
 module BeadsSummary =
     let zero = { Open = 0; InProgress = 0; Blocked = 0; Closed = 0 }
 
+/// Server-side split of a worktree's OPEN beads tasks by their direct parent-feature status,
+/// the source of the band's started-vs-awaiting signal:
+///   - Planned: open task under an OPEN feature (planning done, awaiting go-ahead)
+///   - Queued:  open task under an IN_PROGRESS feature (execution underway, next-up)
+///   - Loose:   open task with no/closed/blocked feature parent, or a non-feature parent
+/// Loose is kept distinct server-side for fidelity but folds into Planned for display.
+/// (FeaturesOpen/FeaturesWip were deliberately dropped — the v1 band shows no feature counts.)
+type BeadsPlanning =
+    { Planned: int
+      Queued: int
+      Loose: int }
+
+module BeadsPlanning =
+    let zero = { Planned = 0; Queued = 0; Loose = 0 }
+
 type CodingToolStatus =
     | Working
     | WaitingForUser
@@ -44,6 +59,48 @@ type CodingToolProvider =
     | Claude
     | Copilot
     static member Default = Copilot
+
+/// Live-agent activity buckets derived from the skill/command an agent is running,
+/// surfaced by the same session scan that drives the red dot. Working is the fallback for
+/// an active session with no recognized skill. Activity is always *derived* from CurrentSkill
+/// via Activity.classify — never stored separately — so the overview band derives it from one
+/// source of truth.
+[<RequireQualifiedAccess>]
+type CurrentActivity =
+    | Investigating
+    | Planning
+    | Executing
+    | Reviewing
+    | Fixing
+    | Working
+
+module Activity =
+    // First whitespace-delimited token — a Claude slash command can carry args
+    // (ClaudeDetector surfaces "<cmd> <args>", e.g. "pr https://..."), so only the command
+    // itself is significant. Split never yields an empty array.
+    let private firstToken (s: string) =
+        s.Split([| ' '; '\t'; '\n'; '\r' |])[0]
+
+    /// Classify a running skill/command name into an activity bucket, per the
+    /// beads-overview-band spec table. The name is normalized first — trimmed, reduced to its
+    /// first token, stripped of a leading '/' (Claude slash commands), and lower-cased — so a
+    /// CLI event name, a Claude slash command and a VS Code tool-call name all map uniformly.
+    /// Unknown or empty/whitespace input falls back to Working.
+    /// Lives in Shared so server (card stripe) and client (band) classify identically.
+    let classify (skill: string) : CurrentActivity =
+        let normalized =
+            if String.IsNullOrWhiteSpace skill then ""
+            else (firstToken (skill.Trim())).TrimStart('/').ToLowerInvariant()
+
+        match normalized with
+        | "investigate" -> CurrentActivity.Investigating
+        | "bd-plan" | "bd-improve" | "bd-autoimprove" | "spec-management" -> CurrentActivity.Planning
+        | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
+        | "pr" | "review-branch" | "reviewing-tests" | "comprehensive-review"
+        | "code-review" | "bd-review" | "contribution"
+        | "review" | "focused-review:review" -> CurrentActivity.Reviewing
+        | "fix-build" | "conflict" -> CurrentActivity.Fixing
+        | _ -> CurrentActivity.Working
 
 [<RequireQualifiedAccess>]
 type ActivityLevel =
@@ -185,8 +242,10 @@ type WorktreeStatus =
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
       Beads: BeadsSummary
+      Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int
@@ -248,6 +307,7 @@ type DashboardResponse =
       EditorName: string
       CollapsedRepos: Set<RepoId>
       CanvasPaneOpen: bool
+      OverviewPanelOpen: bool
       CanvasPosition: CanvasPosition
       CanvasSize: CanvasSize }
 
@@ -290,6 +350,7 @@ type IWorktreeApi =
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
       saveCanvasPaneOpen: bool -> Async<unit>
+      saveOverviewPanelOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
       saveCanvasSize: CanvasSize -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>

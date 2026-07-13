@@ -3,8 +3,10 @@ module Tests.TestUtils
 open System
 open System.Diagnostics
 open System.IO
+open System.Net.Http
 open System.Runtime.InteropServices
 open System.Text.RegularExpressions
+open System.Threading.Tasks
 open NUnit.Framework
 
 let resolveCmdShim (fileName: string) =
@@ -196,3 +198,57 @@ let getFreeTcpPorts (count: int) : int list =
     ports
 
 let getFreeTcpPort () = getFreeTcpPorts 1 |> List.head
+
+let private tryGet (client: HttpClient) (url: string) =
+    async {
+        try
+            let! response = client.GetAsync(url) |> Async.AwaitTask
+            return int response.StatusCode < 500
+        with _ ->
+            return false
+    }
+
+let rec private pollUntilReady (client: HttpClient) (url: string) (deadline: DateTime) =
+    async {
+        if DateTime.UtcNow > deadline then
+            failwith $"Timed out waiting for {url}"
+        else
+            let! ok = tryGet client url
+            if not ok then
+                do! Async.Sleep(500)
+                return! pollUntilReady client url deadline
+    }
+
+/// Poll `url` until it answers (HTTP status < 500) or `timeoutMs` elapses, failing on timeout.
+/// Shared by the E2E fixtures that boot their own server+vite on isolated ports.
+let waitForUrl (url: string) (timeoutMs: int) : Task =
+    async {
+        use client = new HttpClient()
+        let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
+        do! pollUntilReady client url deadline
+    }
+    |> Async.StartAsTask
+    :> Task
+
+/// Launch the Treemon API server process for an E2E fixture. `rootArgs` is the already-quoted,
+/// space-joined worktree-root list; each fixture keeps its own port / orphan-kill / fixture policy
+/// but shares this launch command.
+let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) : Process =
+    startProcess
+        "dotnet"
+        $"""run --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" """
+        repoRoot
+        []
+        false
+
+/// Launch a Vite dev-server process wired to the given API/canvas ports for an E2E fixture.
+let startViteProcess (repoRoot: string) (vitePort: int) (apiPort: int) (canvasPort: int) : Process =
+    startProcess
+        "npx"
+        "vite --host"
+        repoRoot
+        [ "VITE_PORT", string vitePort
+          "API_PORT", string apiPort
+          "CANVAS_PORT", string canvasPort
+          "NODE_OPTIONS", "--max-old-space-size=512" ]
+        false

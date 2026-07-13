@@ -31,7 +31,11 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
                                     { wt with
                                         CanvasDocs =
                                             if obj.ReferenceEquals(wt.CanvasDocs, null) then []
-                                            else wt.CanvasDocs }) }) }
+                                            else wt.CanvasDocs
+                                        Planning =
+                                            wt.Planning
+                                            |> Option.ofObj
+                                            |> Option.defaultValue BeadsPlanning.zero }) }) }
         Ok sanitized
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
@@ -60,6 +64,7 @@ let readOnlyApi
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
       saveCanvasPaneOpen = fun _ -> async { return () }
+      saveOverviewPanelOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
       saveCanvasSize = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
@@ -130,12 +135,14 @@ let private assembleFromState
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
+    let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
     let codingToolData =
         repo.CodingToolData
         |> Map.tryFind wt.Path
         |> Option.defaultValue
             { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
               Provider = None
+              CurrentSkill = None
               LastUserMessage = None
               LastAssistantMessage = None
               LastMessageProvider = None }
@@ -147,8 +154,10 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
+      Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
+      CurrentSkill = codingToolData.CurrentSkill
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
@@ -255,6 +264,7 @@ let getWorktrees
               EditorName = getEditorConfig () |> snd
               CollapsedRepos = readCollapsedRepos ()
               CanvasPaneOpen = readCanvasPaneOpen ()
+              OverviewPanelOpen = readOverviewPanelOpen ()
               CanvasPosition = readCanvasPosition ()
               CanvasSize = readCanvasSize () }
     }
@@ -390,7 +400,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; OverviewPanelOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -595,6 +605,7 @@ let worktreeApi
           reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
+          saveOverviewPanelOpen = fun isOpen -> async { writeOverviewPanelOpen isOpen }
           saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
           saveCanvasSize = fun size -> async { writeCanvasSize size }
           resumeSession = fun wtPath ->

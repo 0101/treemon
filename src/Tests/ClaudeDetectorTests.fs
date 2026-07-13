@@ -143,3 +143,66 @@ type IsSystemNoiseTests() =
     [<Test>]
     member _.``Does not filter normal user message``() =
         Assert.That(isSystemNoise "Please help me with this code", Is.False)
+
+
+let private makeCommandEntry (cmd: string) (args: string) (timestamp: string) =
+    let inner = $"<command-name>{cmd}</command-name><command-args>{args}</command-args>"
+    makeUserEntry inner timestamp
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SlashCommandTests() =
+
+    [<Test>]
+    member _.``Extracts slash command with args as the current skill``() =
+        let content =
+            [ makeCommandEntry "/pr" "fix the build" "2025-01-01T00:00:01Z"
+              makeAssistantEntry "on it" "2025-01-01T00:00:02Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempJsonl content (fun path ->
+            let result = scanForSlashCommand path
+            Assert.That(result.IsSome, Is.True)
+            let cmd, _ = result.Value
+            Assert.That(cmd, Is.EqualTo("/pr fix the build")))
+
+    [<Test>]
+    member _.``Returns the most recent slash command, skipping later plain chat``() =
+        let content =
+            [ makeCommandEntry "/investigate" "the flaky test" "2025-01-01T00:00:01Z"
+              makeAssistantEntry "looking" "2025-01-01T00:00:02Z"
+              makeUserEntry "any progress?" "2025-01-01T00:00:03Z"
+              makeAssistantEntry "yes" "2025-01-01T00:00:04Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempJsonl content (fun path ->
+            let result = scanForSlashCommand path
+            Assert.That(result.IsSome, Is.True)
+            let cmd, _ = result.Value
+            Assert.That(cmd, Is.EqualTo("/investigate the flaky test")))
+
+    [<Test>]
+    member _.``Returns the latest of two slash commands``() =
+        let content =
+            [ makeCommandEntry "/investigate" "bug" "2025-01-01T00:00:01Z"
+              makeAssistantEntry "done" "2025-01-01T00:00:02Z"
+              makeCommandEntry "/review-branch" "" "2025-01-01T00:00:03Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempJsonl content (fun path ->
+            let result = scanForSlashCommand path
+            Assert.That(result.IsSome, Is.True)
+            let cmd, _ = result.Value
+            Assert.That(cmd, Is.EqualTo("/review-branch")))
+
+    [<Test>]
+    member _.``Returns None when no slash command is present``() =
+        let content =
+            [ makeUserEntry "just a normal question" "2025-01-01T00:00:01Z"
+              makeAssistantEntry "an answer" "2025-01-01T00:00:02Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempJsonl content (fun path ->
+            Assert.That(scanForSlashCommand path, Is.EqualTo(None)))
