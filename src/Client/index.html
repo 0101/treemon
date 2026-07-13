@@ -195,6 +195,37 @@
         .activity-working { color: #ff0000; }
         .activity-waiting { color: #f9e2af; }
 
+        /* Drill-down breakdown panel (overview-drilldown): the black panel rendered INSIDE a section,
+           flush beneath the selected group's black tab. Header = accent-tinted title + muted summary +
+           ✕ close; members grouped by repo (small uppercase muted repo name matching the band header);
+           agent groups show borderless [dot name] chips (dot in the group's activity colour), task
+           buckets show name + bar rows on the SAME shared scale as the band bars above (--bar-fill is
+           the documented inline-width exception). The panel's accent class tints the title and, via
+           currentColor, the chip dots and task bars. */
+        .overview-breakdown { background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-bd-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
+        .overview-bd-title { font-size: 13.5px; font-weight: 600; color: currentColor; }
+        .overview-bd-sub { font-size: 12px; color: #6c7086; }
+        .overview-bd-close { margin-left: auto; align-self: flex-start; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
+        .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
+        .overview-bd-repo { margin: 0 0 13px; }
+        .overview-bd-repo:last-child { margin-bottom: 0; }
+        .overview-bd-repo-name { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: #6c7086; margin: 0 0 7px; }
+        /* Agent breakdown: borderless [dot name] chips, the dot in the group's activity colour (currentColor). */
+        .overview-chips { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+        .overview-chip { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; background: #1e1e2e; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12.5px; }
+        .overview-chip:hover { background: #242438; }
+        .overview-chip-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex: none; }
+        .overview-chip-name { color: #cdd6f4; }
+        /* Task breakdown: worktree name + a bar in the bucket colour, sized on the SAME shared scale as
+           the band bars (width = --bar-fill * the same responsive max, floored at the visible min-width),
+           so one task is the same pixel width here as in the band above. */
+        .overview-task-row { display: grid; grid-template-columns: 210px 1fr; align-items: center; gap: 14px; padding: 4px 6px; border-radius: 5px; cursor: pointer; }
+        .overview-task-row:hover { background: #1e1e2e; }
+        .overview-task-name { font-size: 12.5px; color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .overview-task-track { display: block; }
+        .overview-task-bar { display: block; height: 13px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * min(380px, 80cqi)); }
+
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }

@@ -149,14 +149,140 @@ let private taskColumn (selection: OverviewSelection option) (onSelectGroup: Ove
                     [ prop.className ("overview-bar " + accent)
                       prop.style [ style.custom ("--bar-fill", string fill) ] ] ] ]
 
-/// A section shell: an uppercase header over the wrapping row of category columns. The stacked
+/// "1 agent" / "3 agents": count + word, pluralized, for the muted breakdown summary line.
+let private plural (n: int) (word: string) = $"""{n} {word}{if n = 1 then "" else "s"}"""
+
+/// Group a group's members by owning repo, PRESERVING the aggregate's repo/worktree order (members
+/// from one repo arrive contiguous, so folding keeps first-appearance repo order). Each entry is the
+/// repo name and its members in order.
+let private membersByRepo (members: GroupMember list) : (string * GroupMember list) list =
+    members
+    |> List.fold (fun acc m ->
+        match acc with
+        | (repo, ms) :: rest when repo = m.RepoName -> (repo, m :: ms) :: rest
+        | _ -> (m.RepoName, [ m ]) :: acc) []
+    |> List.map (fun (repo, ms) -> repo, List.rev ms)
+    |> List.rev
+
+/// The shared black breakdown-panel shell: an accent-tinted title, a muted summary, and the ✕ close
+/// button, above the repo-grouped member blocks. `accent` tints the title and, via currentColor, the
+/// chip dots / task bars. The ✕ raises onClose (App re-selects the group, toggling the panel shut).
+let private breakdownPanel
+    (accent: string)
+    (title: string)
+    (sub: string)
+    (onClose: unit -> unit)
+    (repoBlocks: ReactElement list)
+    =
+    let head =
+        Html.div
+            [ prop.className "overview-bd-head"
+              prop.children
+                  [ Html.span [ prop.className "overview-bd-title"; prop.text title ]
+                    Html.span [ prop.className "overview-bd-sub"; prop.text sub ]
+                    Html.button
+                        [ prop.className "overview-bd-close"
+                          prop.title "Close (Esc)"
+                          prop.onClick (fun _ -> onClose ())
+                          prop.text "\u2715" ] ] ]
+
+    Html.div
+        [ prop.className [ "overview-breakdown"; accent ]
+          prop.children (head :: repoBlocks) ]
+
+/// The small uppercase muted repo name introducing each repo's members (band-header style).
+let private repoNameLabel (name: string) =
+    Html.div [ prop.className "overview-bd-repo-name"; prop.text name ]
+
+/// Agent breakdown for one selected agent group: per repo, borderless [● branch] chips (one per
+/// member worktree, dot in the group's activity colour). Clicking a chip focuses that worktree with
+/// arrow-nav parity (onSelectWorktree). The ✕ re-selects the group to close the panel.
+let private agentBreakdown
+    (onSelectGroup: OverviewSelection -> unit)
+    (onSelectWorktree: string -> unit)
+    (group: AgentGroup)
+    =
+    let accent = agentClass group.Kind
+    let repoBlocks =
+        membersByRepo group.Members
+        |> List.map (fun (repo, members) ->
+            Html.div
+                [ prop.className "overview-bd-repo"
+                  prop.key repo
+                  prop.children
+                      [ repoNameLabel repo
+                        Html.div
+                            [ prop.className "overview-chips"
+                              prop.children (
+                                  members
+                                  |> List.map (fun m ->
+                                      Html.div
+                                          [ prop.className [ "overview-chip"; accent ]
+                                            prop.key m.ScopedKey
+                                            prop.onClick (fun _ -> onSelectWorktree m.ScopedKey)
+                                            prop.children
+                                                [ Html.span [ prop.className "overview-chip-dot" ]
+                                                  Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ] ] ])) ] ] ])
+
+    let repoCount = group.Members |> List.map _.RepoName |> List.distinct |> List.length
+    let agentsPart = plural group.Count "agent"
+    let reposPart = plural repoCount "repo"
+    let sub = $"{agentsPart} · {reposPart}"
+    breakdownPanel accent (agentLabel group.Kind) sub (fun () -> onSelectGroup (OverviewSelection.Agents group.Kind)) repoBlocks
+
+/// Task breakdown for one selected task bucket: per repo, one `branch + bar` row per member worktree.
+/// The bar is the bucket colour and sized on the SAME shared scale as the band bars above
+/// (`--bar-fill = Contribution / Scale`, floored by CSS min-width), so one task is the same pixel
+/// width here as in the band. Clicking a row focuses that worktree; the ✕ closes the panel.
+let private taskBreakdown
+    (onSelectGroup: OverviewSelection -> unit)
+    (onSelectWorktree: string -> unit)
+    (scale: int)
+    (bucket: TaskBucket)
+    =
+    let accent = taskClass bucket.Kind
+    let repoBlocks =
+        membersByRepo bucket.Members
+        |> List.map (fun (repo, members) ->
+            Html.div
+                [ prop.className "overview-bd-repo"
+                  prop.key repo
+                  prop.children (
+                      repoNameLabel repo
+                      :: (members
+                          |> List.map (fun m ->
+                              let fill = float m.Contribution / float scale
+
+                              Html.div
+                                  [ prop.className "overview-task-row"
+                                    prop.key m.ScopedKey
+                                    prop.onClick (fun _ -> onSelectWorktree m.ScopedKey)
+                                    prop.children
+                                        [ Html.span [ prop.className "overview-task-name"; prop.text m.Branch ]
+                                          Html.span
+                                              [ prop.className "overview-task-track"
+                                                prop.children
+                                                    [ Html.span
+                                                          [ prop.className [ "overview-task-bar"; accent ]
+                                                            prop.style [ style.custom ("--bar-fill", string fill) ] ] ] ] ] ]))) ])
+
+    let tasksPart = plural bucket.Count "task"
+    let worktreesPart = plural bucket.Members.Length "worktree"
+    let sub = $"{tasksPart} · {worktreesPart}"
+    breakdownPanel accent (taskLabel bucket.Kind) sub (fun () -> onSelectGroup (OverviewSelection.Tasks bucket.Kind)) repoBlocks
+
+/// A section shell: an uppercase header over the single-line row of category columns, plus the
+/// (optional) drill-down breakdown panel rendered INSIDE the section, flush beneath its row — so the
+/// agent breakdown sits between the agents row and the Tasks section, and the task breakdown sits
+/// directly below the Tasks row (Html.none when nothing in this section is selected). The stacked
 /// layout + dashed separator live in CSS.
-let private section (header: string) (columns: ReactElement list) =
+let private section (header: string) (columns: ReactElement list) (breakdown: ReactElement) =
     Html.div
         [ prop.className "overview-section"
           prop.children
               [ Html.div [ prop.className "overview-header"; prop.text header ]
-                Html.div [ prop.className "overview-items"; prop.children columns ] ] ]
+                Html.div [ prop.className "overview-items"; prop.children columns ]
+                breakdown ] ]
 
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
 /// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the
@@ -206,10 +332,24 @@ let view
                             | Some m -> $"Active agents · {m} waiting"
                             | None -> $"Active agents · {workingCount} working"
 
-                        section header (groups |> List.map (agentColumn selection onSelectGroup))
+                        section header (groups |> List.map (agentColumn selection onSelectGroup)) (
+                            match selection with
+                            | Some (OverviewSelection.Agents kind) ->
+                                groups
+                                |> List.tryFind (fun g -> g.Kind = kind)
+                                |> Option.map (agentBreakdown onSelectGroup onSelectWorktree)
+                                |> Option.defaultValue Html.none
+                            | _ -> Html.none)
                     match tasks with
                     | [] -> Html.none
                     | buckets ->
                         section
                             "Tasks · across all worktrees"
-                            (buckets |> List.map (taskColumn selection onSelectGroup overview.Scale)) ] ]
+                            (buckets |> List.map (taskColumn selection onSelectGroup overview.Scale))
+                            (match selection with
+                             | Some (OverviewSelection.Tasks kind) ->
+                                 buckets
+                                 |> List.tryFind (fun b -> b.Kind = kind)
+                                 |> Option.map (taskBreakdown onSelectGroup onSelectWorktree overview.Scale)
+                                 |> Option.defaultValue Html.none
+                             | _ -> Html.none) ] ]
