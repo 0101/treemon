@@ -102,7 +102,7 @@ let private latestDocModified (wt: WorktreeStatus) =
     |> List.sortDescending
     |> List.tryHead
 
-let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, BridgeLiveness>) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
+let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedByScopedKey: Map<string, Set<string>>) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
     let entries =
         repos
         |> List.collect (fun repo ->
@@ -136,6 +136,9 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                             prop.text repoName
                         ]
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
+                            // The unviewed set for this worktree, from the same badge-source map
+                            // (`unviewedDocsByScopedKey`); empty for worktrees with nothing unviewed.
+                            let unviewedSet = unviewedByScopedKey |> Map.tryFind scopedKey |> Option.defaultValue Set.empty
                             Html.div [
                                 prop.className "canvas-overview-entry"
                                 prop.children [
@@ -150,8 +153,14 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                         prop.className "canvas-overview-docs"
                                         prop.children (
                                             wt.CanvasDocs |> List.map (fun doc ->
+                                                // Unviewed docs render white (`canvas-overview-doc-unviewed`);
+                                                // viewed docs keep the muted base color. SystemView docs are
+                                                // never in `unviewedSet` (excluded at the awareness source).
+                                                let docClass =
+                                                    if Set.contains doc.Filename unviewedSet then "canvas-overview-doc canvas-overview-doc-unviewed"
+                                                    else "canvas-overview-doc"
                                                 Html.span [
-                                                    prop.className "canvas-overview-doc"
+                                                    prop.className docClass
                                                     prop.onClick (fun e ->
                                                         e.stopPropagation ()
                                                         onClickDoc scopedKey doc.Filename)
@@ -206,7 +215,7 @@ type CanvasPaneState =
       ShareNotice: string option
       BridgeLiveness: Map<string, BridgeLiveness> }
 
-let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (unviewedByScopedKey: Map<string, Set<string>>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
     let { IsOpen = isOpen
           Position = position
           Size = size
@@ -457,7 +466,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 docErrorBanner
                 waitingBanner
                 shareBanner
-                overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
+                overviewView allRepos bridgeLiveness unviewedByScopedKey onOverviewClick onOverviewDocClick
             ]
 
     let paneClass =
