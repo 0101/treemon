@@ -837,7 +837,11 @@ let view model dispatch =
                         dispatch (KeyPressed (key, hasModifier)))
             prop.children [
                 if model.OverviewPanelOpen then
-                    OverviewBand.view model.Repos
+                    OverviewBand.view
+                        model.SelectedOverviewGroup
+                        (SelectOverviewGroup >> dispatch)
+                        (SelectOverviewWorktree >> dispatch)
+                        model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                     Html.div [

@@ -26,6 +26,7 @@ open Shared
 open Navigation
 open Feliz
 open OverviewData
+open AppTypes
 
 /// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
 /// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
@@ -104,13 +105,18 @@ let private metaLine (accentClass: string) (label: string) (count: int) =
                 Html.span [ prop.className "overview-label"; prop.text label ] ] ]
 
 /// One agent group column: the meta line above a row of ~15px circles, one per agent, tinted to the
-/// group's accent (circle fill = currentColor, driven by the accent class).
-let private agentColumn (group: AgentGroup) =
+/// group's accent (circle fill = currentColor, driven by the accent class). Clicking the column
+/// raises onSelectGroup (App toggles the drill-down selection); when this group is the selected one
+/// it renders as the black "tab" (overview-item-selected) sitting flush above its breakdown panel.
+let private agentColumn (selection: OverviewSelection option) (onSelectGroup: OverviewSelection -> unit) (group: AgentGroup) =
     let accent = agentClass group.Kind
+    let target = OverviewSelection.Agents group.Kind
+    let isSelected = selection = Some target
 
     Html.div
-        [ prop.className "overview-item"
+        [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]
           prop.key accent
+          prop.onClick (fun _ -> onSelectGroup target)
           prop.children
               [ metaLine accent (agentLabel group.Kind) group.Count
                 Html.div
@@ -124,15 +130,19 @@ let private agentColumn (group: AgentGroup) =
 /// the responsive shared max (`min(380px, 80cqi)`) and floors it at a visible `min-width`, so every
 /// bar scales together and a narrow dashboard pane can never make one overflow (the accepted,
 /// documented CSS-classes-only exception; spec decision (g)). `scale` is the largest bucket count, so
-/// the widest bar's fill is 1. Fill = currentColor via the accent class.
-let private taskColumn (scale: int) (bucket: TaskBucket) =
+/// the widest bar's fill is 1. Fill = currentColor via the accent class. Clicking the column raises
+/// onSelectGroup; the selected bucket renders as the black "tab" (overview-item-selected).
+let private taskColumn (selection: OverviewSelection option) (onSelectGroup: OverviewSelection -> unit) (scale: int) (bucket: TaskBucket) =
     let accent = taskClass bucket.Kind
+    let target = OverviewSelection.Tasks bucket.Kind
+    let isSelected = selection = Some target
     // scale > 0 whenever any bucket is shown; Fable stringifies the float with a '.' separator.
     let fill = float bucket.Count / float scale
 
     Html.div
-        [ prop.className "overview-item"
+        [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]
           prop.key accent
+          prop.onClick (fun _ -> onSelectGroup target)
           prop.children
               [ metaLine accent (taskLabel bucket.Kind) bucket.Count
                 Html.div
@@ -149,8 +159,16 @@ let private section (header: string) (columns: ReactElement list) =
                 Html.div [ prop.className "overview-items"; prop.children columns ] ] ]
 
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
-/// so the band adds no chrome (not even margin) when there is nothing to show.
-let view (repos: RepoModel list) : ReactElement =
+/// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the
+/// currently drilled-down group (if any); `onSelectGroup` toggles a group's selection when its column
+/// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
+/// arrow-nav parity.
+let view
+    (selection: OverviewSelection option)
+    (onSelectGroup: OverviewSelection -> unit)
+    (onSelectWorktree: string -> unit)
+    (repos: RepoModel list)
+    : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
 
     match overview.Agents, overview.Tasks with
@@ -188,10 +206,10 @@ let view (repos: RepoModel list) : ReactElement =
                             | Some m -> $"Active agents · {m} waiting"
                             | None -> $"Active agents · {workingCount} working"
 
-                        section header (groups |> List.map agentColumn)
+                        section header (groups |> List.map (agentColumn selection onSelectGroup))
                     match tasks with
                     | [] -> Html.none
                     | buckets ->
                         section
                             "Tasks · across all worktrees"
-                            (buckets |> List.map (taskColumn overview.Scale)) ] ]
+                            (buckets |> List.map (taskColumn selection onSelectGroup overview.Scale)) ] ]

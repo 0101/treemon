@@ -146,15 +146,27 @@
            size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
            tasks are ONE proportional bar per status on one true shared scale (width computed inline
            from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)). No
-           box/title bar or hairlines (the toggle button is the header); it reflows purely via
-           .overview-items flex-wrap as the category columns wrap onto new rows on narrow panes. */
+           box/title bar or hairlines (the toggle button is the header); the category columns stay on
+           a single line per section and scroll horizontally on narrow panes (overview-drilldown). */
         .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
         .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
-        /* Shared column layout — identical for both sections; only the visual row differs. Wrapping
-           here is the reflow: category columns wrap onto new rows when the dashboard pane narrows. */
-        .overview-items { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
-        .overview-item { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; flex: 0 0 auto; }
+        /* Shared column layout — identical for both sections; only the visual row differs. The
+           group columns stay on a SINGLE line and scroll horizontally when the pane is too narrow
+           (overview-drilldown decision), so a selected group's breakdown panel always renders
+           directly beneath its own section row. */
+        .overview-items { display: flex; gap: 22px; align-items: flex-start; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+        /* Each column is clickable: it toggles that group's drill-down selection. Negative margins let
+           the hover/selected background bleed slightly past the content without shifting layout. */
+        .overview-item {
+            display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+            flex: 0 0 auto; padding: 6px 8px; margin: -6px -2px; border-radius: 6px;
+            cursor: pointer; border: 1px solid transparent; transition: background 0.12s, border-color 0.12s;
+        }
+        .overview-item:hover { background: #2a2a3c; }
+        /* Selected group = a black "tab" with rounded TOP corners, stretched (align-self: stretch) so
+           its bottom edge sits flush against the black .overview-breakdown panel rendered below it. */
+        .overview-item-selected { background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0; align-self: stretch; padding: 8px 12px 10px; }
         .overview-meta { font-size: 12.5px; color: #a6adc8; white-space: nowrap; }
         /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
            it tints the count text while the label keeps the neutral .overview-meta colour. */
