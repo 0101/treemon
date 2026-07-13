@@ -13,7 +13,7 @@ module OverviewBand
 //   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. Each bar
 //                      carries an inline `--bar-fill` custom property = count / Overview.Scale (its
 //                      share of the largest bucket); CSS multiplies that by a RESPONSIVE shared max
-//                      (`min(380px, 80cqi)`) so every bar shrinks together on a narrow dashboard pane
+//                      (`min(300px, 80cqi)`) so every bar shrinks together on a narrow dashboard pane
 //                      while the shared scale and the count-1 min-width floor hold. The inline custom
 //                      property is the accepted, documented exception to the CSS-classes-only rule (a
 //                      proportional width is inherently dynamic; spec decision (g)). The old N-unit-cell
@@ -120,7 +120,7 @@ let private agentColumn (group: AgentGroup) =
 
 /// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
 /// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by
-/// the responsive shared max (`min(380px, 80cqi)`) and floors it at a visible `min-width`, so every
+/// the responsive shared max (`min(300px, 80cqi)`) and floors it at a visible `min-width`, so every
 /// bar scales together and a narrow dashboard pane can never make one overflow (the accepted,
 /// documented CSS-classes-only exception; spec decision (g)). `scale` is the largest bucket count, so
 /// the widest bar's fill is 1. Fill = currentColor via the accent class.
