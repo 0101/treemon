@@ -163,10 +163,10 @@
         .overview-circles { display: flex; gap: 5px; }
         .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
         /* Bar width = its share of the shared scale (`--bar-fill`, set inline per bar) times a
-           RESPONSIVE max: min(380px, 80cqi) shrinks with the .dashboard inline-size container so a
+           RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
            single bar never overflows a narrow pane, while every bar scales together (shared scale
            preserved). min-width keeps a count-1 bar a visible sliver. */
-        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * min(380px, 80cqi)); }
+        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * min(300px, 80cqi)); }
         /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
            count text and, via currentColor, the circle/bar fill. */
         .task-planned { color: #fab387; }
