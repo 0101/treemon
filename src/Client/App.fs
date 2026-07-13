@@ -451,6 +451,16 @@ let update msg model =
             focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
         | "End" ->
             focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
+        | "Escape" ->
+            let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
+            { model with FocusedElement = newFocus },
+            Cmd.batch [
+                Cmd.ofEffect (fun _ ->
+                    Dom.document.querySelector ".dashboard"
+                    |> Option.ofObj
+                    |> Option.iter (fun el -> el?focus()))
+                scrollToFocus Normal newFocus
+            ]
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -570,10 +580,36 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
+    // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
+    // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
+    // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
+    // catches Escape from anywhere outside the dashboard and routes it through the normal handler,
+    // which refocuses the dashboard and restores a focus target. Skips when focus is already inside
+    // the dashboard (its onKeyDown handles it) or in an editable field (which owns its own Escape).
+    let focusReclaim (dispatch: Dispatch<Msg>) =
+        let isEditable (el: Browser.Types.Element) =
+            match el.tagName.ToUpper() with
+            | "INPUT" | "TEXTAREA" | "SELECT" -> true
+            | _ -> el?isContentEditable = true
+        let insideDashboard (el: Browser.Types.Element) =
+            let ancestor: Browser.Types.Element = el?closest(".dashboard")
+            ancestor |> Option.ofObj |> Option.isSome
+        let handler =
+            fun (e: Browser.Types.Event) ->
+                let ke = e :?> Browser.Types.KeyboardEvent
+                if ke.key = "Escape" then
+                    match Option.ofObj Dom.document.activeElement with
+                    | Some el when insideDashboard el || isEditable el -> ()
+                    | _ -> dispatch (KeyPressed ("Escape", false))
+        Dom.document.addEventListener ("keydown", handler)
+        { new System.IDisposable with
+            member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
+
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
-          [ "canvas-messages" ], CanvasUpdate.messageListener ]
+          [ "canvas-messages" ], CanvasUpdate.messageListener
+          [ "focus-reclaim" ], focusReclaim ]
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
