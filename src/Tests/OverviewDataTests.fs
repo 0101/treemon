@@ -582,7 +582,7 @@ type OverviewDataTests() =
         // shared display name.
         Assert.That(
             members |> List.map (fun m -> m.RepoId, m.RepoName, m.ScopedKey),
-            Is.EqualTo([ ("repo-a", "dup", "/a/1"); ("repo-b", "dup", "/b/1") ]))
+            Is.EqualTo([ (RepoId "repo-a", "dup", "/a/1"); (RepoId "repo-b", "dup", "/b/1") ]))
         // The two distinct repos stay distinct by identity (2 RepoIds) though they share one name.
         Assert.That(members |> List.map _.RepoId |> List.distinct |> List.length, Is.EqualTo(2))
         Assert.That(members |> List.map _.RepoName |> List.distinct |> List.length, Is.EqualTo(1))
