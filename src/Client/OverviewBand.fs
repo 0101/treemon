@@ -31,7 +31,8 @@ open OverviewData
 /// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
 /// filter can still see them (spec decision (f)). Recombine here — the single aggregate call site —
 /// so archived worktrees keep contributing to every non-Done bucket instead of silently vanishing.
-let private toRepoWorktrees (repo: RepoModel) : RepoWorktrees =
+/// Public so App.fs's DataLoaded stale-selection check reuses the exact same recombine (decision (f)).
+let toRepoWorktrees (repo: RepoModel) : RepoWorktrees =
     { RepoId = repo.RepoId
       RootFolderName = repo.Name
       Worktrees = repo.Worktrees @ repo.ArchivedWorktrees

@@ -10,8 +10,17 @@ module AppTypes
 open Shared
 open Shared.EventUtils
 open Navigation
+open OverviewData
 open Elmish
 open Fable.Remoting.Client
+
+/// Which Overview-band group the drill-down panel is currently showing. Single-select across both
+/// sections (at most one is set): an agent group (Active agents section) or a task bucket (Tasks
+/// section). Ephemeral session state — never persisted (unlike OverviewPanelOpen).
+[<RequireQualifiedAccess>]
+type OverviewSelection =
+    | Agents of AgentGroupKind
+    | Tasks of TaskBucketKind
 
 type Model =
     { Repos: RepoModel list
@@ -35,7 +44,8 @@ type Model =
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState
-      OverviewPanelOpen: bool }
+      OverviewPanelOpen: bool
+      SelectedOverviewGroup: OverviewSelection option }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -72,6 +82,12 @@ type Msg =
     | UserActivity of now: float
     | ToggleCanvasPane
     | ToggleOverviewPanel
+    // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
+    // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
+    // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT
+    // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
+    | SelectOverviewGroup of OverviewSelection
+    | SelectOverviewWorktree of scopedKey: string
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string

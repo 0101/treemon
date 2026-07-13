@@ -79,7 +79,8 @@ let private defaultModel : Model =
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
-      OverviewPanelOpen = false }
+      OverviewPanelOpen = false
+      SelectedOverviewGroup = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a

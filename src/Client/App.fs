@@ -26,6 +26,15 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
 
+// Whether an Overview drill-down selection still maps to a present (non-empty) group in the given
+// repos' fresh roll-up. Empty groups are dropped by aggregate, so a selection is stale once its
+// group's count hits 0 — DataLoaded uses this to clear the selection and close the panel.
+let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
+    let overview = repos |> List.map OverviewBand.toRepoWorktrees |> OverviewData.aggregate
+    match selection with
+    | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
+    | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
+
 let init () =
     { Repos = []
       IsLoading = true
@@ -48,7 +57,8 @@ let init () =
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
-      OverviewPanelOpen = false },
+      OverviewPanelOpen = false
+      SelectedOverviewGroup = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -185,6 +195,13 @@ let update msg model =
                 Canvas.CanvasEvents = canvasEvents
                 Canvas.CanvasSendState = canvasSendState }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
+            |> (fun m ->
+                // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
+                // the selected group (its count fell to 0), clear it so the panel closes.
+                match m.SelectedOverviewGroup with
+                | Some selection when not (overviewSelectionPresent selection m.Repos) ->
+                    { m with SelectedOverviewGroup = None }
+                | _ -> m)
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
@@ -440,6 +457,9 @@ let update msg model =
             let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
             m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
         match key with
+        | "Escape" when Option.isSome model.SelectedOverviewGroup ->
+            // Esc closes the drill-down breakdown panel when a group is selected.
+            { model with SelectedOverviewGroup = None }, Cmd.none
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
             let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
@@ -467,8 +487,30 @@ let update msg model =
 
     | ToggleOverviewPanel ->
         let newState = not model.OverviewPanelOpen
-        { model with OverviewPanelOpen = newState },
+        // Closing the band drops any drill-down selection so it can't linger while hidden.
+        let selection = if newState then model.SelectedOverviewGroup else None
+        { model with OverviewPanelOpen = newState; SelectedOverviewGroup = selection },
         Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
+
+    | SelectOverviewGroup selection ->
+        // Toggle: re-selecting the already-selected group clears it (closes the panel).
+        let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
+        { model with SelectedOverviewGroup = next }, Cmd.none
+
+    | SelectOverviewWorktree scopedKey ->
+        // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
+        // scroll it into view — WITHOUT opening the Canvas pane (the deliberate difference from
+        // FocusOverviewCard). Persist collapsed-repo state only when an expand actually changed it.
+        let repos, expanded = expandRepoOwning scopedKey model.Repos
+        let focus = Some (Card scopedKey)
+        let retargetedModel, retargetCmd =
+            { model with Repos = repos } |> CanvasUpdate.applyFocus true focus
+        retargetedModel,
+        Cmd.batch [
+            retargetCmd
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView Normal focus)
+            if expanded then saveCollapsedReposCmd repos
+        ]
 
     | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
 
