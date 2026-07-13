@@ -17,7 +17,7 @@ Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files 
 Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a typographic base into every doc** — so most docs need little or no CSS of their own. Out of the box you get:
 
 - Dark theme, system font, a readable **15px / line-height 1.55** body, and a serif heading scale (`h1`…`h4`).
-- A **single, capped content column** (`--page-max`, ~800px) in which text and figures share one width — so prose, diagrams, wide tables, and inputs line up at one column instead of stranding text at a narrow measure. Need full width for a dashboard-style doc? Override with `body{max-width:none}` (or widen it with `body{--page-max:1200px}`).
+- A **single ~800px reading column** (`--page-max`) so text and figures share one width — no effort needed for plain docs. Building a dashboard, a wide table, or a custom UI? Widen it — see **Page width** below.
 - Quiet tables (header underline + row separators, no heavy gridlines), styled `code`/`pre`, links, scrollbars, and themed form controls (`button`, `textarea`, `input`, `select`).
 - Design tokens as CSS variables — reuse these instead of inventing colors:
   `--bg-deep` `--bg-surface` `--bg-elevated` `--border` `--border-bright`
@@ -25,6 +25,17 @@ Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a ty
   `--status-wip` `--status-blocked` `--status-closed`
 
 Your own rules always win (the base is zero-specificity), so override anything freely — but you rarely need to redeclare `body`, headings, `code`, tables, or buttons.
+
+### Page width — a reading column by default, full width when you need it
+
+Every doc is capped at a **~800px centered reading column** (`--page-max`). That's the right default for **explanatory docs** — status write-ups, notes, plans, forms — where text and figures should line up at one comfortable width. For those you don't have to think about width at all.
+
+But when the doc is really a **dashboard, a wide or dense table, or a custom UI / side-by-side layout**, ~800px is too cramped. The cap is zero-specificity, so **one rule in your own `<style>` opts out** — no `!important` needed:
+
+- `body { max-width: none; }` — fill the whole pane (best for dashboards, wide tables, multi-column layouts).
+- `body { --page-max: 1200px; }` — keep a centered column, just a wider one.
+
+Decide up front which kind of doc you're building: a **reading column** (the default — do nothing) or a **full-width layout** (add one of the rules above).
 
 ### Aim for whitespace and type, not boxes
 
