@@ -72,6 +72,16 @@ type OverviewDataTests() =
           Provider = None
           BaseBranch = "main" }
 
+    /// A repo with a stable RepoId decoupled from its display RootFolderName — for the drill-down's
+    /// repo-identity tests, where two DISTINCT repos can legitimately share a folder name.
+    let idNamedRepo id name (wts: WorktreeStatus list) : RepoWorktrees =
+        { RepoId = RepoId id
+          RootFolderName = name
+          Worktrees = wts
+          IsReady = true
+          Provider = None
+          BaseBranch = "main" }
+
     /// Give a worktree a distinct path (the focus/ScopedKey) and branch.
     let at path branch (wt: WorktreeStatus) = { wt with Path = WorktreePath path; Branch = branch }
 
@@ -557,3 +567,22 @@ type OverviewDataTests() =
             Assert.That(b.Count, Is.EqualTo(b.Members |> List.sumBy _.Contribution))
             Assert.That(b.Members |> List.forall (fun m -> m.Contribution > 0))
             Assert.That(b.Members |> List.forall (fun m -> m.RepoName <> ""))
+
+    [<Test>]
+    member _.``Members carry a stable RepoId so two distinct same-named repos stay separable``() =
+        // Two DISTINCT repos (different RepoId) that happen to share a folder name ("dup"). The
+        // drill-down groups/counts/keys repo blocks on RepoId, so these must NOT collapse: each
+        // worktree keeps its own repo identity even though the display label is identical.
+        let result =
+            aggregate
+                [ idNamedRepo "repo-a" "dup" [ at "/a/1" "a1" (workingWt (Some "investigate")) ]
+                  idNamedRepo "repo-b" "dup" [ at "/b/1" "b1" (workingWt (Some "investigate")) ] ]
+        let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Investigating) result
+        // Both worktrees are members, in repo/worktree order, each tagged with its own RepoId but the
+        // shared display name.
+        Assert.That(
+            members |> List.map (fun m -> m.RepoId, m.RepoName, m.ScopedKey),
+            Is.EqualTo([ ("repo-a", "dup", "/a/1"); ("repo-b", "dup", "/b/1") ]))
+        // The two distinct repos stay distinct by identity (2 RepoIds) though they share one name.
+        Assert.That(members |> List.map _.RepoId |> List.distinct |> List.length, Is.EqualTo(2))
+        Assert.That(members |> List.map _.RepoName |> List.distinct |> List.length, Is.EqualTo(1))

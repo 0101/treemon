@@ -38,12 +38,15 @@ type TaskBucketKind =
 
 /// One worktree's membership in a group, carrying everything the drill-down panel needs: the focus
 /// key (WorktreePath.value — the same key arrow-nav focuses on), the branch label, the owning repo's
-/// RootFolderName (preserved before the aggregate flattens repos away), and Contribution — how much
-/// this worktree adds to the group's Count (agent group: always 1; task bucket: this worktree's task
-/// count in the bucket). A worktree is a group member iff its Contribution > 0.
+/// stable RepoId (the identity the drill-down groups/counts/keys repo blocks on — two distinct repos
+/// that share a folder name stay distinct), the owning repo's RootFolderName (RepoName — display
+/// label only, preserved before the aggregate flattens repos away), and Contribution — how much this
+/// worktree adds to the group's Count (agent group: always 1; task bucket: this worktree's task count
+/// in the bucket). A worktree is a group member iff its Contribution > 0.
 type GroupMember =
     { ScopedKey: string
       Branch: string
+      RepoId: string
       RepoName: string
       Contribution: int }
 
@@ -107,15 +110,18 @@ let private activityOf (wt: WorktreeStatus) =
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
-    // Tag each worktree with its owning repo's RootFolderName BEFORE flattening, so every GroupMember
-    // can carry its RepoName. Repo order and within-repo worktree order are preserved, so member
-    // lists come back in the band's repo/worktree order.
+    // Tag each worktree with its owning repo's stable RepoId and display RootFolderName BEFORE
+    // flattening, so every GroupMember can carry both its repo identity (RepoId) and its display
+    // label (RepoName). Repo order and within-repo worktree order are preserved, so member lists
+    // come back in the band's repo/worktree order.
     let taggedWorktrees =
-        repos |> List.collect (fun r -> r.Worktrees |> List.map (fun w -> r.RootFolderName, w))
+        repos
+        |> List.collect (fun r -> r.Worktrees |> List.map (fun w -> RepoId.value r.RepoId, r.RootFolderName, w))
 
-    let memberOf repoName (w: WorktreeStatus) contribution =
+    let memberOf repoId repoName (w: WorktreeStatus) contribution =
         { ScopedKey = WorktreePath.value w.Path
           Branch = w.Branch
+          RepoId = repoId
           RepoName = repoName
           Contribution = contribution }
 
@@ -141,9 +147,9 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     // Members of one task bucket, in repo/worktree order: every worktree whose contribution is > 0.
     let taskMembersFor kind =
         taggedWorktrees
-        |> List.choose (fun (repoName, w) ->
+        |> List.choose (fun (repoId, repoName, w) ->
             match contributionFor kind w with
-            | c when c > 0 -> Some(memberOf repoName w c)
+            | c when c > 0 -> Some(memberOf repoId repoName w c)
             | _ -> None)
 
     // Build members once per bucket, in canonical order; the count is Σ contribution over them.
@@ -169,13 +175,13 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     // Members.Length. Empty groups omitted; Waiting sorts last.
     let agentMembersFor kind =
         taggedWorktrees
-        |> List.choose (fun (repoName, w) ->
+        |> List.choose (fun (repoId, repoName, w) ->
             let isMember =
                 match kind with
                 | AgentGroupKind.Activity activity ->
                     w.CodingTool = CodingToolStatus.Working && activityOf w = activity
                 | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
-            if isMember then Some(memberOf repoName w 1) else None)
+            if isMember then Some(memberOf repoId repoName w 1) else None)
 
     let agents =
         agentGroupOrder

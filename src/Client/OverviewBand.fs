@@ -152,16 +152,18 @@ let private taskColumn (selection: OverviewSelection option) (onSelectGroup: Ove
 /// "1 agent" / "3 agents": count + word, pluralized, for the muted breakdown summary line.
 let private plural (n: int) (word: string) = $"""{n} {word}{if n = 1 then "" else "s"}"""
 
-/// Group a group's members by owning repo, PRESERVING the aggregate's repo/worktree order (members
-/// from one repo arrive contiguous, so folding keeps first-appearance repo order). Each entry is the
-/// repo name and its members in order.
-let private membersByRepo (members: GroupMember list) : (string * GroupMember list) list =
+/// Group a group's members by owning repo IDENTITY (RepoId), PRESERVING the aggregate's repo/worktree
+/// order (members from one repo arrive contiguous, so folding keeps first-appearance repo order).
+/// Grouping on RepoId — not the display name — keeps two distinct repos that happen to share a folder
+/// name in separate blocks (matches how the rest of the client keys repo identity). Each entry is the
+/// repo's stable id (for React keys), its display name, and its members in order.
+let private membersByRepo (members: GroupMember list) : (string * string * GroupMember list) list =
     members
     |> List.fold (fun acc m ->
         match acc with
-        | (repo, ms) :: rest when repo = m.RepoName -> (repo, m :: ms) :: rest
-        | _ -> (m.RepoName, [ m ]) :: acc) []
-    |> List.map (fun (repo, ms) -> repo, List.rev ms)
+        | (repoId, name, ms) :: rest when repoId = m.RepoId -> (repoId, name, m :: ms) :: rest
+        | _ -> (m.RepoId, m.RepoName, [ m ]) :: acc) []
+    |> List.map (fun (repoId, name, ms) -> repoId, name, List.rev ms)
     |> List.rev
 
 /// The shared black breakdown-panel shell: an accent-tinted title, a muted summary, and the ✕ close
@@ -205,12 +207,12 @@ let private agentBreakdown
     let accent = agentClass group.Kind
     let repoBlocks =
         membersByRepo group.Members
-        |> List.map (fun (repo, members) ->
+        |> List.map (fun (repoId, repoName, members) ->
             Html.div
                 [ prop.className "overview-bd-repo"
-                  prop.key repo
+                  prop.key repoId
                   prop.children
-                      [ repoNameLabel repo
+                      [ repoNameLabel repoName
                         Html.div
                             [ prop.className "overview-chips"
                               prop.children (
@@ -224,7 +226,7 @@ let private agentBreakdown
                                                 [ Html.span [ prop.className "overview-chip-dot" ]
                                                   Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ] ] ])) ] ] ])
 
-    let repoCount = group.Members |> List.map _.RepoName |> List.distinct |> List.length
+    let repoCount = group.Members |> List.map _.RepoId |> List.distinct |> List.length
     let agentsPart = plural group.Count "agent"
     let reposPart = plural repoCount "repo"
     let sub = $"{agentsPart} · {reposPart}"
@@ -243,12 +245,12 @@ let private taskBreakdown
     let accent = taskClass bucket.Kind
     let repoBlocks =
         membersByRepo bucket.Members
-        |> List.map (fun (repo, members) ->
+        |> List.map (fun (repoId, repoName, members) ->
             Html.div
                 [ prop.className "overview-bd-repo"
-                  prop.key repo
+                  prop.key repoId
                   prop.children (
-                      repoNameLabel repo
+                      repoNameLabel repoName
                       :: (members
                           |> List.map (fun m ->
                               let fill = float m.Contribution / float scale
