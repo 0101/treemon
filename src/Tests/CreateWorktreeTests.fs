@@ -34,7 +34,8 @@ let private defaultModel : Model =
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty }
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
@@ -384,6 +385,7 @@ type SubmitCreateWorktreeRequestMappingTests() =
           reportActivity = fun _ -> failwith "unused"
           saveCollapsedRepos = fun _ -> failwith "unused"
           saveCanvasPaneOpen = fun _ -> failwith "unused"
+          saveOverviewPanelOpen = fun _ -> failwith "unused"
           saveCanvasPosition = fun _ -> failwith "unused"
           saveCanvasSize = fun _ -> failwith "unused"
           resumeSession = fun _ -> failwith "unused"

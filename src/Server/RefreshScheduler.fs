@@ -12,6 +12,7 @@ type PerRepoState =
       KnownPaths: Set<string>
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
+      PlanningData: Map<string, BeadsPlanning>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
       CanvasData: Map<string, CanvasDoc list>
@@ -26,6 +27,7 @@ module PerRepoState =
           KnownPaths = Set.empty
           GitData = Map.empty
           BeadsData = Map.empty
+          PlanningData = Map.empty
           CodingToolData = Map.empty
           PrData = Map.empty
           CanvasData = Map.empty
@@ -56,7 +58,7 @@ module DashboardState =
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
-    | UpdateBeads of repoId: RepoId * path: string * BeadsSummary
+    | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
     | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
     | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
@@ -97,6 +99,7 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         WorktreeList = repo.WorktreeList |> List.filter (fun wt -> wt.Path <> path)
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
+        PlanningData = repo.PlanningData |> Map.remove path
         CodingToolData = repo.CodingToolData |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
 
@@ -126,10 +129,14 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         else
             state
 
-    | UpdateBeads(repoId, path, beads) ->
+    | UpdateBeads(repoId, path, beads, planning) ->
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
-            updateRepo repoId { repo with BeadsData = repo.BeadsData |> Map.add path beads } state
+            updateRepo repoId
+                { repo with
+                    BeadsData = repo.BeadsData |> Map.add path beads
+                    PlanningData = repo.PlanningData |> Map.add path planning }
+                state
         else
             state
 
@@ -405,8 +412,8 @@ let private executeTask
             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
 
         | RefreshBeads(repoId, path) ->
-            let! beads = BeadsStatus.getBeadsSummary path
-            agent.Post(UpdateBeads(repoId, path, beads))
+            let! (beads, planning) = BeadsStatus.getBeadsData path
+            agent.Post(UpdateBeads(repoId, path, beads, planning))
 
             BeadspaceProvisioner.provisionDashboard path beads
             |> Option.iter (Log.log "BeadspaceProvisioner")

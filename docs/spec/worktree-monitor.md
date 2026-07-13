@@ -80,7 +80,19 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 #### Copilot CLI Status Detection
 
-Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.message`, `assistant.turn_start`, `assistant.turn_end`, `assistant.message`. Status is determined by scanning backward from the end of the file to the first recognized event.
+Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.message`, `assistant.turn_start`, `assistant.turn_end`, `assistant.message`, `skill.invoked`, `subagent.started`, `subagent.completed`. Status, the current skill, and the last user/assistant messages are all derived from a single **forward fold** of the file (oldest→newest, `foldSessionEvents` in `CopilotDetector.fs`) through an **append-aware per-session cache**, so a `skill.invoked` or `user.message` megabytes back is still seen regardless of session size.
+
+**Why forward + incremental.** A `/skill` invocation is written once, at session start — a `skill.invoked` event plus a `user.message` with `source: "skill-<name>"` and `<skill-context>` content; there is no later plain `/skill` line. Sub-agents (Task tool) emit only `subagent.*` + tool/assistant events, never `user.message`. On real sessions the skill invocation and the sole `user.message` sit 2–12 MB back while sessions run 2–207 MB, so a fixed ~1 MB backward tail scan saw neither and reported a generic `Working` with no user line. Folding the whole stream forward fixes this; the incremental cache keeps it O(new bytes) per refresh instead of re-reading the file each cycle.
+
+**Fold state** (`SessionScanCache`): `CurrentSkill`, `LastUserMessage` (genuine prompts only), `LastAssistantMessage`, `RawStatus`, `LastAssistantWasAskUser`, `SubagentDepth`. Key rules:
+
+- **Current skill persists** from its `skill.invoked` until a genuine new top-level `user.message` supersedes it. An `ask_user` reply mid-skill resumes the same skill; a `<skill-context>` injection is transparent (not a boundary).
+- **`<skill-context>` injections are never recorded** as `LastUserMessage` — but, like any `user.message`, they still set `RawStatus = Working`. `skill.invoked` alone does not change `RawStatus` (the following `assistant.message` does).
+- **Sub-agent depth gating:** `subagent.started`/`subagent.completed` bracket a sub-agent's events; a `skill.invoked` inside a bracket is the sub-agent's and is ignored (gated on `SubagentDepth = 0`) so the top-level skill the user invoked (e.g. `bd-execute`) is what surfaces. A sub-agent's `skill.invoked` bubbles into the parent file with no depth marker of its own, so the enclosing bracket is the only signal — see the depth-gating comment on `foldForwardEvent`.
+
+**Incremental cache.** A `ConcurrentDictionary<eventsPath, SessionScanEntry>` (`{ State; Length }`) holds the fold state plus bytes consumed. Each refresh reads only bytes `[Length, fileLength)` (`FileUtils.readByteRangeLines`, a chunked int64 read), folds the complete newline-terminated lines onto the cached state, and advances `Length` past the last `\n` (a partial trailing line is left for next time). A shrunken file (rotation) or a cache miss triggers a full rescan; `getRefreshData` prunes entries whose file is missing or older than the 2 h Idle cutoff, throttled to once per 5 minutes. `CodingToolStatus` assembles a worktree's Copilot surface from **one** `getRefreshData` call (`Status`, `Mtime`, `CurrentSkill`, `LastUserMessage`, `LastMessage`) instead of four separate ~1 MB scans. A path-based `getStatusFromEventsFile` (full `File.ReadLines` forward scan) is retained for the status unit tests.
+
+**Card display.** When `CurrentSkill` is `Some`, the card surfaces a `▶ <skill>` label in place of the user line; otherwise it shows `LastUserMessage` (never a `<skill-context>` injection). The choice is a pure `cardUserLine` decision in `CardViews.fs`, unit-testable without rendering React.
 
 **Temporal adjustments** (applied after raw status is determined from events):
 

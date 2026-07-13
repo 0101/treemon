@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="Navigation.fs" />
+    <Compile Include="OverviewData.fs" />
     <Compile Include="CanvasTypes.fs" />
     <Compile Include="Components.fs" />
     <Compile Include="ModalOverlay.fs" />
@@ -25,6 +26,7 @@
     <Compile Include="CanvasUpdate.fs" />
     <Compile Include="ActivityUpdate.fs" />
     <Compile Include="CanvasView.fs" />
+    <Compile Include="OverviewBand.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>
 

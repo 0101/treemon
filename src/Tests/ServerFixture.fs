@@ -3,7 +3,6 @@ module Tests.ServerFixture
 open System
 open System.Diagnostics
 open System.IO
-open System.Net.Http
 open System.Threading.Tasks
 open NUnit.Framework
 
@@ -59,37 +58,6 @@ let getMemoryStats () =
       readMemoryStats "Vite" viteProcess.Value ]
     |> List.choose id
 
-let private tryGet (client: HttpClient) (url: string) =
-    async {
-        try
-            let! response = client.GetAsync(url) |> Async.AwaitTask
-            return int response.StatusCode < 500
-        with
-        | _ -> return false
-    }
-
-let rec private pollUntilReady (client: HttpClient) (url: string) (deadline: DateTime) =
-    async {
-        if DateTime.UtcNow > deadline then
-            failwithf "Timed out waiting for %s" url
-        else
-            let! ok = tryGet client url
-
-            if not ok then
-                do! Async.Sleep(500)
-                return! pollUntilReady client url deadline
-    }
-
-let private waitForUrl (url: string) (timeoutMs: int) : Task =
-    let work =
-        async {
-            use client = new HttpClient()
-            let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
-            do! pollUntilReady client url deadline
-        }
-
-    work |> Async.StartAsTask :> Task
-
 let private startProcess fileName args workingDir envVars redirectOutput =
     TestUtils.startProcess fileName args workingDir envVars redirectOutput
 
@@ -98,15 +66,10 @@ let startServer () =
         let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
 
         let proc =
-            startProcess
-                "dotnet"
-                $"""run --project "{serverProjectPath}" -- {rootArgs} --port {apiPort} --canvas-port {canvasPort} --test-fixtures "{fixturesPath}" """
-                repoRoot
-                []
-                false
+            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath
 
         serverProcess.Value <- Some proc
-        do! waitForUrl serverUrl 30000
+        do! TestUtils.waitForUrl serverUrl 30000
     }
 
 let compileFable () =
@@ -134,18 +97,10 @@ let compileFable () =
 let startVite () =
     task {
         let proc =
-            startProcess
-                "npx"
-                "vite --host"
-                repoRoot
-                [ "VITE_PORT", string vitePort
-                  "API_PORT", string apiPort
-                  "CANVAS_PORT", string canvasPort
-                  "NODE_OPTIONS", "--max-old-space-size=512" ]
-                false
+            TestUtils.startViteProcess repoRoot vitePort apiPort canvasPort
 
         viteProcess.Value <- Some proc
-        do! waitForUrl viteUrl 15000
+        do! TestUtils.waitForUrl viteUrl 15000
     }
 
 let private killProc procOpt =

@@ -245,8 +245,10 @@ type NavigationArchiveTests() =
           LastCommitMessage = "test"
           LastCommitTime = DateTimeOffset.UtcNow
           Beads = BeadsSummary.zero
+          Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          CurrentSkill = None
           LastUserMessage = None
           Pr = NoPr
           MainBehindCount = 0
@@ -352,6 +354,7 @@ type ArchiveE2ETests() =
             "Path":{{"WorktreePath":"Q:/test/{branch}"}},"Branch":"{branch}",
             "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
             "Beads":{{"Open":0,"InProgress":0,"Blocked":0,"Closed":0}},
+            "Planning":{{"Planned":0,"Queued":0,"Loose":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
             "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[]
@@ -359,7 +362,7 @@ type ArchiveE2ETests() =
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[],"CanvasPaneOpen":false,"CanvasPosition":"Right","CanvasSize":"Ratio1To1"}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[],"CanvasPaneOpen":false,"OverviewPanelOpen":false,"CanvasPosition":"Right","CanvasSize":"Ratio1To1"}}"""
 
     let emptySyncStatus = "{}"
 
