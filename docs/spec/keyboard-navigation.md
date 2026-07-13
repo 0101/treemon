@@ -67,7 +67,7 @@ the user must click out of the iframe first.
 
 ## Key Files
 
-- `src/Client/App.fs` — `FocusTarget` DU, `navigateSpatial`, `keyBinding`, `KeyPressed` handler (incl. Escape reclaim), `focusReclaim` global subscription, view focus rendering
-- `src/Client/Navigation.fs` — `reclaimFocusTarget` (focus target to restore on Escape)
+- `src/Client/App.fs` — `keyBinding`, `KeyPressed` handler (incl. Escape reclaim), `focusReclaim` global subscription, view focus rendering
+- `src/Client/Navigation.fs` — `FocusTarget` DU, `navigateSpatial`, `reclaimFocusTarget` (focus target to restore on Escape)
 - `src/Client/index.html` — `.focused` CSS class (outline: 2px solid #4a9eff), `.nav-hint` footer hint
 

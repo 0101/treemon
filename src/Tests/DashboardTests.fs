@@ -3903,6 +3903,58 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Escape from outside the dashboard reclaims focus and restores arrow nav``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! _ = this.Page.EvaluateAsync("() => document.querySelector('.dashboard').blur()")
+            let! left =
+                this.Page.EvaluateAsync<bool>("() => document.activeElement.closest('.dashboard') === null")
+            Assert.That(left, Is.True, "Focus should have left the dashboard subtree")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            let! reclaimed =
+                this.Page.EvaluateAsync<bool>("() => document.activeElement === document.querySelector('.dashboard')")
+            Assert.That(reclaimed, Is.True, "Escape from outside the dashboard should reclaim focus to it")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focusedNav = this.Page.Locator(".focused")
+            do! focusedNav.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! navClass = focusedNav.GetAttributeAsync("class")
+            Assert.That(navClass, Does.Contain("wt-card"),
+                "Arrow navigation should work after Escape reclaim without a manual refocus")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Escape does not reclaim focus while an editable field has focus``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { const i = document.createElement('input'); i.id = 'e2e-editable-probe'; document.body.appendChild(i); i.focus(); }")
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            let! keptFocus =
+                this.Page.EvaluateAsync<bool>("() => document.activeElement.id === 'e2e-editable-probe'")
+            let! _ = this.Page.EvaluateAsync("() => document.getElementById('e2e-editable-probe').remove()")
+            Assert.That(keptFocus, Is.True,
+                "The global Escape reclaim must skip editable fields and leave their focus intact")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Cancel button closes modal and restores focus for arrow key nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
