@@ -1197,3 +1197,68 @@ type LoadLastViewedHashesTests() =
             "the server value is kept (not overwritten by the current hash), so the update still registers")
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
             "a doc updated since the server last saw it must remain unviewed")
+
+
+// ── Switch-back morph gating (StaleHiddenDocs) ───────────────────────
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SelectCanvasDocMorphGatingTests() =
+
+    // Run the SelectCanvasDoc Cmd and collect the messages it dispatches. Its Cmd is a batch of
+    // Cmd.ofMsg (MarkDocViewed + optional MorphActiveDoc), so forcing the effects neither builds the
+    // Remoting proxy nor touches Fable.Core.JS.
+    let dispatchedMsgs cmd : Msg list =
+        let captured = ResizeArray<Msg>()
+        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
+        List.ofSeq captured
+
+    let model docs =
+        { defaultModel with
+            Repos = [ makeRepo "r" [ makeWorktree "r" "feat" docs ] ]
+            FocusedElement = Some (Card "r/feat") }
+
+    [<Test>]
+    member _.``re-selecting a visited but unchanged doc does not morph``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+                Canvas.StaleHiddenDocs = Set.empty }
+        let updated, cmd = update (SelectCanvasDoc ("r/feat", "a.html")) m
+        Assert.That(dispatchedMsgs cmd |> List.contains MorphActiveDoc, Is.False,
+            "an unchanged, already-visited doc must not morph on switch-back (that would wipe in-progress input)")
+        Assert.That(updated.Canvas.StaleHiddenDocs, Is.Empty)
+
+    [<Test>]
+    member _.``re-selecting a visited doc that changed while hidden morphs and clears its stale mark``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+                Canvas.StaleHiddenDocs = Set.ofList [ "r/feat", "a.html" ] }
+        let updated, cmd = update (SelectCanvasDoc ("r/feat", "a.html")) m
+        Assert.That(dispatchedMsgs cmd |> List.contains MorphActiveDoc, Is.True,
+            "a doc that changed on disk while hidden must be morphed on its next reveal to catch up")
+        Assert.That(updated.Canvas.StaleHiddenDocs |> Set.contains ("r/feat", "a.html"), Is.False,
+            "morphing brings the iframe back in sync with disk, so its stale mark is cleared")
+
+    [<Test>]
+    member _.``selecting a not-yet-visited doc does not morph``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
+                // Even if erroneously flagged stale, a fresh mount loads current content — no morph.
+                Canvas.StaleHiddenDocs = Set.ofList [ "r/feat", "b.html" ] }
+        let _, cmd = update (SelectCanvasDoc ("r/feat", "b.html")) m
+        Assert.That(dispatchedMsgs cmd |> List.contains MorphActiveDoc, Is.False,
+            "a doc opened for the first time mounts fresh with current content, so it never morphs")
+
+    [<Test>]
+    member _.``a stale SystemView is never morphed on switch-back``() =
+        let m =
+            { model [ makeSystemDoc "beads.html" "h1"; makeDoc "b.html" "h2" ] with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "beads.html"; "b.html" ] ]
+                Canvas.StaleHiddenDocs = Set.ofList [ "r/feat", "beads.html" ] }
+        let _, cmd = update (SelectCanvasDoc ("r/feat", "beads.html")) m
+        Assert.That(dispatchedMsgs cmd |> List.contains MorphActiveDoc, Is.False,
+            "a SystemView is served without a morph controller, so it must never receive a morph signal")

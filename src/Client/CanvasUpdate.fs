@@ -65,19 +65,28 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         |> Map.tryFind scopedKey
         |> Option.defaultValue []
         |> List.contains filename
+    // Morph on switch-back ONLY when the doc actually changed on disk while it was hidden (it is
+    // recorded in StaleHiddenDocs). An ordinary tab switch with no on-disk change morphs nothing,
+    // so the mounted iframe's live DOM — including in-progress form input — is left untouched. A
+    // SystemView self-refreshes and is served without a morph controller, so it never qualifies.
+    let shouldMorph =
+        wasAlreadyVisited
+        && Set.contains (scopedKey, filename) model.Canvas.StaleHiddenDocs
+        && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc
     { model with
         // Doc-scoped error: a tab switch must never carry a stale error from the doc we're
         // leaving into the one we're showing, so clear it here (it reappears only if the new
         // doc throws again).
         Canvas.DocError = None
         Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
+        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs
+        // Morphing brings the iframe back in sync with disk, so drop its stale mark.
+        Canvas.StaleHiddenDocs =
+            if shouldMorph then model.Canvas.StaleHiddenDocs |> Set.remove (scopedKey, filename)
+            else model.Canvas.StaleHiddenDocs },
     Cmd.batch [
         Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
-        // When switching to a previously hidden iframe, morph it in case content changed while
-        // hidden — but only for AgentDocs. A SystemView (beads dashboard) self-refreshes and is
-        // served without a morph controller, so a morph signal is meaningless for it.
-        if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
+        if shouldMorph then Cmd.ofMsg MorphActiveDoc
     ]
 
 /// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus genuinely
@@ -359,7 +368,13 @@ let morphActiveDoc (model: Model) =
             Fable.Core.JsInterop.emitJsExpr (iframe, CanvasPane.CanvasOrigin) "$0.contentWindow.postMessage({action:'content-updated'},$1)"))
 
 let morphComplete (model: Model) =
-    model, markVisibleDocCmd model
+    // The active visible doc just morphed, so it is back in sync with disk — drop any stale mark it
+    // carried (e.g. it changed while hidden, then was morphed in place once it became visible).
+    let staleHiddenDocs =
+        match activeVisibleDoc model with
+        | Some key -> model.Canvas.StaleHiddenDocs |> Set.remove key
+        | None -> model.Canvas.StaleHiddenDocs
+    { model with Canvas.StaleHiddenDocs = staleHiddenDocs }, markVisibleDocCmd model
 
 let messageListener (dispatch: Dispatch<Msg>) =
     CanvasPane.messageListener

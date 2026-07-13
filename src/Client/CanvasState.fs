@@ -15,6 +15,13 @@ type CanvasState =
       CanvasSize: CanvasSize
       ActiveCanvasDoc: Map<string, string>
       VisitedCanvasDocs: Map<string, string list>
+      // Mounted-but-hidden AgentDocs whose on-disk content changed while they were hidden, keyed by
+      // (scopedKey, filename). A hidden iframe is not morphed on change (only the active visible doc
+      // is — see App.fs DataLoaded), so it falls out of sync silently. This records the docs that
+      // need a catch-up morph on their next reveal. `selectCanvasDoc` morphs a doc on switch-back
+      // ONLY when it is in this set, then clears it — so an ordinary tab switch (nothing changed on
+      // disk) morphs nothing and the mounted iframe's live form input survives.
+      StaleHiddenDocs: Set<string * string>
       LastViewedHashes: Map<string, Map<string, string>>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
@@ -44,6 +51,7 @@ let empty : CanvasState =
       CanvasSize = CanvasSize.Ratio1To1
       ActiveCanvasDoc = Map.empty
       VisitedCanvasDocs = Map.empty
+      StaleHiddenDocs = Set.empty
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty

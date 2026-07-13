@@ -188,22 +188,18 @@ type CanvasPaneTests() =
     // ── Step 5: In-place morph on content change (stable src, no src-swap) ──
 
     [<Test>]
-    member this.``Canvas content update morphs the iframe in place without swapping its src``() =
+    member this.``Re-selecting an unchanged canvas doc tab does not morph it (preserves in-progress input)``() =
         task {
-            // The product reloads a changed canvas doc IN PLACE: it stabilises the iframe src (no
-            // ?v=<hash> cache-buster) and posts {action:'content-updated'} to the iframe, which
-            // idiomorph-morphs its body — the src never changes (CanvasPane.iframeSrc, App.fs
-            // MorphActiveDoc, IdiomorphScript.morphController; docs/spec/canvas-pane.md).
+            // Switching back to an already-visited AgentDoc tab must NOT morph it when its on-disk
+            // content is unchanged. A morph re-fetches the on-disk HTML and idiomorph resyncs form
+            // fields to that (empty) markup, wiping in-progress input — so the switch-back morph is
+            // gated on an actual on-disk change (CanvasUpdate.selectCanvasDoc, CanvasState.StaleHiddenDocs;
+            // docs/spec/canvas-pane.md). In --test-fixtures mode ContentHash is static, so nothing is
+            // ever marked stale and re-selecting a tab must post NO {action:'content-updated'}.
+            // feature-multidoc exposes three AgentDocs (overview/details/metrics).
             //
-            // We drive the morph signal purely from the UI: re-selecting an already-visited AgentDoc
-            // tab dispatches MorphActiveDoc (App.fs SelectCanvasDoc, wasAlreadyVisited), which posts
-            // 'content-updated' to the active iframe. This needs no on-disk file and no server-side
-            // hash change — both impossible in --test-fixtures mode (synthetic worktree paths, static
-            // ContentHash). feature-multidoc exposes three AgentDocs (overview/details/metrics).
-            //
-            // NOTE (tm-canvas48-hmb): the previous version modified an on-disk file and expected the
-            // src to CHANGE. It always hit Assert.Inconclusive (the fixture file never exists) and,
-            // had the file existed, asserted the wrong behavior (the src stays stable on morph).
+            // The iframe src stays stable across the switch either way (no ?v=<hash> cache-buster) and
+            // the same iframe document persists — those invariants are still asserted below.
             do! focusCanvasCard this.Page FixtureMultiDocBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -255,14 +251,15 @@ type CanvasPaneTests() =
             let detailsFrame = detailsFrameOpt |> Option.defaultWith (fun () -> failwith "details iframe never reached the :5002 canvas origin")
             let! _ = detailsFrame.EvaluateAsync("() => { window.__contentUpdated = false; window.addEventListener('message', (e) => { if (e.data && e.data.action === 'content-updated') window.__contentUpdated = true; }); }")
 
-            // Re-select the already-visited details tab → App dispatches MorphActiveDoc → posts
-            // {action:'content-updated'} to the active iframe (the morph trigger we can drive from the UI).
+            // Re-select the already-visited, unchanged details tab. Because its content hasn't changed
+            // on disk it is not in StaleHiddenDocs, so App must NOT dispatch MorphActiveDoc — no
+            // {action:'content-updated'} should ever reach the iframe.
             do! (tab "details").ClickAsync()
 
             let! contentUpdated =
-                // Tail-recursive task poll (5s deadline, 100ms interval): probes the iframe flag until
-                // the morph signal is observed or the deadline passes, returning the last observed value.
-                let deadline = DateTime.UtcNow.AddSeconds(5.0)
+                // Tail-recursive task poll (1.5s window, 100ms interval): a negative check — give any
+                // (erroneous) morph signal time to arrive; it must stay false the whole window.
+                let deadline = DateTime.UtcNow.AddSeconds(1.5)
                 let rec poll () =
                     task {
                         let! got = detailsFrame.EvaluateAsync<bool>("() => window.__contentUpdated === true")
@@ -273,16 +270,16 @@ type CanvasPaneTests() =
                             return! poll ()
                     }
                 poll ()
-            Assert.That(contentUpdated, Is.True,
-                "Re-selecting the active AgentDoc tab must post {action:'content-updated'} to its iframe so it can morph in place")
+            Assert.That(contentUpdated, Is.False,
+                "Re-selecting an unchanged AgentDoc tab must NOT post {action:'content-updated'} — a gratuitous morph would wipe in-progress form input")
 
-            // The morph reloads content WITHOUT swapping the iframe: same document, same stable src.
+            // The switch keeps the same mounted iframe: same document, same stable src (no swap).
             let! newSrc = activeIframe.GetAttributeAsync("src")
             Assert.That(newSrc, Is.EqualTo(initialSrc),
-                "Iframe src must stay identical across a content update — the doc morphs in place, the src is never swapped")
+                "Iframe src must stay identical across a tab switch — the doc is never reloaded, the src is never swapped")
             let! sameFrameUrl = detailsFrame.EvaluateAsync<string>("() => location.href")
             Assert.That(sameFrameUrl, Does.Contain("details.html"),
-                "The same details iframe document must persist across the morph (not be replaced)")
+                "The same details iframe document must persist across the switch (not be replaced)")
         }
 
     // ── Step 8: PostMessage Dispatch ────────────────────────────────────
