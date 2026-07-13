@@ -300,18 +300,29 @@ let main args =
     // demo mode there is no agent (and the canvas doc server is never started — see above), so
     // these are unavailable there; bridge-status stays available and simply reports nothing
     // registered.
+    // register/attribute are state-changing POST endpoints reachable by the same cross-origin
+    // vector as the remoting surface (attribute's sessionId feeds a coding-agent launch), so they
+    // carry the same HttpSecurity.csrfGuard: a POST with a non-loopback Origin/Referer is rejected
+    // 403 while a MISSING one is allowed — the non-browser canvas-bridge extension (Node fetch)
+    // sends neither header, so it keeps registering/attributing. POST filters first, so the guard
+    // only ever evaluates the state-changing request it protects.
     let canvasAgentRoutes =
         match schedulerAgent with
         | Some agent ->
-            [ route "/api/canvas/register" >=> POST >=> CanvasDocServer.canvasRegisterHandler agent
-              route "/api/canvas/attribute" >=> POST >=> CanvasDocServer.canvasAttributeHandler agent ]
+            [ route "/api/canvas/register" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasRegisterHandler agent
+              route "/api/canvas/attribute" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 
     let combinedRouter =
         choose (
             canvasAgentRoutes
             @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
-                remotingApi ])
+                // CSRF hardening: the Fable.Remoting surface has no auth/CSRF token and does not
+                // enforce a content type, so a cross-origin page could POST to state-changing
+                // methods (e.g. createWorktree, which auto-launches a coding agent). The guard
+                // rejects state-changing requests with a non-loopback Origin/Referer; a missing one
+                // is allowed so the non-browser Cli and same-origin SPA keep working.
+                HttpSecurity.csrfGuard >=> remotingApi ])
 
     let app =
         application {

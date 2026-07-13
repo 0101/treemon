@@ -44,10 +44,15 @@ let private encodeCommand (command: string) =
     let bytes = System.Text.Encoding.Unicode.GetBytes(command)
     Convert.ToBase64String(bytes)
 
-let private buildScript (nativePath: string) (command: string option) =
+// internal (not private) so Tests can assert the single-quote path-escaping headlessly
+// (InternalsVisibleTo "Tests"); durable cover for the manual worktree-launch smoke step.
+let internal buildScript (nativePath: string) (command: string option) =
+    // Double embedded single quotes so a path containing ' cannot break out of the
+    // single-quoted PowerShell string literal (or inject). Central to every launch path.
+    let escapedPath = nativePath.Replace("'", "''")
     match command with
-    | Some cmd -> $"Set-Location '{nativePath}'; {cmd}"
-    | None -> $"Set-Location '{nativePath}'"
+    | Some cmd -> $"Set-Location '{escapedPath}'; {cmd}"
+    | None -> $"Set-Location '{escapedPath}'"
 
 let private waitForExitAsync (proc: Process) (timeoutMs: int) =
     async {

@@ -47,7 +47,8 @@ let init () =
       ActionCooldowns = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty },
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -176,6 +177,7 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                OverviewPanelOpen = if isFirstLoad then response.OverviewPanelOpen else model.OverviewPanelOpen
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
                 Canvas.CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
                 Canvas.CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
@@ -473,6 +475,11 @@ let update msg model =
 
     | ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model
 
+    | ToggleOverviewPanel ->
+        let newState = not model.OverviewPanelOpen
+        { model with OverviewPanelOpen = newState },
+        Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
+
     | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
 
     | SetCanvasSize size -> CanvasUpdate.setCanvasSize size model
@@ -723,6 +730,13 @@ let viewAppHeader model dispatch =
                                 prop.text "Compact"
                             ]
                             Html.button [
+                                prop.className (if model.OverviewPanelOpen then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleOverviewPanel)
+                                prop.title "Toggle overview panel"
+                                prop.text "Overview"
+                            ]
+                            Html.button [
                                 prop.className (if model.Canvas.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
                                 prop.onClick (fun _ -> dispatch ToggleCanvasPane)
@@ -743,6 +757,14 @@ let viewAppHeader model dispatch =
             ]
         ]
     ]
+
+let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
+    let target = e.target
+    if isNull (box target) then
+        false
+    else
+        let tag: string = target?tagName
+        tag = "INPUT" || tag = "TEXTAREA" || tag = "SELECT" || target?isContentEditable = true
 
 let view model dispatch =
     let canvasPositionClass =
@@ -799,14 +821,18 @@ let view model dispatch =
             prop.tabIndex 0
             prop.autoFocus true
             prop.onKeyDown (fun e ->
-                match e.key with
-                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                    e.preventDefault()
-                    dispatch (KeyPressed (e.key, false))
-                | key ->
-                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                    dispatch (KeyPressed (key, hasModifier)))
+                if not (isEditableEventTarget e) then
+                    match e.key with
+                    | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                        e.preventDefault()
+                        dispatch (KeyPressed (e.key, false))
+                    | key ->
+                        let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                        dispatch (KeyPressed (key, hasModifier)))
             prop.children [
+                if model.OverviewPanelOpen then
+                    OverviewBand.view model.Repos
+
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                     Html.div [
                         prop.className "status-bar"

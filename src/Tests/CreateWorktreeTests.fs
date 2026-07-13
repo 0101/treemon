@@ -34,7 +34,8 @@ let private defaultModel : Model =
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty }
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
@@ -179,7 +180,7 @@ type BranchesLoadedTests() =
 
     [<Test>]
     member _.``BranchesLoaded Ok ignored when modal is Open``() =
-        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old" }
+        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old"; Prompt = "" }
         let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "new-branch" ]))) { defaultModel with CreateModal = openForm }
 
         match model.CreateModal with
@@ -195,7 +196,7 @@ type BranchesLoadedTests() =
 type FormStateTests() =
 
     let openForm =
-        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main"; Prompt = "" }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
@@ -210,35 +211,12 @@ type FormStateTests() =
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
-    member _.``SetNewWorktreeName preserves other form fields``() =
-        let model, _ = update (ModalMsg (Modal.SetNewWorktreeName "my-feature")) openModel
-
-        match model.CreateModal with
-        | Modal.Open form ->
-            Assert.That(form.BaseBranch, Is.EqualTo("main"))
-            Assert.That(form.RepoId, Is.EqualTo(testRepoId))
-            Assert.That(form.Branches, Is.EqualTo([ "main"; "develop" ]))
-        | other ->
-            Assert.Fail($"Expected Open but got {other}")
-
-    [<Test>]
     member _.``SetBaseBranch updates BaseBranch in Open form``() =
         let model, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) openModel
 
         match model.CreateModal with
         | Modal.Open form ->
             Assert.That(form.BaseBranch, Is.EqualTo("develop"))
-        | other ->
-            Assert.Fail($"Expected Open but got {other}")
-
-    [<Test>]
-    member _.``SetBaseBranch preserves other form fields``() =
-        let model, _ = update (ModalMsg (Modal.SetBaseBranch "develop")) openModel
-
-        match model.CreateModal with
-        | Modal.Open form ->
-            Assert.That(form.Name, Is.EqualTo(""))
-            Assert.That(form.RepoId, Is.EqualTo(testRepoId))
         | other ->
             Assert.Fail($"Expected Open but got {other}")
 
@@ -281,6 +259,29 @@ type FormStateTests() =
         Assert.That(cmd, Is.Empty)
 
     [<Test>]
+    member _.``SetPrompt updates Prompt in Open form``() =
+        let model, _ = update (ModalMsg (Modal.SetPrompt "investigate the flaky test")) openModel
+
+        match model.CreateModal with
+        | Modal.Open form ->
+            Assert.That(form.Prompt, Is.EqualTo("investigate the flaky test"))
+        | other ->
+            Assert.Fail($"Expected Open but got {other}")
+
+    [<Test>]
+    member _.``SetPrompt ignored when modal is Closed``() =
+        let model, _ = update (ModalMsg (Modal.SetPrompt "test")) defaultModel
+
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
+
+    [<Test>]
+    member _.``SetPrompt ignored when modal is Creating``() =
+        let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
+        let model, _ = update (ModalMsg (Modal.SetPrompt "test")) creating
+
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.Creating testRepoId))
+
+    [<Test>]
     member _.``Multiple SetNewWorktreeName calls update correctly``() =
         let m1, _ = update (ModalMsg (Modal.SetNewWorktreeName "first")) openModel
         let m2, _ = update (ModalMsg (Modal.SetNewWorktreeName "second")) m1
@@ -296,7 +297,7 @@ type FormStateTests() =
 type SubmitCreateWorktreeTests() =
 
     let openForm =
-        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main"; Prompt = "" }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
@@ -313,7 +314,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with empty name is ignored``() =
         let emptyName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main"; Prompt = "" }
         let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = emptyName }
 
         match model.CreateModal with
@@ -324,7 +325,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with whitespace-only name is ignored``() =
         let wsName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main"; Prompt = "" }
         let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = wsName }
 
         match model.CreateModal with
@@ -342,7 +343,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree trims name with leading and trailing spaces``() =
         let spacedName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main"; Prompt = "" }
         let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = spacedName }
 
         match model.CreateModal with
@@ -355,6 +356,95 @@ type SubmitCreateWorktreeTests() =
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.LoadingBranches testRepoId))
         Assert.That(cmd, Is.Empty)
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SubmitCreateWorktreeRequestMappingTests() =
+
+    // IWorktreeApi is a record of async functions. Every field is stubbed to throw so an
+    // accidental call is loud; each test overrides only the field it exercises (createWorktree).
+    let unusedApi : IWorktreeApi =
+        { getWorktrees = fun _ -> failwith "unused"
+          openTerminal = fun _ -> failwith "unused"
+          openEditor = fun _ -> failwith "unused"
+          startSync = fun _ -> failwith "unused"
+          cancelSync = fun _ -> failwith "unused"
+          getSyncStatus = fun _ -> failwith "unused"
+          deleteWorktree = fun _ -> failwith "unused"
+          launchSession = fun _ -> failwith "unused"
+          focusSession = fun _ -> failwith "unused"
+          killSession = fun _ -> failwith "unused"
+          archiveWorktree = fun _ -> failwith "unused"
+          unarchiveWorktree = fun _ -> failwith "unused"
+          getBranches = fun _ -> failwith "unused"
+          createWorktree = fun _ -> failwith "unused"
+          openNewTab = fun _ -> failwith "unused"
+          launchAction = fun _ -> failwith "unused"
+          reportActivity = fun _ -> failwith "unused"
+          saveCollapsedRepos = fun _ -> failwith "unused"
+          saveCanvasPaneOpen = fun _ -> failwith "unused"
+          saveOverviewPanelOpen = fun _ -> failwith "unused"
+          saveCanvasPosition = fun _ -> failwith "unused"
+          saveCanvasSize = fun _ -> failwith "unused"
+          resumeSession = fun _ -> failwith "unused"
+          sendCanvasMessage = fun _ -> failwith "unused"
+          archiveCanvasDoc = fun _ -> failwith "unused"
+          shareCanvasDoc = fun _ -> failwith "unused"
+          saveLastViewedHashes = fun _ -> failwith "unused"
+          loadLastViewedHashes = fun _ -> failwith "unused"
+          getBridgeLiveness = fun _ -> failwith "unused"
+          addRoot = fun _ -> failwith "unused"
+          removeRoot = fun _ -> failwith "unused"
+          getRoots = fun _ -> failwith "unused" }
+
+    let baseForm prompt : Modal.CreateWorktreeForm =
+        { RepoId = testRepoId
+          Branches = [ "main"; "develop" ]
+          Name = "my-feature"
+          BaseBranch = "develop"
+          Prompt = prompt }
+
+    /// Submits the modal against a capturing fake api and returns the request handed to
+    /// createWorktree. Elmish runs the Cmd's async via Async.Start on .NET, so the fake
+    /// completes a TaskCompletionSource we block on (bounded) instead of racing the write.
+    let submitAndCapture (form: Modal.CreateWorktreeForm) : CreateWorktreeRequest =
+        let tcs = System.Threading.Tasks.TaskCompletionSource<CreateWorktreeRequest>()
+        let api =
+            { unusedApi with
+                createWorktree = fun req -> tcs.TrySetResult req |> ignore; async { return Ok [] } }
+        let _, cmd = Modal.update (lazy api) Modal.SubmitCreateWorktree (Modal.Open form)
+        cmd |> List.iter (fun effect -> effect ignore)
+        if not (tcs.Task.Wait(TimeSpan.FromSeconds 5.0)) then
+            Assert.Fail("SubmitCreateWorktree did not call createWorktree")
+        tcs.Task.Result
+
+    [<Test>]
+    member _.``SubmitCreateWorktree maps a non-blank prompt to Some trimmed``() =
+        let req = submitAndCapture (baseForm "  investigate the flaky test  ")
+
+        Assert.That(req.Prompt, Is.EqualTo(Some "investigate the flaky test"))
+
+    [<Test>]
+    member _.``SubmitCreateWorktree maps an empty prompt to None``() =
+        let req = submitAndCapture (baseForm "")
+
+        Assert.That(req.Prompt.IsNone, Is.True)
+
+    [<Test>]
+    member _.``SubmitCreateWorktree maps a whitespace-only prompt to None``() =
+        let req = submitAndCapture (baseForm "   \t  ")
+
+        Assert.That(req.Prompt.IsNone, Is.True)
+
+    [<Test>]
+    member _.``SubmitCreateWorktree trims the branch name and carries base branch and repo id``() =
+        let req = submitAndCapture { baseForm "do research" with Name = "  my-feature  " }
+
+        Assert.That(BranchName.value req.BranchName, Is.EqualTo("my-feature"))
+        Assert.That(BranchName.value req.BaseBranch, Is.EqualTo("develop"))
+        Assert.That(req.RepoId, Is.EqualTo("TestRepo"))
 
 
 [<TestFixture>]
@@ -425,7 +515,7 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal resets to Closed from Open``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let model, _ = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -453,7 +543,7 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal produces no command``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let _, cmd = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Empty)
@@ -473,7 +563,7 @@ type EscapeKeyClosesModalTests() =
     [<Test>]
     member _.``Escape key closes modal from Open state``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -500,7 +590,7 @@ type EscapeKeyClosesModalTests() =
     [<Test>]
     member _.``Escape key produces no command when modal is open``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let _, cmd = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Empty)
@@ -600,7 +690,7 @@ type EnterKeySuppressedWhileModalOpenTests() =
           BaseBranch = "main" }
 
     let openForm =
-        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
 
     let modelWithRepoAndModal =
         { defaultModel with
@@ -677,7 +767,7 @@ type FocusRestorationTests() =
     let repoId = testRepoId
 
     let openForm =
-        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main" }
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
 
     let modelWithFocusAndModal =
         { defaultModel with

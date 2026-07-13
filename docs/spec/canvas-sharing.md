@@ -266,27 +266,26 @@ restart or reboot is required. (The secret is still only ever read from the env 
 | 9 | Blob lifecycle | **Auto-delete via an Azure storage lifecycle policy** — blobs older than the expiry window (default 90 days) are removed, so a doc's content does not linger at rest after its link is dead (privacy) and storage does not accumulate (cost). Runs daily (≈1-day granularity); immediate per-doc revoke is still a blob delete. Rule JSON + apply/verify commands live in **Storage Account Setup** (`scripts/canvas-share-lifecycle-policy.json`). |
 | 10 | Client banner state | Two **mutually-exclusive** banners: share **failure reuses** the existing dismissible error banner (`CanvasSendState.Failed`), success uses a **new** dismissible `ShareNotice`. The success banner reflects the **actual clipboard-write outcome**, not merely that the share succeeded: because `navigator.clipboard.write` is async and can be rejected (transient user activation / an active document — both can be lost across the share network round-trip — a revoked permission, or an unavailable API), the `Ok` share arm does **not** pre-claim a copy. It clears the stale channels and fires the write, then a `ClipboardWriteResult` arm raises `Shared — link copied` on a landed write or `Shared — link ready, copy it manually: <url>` on a rejected one (the raw SAS URL is surfaced as selectable text so a failed copy is still recoverable). Each result arm clears the other channel — the `Ok` arm clears a stale `Failed`, the `Error` arm clears a stale `ShareNotice` — so a red + green stack can never render (a fail→retry→succeed flow is common). A live `Waiting` banner is independent and is preserved. Invariant locked by `ShareCanvasDocResultTests`. |
 | 11 | Shared `prettifyFilename` | The filename→title helper is a **single source of truth in `src/Shared/Formatting.fs`**, not duplicated per side. It uses the client's `Split`-on-explicit-ASCII-whitespace body (proven Fable-safe; no `\s` Regex), so it compiles under Fable and behaves identically everywhere — a Unicode space such as U+00A0 is preserved, not collapsed (pinned by `FormattingTests`). Home is a new `Formatting.fs`, not `PathUtils.fs`, to keep `PathUtils` scoped to path comparison (module cohesion). The client's `buildClipboardPayload` **dead fallback was removed**: `WorktreeApi.shareCanvasDocImpl` always resolves a non-blank `CanvasShareResult.Title` via `resolveTitle`, so the client uses `result.Title` directly and no longer takes a `filename` arg. Fixes focused-review F4/F5. |
-| 12 | Remoting CSRF exposure (F16) | **No per-endpoint guard on `shareCanvasDoc`; deferred to the central pipeline fix.** It rides the same unauthenticated, Origin-unvalidated Remoting surface as every `IWorktreeApi` method and is *consistent* with it — the same `withValidatedPath` worktree-membership guard as `archiveCanvasDoc` — so no per-endpoint auth/CSRF/path restriction is added. The correct fix is the single central Origin/Referer allowlist middleware already designed in `docs/spec/future/remoting-csrf-hardening.md`. `shareCanvasDoc` is that surface's first **data-egress** endpoint (forged call → local file published to an internet-reachable blob), which *raises the priority* of that hardening but does not change its design. See **Security Posture**. |
+| 12 | Remoting CSRF exposure (F16) | **Now covered by the central pipeline guard** (`docs/spec/remoting-csrf-hardening.md`). No per-endpoint guard was added on `shareCanvasDoc`: it rides the same Remoting surface as every `IWorktreeApi` method (behind the same `withValidatedPath` worktree-membership guard as `archiveCanvasDoc`), and the single `HttpSecurity.csrfGuard` fronting that surface rejects cross-origin forged calls for all of them at once. `shareCanvasDoc` — that surface's first **data-egress** endpoint (forged call → local file published to an internet-reachable blob) — is what raised the guard's priority. See **Security Posture**. |
 | 13 | Published-doc active HTML (F17) | **Accepted risk — no CSP/security headers and no sanitization in v1.** A published copy is served as active, non-sandboxed HTML/JS with only `Content-Type`. Not fixed: sanitizing/stripping `<script>` + inline handlers would defeat the interactivity goal (Decision #6), and a per-blob `Content-Security-Policy` would need a CDN/redirect-proxy — both disproportionate to a *Low*, two-stage-trigger risk (malicious JS must land verbatim in a doc **and** a human must click Share). Revisit if the audience broadens beyond the current local/dev, trusted-recipient scope. See **Security Posture**. |
 | 14 | Section-divider comments (F3/F9/F10/F12) | **Removed the four `// ── … ──` dividers rather than loosening the `no-unnecessary-comments` rule.** The three `CanvasShare.fs` banners (`pure: blob naming` / `pure: SAS grant` / `impure: publish`) only restated each function's own `///` purity doc, and the `CanvasUpdate.fs` banner was dropped in favor of the explanatory paragraph it introduced (kept as the section lead-in). Chose deletion over the review's rule-refinement option because AGENTS.md's *"no unnecessary comments — code should be self-documenting"* is the governing value, the banners carried no information the per-function `///` docs didn't, and the convention isn't broadly established in production code (only `DemoFixture.fs`, a long timed-frame data fixture that fits the rule's long-fixture carve-out). Comment-only change, zero behavioral effect. |
 
 ## Security Posture
 
-Two properties surfaced by focused-review (F16/F17, both *Low*) are **explicitly accepted** for v1
-rather than mitigated in code. Recording them here so each is a documented trade-off, not a blind spot:
+Two properties surfaced by focused-review (F16/F17, both *Low*). F16 is now **closed** by the central
+Origin/Referer guard; F17 remains **explicitly accepted** for v1 rather than mitigated in code.
+Recording both here so each is a documented decision, not a blind spot:
 
-- **Remoting CSRF exposure (F16).** `shareCanvasDoc` is dispatched over the same unauthenticated,
-  Origin/CSRF-unvalidated Fable.Remoting surface as every other `IWorktreeApi` method, so a page open
-  in the operator's browser could in principle forge a call. It is handled **exactly like its peers**
-  (the same `withValidatedPath` worktree-membership guard as `archiveCanvasDoc`), so it gets **no
-  per-endpoint guard**; the fix belongs once, at the pipeline — the Origin/Referer allowlist middleware
-  already designed in `docs/spec/future/remoting-csrf-hardening.md`, which covers the whole surface
-  (including the more dangerous process-launching endpoints). `shareCanvasDoc` is the first member
-  whose forged invocation causes **data egress** (a local canvas file published to an
-  internet-reachable blob), which raises that fix's priority without changing its design. Residual risk
-  stays low: the forger can't read the response (CORS-blocked), can't enumerate the machine-specific
-  worktree path, and the feature is opt-in (no `AZURE_STORAGE_CONNECTION_STRING` ⇒ the call fails
-  closed before any I/O).
+- **Remoting CSRF exposure (F16) — now closed.** `shareCanvasDoc` is dispatched over the same
+  Fable.Remoting surface as every other `IWorktreeApi` method, so a page open in the operator's browser
+  could in principle forge a call. Rather than a per-endpoint guard, the fix landed **once, at the
+  pipeline** — the `HttpSecurity.csrfGuard` Origin/Referer allowlist (`docs/spec/remoting-csrf-hardening.md`),
+  which covers the whole surface (including the more dangerous process-launching endpoints).
+  `shareCanvasDoc` — the first member whose forged invocation causes **data egress** (a local canvas
+  file published to an internet-reachable blob) — is what raised that fix's priority. Residual risk was
+  already low even before the guard: the forger can't read the response (CORS-blocked), can't enumerate
+  the machine-specific worktree path, and the feature is opt-in (no `AZURE_STORAGE_CONNECTION_STRING` ⇒
+  the call fails closed before any I/O).
 - **Published docs run untrusted-derived JS, non-sandboxed (F17).** A published copy is author-authored
   canvas HTML/JS served **as active content** from the storage-account origin with only
   `Content-Type: text/html` — **no CSP, no `X-Content-Type-Options`, no sanitization** — and the

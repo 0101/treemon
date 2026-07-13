@@ -248,7 +248,8 @@ type StateAgentTests() =
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 2; Blocked = 0; Closed = 3 }
-            agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads))
+            let planning : Shared.BeadsPlanning = { Planned = 1; Queued = 1; Loose = 0 }
+            agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads, planning))
             do! waitForAgent agent
 
             agent.Post(RemoveWorktree(testRepoId, "/repo/feature"))
@@ -260,6 +261,7 @@ type StateAgentTests() =
             Assert.That(repo.WorktreeList[0].Path, Is.EqualTo("/repo/main"))
             Assert.That(repo.GitData.ContainsKey("/repo/feature"), Is.False)
             Assert.That(repo.BeadsData.ContainsKey("/repo/feature"), Is.False)
+            Assert.That(repo.PlanningData.ContainsKey("/repo/feature"), Is.False)
         }
         |> Async.RunSynchronously
 
@@ -335,12 +337,13 @@ type StateAgentTests() =
             do! waitForAgent agent
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 0; Blocked = 0; Closed = 0 }
-            agent.Post(UpdateBeads(testRepoId, "/repo/unknown", beads))
+            agent.Post(UpdateBeads(testRepoId, "/repo/unknown", beads, Shared.BeadsPlanning.zero))
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
 
             Assert.That(repo.BeadsData.ContainsKey("/repo/unknown"), Is.False)
+            Assert.That(repo.PlanningData.ContainsKey("/repo/unknown"), Is.False)
         }
         |> Async.RunSynchronously
 

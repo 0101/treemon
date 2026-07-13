@@ -440,7 +440,13 @@ try {
   log(`joinSession with tools failed (${err?.message ?? err}); retrying without tools`);
   session = await joinSession();
 }
-const sessionId = session.sessionId;
+// Read the session id defensively: the current native runtime populates `session.sessionId`,
+// but older/other SDK shapes expose it as `session.id`. The `@github/copilot-sdk` dependency is
+// floating ("*") with no runtime/version guard, so keep both. Dropping the `session.id` fallback
+// yields `undefined` on an id-only runtime -> anonymous registration + skipped declareOwnership
+// (see the `if (state.sessionId)` guard in handleCanvasWrite) -> unowned docs whose canvas replies
+// are queued rather than delivered (the server's single-session fallback is intentionally gone).
+const sessionId = session.sessionId ?? session.id;
 extensionState.sessionId = sessionId;
 const canvasWrites = watchCanvasWrites(session);
 

@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
+    <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
     <Compile Include="ServerFixture.fs" />
     <Compile Include="MultiRepoApiTests.fs" />
@@ -15,6 +16,7 @@
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="IdleDetectionTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
+    <Compile Include="FileUtilsTests.fs" />
     <Compile Include="ClaudeDetectorTests.fs" />
     <Compile Include="ClaudeSessionReplayTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
@@ -30,6 +32,7 @@
     <Compile Include="ConfirmModalTests.fs" />
     <Compile Include="NavigationTests.fs" />
     <Compile Include="ComponentsTests.fs" />
+    <Compile Include="CardViewsTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />
@@ -38,6 +41,7 @@
     <Compile Include="CommandBuilderTests.fs" />
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
+    <Compile Include="SessionManagerBuildScriptTests.fs" />
     <Compile Include="ConfigWriterTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
@@ -45,6 +49,7 @@
     <Compile Include="VsCodeCopilotDetectorTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
+    <Compile Include="OverviewBandE2ETests.fs" />
     <Compile Include="RemoveWorktreeTests.fs" />
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPaneTests.fs" />
@@ -56,7 +61,13 @@
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
+    <Compile Include="BeadsPlanningTests.fs" />
+    <Compile Include="ActivityClassifierTests.fs" />
+    <Compile Include="OverviewDataTests.fs" />
+    <Compile Include="OverviewPersistenceTests.fs" />
+    <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
+    <Compile Include="HttpSecurityTests.fs" />
     <Compile Include="CanvasExportTests.fs" />
     <Compile Include="CanvasShareTests.fs" />
     <Compile Include="CanvasShareAzuriteTests.fs" />

@@ -32,6 +32,7 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
 type CodingToolResult =
     { Status: CodingToolStatus
       Provider: CodingToolProvider option
+      CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
       LastMessageProvider: CodingToolProvider option }
@@ -41,11 +42,30 @@ type internal ProviderResult =
       Status: CodingToolStatus
       Mtime: DateTimeOffset option }
 
-let internal pickActiveProvider (results: ProviderResult list) : ProviderResult option =
-    results
-    |> List.filter (fun r -> r.Status <> Idle)
-    |> List.sortByDescending (fun r -> r.Mtime |> Option.defaultValue DateTimeOffset.MinValue)
+// Shared "active surface wins" rule: drop Idle sources, then the most recent (by mtime) wins.
+// Both provider-status resolution and running-skill selection go through this so they can never
+// disagree about which surface is active.
+let private mostRecentActive
+    (statusOf: 'a -> CodingToolStatus)
+    (mtimeOf: 'a -> DateTimeOffset option)
+    (items: 'a list)
+    : 'a option =
+    items
+    |> List.filter (fun x -> statusOf x <> Idle)
+    |> List.sortByDescending (fun x -> mtimeOf x |> Option.defaultValue DateTimeOffset.MinValue)
     |> List.tryHead
+
+let internal pickActiveProvider (results: ProviderResult list) : ProviderResult option =
+    results |> mostRecentActive _.Status _.Mtime
+
+// The running skill must come from the SAME surface that wins the status resolution, not from
+// whichever session file merely has the newest mtime. Mirrors pickActiveProvider (drop Idle, most
+// recent wins), then scans only the winning surface for its skill via a lazy getter, so idle/losing
+// surfaces are never read. All surfaces Idle -> None (-> Working via Activity.classify downstream).
+let internal pickActiveSkill (surfaces: (ProviderResult * (unit -> string option)) list) : string option =
+    surfaces
+    |> mostRecentActive (fun (r, _) -> r.Status) (fun (r, _) -> r.Mtime)
+    |> Option.bind (fun (_, getSkill) -> getSkill ())
 
 // Uses pickActiveProvider (filter non-Idle, pick most recent) instead of tryFind
 // so that when multiple providers report status, the most recently active wins.
@@ -66,32 +86,40 @@ let internal resolveStatus
         | Some r -> r.Status, Some r.Provider
         | None -> Idle, None
 
+// The three session surfaces scanned per refresh: Claude, Copilot CLI, and VS Code Copilot. Kept as
+// named results so status resolution and running-skill selection reuse the SAME status/mtime reads.
+type internal SessionResults =
+    { Claude: ProviderResult
+      CopilotCli: ProviderResult
+      VsCodeCopilot: ProviderResult }
+
 let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) list) =
     { Provider = Claude
       Status = ClaudeDetector.getStatusFromEnumeratedFiles files
       Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
 
-let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) =
-    let claudeResult = getClaudeResult claudeFiles
-
-    let copilotResult =
+let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) (copilot: CopilotDetector.CopilotRefreshData) : SessionResults =
+    { Claude = getClaudeResult claudeFiles
+      CopilotCli =
         { Provider = Copilot
-          Status = CopilotDetector.getStatus worktreePath
-          Mtime = CopilotDetector.getSessionMtime worktreePath }
-
-    let vsCodeCopilotResult =
+          Status = copilot.Status
+          Mtime = copilot.Mtime }
+      VsCodeCopilot =
         { Provider = Copilot
           Status = VsCodeCopilotDetector.getStatus worktreePath
-          Mtime = VsCodeCopilotDetector.getSessionMtime worktreePath }
-
-    [ claudeResult; copilotResult; vsCodeCopilotResult ]
+          Mtime = VsCodeCopilotDetector.getSessionMtime worktreePath } }
 
 let getRefreshData (worktreePath: string) : CodingToolResult =
     let configured = readConfiguredProvider worktreePath
     let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
-    let results = gatherResultsFromFiles worktreePath claudeFiles
+    // ONE incremental Copilot CLI session scan per refresh; every Copilot field below is derived from
+    // it, instead of the four separate ~1 MB backward scans (status / skill / last user / last message).
+    let copilot = CopilotDetector.getRefreshData worktreePath
+    let results = gatherResultsFromFiles worktreePath claudeFiles copilot
 
-    let status, provider = resolveStatus configured results
+    let status, provider =
+        resolveStatus configured [ results.Claude; results.CopilotCli; results.VsCodeCopilot ]
+
     let target = configured |> Option.orElse provider
 
     let lastUserMsg, lastMsgProvider =
@@ -100,7 +128,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
             let msg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
             msg, msg |> Option.map (fun _ -> Claude)
         | Some Copilot ->
-            let cliMsg = CopilotDetector.getLastUserMessage worktreePath
+            let cliMsg = copilot.LastUserMessage
             let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
 
             let msg =
@@ -112,7 +140,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | None ->
             let winner =
                 [ ClaudeDetector.getLastUserMessageFromFiles claudeFiles |> Option.map (fun m -> Claude, m)
-                  CopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m)
+                  copilot.LastUserMessage |> Option.map (fun m -> Copilot, m)
                   VsCodeCopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m) ]
                 |> List.choose id
                 |> List.sortByDescending (fun (_, (_, ts)) -> ts)
@@ -124,20 +152,29 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
         | Some Claude ->
             ClaudeDetector.getLastMessageFromFiles claudeFiles
         | Some Copilot ->
-            [ CopilotDetector.getLastMessage worktreePath
+            [ copilot.LastMessage
               VsCodeCopilotDetector.getLastMessage worktreePath ]
             |> List.choose id
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
         | None ->
             [ ClaudeDetector.getLastMessageFromFiles claudeFiles
-              CopilotDetector.getLastMessage worktreePath
+              copilot.LastMessage
               VsCodeCopilotDetector.getLastMessage worktreePath ]
             |> List.choose id
             |> List.sortByDescending _.Timestamp
             |> List.tryHead
 
-    { Status = status; Provider = provider; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
+    let currentSkill =
+        match target with
+        | Some Claude -> ClaudeDetector.getCurrentSkillFromFiles claudeFiles
+        | Some Copilot ->
+            pickActiveSkill
+                [ results.CopilotCli, (fun () -> copilot.CurrentSkill)
+                  results.VsCodeCopilot, (fun () -> VsCodeCopilotDetector.getCurrentSkill worktreePath) ]
+        | None -> None
+
+    { Status = status; Provider = provider; CurrentSkill = currentSkill; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "
@@ -145,17 +182,24 @@ let configureTestsPrompt (repoRoot: string) =
     + $"IMPORTANT: The config file MUST be at '{repoRoot}\\.treemon.json', not in the current directory. "
     + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
 
+/// Wraps an arbitrary argument in a provider-aware skill invocation.
+/// Copilot uses the natural-language "use {skill} skill with {arg}" form;
+/// Claude uses the "/{skill} {arg}" slash-command form. Shared by actionPrompt
+/// (FixPr/FixBuild) and the worktree-create auto-launch flow so both stay byte-identical.
+let skillInvocation (provider: CodingToolProvider option) (skill: string) (arg: string) =
+    match provider |> Option.defaultValue CodingToolProvider.Default with
+    | Copilot -> $"use {skill} skill with {arg}"
+    | Claude -> $"/{skill} {arg}"
+
 let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
-    match action, provider |> Option.defaultValue CodingToolProvider.Default with
-    | FixPr url, CodingToolProvider.Copilot -> $"use pr skill with {url}"
-    | FixPr url, CodingToolProvider.Claude -> $"/pr {url}"
-    | FixBuild url, CodingToolProvider.Copilot -> $"use fix-build skill with {url}"
-    | FixBuild url, CodingToolProvider.Claude -> $"/fix-build {url}"
-    | FixTests, _ ->
+    match action with
+    | FixPr url -> skillInvocation provider "pr" url
+    | FixBuild url -> skillInvocation provider "fix-build" url
+    | FixTests ->
         $"Please fix the failing tests. See the test failure report in {TestFailureLog.relPath} for details."
-    | ConfigureTests, _ -> configureTestsPrompt "the repo root"
-    | CreatePr, _ -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
-    | CanvasSession prompt, _ -> prompt
+    | ConfigureTests -> configureTestsPrompt "the repo root"
+    | CreatePr -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
+    | CanvasSession prompt -> prompt
 
 let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with

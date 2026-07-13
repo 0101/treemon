@@ -105,10 +105,11 @@ type internal ReqState =
       CompletedAt: DateTimeOffset option
       ResponseText: string option
       ResponseKinds: string list
-      UserText: string option }
+      UserText: string option
+      SlashCommand: string option }
 
 let private emptyReq =
-    { ModelState = Unknown; CompletedAt = None; ResponseText = None; ResponseKinds = []; UserText = None }
+    { ModelState = Unknown; CompletedAt = None; ResponseText = None; ResponseKinds = []; UserText = None; SlashCommand = None }
 
 let internal modelStateFromInt = function
     | 0 -> InProgress
@@ -163,15 +164,28 @@ let private applyRequestObject (req: JsonElement) (state: ReqState) =
         | true, r -> applyResponseParts r withModel
         | _ -> withModel
 
+    // A VS Code chat request records the invoked command as slashCommand.name (e.g. "@binlog
+    // /summary" -> "summary"); this is the closest analog to a running skill. Absent -> None.
+    let withSlashCommand =
+        match req.TryGetProperty("slashCommand") with
+        | true, sc ->
+            match sc.TryGetProperty("name") with
+            | true, n when n.ValueKind = JsonValueKind.String ->
+                let name = n.GetString()
+                if String.IsNullOrWhiteSpace(name) then withResponse
+                else { withResponse with SlashCommand = Some name }
+            | _ -> withResponse
+        | _ -> withResponse
+
     match req.TryGetProperty("message") with
     | true, msg ->
         match msg.TryGetProperty("text") with
         | true, t ->
             let text = t.GetString()
-            if String.IsNullOrWhiteSpace(text) then withResponse
-            else { withResponse with UserText = Some text }
-        | _ -> withResponse
-    | _ -> withResponse
+            if String.IsNullOrWhiteSpace(text) then withSlashCommand
+            else { withSlashCommand with UserText = Some text }
+        | _ -> withSlashCommand
+    | _ -> withSlashCommand
 
 let private readAllLines (filePath: string) =
     try
@@ -340,3 +354,9 @@ let getLastUserMessage (worktreePath: string) : (string * DateTimeOffset) option
             req.UserText
             |> Option.map (fun text ->
                 FileUtils.truncateMessage 120 text, fileMtime))
+
+let getCurrentSkill (worktreePath: string) : string option =
+    getChatSessionsDir worktreePath
+    |> Option.bind findMostRecentSessionFile
+    |> Option.bind getReconstructed
+    |> Option.bind _.SlashCommand

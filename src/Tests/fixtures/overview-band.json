@@ -1,0 +1,129 @@
+{
+  "Worktrees": {
+    "Repos": [
+      {
+        "RepoId": {"RepoId": "OverviewProj"},
+        "RootFolderName": "OverviewProj",
+        "Worktrees": [
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/investigate-a"},
+            "Branch": "investigate-a",
+            "LastCommitMessage": "Investigate flaky test",
+            "LastCommitTime": "2026-02-16T22:30:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 40 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "Copilot",
+            "CurrentSkill": "investigate",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/investigate-b"},
+            "Branch": "investigate-b",
+            "LastCommitMessage": "Investigate perf regression",
+            "LastCommitTime": "2026-02-16T22:29:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "Copilot",
+            "CurrentSkill": "investigate",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/investigate-c"},
+            "Branch": "investigate-c",
+            "LastCommitMessage": "Investigate memory leak",
+            "LastCommitTime": "2026-02-16T22:28:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "Copilot",
+            "CurrentSkill": "investigate",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/plan-a"},
+            "Branch": "plan-a",
+            "LastCommitMessage": "Plan the auth feature",
+            "LastCommitTime": "2026-02-16T22:27:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 10, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "Copilot",
+            "CurrentSkill": "bd-plan",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/plan-b"},
+            "Branch": "plan-b",
+            "LastCommitMessage": "Improve the plan",
+            "LastCommitTime": "2026-02-16T22:26:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "Copilot",
+            "CurrentSkill": "bd-improve",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/review-a"},
+            "Branch": "review-a",
+            "LastCommitMessage": "Review the branch",
+            "LastCommitTime": "2026-02-16T22:25:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "Planning": { "Planned": 20, "Queued": 0, "Loose": 0 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "Copilot",
+            "CurrentSkill": "review",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/wait-a"},
+            "Branch": "wait-a",
+            "LastCommitMessage": "Awaiting go-ahead on migration",
+            "LastCommitTime": "2026-02-16T22:24:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "WaitingForUser",
+            "CodingToolProvider": "Copilot",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/wait-b"},
+            "Branch": "wait-b",
+            "LastCommitMessage": "Awaiting review approval",
+            "LastCommitTime": "2026-02-16T22:23:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "WaitingForUser",
+            "CodingToolProvider": "Copilot",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          }
+        ],
+        "IsReady": true,
+        "Provider": { "GitHubProvider": "https://github.com/user/OverviewProj" }
+      }
+    ],
+    "SchedulerEvents": [],
+    "LatestByCategory": {},
+    "AppVersion": "2026-02-16T22:50:00.000Z"
+  },
+  "SyncStatus": {}
+}

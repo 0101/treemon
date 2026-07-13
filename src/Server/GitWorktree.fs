@@ -27,6 +27,13 @@ type GitData =
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
+/// Result of a successful worktree creation: the path of the new worktree (so
+/// callers can act on the exact location — e.g. launch a session there) alongside
+/// any non-fatal warnings surfaced during creation.
+type CreateWorktreeResult =
+    { WorktreePath: string
+      Warnings: CreateWorktreeWarnings }
+
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
 
@@ -422,8 +429,9 @@ let private runPostFork (repoRoot: string) (worktreePath: string) (baseRef: stri
 
 /// Creates a new worktree, forking `branchName` from `baseBranch`. Treemon owns
 /// the forking: it fetches the base from upstream, forks from the remote-tracking
-/// ref when available, then runs an optional `post-fork` setup script. Returns any
-/// non-fatal warnings (a legacy fork script is present, or post-fork failed).
+/// ref when available, then runs an optional `post-fork` setup script. Returns the
+/// new worktree path alongside any non-fatal warnings (a legacy fork script is
+/// present, or post-fork failed).
 let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) =
     asyncResult {
         let! name = validateBranchName branchName
@@ -443,5 +451,6 @@ let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) 
         let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
         let legacyScriptExists = File.Exists(Path.Combine(repoRoot, legacyScriptName))
 
-        return List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists; postForkWarning ]
+        let warnings = List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists; postForkWarning ]
+        return { WorktreePath = worktreePath; Warnings = warnings }
     }

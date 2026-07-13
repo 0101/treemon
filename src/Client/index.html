@@ -137,6 +137,52 @@
         .progress-segment.seg-blocked { background: #fab387; }
         .progress-segment.seg-closed { background: #a6e3a1; }
 
+        /* Overview band (spec: docs/spec/beads-overview-band.md, Corrections v1.1) — chrome-less
+           cross-worktree roll-up rendered inside .dashboard above .repo-list, gated on
+           Model.OverviewPanelOpen. Rebuilt to match the prototype's .band block exactly
+           (.agents/canvas/beads-panel-prototypes.html): two STACKED sections split by a 1px dashed
+           rule; each opens with an uppercase muted header; each category is a column with a
+           count-first meta line ABOVE its visual (count in the accent colour, label neutral, same
+           size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
+           tasks are ONE proportional bar per status on one true shared scale (width computed inline
+           from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)). No
+           box/title bar or hairlines (the toggle button is the header); it reflows purely via
+           .overview-items flex-wrap as the category columns wrap onto new rows on narrow panes. */
+        .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
+        .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
+        .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
+        /* Shared column layout — identical for both sections; only the visual row differs. Wrapping
+           here is the reflow: category columns wrap onto new rows when the dashboard pane narrows. */
+        .overview-items { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
+        .overview-item { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; flex: 0 0 auto; }
+        .overview-meta { font-size: 12.5px; color: #a6adc8; white-space: nowrap; }
+        /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
+           it tints the count text while the label keeps the neutral .overview-meta colour. */
+        .overview-count { font-weight: 400; margin-right: 3px; }
+        .overview-label { font-weight: 400; }
+        .overview-circles { display: flex; gap: 5px; }
+        .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
+        /* Bar width = its share of the shared scale (`--bar-fill`, set inline per bar) times a
+           RESPONSIVE max: min(380px, 80cqi) shrinks with the .dashboard inline-size container so a
+           single bar never overflows a narrow pane, while every bar scales together (shared scale
+           preserved). min-width keeps a count-1 bar a visible sliver. */
+        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * min(380px, 80cqi)); }
+        /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
+           count text and, via currentColor, the circle/bar fill. */
+        .task-planned { color: #fab387; }
+        .task-queued { color: #89dceb; }
+        .task-inprogress { color: #a6e3a1; }
+        .task-blocked { color: #f38ba8; }
+        .task-done { color: #cba6f7; }
+        .task-unattended { color: #7f849c; }
+        .activity-investigating { color: #89dceb; }
+        .activity-planning { color: #cba6f7; }
+        .activity-executing { color: #a6e3a1; }
+        .activity-reviewing { color: #f5c2e7; }
+        .activity-fixing { color: #fab387; }
+        .activity-working { color: #ff0000; }
+        .activity-waiting { color: #f9e2af; }
+
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }
@@ -250,6 +296,14 @@
         }
         .card-footer .user-prompt > span:last-child {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+        }
+        .card-footer .user-prompt.skill-line { color: #a6e3a1; font-style: normal; }
+        .card-footer .user-prompt.skill-line .skill-indicator {
+            color: #a6e3a1; flex-shrink: 0; font-style: normal;
+        }
+        .card-footer .user-prompt.skill-line .skill-name {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+            font-weight: 600;
         }
 
         .event-log {
@@ -384,13 +438,14 @@
             gap: 4px; padding: 28px 18px; font-size: 0.95em; color: #a6adc8;
         }
         .modal-loading { color: #a6adc8; font-size: 0.95em; text-align: center; padding: 18px 0; }
-        .modal-input {
+        .modal-input, .modal-textarea {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
             padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
             outline: none; transition: border-color 0.15s;
         }
-        .modal-input:focus { border-color: #89b4fa; }
-        .modal-input::placeholder { color: #585b70; }
+        .modal-textarea { resize: vertical; }
+        .modal-input:focus, .modal-textarea:focus { border-color: #89b4fa; }
+        .modal-input::placeholder, .modal-textarea::placeholder { color: #585b70; }
         .modal-select {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
             padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
