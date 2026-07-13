@@ -21,7 +21,7 @@ let private resetDarkBgMarker = "#1e1e2e"      // the dark background the reset 
 // The base also steers plain docs toward typography over boxes (grounded, not invented):
 let private resetTokenMarker = "--text-muted:#9399b2"          // app design tokens, via :where(:root)
 let private resetTypeScaleMarker = ":where(h1){font-size:1.85rem"  // serif heading scale
-let private resetMeasureMarker = "max-width:70ch"               // Bringhurst ~45–75ch measure
+let private resetPageWidthMarker = "--page-max:800px"           // ~800px single column; text + figures share one width
 
 // Element-name selectors that, if they appeared *bare* (name directly followed by `{`), would carry
 // non-zero specificity and could beat a doc's own rule via the source-order tiebreak (the reset is
@@ -104,10 +104,10 @@ type BuildInjectionTests() =
                         $"{kind}: the reset must set the dark theme background so a plain doc renders dark"))
 
     [<Test>]
-    member _.``the base reset bakes in design tokens, a type scale, and a readable measure``() =
+    member _.``the base reset bakes in design tokens, a type scale, and a single-column page``() =
         // Beyond dark colours the base steers plain docs toward typography over boxes: a :where(:root)
         // token palette (so docs stop reinventing one), a serif heading scale (h1 1.85rem / h2 1.35rem
-        // / h3 1.12rem — hierarchy from size, not borders), and a ~70ch measure on text elements (readable line length).
+        // / h3 1.12rem — hierarchy from size, not borders), and a ~800px single-column page so text and figures share one width.
         [ SystemView; AgentDoc ]
         |> List.iter (fun kind ->
             let injection = buildInjection kind "status.html"
@@ -115,8 +115,8 @@ type BuildInjectionTests() =
                         $"{kind}: the base must expose the app design tokens so docs reuse the palette")
             Assert.That(injection, Does.Contain(resetTypeScaleMarker),
                         $"{kind}: the base must bake in the heading type scale")
-            Assert.That(injection, Does.Contain(resetMeasureMarker),
-                        $"{kind}: the base must cap the text measure (~70ch) for readability"))
+            Assert.That(injection, Does.Contain(resetPageWidthMarker),
+                        $"{kind}: the base must cap the page to a ~800px single column"))
 
     [<Test>]
     member _.``the base reset carries zero specificity (no bare element selectors, no !important)``() =

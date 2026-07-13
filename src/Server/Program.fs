@@ -268,6 +268,7 @@ let main args =
         else
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = SyncEngine.createSyncAgent ()
+            let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
 
@@ -284,7 +285,7 @@ let main args =
                 RefreshScheduler.start agent worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            WorktreeApi.worktreeApi agent syncAgent sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
+            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->

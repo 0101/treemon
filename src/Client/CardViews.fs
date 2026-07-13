@@ -132,7 +132,7 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
         ]
 
 let isBranchSyncing (events: CardEvent list) =
-    events |> List.exists (fun e -> e.Status = Some StepStatus.Running)
+    events |> List.exists (fun e -> e.Status = Some StepStatus.Running && e.Source <> EventSource.PostFork)
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with

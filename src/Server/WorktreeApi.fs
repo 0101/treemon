@@ -367,6 +367,7 @@ let private updateArchivedBranches
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
+    (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (worktreeRoots: string list)
     (testFixtures: string option)
@@ -423,12 +424,18 @@ let worktreeApi
                   let provider = resolveProvider state ctx.Worktree.Path
 
                   let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
+                  cardLog.Post(CardEventLog.SyncStarted syncKey)
 
-                  let post = syncAgent.Post
+                  let sinks : SyncEngine.PipelineSinks =
+                      { PushEvent = fun key event -> cardLog.Post(CardEventLog.SyncStep (key, event))
+                        SetProcessState = fun key state -> syncAgent.Post(SyncEngine.UpdateProcessState (key, state))
+                        Complete = fun key ->
+                            syncAgent.Post(SyncEngine.CompleteSync key)
+                            cardLog.Post(CardEventLog.SyncEnded key) }
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
                   let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
                   let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
+                  Async.Start(SyncEngine.executeSyncPipeline sinks syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath
@@ -442,7 +449,9 @@ let worktreeApi
                       Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
                   | Some ({ Branch = Some branch } as ctx) ->
                       let syncKey = scopedBranchKey ctx.RepoId branch
-                      syncAgent.Post(SyncEngine.CancelSync syncKey)
+                      let! wasRunning = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.CancelSync (syncKey, reply))
+                      if wasRunning then
+                          cardLog.Post(CardEventLog.SyncCancelled syncKey)
               }
           getSyncStatus = fun () ->
               async {
@@ -459,7 +468,7 @@ let worktreeApi
                               syncKey, wt.Path))
                       |> Map.ofList
 
-                  let! syncEvents = syncAgent.PostAndAsyncReply(SyncEngine.GetAllEvents)
+                  let! syncEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
 
                   let allKeys =
                       [ yield! syncEvents |> Map.keys
@@ -546,43 +555,75 @@ let worktreeApi
                       |> Map.tryFind repoId
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
-                  let! result = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
+                  let branchName = BranchName.value req.BranchName
+                  let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
 
                   // Fire-and-forget: when a prompt was supplied, spawn a tracked coding-agent
                   // window in the new worktree seeded with the config-driven skill invocation.
                   // Reuses SessionManager.launchAction (spawns+tracks when no window exists yet).
-                  // Launched even when create returned post-fork warnings; a blank prompt is a no-op.
-                  match req.Prompt with
-                  | Some prompt when not (String.IsNullOrWhiteSpace prompt) ->
-                      let newPath = result.WorktreePath
-                      // Provider is read directly from .treemon.json — the new worktree first (its
-                      // config exists once create returns and can differ from the root working
-                      // copy), then the root as fallback. This intentionally does NOT go through
-                      // resolveProvider (the scheduler-state routing the other launch sites use): a
-                      // just-created worktree is not yet in KnownPaths/CodingToolData, so
-                      // resolveProvider would return None here. Keep this a direct config read.
-                      let provider =
-                          CodingToolStatus.readConfiguredProvider newPath
-                          |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
-                      let skill = TreemonConfig.readDefaultSkill root
-                      let wrapped = CodingToolStatus.skillInvocation provider skill prompt
-                      let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
-                      // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
-                      // throws on timeout, and Async.Ignore would swallow the Error case — an
-                      // unguarded Async.Start could fault silently.
-                      async {
-                          try
-                              match! SessionManager.launchAction sessionAgent (WorktreePath newPath) cmd with
-                              | Ok () -> ()
-                              | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
-                          with ex ->
-                              Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
-                      }
-                      |> Async.Start
-                  | _ -> ()
+                  // A blank prompt is a no-op. Deferred until post-fork finishes below so the
+                  // session starts with dependencies already installed.
+                  let launchPromptSession () =
+                      match req.Prompt with
+                      | Some prompt when not (String.IsNullOrWhiteSpace prompt) ->
+                          let newPath = fork.WorktreePath
+                          // Provider is read directly from .treemon.json — the new worktree first (its
+                          // config exists once create returns and can differ from the root working
+                          // copy), then the root as fallback. This intentionally does NOT go through
+                          // resolveProvider (the scheduler-state routing the other launch sites use): a
+                          // just-created worktree is not yet in KnownPaths/CodingToolData, so
+                          // resolveProvider would return None here. Keep this a direct config read.
+                          let provider =
+                              CodingToolStatus.readConfiguredProvider newPath
+                              |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
+                          let skill = TreemonConfig.readDefaultSkill root
+                          let wrapped = CodingToolStatus.skillInvocation provider skill prompt
+                          let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
+                          // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
+                          // throws on timeout, and Async.Ignore would swallow the Error case — an
+                          // unguarded Async.Start could fault silently.
+                          async {
+                              try
+                                  match! SessionManager.launchAction sessionAgent (WorktreePath newPath) cmd with
+                                  | Ok () -> ()
+                                  | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
+                              with ex ->
+                                  Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
+                          }
+                          |> Async.Start
+                      | _ -> ()
 
-                  return result.Warnings
+                  // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
+                  // the background and surface its lifecycle on the worktree card via the sync event
+                  // log — the create call returns as soon as `git worktree add` succeeds, closing the
+                  // modal promptly. The prompt auto-launch waits for deps, so it runs once post-fork
+                  // finishes (success or failure); with no post-fork script there is nothing to wait
+                  // for, so launch immediately.
+                  match GitWorktree.postForkScriptPath root with
+                  | None -> launchPromptSession ()
+                  | Some _ ->
+                      let syncKey = scopedBranchKey repoId branchName
+                      Async.Start(
+                          async {
+                              try
+                                  cardLog.Post(CardEventLog.PostForkStarted syncKey)
+                                  let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
+                                  let status =
+                                      match result with
+                                      | Ok () -> StepStatus.Succeeded
+                                      | Error msg ->
+                                          Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
+                                          StepStatus.Failed msg
+                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, status))
+                                  agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                              with ex ->
+                                  Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
+                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, StepStatus.Failed ex.Message))
+                              launchPromptSession ()
+                          })
+
+                  return fork.Warnings
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
