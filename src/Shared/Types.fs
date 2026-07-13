@@ -63,8 +63,8 @@ type CodingToolProvider =
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
 /// an active session with no recognized skill. Activity is always *derived* from CurrentSkill
-/// via Activity.classify — never stored separately — so the per-card stripe and the overview
-/// band share one source of truth.
+/// via Activity.classify — never stored separately — so the overview band derives it from one
+/// source of truth.
 [<RequireQualifiedAccess>]
 type CurrentActivity =
     | Investigating

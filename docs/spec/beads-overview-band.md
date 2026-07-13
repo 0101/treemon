@@ -123,7 +123,7 @@ feature). A single read of this file yields every issue's status/type **and** it
 - **No binary-schema coupling** (JSONL is beads' stable interchange format).
 - Consistency with the house rules (minimal moving parts, reuse what exists).
 
-Derive **both** the status `BeadsSummary` and the planning split from this single parse; `getBeadsSummary`
+Derive **both** the status `BeadsSummary` and the planning split from this single parse; `getBeadsData`
 has one enriched collection point and no `bd count --by-status` spawn, so there is no skew between
 summary and split. Missing file → zeros (fresh/empty worktree). **Freshness caveat:**
 the JSONL lags the db only until the next auto-flush; if guaranteed freshness is needed, refresh via
@@ -176,10 +176,11 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
   means the prior skill's run is over. A skill context-injection `user.message` is transparent only
   when both markers are present (`source: "skill-<name>"` and a `<skill-context …>` content
   preamble), so the scan steps past it to the `skill.invoked` it belongs to. A `user.message` that is
-  an `ask_user` reply is also not a boundary: the newest-to-oldest scan discards a candidate
-  boundary only if the first older `assistant.message` was the outstanding `ask_user` request. This
-  stateful freshness scan reads the bounded tail with `FileUtils.readTailLines` rather than
-  overlapping `scanBackward` chunks. Claude Code / VS Code Copilot may report `None`; display
+  an `ask_user` reply is also not a boundary: the fold keeps the current skill across a reply (the
+  reply follows the outstanding `ask_user` request rather than superseding the skill). This
+  determination is a **forward fold over the whole session** (oldest→newest) through the append-aware
+  per-session cache — see `worktree-monitor.md` (Copilot CLI Status Detection) — not a bounded tail
+  scan, so a skill invoked megabytes back is still detected. Claude Code / VS Code Copilot may report `None`; display
   consumers still gate on an active session, so an idle card never shows a skill.
 
 ### Domain changes (`src/Shared/Types.fs`)
@@ -209,7 +210,7 @@ the solution compiling (no compat shims, per house rules).
   Waiting) + `Scale` (the largest bucket count — the one true shared linear denominator). Empty
   buckets/groups are omitted (never a `0`); both lists come back in canonical order, with
   Unattended trailing Done. The result `Overview` carries `Tasks: TaskBucket list` /
-  `Activities: ActivityGroup list` / `Scale: int` (`TaskBucketKind` is `[<RequireQualifiedAccess>]`
+  `Agents: AgentGroup list` / `Scale: int` (`TaskBucketKind` is `[<RequireQualifiedAccess>]`
   to avoid the `Done`/`Working` collisions with `CodingToolStatus`). **Input contract:** pass the
   un-split `RepoWorktrees` shape (see decision (f)) — not the client `RepoModel`.
 - The band is native **Feliz with CSS classes**, with the documented exception that each task bar
@@ -227,25 +228,27 @@ the solution compiling (no compat shims, per house rules).
   render one `.overview-circle` per working/waiting agent with a normal gap.
 - **Accent colour drives both mark and count via `currentColor`.** One class per category
   (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
-  `background: currentColor`. Label stays neutral, same `0.82em`/`600` as the count — so count and
-  label differ only by colour, per spec.
+  `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the
+  count — so count and label differ only by colour, per spec.
 - **Section chrome.** The band renders `ACTIVE AGENTS · N WORKING` and `TASKS · ACROSS ALL
   WORKTREES` headings, separated by a 1px dashed rule, and has no top/bottom border hairlines or task
   footer caption.
 - **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
   `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
-- **Empty-state collapse.** `renderSection` drops an all-empty lens and `view` returns `Html.none`
-  when both lenses are empty, so an opened-but-empty band adds no chrome (not even margin).
+- **Empty-state collapse.** `view` drops an all-empty lens by pattern-matching (each section is built
+  by the `section` helper) and returns `Html.none` when both lenses are empty, so an opened-but-empty
+  band adds no chrome (not even margin).
 - **Placement:** rendered in `App.fs` as the first child inside `.dashboard` (above `.repo-list`),
-  gated on `model.OverviewPanelOpen`; reflow via a `@container dashboard (min-width: 1200px)` rule
-  that flips the two sections from stacked (narrow) to side-by-side (wide).
+  gated on `model.OverviewPanelOpen`. The two sections stay **stacked** at every width; the reflow is
+  the category columns wrapping onto new rows via `.overview-items { flex-wrap: wrap }` as the pane
+  narrows — there is no container-query flip to a side-by-side layout.
 
 ## Decisions
 
 Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.md`. Key ones:
 band is chrome-less and dashboard-scoped; aggregate-only; agent **circles** + task **true-scale
 bars**; empty categories omitted; **Planned vs Queued** = open vs in_progress parent feature; Loose →
-Planned; **Done** = Σ closed non-archived; static interactions; reuse the single `getBeadsSummary`
+Planned; **Done** = Σ closed non-archived; static interactions; reuse the single `getBeadsData`
 call site; running skill from the existing session scan; per-session context usage (Extension C)
 parked.
 
@@ -299,7 +302,7 @@ parked.
 |---|---|
 | Domain types | `src/Shared/Types.fs` (`BeadsSummary`, `WorktreeStatus`, `DashboardResponse`, `IWorktreeApi`) |
 | Beads collection | `src/Server/BeadsStatus.fs` (`getBeadsData`, `getBeadsIssueList`) |
-| Cross-worktree aggregation | `src/Client/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `ActivityGroup`) |
+| Cross-worktree aggregation | `src/Client/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `AgentGroup`) |
 | Session/skill scan | `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs`, `CodingToolStatus.fs` |
 | Refresh + assembly | `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs` |
 | Toggle precedent | `src/Client/App.fs` (`ToggleCanvasPane`, `header-controls`), `saveCanvasPaneOpen` |
