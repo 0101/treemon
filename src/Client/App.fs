@@ -501,6 +501,13 @@ let update msg model =
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
         // scroll it into view — WITHOUT opening the Canvas pane (the deliberate difference from
         // FocusOverviewCard). Persist collapsed-repo state only when an expand actually changed it.
+        // Guard: archived worktrees can appear in non-Done breakdown buckets, but they have no
+        // focusable card (they render in the separate archive section, never with .focused). Setting
+        // FocusedElement to such a key produces no visible focus/scroll and gets reset on the next
+        // refresh — so a non-focusable scopedKey is a no-op rather than an invalid focus target.
+        if not (resolvesToFocusableCard scopedKey model.Repos) then
+            model, Cmd.none
+        else
         let repos, expanded = expandRepoOwning scopedKey model.Repos
         let focus = Some (Card scopedKey)
         let retargetedModel, retargetCmd =

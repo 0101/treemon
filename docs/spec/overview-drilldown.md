@@ -66,6 +66,12 @@ Clicking a member worktree selects it in the dashboard, identical to arrow-key n
 It does **not** open the Canvas pane (this is the deliberate difference from the existing
 `FocusOverviewCard`, which force-opens the pane on a doc).
 
+`SelectOverviewWorktree` guards against archived breakdown rows: non-`Done` buckets keep archived
+worktrees as members, but archived worktrees have no focusable card (`visibleFocusTargets` scans only
+`repo.Worktrees`). A `scopedKey` that does not resolve to a focusable card via
+`Navigation.resolvesToFocusableCard` is a **no-op** — it never sets an invalid `FocusedElement`
+(which would produce no visible focus/scroll and be reset by `adjustFocusForVisibility`).
+
 ### Edge cases
 
 - Empty groups are already omitted upstream (a group with count 0 never renders), so a selected

@@ -246,3 +246,10 @@ let expandRepoOwning (scopedKey: string) (repos: RepoModel list) =
     let expanded = repos |> List.exists (fun r -> r.IsCollapsed && owns r)
     let updated = repos |> List.map (fun r -> if r.IsCollapsed && owns r then { r with IsCollapsed = false } else r)
     updated, expanded
+
+/// Whether the scoped key resolves to a focusable (non-archived) worktree card. Archived worktrees
+/// live in repo.ArchivedWorktrees and never render as .focused cards, so focusing them is invalid.
+/// Guards drill-down selection against archived breakdown rows (only the Done bucket filters
+/// archived; other buckets can list archived worktrees as clickable rows).
+let resolvesToFocusableCard (scopedKey: string) (repos: RepoModel list) =
+    repos |> List.exists (fun r -> r.Worktrees |> List.exists (fun wt -> WorktreePath.value wt.Path = scopedKey))

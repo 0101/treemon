@@ -1198,3 +1198,36 @@ type LoadLastViewedHashesTests() =
             "the server value is kept (not overwritten by the current hash), so the update still registers")
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
             "a doc updated since the server last saw it must remain unviewed")
+
+
+// ── SelectOverviewWorktree archived-row guard (finding F4) ───────────────────
+// A task-bucket breakdown can list ARCHIVED worktrees as clickable rows (only the Done bucket filters
+// archived; other buckets keep them). Archived worktrees have no focusable card (visibleFocusTargets
+// scans only repo.Worktrees; archived entries render in the separate archive section, never .focused).
+// So SelectOverviewWorktree must treat a scopedKey that resolves to no focusable card as a no-op
+// rather than setting an invalid FocusedElement that produces no visible focus/scroll and gets reset.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SelectOverviewWorktreeGuardTests() =
+
+    // A repo whose "feat" worktree is live and whose "old" worktree is archived (lives in
+    // ArchivedWorktrees, so it has no focusable card even though its scopedKey looks routable).
+    let repoWithArchived () =
+        let live = makeWorktree "r" "feat" []
+        let archived = { makeWorktree "r" "old" [] with IsArchived = true }
+        { makeRepo "r" [ live ] with ArchivedWorktrees = [ archived ] }
+
+    [<Test>]
+    member _.``an archived worktree scopedKey does not set FocusedElement (F4)``() =
+        let model = { defaultModel with Repos = [ repoWithArchived () ]; FocusedElement = None }
+        let updated, _ = update (SelectOverviewWorktree "r/old") model
+        Assert.That(updated.FocusedElement, Is.EqualTo(None),
+            "clicking an archived breakdown row must be a no-op, not an invalid Card focus (F4)")
+
+    [<Test>]
+    member _.``an archived scopedKey leaves an existing focus untouched (F4)``() =
+        let model = { defaultModel with Repos = [ repoWithArchived () ]; FocusedElement = Some (Card "r/feat") }
+        let updated, _ = update (SelectOverviewWorktree "r/old") model
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "r/feat")),
+            "a dead archived-row click must not clobber the current focus target (F4)")
