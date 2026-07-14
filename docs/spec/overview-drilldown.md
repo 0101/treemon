@@ -23,13 +23,13 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 
 ### Selecting a group
 
-- Each agent-group column (Active agents section) and task-bucket column (Tasks section) is
+- Each agent-group column (Agents section) and task-bucket column (Tasks section) is
   clickable. Clicking a column selects that group; clicking the selected group again deselects it.
 - **Single-select**: at most one group is selected at a time (across both sections).
 - The selected column renders as a **black "tab"** with rounded top corners, sitting flush against a
   black **breakdown panel** rendered directly beneath the group's row.
 - The breakdown panel appears **inside its own section**:
-  - Agent-group breakdown renders **between the Active agents row and the Tasks section**.
+  - Agent-group breakdown renders **between the Agents row and the Tasks section**.
   - Task-bucket breakdown renders **directly below the Tasks row**.
 - Within each section, the group columns **wrap** to the next line when the pane is too narrow (a
   row-gap keeps wrapped lines legible), instead of a horizontal scrollbar.
