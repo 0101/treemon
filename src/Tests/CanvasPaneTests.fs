@@ -2,6 +2,7 @@ module Tests.CanvasPaneTests
 
 open System
 open NUnit.Framework
+open Newtonsoft.Json
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Tests.CanvasTestHelpers
@@ -730,6 +731,69 @@ type CanvasPaneTests() =
             let dashboardDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "dashboard"))
             let! dashDots = dashboardDoc.Locator(".canvas-liveness-dot").CountAsync()
             Assert.That(dashDots, Is.EqualTo(1), "AgentDoc (dashboard) overview entry should still render a liveness dot")
+        }
+
+    // ── Canvas Overview unread highlighting (tm-unread-canvas-xcx / -mtr wiring) ──
+    // Proves ONLY the render wiring: the overview adds `canvas-overview-doc-unviewed` to unviewed
+    // AgentDocs, omits it on viewed ones, and never adds it to a SystemView doc. The unviewed logic
+    // (`unviewedDocsByScopedKey` + SystemView exclusion) is unit-tested in CanvasAwarenessTests.fs.
+    //
+    // The naive "focus and look" approach is unfalsifiable here: in fixture/E2E mode the server's
+    // loadLastViewedHashes returns Map.empty and the client seeds every AgentDoc's current
+    // ContentHash on first load (seedLastViewedHashes), so EVERY doc starts VIEWED and none would
+    // carry the class. We instead mock loadLastViewedHashes (mirroring the DashboardTests cold-start
+    // network-mock pattern) so exactly one AgentDoc is unviewed, serialising the map with the same
+    // FableJsonConverter the client deserialises with so the wire format matches.
+    [<Test>]
+    member this.``Overview marks only unviewed AgentDocs unread, never viewed or SystemView docs``() =
+        task {
+            // Build the last-viewed map for feature-multidoc (scopedKey "Q:/code/TestProject/feature-multidoc";
+            // AgentDocs overview.html=multi-hash-001, details.html=multi-hash-002, metrics.html=multi-hash-003):
+            //   overview.html hash matches current  -> VIEWED
+            //   details.html  hash differs          -> UNVIEWED
+            //   metrics.html  omitted -> client seeds it to current -> VIEWED
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let lastViewed =
+                Map.ofList [
+                    "Q:/code/TestProject/feature-multidoc",
+                    Map.ofList [ "overview.html", "multi-hash-001"; "details.html", "STALE-DIFFERENT" ]
+                ]
+            let body = JsonConvert.SerializeObject(lastViewed, converter)
+
+            let! page = this.Context.NewPageAsync()
+            // Register the mock BEFORE navigating so the initial loadLastViewedHashes call is intercepted.
+            do! page.RouteAsync("**/IWorktreeApi/loadLastViewedHashes", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = body)))
+
+            let! _ = page.GotoAsync(baseUrl)
+            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            // Focus a docless worktree to render the overview (which lists every worktree's docs), then open the pane.
+            do! focusCanvasCard page "feature-recent"
+            do! (canvasToggleBtn page).ClickAsync()
+            do! (canvasPaneOpen page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! (page.Locator(".canvas-overview")).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            // details.html — current hash differs from the mocked last-viewed hash -> UNVIEWED -> must carry the class.
+            let detailsDoc = page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "details"))
+            do! detailsDoc.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! detailsClass = detailsDoc.First.GetAttributeAsync("class")
+            Assert.That(detailsClass, Does.Contain("canvas-overview-doc-unviewed"),
+                "Unviewed AgentDoc (details) must carry canvas-overview-doc-unviewed")
+
+            // overview.html — mocked last-viewed hash matches current -> VIEWED -> must NOT carry the class.
+            let overviewDoc = page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "overview"))
+            let! overviewClass = overviewDoc.First.GetAttributeAsync("class")
+            Assert.That(overviewClass, Does.Not.Contain("canvas-overview-doc-unviewed"),
+                "Viewed AgentDoc (overview) must NOT carry canvas-overview-doc-unviewed")
+
+            // beads.html — SystemView, excluded from awareness at the source -> must never carry the class.
+            let beadsDoc = page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "beads"))
+            let! beadsClass = beadsDoc.First.GetAttributeAsync("class")
+            Assert.That(beadsClass, Does.Not.Contain("canvas-overview-doc-unviewed"),
+                "SystemView (beads) doc must never carry canvas-overview-doc-unviewed")
+
+            do! page.CloseAsync()
         }
 
     // ── SystemView distinct affordance + archive gating (tm-canvas48-86v) ──
