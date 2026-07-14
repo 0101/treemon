@@ -217,7 +217,7 @@ type OverviewBandE2ETests() =
 
         let agentsHeader = probe.Value<string>("agentsHeader")
         let tasksHeader = probe.Value<string>("tasksHeader")
-        Assert.That(agentsHeader.ToUpperInvariant(), Does.StartWith("ACTIVE AGENTS"), "agents header begins ACTIVE AGENTS")
+        Assert.That(agentsHeader.ToUpperInvariant(), Does.StartWith("AGENTS"), "agents header begins AGENTS")
         Assert.That(tasksHeader.ToUpperInvariant(), Does.StartWith("TASKS"), "tasks header begins TASKS")
         Assert.That(probe.Value<string>("agentsHeaderTransform"), Is.EqualTo("uppercase"), "agents header rendered uppercase")
         Assert.That(probe.Value<string>("tasksHeaderTransform"), Is.EqualTo("uppercase"), "tasks header rendered uppercase")
