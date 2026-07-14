@@ -184,3 +184,35 @@ type ExpandRepoOwningTests() =
         let updated, expanded = expandRepoOwning "/repo/missing" repos
         Assert.That(expanded, Is.False)
         Assert.That(updated, Is.EqualTo(repos))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ResolvesToFocusableCardTests() =
+
+    // Archived worktrees live in ArchivedWorktrees and never render as focusable .focused cards
+    // (visibleFocusTargets scans only repo.Worktrees). A drill-down breakdown row for an archived
+    // worktree (non-Done buckets keep archived members) must not be treated as a valid focus target.
+    let withArchived (repo: RepoModel) (archivedBranch: string) =
+        let wt = { NavHelpers.makeWorktree archivedBranch with IsArchived = true }
+        { repo with ArchivedWorktrees = [ wt ] }
+
+    [<Test>]
+    member _.``a live worktree scoped key resolves to a focusable card``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a"; "b" ] ]
+        Assert.That(resolvesToFocusableCard "/repo/a" repos, Is.True)
+
+    [<Test>]
+    member _.``an archived worktree scoped key does not resolve to a focusable card``() =
+        let repos = [ withArchived (NavHelpers.makeRepo "r1" [ "a" ]) "archived-x" ]
+        Assert.That(resolvesToFocusableCard "/repo/archived-x" repos, Is.False)
+
+    [<Test>]
+    member _.``an unknown scoped key does not resolve to a focusable card``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a" ] ]
+        Assert.That(resolvesToFocusableCard "/repo/missing" repos, Is.False)
+
+    [<Test>]
+    member _.``resolves even when the owning repo is collapsed (drill-down expands it)``() =
+        let repos = [ { NavHelpers.makeRepo "r1" [ "a" ] with IsCollapsed = true } ]
+        Assert.That(resolvesToFocusableCard "/repo/a" repos, Is.True)

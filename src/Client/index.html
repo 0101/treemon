@@ -146,15 +146,28 @@
            size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
            tasks are ONE proportional bar per status on one true shared scale (width computed inline
            from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)). No
-           box/title bar or hairlines (the toggle button is the header); it reflows purely via
-           .overview-items flex-wrap as the category columns wrap onto new rows on narrow panes. */
+           box/title bar or hairlines (the toggle button is the header); the category columns wrap to
+           the next line when the pane is too narrow (overview-drilldown). */
         .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
         .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
-        /* Shared column layout — identical for both sections; only the visual row differs. Wrapping
-           here is the reflow: category columns wrap onto new rows when the dashboard pane narrows. */
-        .overview-items { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
-        .overview-item { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; flex: 0 0 auto; }
+        /* Shared column layout — identical for both sections; only the visual row differs. The
+           group columns wrap to the next line when the pane is too narrow (overview-drilldown
+           decision); the row-gap keeps wrapped lines legible without a horizontal scrollbar. */
+        .overview-items { display: flex; gap: 12px 22px; align-items: flex-start; flex-wrap: wrap; }
+        /* Each column is clickable: it toggles that group's drill-down selection. Negative margins let
+           the hover/selected background bleed slightly past the content without shifting layout. */
+        .overview-item {
+            display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+            flex: 0 0 auto; padding: 6px 8px; margin: -6px -2px; border-radius: 6px;
+            cursor: pointer; border: 1px solid transparent; transition: background 0.12s, border-color 0.12s;
+        }
+        .overview-item:not(.overview-item-selected):hover { background: #2a2a3c; }
+        /* Selected group = a black "tab" with rounded TOP corners. Its content keeps the base
+           item's padding so it stays aligned with the sibling columns (only the background changes);
+           the extra bottom padding + align-self: stretch drop its bottom edge flush against the
+           black .overview-breakdown panel rendered below it. */
+        .overview-item-selected { background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0; align-self: stretch; padding: 6px 8px 12px; }
         .overview-meta { font-size: 12.5px; color: #a6adc8; white-space: nowrap; }
         /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
            it tints the count text while the label keeps the neutral .overview-meta colour. */
@@ -166,7 +179,7 @@
            RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
            single bar never overflows a narrow pane, while every bar scales together (shared scale
            preserved). min-width keeps a count-1 bar a visible sliver. */
-        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * min(300px, 80cqi)); }
+        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
         /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
            count text and, via currentColor, the circle/bar fill. */
         .task-planned { color: #fab387; }
@@ -182,6 +195,37 @@
         .activity-fixing { color: #fab387; }
         .activity-working { color: #ff0000; }
         .activity-waiting { color: #f9e2af; }
+
+        /* Drill-down breakdown panel (overview-drilldown): the black panel rendered INSIDE a section,
+           flush beneath the selected group's black tab. Header = accent-tinted title + muted summary +
+           ✕ close; members grouped by repo (small uppercase muted repo name matching the band header);
+           agent groups show borderless [dot name] chips (dot in the group's activity colour), task
+           buckets show name + bar rows on the SAME shared scale as the band bars above (--bar-fill is
+           the documented inline-width exception). The panel's accent class tints the title and, via
+           currentColor, the chip dots and task bars. */
+        .overview-breakdown { background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-bd-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
+        .overview-bd-title { font-size: 13.5px; font-weight: 600; color: currentColor; }
+        .overview-bd-sub { font-size: 12px; color: #6c7086; }
+        .overview-bd-close { margin-left: auto; align-self: flex-start; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
+        .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
+        .overview-bd-repo { margin: 0 0 13px; }
+        .overview-bd-repo:last-child { margin-bottom: 0; }
+        .overview-bd-repo-name { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: #6c7086; margin: 0 0 7px; }
+        /* Agent breakdown: borderless [dot name] chips, the dot in the group's activity colour (currentColor). */
+        .overview-chips { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+        .overview-chip { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; background: #1e1e2e; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12.5px; }
+        .overview-chip:hover { background: #242438; }
+        .overview-chip-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex: none; }
+        .overview-chip-name { color: #cdd6f4; }
+        /* Task breakdown: worktree name + a bar in the bucket colour, sized on the SAME shared scale as
+           the band bars (width = --bar-fill * the same responsive max, floored at the visible min-width),
+           so one task is the same pixel width here as in the band above. */
+        .overview-task-row { display: grid; grid-template-columns: 210px 1fr; align-items: center; gap: 14px; padding: 4px 6px; border-radius: 5px; cursor: pointer; }
+        .overview-task-row:hover { background: #1e1e2e; }
+        .overview-task-name { font-size: 12.5px; color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .overview-task-track { display: block; }
+        .overview-task-bar { display: block; height: 13px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
@@ -500,6 +544,7 @@
             transition: flex 0.2s ease;
             container-type: inline-size;
             container-name: dashboard;
+            --overview-bar-max: min(300px, 80cqi);
         }
         .canvas-pane {
             overflow: hidden;
