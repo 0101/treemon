@@ -118,5 +118,12 @@ let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCa
                 prop.className "status-overview"
                 prop.children (knownCategories |> List.map (statusOverviewRow prefix latestByCategory))
             ]
+            Html.div [
+                prop.className "nav-hint"
+                prop.children [
+                    Html.kbd "Esc"
+                    Html.span " to refocus worktree navigation"
+                ]
+            ]
         ]
     ]

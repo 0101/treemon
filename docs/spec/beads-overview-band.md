@@ -202,17 +202,19 @@ the solution compiling (no compat shims, per house rules).
 ### Client aggregation + band
 
 - Aggregate **client-side** (the client already receives every worktree). `Client/OverviewData.fs`
-  (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every worktree → task buckets
-  (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has `CodingTool =
-  Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended, Blocked, Done =
-  Σ Closed where `not IsArchived`) + activity groups (`CodingTool = Working` grouped by
+  (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
+  task buckets (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has
+  `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
+  Blocked, Done = Σ Closed) + activity groups (`CodingTool = Working` grouped by
   `Activity.classify` of `CurrentSkill`, absent skill ⇒ Working; `CodingTool = WaitingForUser` ⇒
-  Waiting) + `Scale` (the largest bucket count — the one true shared linear denominator). Empty
-  buckets/groups are omitted (never a `0`); both lists come back in canonical order, with
-  Unattended trailing Done. The result `Overview` carries `Tasks: TaskBucket list` /
-  `Agents: AgentGroup list` / `Scale: int` (`TaskBucketKind` is `[<RequireQualifiedAccess>]`
-  to avoid the `Done`/`Working` collisions with `CodingToolStatus`). **Input contract:** pass the
-  un-split `RepoWorktrees` shape (see decision (f)) — not the client `RepoModel`.
+  Waiting) + `Scale` (the largest bucket count — the one true shared linear denominator). **Archived
+  worktrees are excluded from the entire roll-up** (every task bucket and every agent group), so
+  archiving a worktree drops all of its contributions at once. Empty buckets/groups are omitted
+  (never a `0`); both lists come back in canonical order, with Unattended trailing Done. The result
+  `Overview` carries `Tasks: TaskBucket list` / `Agents: AgentGroup list` / `Scale: int`
+  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to avoid the `Done`/`Working` collisions with
+  `CodingToolStatus`). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
+  — not the client `RepoModel`.
 - The band is native **Feliz with CSS classes**, with the documented exception that each task bar
   uses a computed inline width or CSS variable for its proportional scale. Toggle mirrors Canvas:
   `ToggleOverviewPanel` message, `OverviewPanelOpen` model state, `saveOverviewPanelOpen`
@@ -248,7 +250,8 @@ the solution compiling (no compat shims, per house rules).
 Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.md`. Key ones:
 band is chrome-less and dashboard-scoped; aggregate-only; agent **circles** + task **true-scale
 bars**; empty categories omitted; **Planned vs Queued** = open vs in_progress parent feature; Loose →
-Planned; **Done** = Σ closed non-archived; static interactions; reuse the single `getBeadsData`
+Planned; **Done** = Σ closed; **archived worktrees excluded from the whole roll-up** (every task
+bucket and every agent group); static interactions; reuse the single `getBeadsData`
 call site; running skill from the existing session scan; per-session context usage (Extension C)
 parked.
 
@@ -273,16 +276,18 @@ parked.
   never overlap. A parent that is absent, dangling (id not in the set), non-feature, or a
   closed/blocked feature ⇒ Loose. Matching is one hop and case-insensitive against the raw beads
   strings (`"feature"`, `"open"`, `"in_progress"`).
-- (f) **Only `Done` filters archived; the aggregation folds the un-split `RepoWorktrees list`.**
-  `OverviewData.aggregate` scopes the `not IsArchived` filter to `Done` alone — Planned/Queued/
-  In-progress/Blocked sum across *all* worktrees, archived included. Rationale: `Done` accumulates
-  closed work, so a stale/parked (archived) worktree would inflate it, whereas the other buckets are
-  current work and naturally bounded. Consequence for wiring: the aggregation must receive the
-  server-shaped `RepoWorktrees list` (every worktree present, archived ones flagged via
-  `IsArchived`), **not** the client `RepoModel`, which pre-splits archived worktrees into a separate
-  `ArchivedWorktrees` field. A `RepoModel`-based caller must recombine `Worktrees @ ArchivedWorktrees`
-  before calling `aggregate`, or archived worktrees vanish entirely (silently zeroing their
-  contribution to every bucket, not just `Done`).
+- (f) **Archived worktrees are excluded from the entire roll-up; the aggregation folds the un-split
+  `RepoWorktrees list`.** `OverviewData.aggregate` drops `IsArchived` worktrees up front (when
+  building `taggedWorktrees`), so an archived worktree contributes to **no** task bucket and **no**
+  agent group — archiving a worktree removes all of its Overview contributions at once. (This
+  reverses the original decision, which scoped the `not IsArchived` filter to `Done` alone and let
+  archived worktrees keep inflating Planned/Queued/In-progress/Blocked; users reported the residual
+  counts as a bug — archived means "put away", so it should leave the band entirely.) Consequence for
+  wiring: the aggregation receives the server-shaped `RepoWorktrees list` (every worktree present,
+  archived ones flagged via `IsArchived`), **not** the client `RepoModel`, which pre-splits archived
+  worktrees into a separate `ArchivedWorktrees` field. A `RepoModel`-based caller recombines
+  `Worktrees @ ArchivedWorktrees` before calling `aggregate` and lets `aggregate` — the single owner
+  of the archived policy — drop the archived ones.
 
 **Additional locked decisions:**
 - The visual contract is the count-first, label-above-mark layout with section headers, dashed

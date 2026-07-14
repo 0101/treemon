@@ -83,6 +83,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - Worktree cards show yellow canvas notifications for new or updated docs. Notifications expire after 5 minutes, deduplicate by filename, replace `LastUserMessage` while present, and click through to the relevant worktree or doc.
 - `SystemView` docs are excluded from content-hash awareness at the source (the `awarenessDocs` filter in `CanvasAwareness.fs`): they never contribute to unviewed counts, card notifications, seeded viewed-hashes, or the idle auto-display target. The beads file hash is stable while its data changes, so it would never signal real newness — and it would morph-signal spuriously on a template/deploy edit. Beads "newness" is surfaced on the worktree card as `BeadsSummary` instead.
 - Viewed tabs dim to 0.5 opacity so unviewed docs stand out.
+- The Canvas Overview highlights unviewed docs by rendering them pure white (`#fff`, normal weight); viewed docs keep the muted `#6c7086`. The highlighted set is exactly `unviewedDocsByScopedKey` — the same signal the Canvas badge counts — so the overview highlight and the badge count can never disagree, and `SystemView` docs are excluded at the source. This unread text color is orthogonal to the per-doc green liveness dot (session-alive), which occupies a separate visual channel (leading dot).
 
 ### Liveness and Session Routing
 
