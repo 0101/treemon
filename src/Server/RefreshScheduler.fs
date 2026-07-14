@@ -695,62 +695,83 @@ let start
     /// callback and the main scheduler loop so watcher updates are visible across iterations.
     let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) (lastLoggedSnapshot: OverviewData.OverviewSnapshot option) =
         async {
-            let! state = agent.PostAndAsyncReply(GetState)
+            // Run the whole per-iteration body inside a try/with so a transient failure
+            // (e.g. SessionManager.getActiveSessions raising TimeoutException when a slow
+            // Spawn/LaunchAction turn is queued ahead of its 10s reply timeout) degrades
+            // gracefully instead of unwinding the loop. If the body escaped uncaught, the
+            // exception would propagate out of `loop -> startup`, and Async.Start has no error
+            // continuation — the scheduler (watcher reconciliation, periodic refresh, and 24/7
+            // overview-history logging) would stop permanently until process restart. On failure
+            // we log and continue the recursion with the previous accumulators. The recursion
+            // itself stays OUTSIDE the handler so handlers don't nest across iterations.
+            let! (nextRuns, nextWatchers, nextSnapshot) =
+                async {
+                    try
+                        let! state = agent.PostAndAsyncReply(GetState)
 
-            let repos =
-                if Map.isEmpty state.Repos then initialRepos
-                else state.Repos
+                        let repos =
+                            if Map.isEmpty state.Repos then initialRepos
+                            else state.Repos
 
-            let! watchers = CanvasWatchers.reconcile agent repos watchers
-            latestWatchers.Value <- watchers
+                        let! watchers = CanvasWatchers.reconcile agent repos watchers
+                        latestWatchers.Value <- watchers
 
-            // 24/7 overview activity-history logging (spec: docs/spec/overview-activity-history.md,
-            // decisions #1/#3). Assemble the SAME cross-worktree roll-up the client band shows and
-            // append one JSONL record only when its count-only projection changed since the last
-            // logged snapshot. The accumulator threads immutably through the recursion, exactly like
-            // lastRuns/watchers — no `let mutable`. `assembleOverview` is injected by the caller
-            // because assembleRepos lives in a later-compiled module (WorktreeApi/SyncEngine).
-            let! overview = assembleOverview state
-            let lastLoggedSnapshot =
-                if OverviewHistory.changed lastLoggedSnapshot overview then
-                    let snap = OverviewHistory.snapshot DateTimeOffset.UtcNow overview
-                    OverviewHistory.append snap
-                    Some snap
-                else
-                    lastLoggedSnapshot
+                        // 24/7 overview activity-history logging (spec: docs/spec/overview-activity-history.md,
+                        // decisions #1/#3). Assemble the SAME cross-worktree roll-up the client band shows and
+                        // append one JSONL record only when its count-only projection changed since the last
+                        // logged snapshot. The accumulator threads immutably through the recursion, exactly like
+                        // lastRuns/watchers — no `let mutable`. `assembleOverview` is injected by the caller
+                        // because assembleRepos lives in a later-compiled module (WorktreeApi/SyncEngine).
+                        let! overview = assembleOverview state
+                        let lastLoggedSnapshot =
+                            if OverviewHistory.changed lastLoggedSnapshot overview then
+                                let snap = OverviewHistory.snapshot DateTimeOffset.UtcNow overview
+                                OverviewHistory.append snap
+                                Some snap
+                            else
+                                lastLoggedSnapshot
 
-            let archivedBranchSets = readArchivedBranchSets rootPaths
-            let archivedPaths = resolveArchivedPaths archivedBranchSets repos
-            let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
-            let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
-            let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
-            let now = DateTimeOffset.UtcNow
-            let activity = effectiveActivity now state
+                        let archivedBranchSets = readArchivedBranchSets rootPaths
+                        let archivedPaths = resolveArchivedPaths archivedBranchSets repos
+                        let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+                        let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
+                        let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
+                        let now = DateTimeOffset.UtcNow
+                        let activity = effectiveActivity now state
 
-            let effectiveLastRuns =
-                tasks
-                |> List.fold (fun runs task ->
-                    match task with
-                    | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
-                        runs |> Map.remove task
-                    | _ -> runs) lastRuns
+                        let effectiveLastRuns =
+                            tasks
+                            |> List.fold (fun runs task ->
+                                match task with
+                                | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                                    runs |> Map.remove task
+                                | _ -> runs) lastRuns
 
-            match pickMostOverdue activity now effectiveLastRuns tasks with
-            | Some task ->
-                let! result = executeWithTimeout agent rootPaths task
-                logTaskResult agent task result
+                        match pickMostOverdue activity now effectiveLastRuns tasks with
+                        | Some task ->
+                            let! result = executeWithTimeout agent rootPaths task
+                            logTaskResult agent task result
 
-                match task with
-                | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
-                    agent.Post(ClearExpedite repoId)
-                | _ -> ()
+                            match task with
+                            | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                                agent.Post(ClearExpedite repoId)
+                            | _ -> ()
 
-                let updatedRuns = lastRuns |> Map.add task now
-                return! loop latestWatchers updatedRuns watchers lastLoggedSnapshot
-            | None ->
-                let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
-                do! Async.Sleep sleepMs
-                return! loop latestWatchers lastRuns watchers lastLoggedSnapshot
+                            let updatedRuns = lastRuns |> Map.add task now
+                            return (updatedRuns, watchers, lastLoggedSnapshot)
+                        | None ->
+                            let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
+                            do! Async.Sleep sleepMs
+                            return (lastRuns, watchers, lastLoggedSnapshot)
+                    with ex ->
+                        // Transient failure — log and continue with the previous accumulators so the
+                        // scheduler survives. Sleep briefly to avoid a hot spin if the fault persists.
+                        Log.log "Scheduler" $"Refresh iteration failed, continuing with last snapshot: {ex.Message}"
+                        do! Async.Sleep 5000
+                        return (lastRuns, watchers, lastLoggedSnapshot)
+                }
+
+            return! loop latestWatchers nextRuns nextWatchers nextSnapshot
         }
 
     let startup =
