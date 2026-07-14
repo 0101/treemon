@@ -57,10 +57,13 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
     // The single unviewed input: the same badge-source map (`unviewedDocsByScopedKey`), computed
     // ONCE and converted to Map<string, Set<string>> for O(1) per-doc membership. The overview
     // highlights from this whole map; the focused card's set is derived from it below, so the
-    // overview highlight and the Canvas badge can never disagree.
+    // overview highlight and the Canvas badge can never disagree. Only the pane UI consumes it, so
+    // the repo/worktree/doc walk is skipped entirely while the pane is closed.
     let unviewedByScopedKey =
-        unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
-        |> Map.map (fun _ filenames -> Set.ofList filenames)
+        if model.Canvas.CanvasPaneOpen then
+            unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
+            |> Map.map (fun _ filenames -> Set.ofList filenames)
+        else Map.empty
 
     let focusedUnviewedFilenames =
         match model.FocusedElement with
