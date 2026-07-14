@@ -38,6 +38,7 @@
     <Compile Include="CanvasScanner.fs" />
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
+    <Compile Include="OverviewHistory.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="SyncEngine.fs" />

@@ -66,6 +66,7 @@
     <Compile Include="ActivityClassifierTests.fs" />
     <Compile Include="OverviewDataTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
+    <Compile Include="OverviewHistoryTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
     <Compile Include="HttpSecurityTests.fs" />
