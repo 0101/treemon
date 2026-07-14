@@ -215,6 +215,42 @@ let private resolveProvider (state: RefreshScheduler.DashboardState) (path: stri
         |> Map.tryFind path
         |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
 
+/// Assemble the RepoWorktrees list from a scheduler DashboardState. Shared by the
+/// client-poll path (getWorktrees) and the 24/7 scheduler overview logger so both
+/// observe the identical worktree roll-up (active sessions, archived branch sets,
+/// ignore predicate). Reads config (ignore patterns, archived branches) and the
+/// filesystem (test-failure log presence) — the same side effects the poll path had.
+let assembleRepos
+    (rootPaths: Map<RepoId, string>)
+    (activeSessionPaths: Set<string>)
+    (state: RefreshScheduler.DashboardState)
+    : RepoWorktrees list =
+    let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+
+    state.Repos
+    |> Map.toList
+    |> List.map (fun (repoId, repo) ->
+        let archivedBranches =
+            rootPaths
+            |> Map.tryFind repoId
+            |> TreemonConfig.readArchivedBranchSet
+
+        let statuses =
+            repo.WorktreeList
+            |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
+            |> List.map (fun wt ->
+                let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
+                assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
+
+        let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
+
+        { RepoId = repoId
+          RootFolderName = Path.GetFileName(originalPath)
+          Worktrees = statuses
+          IsReady = repo.IsReady
+          Provider = repo.Provider
+          BaseBranch = repo.BaseBranch })
+
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -227,32 +263,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
-
-        let repos =
-            state.Repos
-            |> Map.toList
-            |> List.map (fun (repoId, repo) ->
-                let archivedBranches =
-                    rootPaths
-                    |> Map.tryFind repoId
-                    |> TreemonConfig.readArchivedBranchSet
-
-                let statuses =
-                    repo.WorktreeList
-                    |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
-                    |> List.map (fun wt ->
-                        let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
-
-                let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
-
-                { RepoId = repoId
-                  RootFolderName = Path.GetFileName(originalPath)
-                  Worktrees = statuses
-                  IsReady = repo.IsReady
-                  Provider = repo.Provider
-                  BaseBranch = repo.BaseBranch })
+        let repos = assembleRepos rootPaths activeSessionPaths state
 
         return
             { Repos = repos
