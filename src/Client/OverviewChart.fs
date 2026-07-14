@@ -51,26 +51,28 @@ let private taskCount kind (s: OverviewSnapshot) =
     |> Option.defaultValue 0
 
 // Agent series in canonical stacking order (bottom -> top): the activity groups, then Waiting last —
-// mirroring OverviewData.agentGroupOrder and the band's palette. Labels/classes mirror OverviewBand.
+// mirroring OverviewData.agentGroupOrder and the band's palette. Labels/classes come from the shared
+// OverviewData.agentLabel/agentClass so the legend never drifts from the live band.
 let private agentDefs : SeriesDef list =
-    [ AgentGroupKind.Activity CurrentActivity.Investigating, "Investigating", "activity-investigating"
-      AgentGroupKind.Activity CurrentActivity.Planning,      "Planning",      "activity-planning"
-      AgentGroupKind.Activity CurrentActivity.Executing,     "Executing",     "activity-executing"
-      AgentGroupKind.Activity CurrentActivity.Reviewing,     "Reviewing",     "activity-reviewing"
-      AgentGroupKind.Activity CurrentActivity.Fixing,        "Fixing",        "activity-fixing"
-      AgentGroupKind.Activity CurrentActivity.Working,       "Working",       "activity-working"
-      AgentGroupKind.Waiting,                                "Waiting",       "activity-waiting" ]
-    |> List.map (fun (kind, label, accent) -> { Label = label; Accent = accent; ValueAt = agentCount kind })
+    [ AgentGroupKind.Activity CurrentActivity.Investigating
+      AgentGroupKind.Activity CurrentActivity.Planning
+      AgentGroupKind.Activity CurrentActivity.Executing
+      AgentGroupKind.Activity CurrentActivity.Reviewing
+      AgentGroupKind.Activity CurrentActivity.Fixing
+      AgentGroupKind.Activity CurrentActivity.Working
+      AgentGroupKind.Waiting ]
+    |> List.map (fun kind -> { Label = agentLabel kind; Accent = agentClass kind; ValueAt = agentCount kind })
 
 // Task series in canonical stacking order, mirroring OverviewData.taskOrder and the band's task-* palette.
+// Labels/classes come from the shared OverviewData.taskLabel/taskClass so the legend never drifts.
 let private taskDefs : SeriesDef list =
-    [ TaskBucketKind.Planned,    "Planned",     "task-planned"
-      TaskBucketKind.Queued,     "Queued",      "task-queued"
-      TaskBucketKind.InProgress, "In progress", "task-inprogress"
-      TaskBucketKind.Blocked,    "Blocked",     "task-blocked"
-      TaskBucketKind.Done,       "Done",        "task-done"
-      TaskBucketKind.Unattended, "Unattended",  "task-unattended" ]
-    |> List.map (fun (kind, label, accent) -> { Label = label; Accent = accent; ValueAt = taskCount kind })
+    [ TaskBucketKind.Planned
+      TaskBucketKind.Queued
+      TaskBucketKind.InProgress
+      TaskBucketKind.Blocked
+      TaskBucketKind.Done
+      TaskBucketKind.Unattended ]
+    |> List.map (fun kind -> { Label = taskLabel kind; Accent = taskClass kind; ValueAt = taskCount kind })
 
 /// The TimeSpan a window scopes to (Hidden collapses to zero — callers gate on non-Hidden before rendering).
 let private windowSpan =

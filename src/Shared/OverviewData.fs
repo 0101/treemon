@@ -137,6 +137,65 @@ let private activityOrder =
 let private agentGroupOrder =
     (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting ]
 
+// ── Shared kind -> display-label and kind -> accent-class mappings ──
+// The single owner of the label + CSS-class strings for every task/activity/agent kind. Both the live
+// band (OverviewBand) and the in-band history chart (OverviewChart) read these so a label rename, typo
+// fix, or palette change happens in exactly one place and the band + chart legend can never drift. The
+// accent class sets `color`, which tints both the count text and the visual (bar/circle/area paint
+// `currentColor`).
+
+/// Display label per task bucket, in the aggregate's canonical left-to-right order.
+let taskLabel =
+    function
+    | TaskBucketKind.Planned -> "Planned"
+    | TaskBucketKind.Queued -> "Queued"
+    | TaskBucketKind.InProgress -> "In progress"
+    | TaskBucketKind.Blocked -> "Blocked"
+    | TaskBucketKind.Done -> "Done"
+    | TaskBucketKind.Unattended -> "Unattended"
+
+/// Accent-color modifier class per task bucket.
+let taskClass =
+    function
+    | TaskBucketKind.Planned -> "task-planned"
+    | TaskBucketKind.Queued -> "task-queued"
+    | TaskBucketKind.InProgress -> "task-inprogress"
+    | TaskBucketKind.Blocked -> "task-blocked"
+    | TaskBucketKind.Done -> "task-done"
+    | TaskBucketKind.Unattended -> "task-unattended"
+
+/// Display label per activity bucket, in the aggregate's canonical order.
+let activityLabel =
+    function
+    | CurrentActivity.Investigating -> "Investigating"
+    | CurrentActivity.Planning -> "Planning"
+    | CurrentActivity.Executing -> "Executing"
+    | CurrentActivity.Reviewing -> "Reviewing"
+    | CurrentActivity.Fixing -> "Fixing"
+    | CurrentActivity.Working -> "Working"
+
+/// Accent-color modifier class per activity bucket (same currentColor scheme as taskClass).
+let activityClass =
+    function
+    | CurrentActivity.Investigating -> "activity-investigating"
+    | CurrentActivity.Planning -> "activity-planning"
+    | CurrentActivity.Executing -> "activity-executing"
+    | CurrentActivity.Reviewing -> "activity-reviewing"
+    | CurrentActivity.Fixing -> "activity-fixing"
+    | CurrentActivity.Working -> "activity-working"
+
+/// Display label per agent group: the skill-derived activity, or the distinct Waiting group.
+let agentLabel =
+    function
+    | AgentGroupKind.Activity activity -> activityLabel activity
+    | AgentGroupKind.Waiting -> "Waiting"
+
+/// Accent-color modifier class per agent group (same currentColor scheme as activityClass).
+let agentClass =
+    function
+    | AgentGroupKind.Activity activity -> activityClass activity
+    | AgentGroupKind.Waiting -> "activity-waiting"
+
 /// The activity a WORKING worktree's current skill classifies to. An absent skill classifies to
 /// Working (classify normalizes "" -> Working), matching the spec's "red-dot agent, no recognized
 /// skill -> generic Working group".

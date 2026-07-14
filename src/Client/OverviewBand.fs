@@ -28,59 +28,6 @@ open Feliz
 open OverviewData
 open AppTypes
 
-// Display label per task bucket, in the aggregate's canonical left-to-right order.
-let private taskLabel =
-    function
-    | TaskBucketKind.Planned -> "Planned"
-    | TaskBucketKind.Queued -> "Queued"
-    | TaskBucketKind.InProgress -> "In progress"
-    | TaskBucketKind.Blocked -> "Blocked"
-    | TaskBucketKind.Done -> "Done"
-    | TaskBucketKind.Unattended -> "Unattended"
-
-// Accent-color modifier class per task bucket. The class sets `color`, which drives BOTH the count
-// text and the bar fill (the bar paints `background: currentColor`).
-let private taskClass =
-    function
-    | TaskBucketKind.Planned -> "task-planned"
-    | TaskBucketKind.Queued -> "task-queued"
-    | TaskBucketKind.InProgress -> "task-inprogress"
-    | TaskBucketKind.Blocked -> "task-blocked"
-    | TaskBucketKind.Done -> "task-done"
-    | TaskBucketKind.Unattended -> "task-unattended"
-
-// Display label per activity bucket, in the aggregate's canonical order.
-let private activityLabel =
-    function
-    | CurrentActivity.Investigating -> "Investigating"
-    | CurrentActivity.Planning -> "Planning"
-    | CurrentActivity.Executing -> "Executing"
-    | CurrentActivity.Reviewing -> "Reviewing"
-    | CurrentActivity.Fixing -> "Fixing"
-    | CurrentActivity.Working -> "Working"
-
-// Accent-color modifier class per activity bucket (same currentColor scheme as taskClass).
-let private activityClass =
-    function
-    | CurrentActivity.Investigating -> "activity-investigating"
-    | CurrentActivity.Planning -> "activity-planning"
-    | CurrentActivity.Executing -> "activity-executing"
-    | CurrentActivity.Reviewing -> "activity-reviewing"
-    | CurrentActivity.Fixing -> "activity-fixing"
-    | CurrentActivity.Working -> "activity-working"
-
-// Display label per agent group: the skill-derived activity, or the distinct Waiting group.
-let private agentLabel =
-    function
-    | AgentGroupKind.Activity activity -> activityLabel activity
-    | AgentGroupKind.Waiting -> "Waiting"
-
-// Accent-color modifier class per agent group (same currentColor scheme as activityClass).
-let private agentClass =
-    function
-    | AgentGroupKind.Activity activity -> activityClass activity
-    | AgentGroupKind.Waiting -> "activity-waiting"
-
 /// The count+label meta line shown ABOVE each visual: count FIRST in the accent colour, label
 /// neutral, both the same font size/weight so they differ only by colour (prototype `.ulbl`). The
 /// accent class sets `color`, so it tints the count; the label keeps the neutral meta colour.
