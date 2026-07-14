@@ -19,6 +19,7 @@ open Shared
 open OverviewData
 open AppTypes
 open Feliz
+open Fable.Core.JsInterop
 
 // ── Fixed geometry (verbatim from the prototype) ──
 let [<Literal>] private w = 760.0
@@ -129,14 +130,80 @@ let agentPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSna
 let taskPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : Point list =
     buildPoints taskDefs now window snapshots
 
+/// One row of the crosshair tooltip: a non-empty series at the snapped snapshot, carrying its display
+/// label, the accent class that tints its swatch, and the count held at that instant.
+type TooltipRow = { Label: string; Accent: string; Count: int }
+
+/// The pure model behind the crosshair tooltip (task tm-activity-history-zx6): the series rows visible at
+/// the snapped snapshot (each non-empty, in canonical order), the running total, and the relative-time
+/// header. Derived purely from the windowed Point list + a cursor fraction so it is unit-testable and
+/// Fable-safe — the React component only positions and paints it.
+type TooltipModel = { RelativeLabel: string; Rows: TooltipRow list; Total: int }
+
+// The relative-time header for a snapped point, derived from its window-fraction (minutes-ago =
+// window * (1 - fraction)); mirrors the prototype's "Hh Mm ago" / "Mm ago" ladder, with 0 -> "now".
+let private relativeLabel (window: TimeSpan) (fraction: float) =
+    let minutesAgo = int (Math.Round(window.TotalMinutes * (1.0 - fraction)))
+    let hh = minutesAgo / 60
+    let mm = minutesAgo % 60
+    if hh > 0 then $"{hh}h {mm}m ago"
+    elif minutesAgo = 0 then "now"
+    else $"{mm}m ago"
+
+/// Snap to the ACTIVE stepped snapshot for a cursor fraction and project the crosshair tooltip model: the
+/// last point at or before the cursor (the value actually held then — matching the stepped rendering),
+/// its non-empty series as rows in canonical order, a total, and a relative-time header. Returns None when
+/// there is no history to snap to. `isAgents` selects the canonical series set (matching
+/// agentPoints/taskPoints). Pure test/reuse seam — the React component is the only impure caller.
+let tooltipAt (isAgents: bool) (window: TimeSpan) (points: Point list) (cursorFraction: float) : TooltipModel option =
+    match points with
+    | [] -> None
+    | head :: _ ->
+        let defs = if isAgents then agentDefs else taskDefs
+        let snap =
+            points
+            |> List.filter (fun p -> p.Fraction <= cursorFraction)
+            |> List.tryLast
+            |> Option.defaultValue head
+        let rows =
+            List.zip defs snap.Counts
+            |> List.choose (fun (d, c) ->
+                if c > 0 then Some { Label = d.Label; Accent = d.Accent; Count = c } else None)
+        Some
+            { RelativeLabel = relativeLabel window snap.Fraction
+              Rows = rows
+              Total = List.sum snap.Counts }
+
 // Round a coordinate to an integer string (culture-invariant — integers carry no decimal separator), so
 // the emitted path/attribute geometry is deterministic under both Fable and the .NET test compile.
 let private ix (v: float) = string (int (Math.Round v))
 
-/// Render one stacked stepped-area chart with its title and legend for the given series over the window.
-/// `title` is the section name ("Active agents" / "Tasks"); when there is no history the chart degrades to
-/// a bare baseline (grid + axes, no areas) rather than erroring.
-let private renderChart (title: string) (winLabel: string) (defs: SeriesDef list) (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : ReactElement =
+/// Ephemeral hover state for the crosshair tooltip (task tm-activity-history-zx6): the cursor's position
+/// in SVG-x (for the dashed guide line) and window-fraction (for snapping to the active snapshot), plus
+/// its pixel offset within the figure (for placing the HTML tooltip). Lives only while the pointer is
+/// over a chart — reset on mouse-leave, never persisted.
+type private HoverState =
+    { SvgX: float
+      Frac: float
+      Px: float
+      Py: float
+      RectWidth: float }
+
+/// Render one stacked stepped-area chart with its title, legend, and crosshair tooltip for the given
+/// series over the window (spec decision #8). `title` is the section name ("Active agents" / "Tasks");
+/// `isAgents` selects the canonical series set. When there is no history the chart degrades to a bare
+/// baseline (grid + axes, no areas, no hover) rather than erroring.
+///
+/// Hovering the plot shows a dashed vertical crosshair at the cursor and a tooltip SNAPPED to the active
+/// stepped snapshot — the last plotted point at or before the cursor time, matching the stepped rendering
+/// — listing each non-empty series as `label: count` with a colour swatch, plus a relative-time header
+/// and a total. Rendered as a Feliz React component so the hover state stays local & ephemeral; the pure
+/// geometry (buildPoints/agentDefs/taskDefs) is shared with the static path & legend builders above and
+/// with the `agentPoints`/`taskPoints` test seams.
+[<ReactComponent>]
+let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : ReactElement =
+    let defs = if isAgents then agentDefs else taskDefs
+    let hover, setHover = React.useState (None: HoverState option)
     let pts = buildPoints defs now window snapshots |> List.toArray
     let n = pts.Length
 
@@ -240,6 +307,42 @@ let private renderChart (title: string) (winLabel: string) (defs: SeriesDef list
                 else
                     None)
 
+    // ── Crosshair tooltip (spec decision #8) ──
+    // Map a pointer move over the whole SVG into SVG-x + window-fraction + figure-pixel offset (mirrors
+    // the prototype: cursor scaled by the viewBox width / rendered width, clamped to the plot). No-op when
+    // there is no history to snap to.
+    let onMove (ev: Browser.Types.MouseEvent) =
+        if n > 0 then
+            let rect = ev.currentTarget?getBoundingClientRect ()
+            let rectLeft: float = rect?left
+            let rectTop: float = rect?top
+            let rectWidth: float = rect?width
+            let scaleX = if rectWidth > 0.0 then w / rectWidth else 1.0
+            let rawX = (ev.clientX - rectLeft) * scaleX
+            let svgX = max padL (min (padL + plotW) rawX)
+            let frac = (svgX - padL) / plotW
+
+            setHover (
+                Some
+                    { SvgX = svgX
+                      Frac = frac
+                      Px = ev.clientX - rectLeft
+                      Py = ev.clientY - rectTop
+                      RectWidth = rectWidth }
+            )
+
+    // Dashed vertical guide line at the cursor (pointer-events:none via CSS so it never steals the move).
+    let crosshairEls =
+        match hover with
+        | Some hv when n > 0 ->
+            [ Svg.line
+                  [ svg.className "cursor-line"
+                    svg.x1 (int (Math.Round hv.SvgX))
+                    svg.y1 (int (Math.Round padT))
+                    svg.x2 (int (Math.Round hv.SvgX))
+                    svg.y2 (int (Math.Round(padT + plotH))) ] ]
+        | _ -> []
+
     let svgEl =
         Svg.svg
             [ svg.viewBox (0, 0, int w, int h)
@@ -247,7 +350,45 @@ let private renderChart (title: string) (winLabel: string) (defs: SeriesDef list
               svg.height h
               svg.custom ("role", "img")
               svg.custom ("aria-label", $"{title} over the last {winLabel}")
-              svg.children (gridEls @ areaEls @ axisEls) ]
+              svg.onMouseMove onMove
+              svg.onMouseLeave (fun _ -> setHover None)
+              svg.children (gridEls @ areaEls @ axisEls @ crosshairEls) ]
+
+    // The snapped HTML tooltip, absolutely positioned within the figure. Rows/total/header come from the
+    // pure `tooltipAt` seam; the component only positions & paints. Flips left of the cursor near the right
+    // edge and sits above it (translateY(-100%)) so the tooltip size never has to be measured.
+    let tooltipEl =
+        match hover with
+        | Some hv ->
+            match tooltipAt isAgents window (List.ofArray pts) hv.Frac with
+            | Some model ->
+                let rows =
+                    model.Rows
+                    |> List.map (fun r ->
+                        Html.div
+                            [ prop.className "tip-row"
+                              prop.children
+                                  [ Html.span [ prop.className (r.Accent + " swatch") ]
+                                    Html.span [ prop.className "tip-label"; prop.text (r.Label + ": ") ]
+                                    Html.b [ prop.text (string r.Count) ] ] ])
+
+                let flipLeft = hv.Px > hv.RectWidth * 0.62
+                let leftPx = if flipLeft then hv.Px - 12.0 else hv.Px + 12.0
+                let transformStr = if flipLeft then "translate(-100%, -100%)" else "translate(0, -100%)"
+
+                Html.div
+                    [ prop.className "chart-tip"
+                      prop.style
+                          [ style.left (length.px (int (Math.Round leftPx)))
+                            style.top (length.px (int (Math.Round(hv.Py - 8.0))))
+                            style.custom ("transform", transformStr) ]
+                      prop.children (
+                          [ Html.div [ prop.className "tip-time"; prop.text model.RelativeLabel ] ]
+                          @ rows
+                          @ [ Html.div [ prop.className "tip-total"; prop.text $"Total: {model.Total}" ] ]
+                      ) ]
+            | None -> Html.none
+        | None -> Html.none
 
     Html.div
         [ prop.className "history-charts"
@@ -257,17 +398,17 @@ let private renderChart (title: string) (winLabel: string) (defs: SeriesDef list
                       prop.children
                           [ Html.text (title + " \u00B7 last ")
                             Html.span [ prop.className "win-label"; prop.text winLabel ] ] ]
-                Html.figure [ prop.children [ svgEl ] ]
+                Html.figure [ prop.children [ svgEl; tooltipEl ] ]
                 Html.div [ prop.className "chart-legend"; prop.children legendEls ] ] ]
 
 /// The Active-agents history chart for the given window. Returns Html.none when the window is Hidden.
 let agentsChart (window: OverviewChartWindow) (now: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
     match window with
     | OverviewChartWindow.Hidden -> Html.none
-    | _ -> renderChart "Active agents" (windowLabel window) agentDefs now (windowSpan window) snapshots
+    | _ -> HistoryChart "Active agents" (windowLabel window) true now (windowSpan window) snapshots
 
 /// The Tasks history chart for the given window. Returns Html.none when the window is Hidden.
 let tasksChart (window: OverviewChartWindow) (now: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
     match window with
     | OverviewChartWindow.Hidden -> Html.none
-    | _ -> renderChart "Tasks" (windowLabel window) taskDefs now (windowSpan window) snapshots
+    | _ -> HistoryChart "Tasks" (windowLabel window) false now (windowSpan window) snapshots

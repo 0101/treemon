@@ -103,3 +103,56 @@ type OverviewChartTests() =
         Assert.That(pts.Head.Counts.Length, Is.EqualTo 7)
         Assert.That(List.item 2 pts.Head.Counts, Is.EqualTo 3) // Executing is index 2
         Assert.That(pts.Head.Counts |> List.sum, Is.EqualTo 3) // every other series is empty
+
+    // ── Crosshair tooltip seam (task tm-activity-history-zx6) ──
+
+    [<Test>]
+    member _.``tooltipAt returns None when there is no history`` () =
+        let pts = OverviewChart.taskPoints now window []
+        Assert.That(OverviewChart.tooltipAt false window pts 0.5, Is.EqualTo None)
+
+    [<Test>]
+    member _.``tooltipAt snaps to the active stepped snapshot and totals its non-empty series`` () =
+        let pts =
+            OverviewChart.taskPoints
+                now
+                window
+                [ taskSnap (hoursAgo 12.0) TaskBucketKind.Done 2
+                  taskSnap (hoursAgo 2.0) TaskBucketKind.Done 7 ]
+
+        // Cursor past the 12h mark but before the 2h change -> the stepped value still held is Done = 2,
+        // and only that non-empty series shows as a row.
+        let m1 = OverviewChart.tooltipAt false window pts 0.6 |> Option.get
+        Assert.That(m1.Total, Is.EqualTo 2)
+        Assert.That(m1.Rows |> List.map (fun r -> r.Label, r.Count), Is.EqualTo [ ("Done", 2) ])
+        Assert.That(m1.Rows.Head.Accent, Is.EqualTo "task-done")
+
+        // Cursor past the 2h change -> the held value snaps up to Done = 7.
+        let m2 = OverviewChart.tooltipAt false window pts 0.95 |> Option.get
+        Assert.That(m2.Total, Is.EqualTo 7)
+        Assert.That(m2.Rows |> List.exists (fun r -> r.Label = "Done" && r.Count = 7))
+
+    [<Test>]
+    member _.``tooltipAt header reads the snapped point's relative time`` () =
+        let pts = OverviewChart.taskPoints now window [ taskSnap (hoursAgo 12.0) TaskBucketKind.Done 2 ]
+        // The head (fraction 0.0) sits a full window back in a 24h window -> "24h 0m ago".
+        let head = OverviewChart.tooltipAt false window pts 0.0 |> Option.get
+        Assert.That(head.RelativeLabel, Is.EqualTo "24h 0m ago")
+        // The right-edge hold (fraction 1.0) is "now".
+        let tail = OverviewChart.tooltipAt false window pts 1.0 |> Option.get
+        Assert.That(tail.RelativeLabel, Is.EqualTo "now")
+
+    [<Test>]
+    member _.``tooltipAt rows follow the canonical order and drop empty series`` () =
+        let agentSnap : OverviewSnapshot =
+            { Timestamp = hoursAgo 1.0
+              Tasks = []
+              Agents =
+                [ { AgentCount.Kind = AgentGroupKind.Waiting; Count = 2 }
+                  { AgentCount.Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 3 } ] }
+
+        let pts = OverviewChart.agentPoints now window [ agentSnap ]
+        let model = OverviewChart.tooltipAt true window pts 1.0 |> Option.get
+        // Executing (canonical index 2) precedes Waiting (index 6); both are non-empty, nothing else is.
+        Assert.That(model.Rows |> List.map (fun r -> r.Label), Is.EqualTo [ "Executing"; "Waiting" ])
+        Assert.That(model.Total, Is.EqualTo 5)

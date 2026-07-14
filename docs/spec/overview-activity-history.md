@@ -67,6 +67,22 @@ These were settled with the user during investigation and prototyping:
     history, matching the "chart directly under its section" framing. Coordinates are rounded to
     integer pixels (culture-invariant, deterministic under both Fable and the .NET test compile);
     adjacent stacked edges share the identical rounding formula so no seams appear.
+15. **Crosshair tooltip (task `tm-activity-history-zx6`) is a Feliz React component with local hover
+    state, not a static builder.** `OverviewChart.HistoryChart` (`[<ReactComponent>]`, matching the
+    `Components.FitOrHide` precedent) holds an ephemeral `HoverState` via `React.useState`; a
+    `svg.onMouseMove` on the SVG root maps the cursor to an SVG-x + window-fraction (scaled by
+    viewBox/rendered width, clamped to the plot, mirroring the prototype), drawing a dashed
+    `.cursor-line` at the cursor and an absolutely-positioned `.chart-tip` snapped to the active
+    snapshot. The snap + rows + total + relative header are a **pure, unit-tested seam**
+    `tooltipAt : isAgents -> window -> Point list -> cursorFraction -> TooltipModel option` (reusing
+    the `agentPoints`/`taskPoints` `Point` seam from #13): it picks the last point at or before the
+    cursor and lists each non-empty series in canonical order. The relative-time header is derived
+    from the snapped point's **fraction** (`minutes-ago = window * (1 - fraction)`, "Hh Mm ago" /
+    "Mm ago" / "now") — internally consistent with the stepped x-axis, so no per-point timestamp is
+    added to `Point`. The tooltip flips left of the cursor near the right edge and sits above it via
+    `translate(±100%, -100%)`, so its size never needs measuring. No history ⇒ no hover (bare
+    baseline). `agentsChart`/`tasksChart` now instantiate `HistoryChart` (passing `isAgents`) instead
+    of a plain builder.
 
 ## Expected Behavior
 
