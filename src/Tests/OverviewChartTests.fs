@@ -70,9 +70,9 @@ type OverviewChartTests() =
         Assert.That(List.item doneIdx last.Counts, Is.EqualTo 7)
 
         // 12h ago in a 24h window lands at fraction 0.5.
-        Assert.That(pts.[1].Fraction, Is.EqualTo(0.5).Within 1e-9)
+        Assert.That(pts[1].Fraction, Is.EqualTo(0.5).Within 1e-9)
         // Fractions are monotonically non-decreasing across [0, 1].
-        let fracs = pts |> List.map (fun p -> p.Fraction)
+        let fracs = pts |> List.map _.Fraction
         Assert.That(fracs, Is.Ordered)
 
     [<Test>]
@@ -88,7 +88,7 @@ type OverviewChartTests() =
         // change and the held right edge make three points total.
         Assert.That(pts.Length, Is.EqualTo 3)
         Assert.That(List.item doneIdx pts.Head.Counts, Is.EqualTo 1) // carried left edge
-        Assert.That(pts.[1].Fraction, Is.EqualTo(0.75).Within 1e-9) // 6h ago in a 24h window
+        Assert.That(pts[1].Fraction, Is.EqualTo(0.75).Within 1e-9) // 6h ago in a 24h window
         Assert.That(List.item doneIdx (List.last pts).Counts, Is.EqualTo 9) // held right edge
 
     [<Test>]
@@ -154,5 +154,5 @@ type OverviewChartTests() =
         let pts = OverviewChart.agentPoints now window [ agentSnap ]
         let model = OverviewChart.tooltipAt true window pts 1.0 |> Option.get
         // Executing (canonical index 2) precedes Waiting (index 6); both are non-empty, nothing else is.
-        Assert.That(model.Rows |> List.map (fun r -> r.Label), Is.EqualTo [ "Executing"; "Waiting" ])
+        Assert.That(model.Rows |> List.map _.Label, Is.EqualTo [ "Executing"; "Waiting" ])
         Assert.That(model.Total, Is.EqualTo 5)

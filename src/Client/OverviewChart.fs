@@ -98,7 +98,7 @@ type Point = { Fraction: float; Counts: int list }
 /// Returns [] only when there is no history at all. Pure — see the public `agentPoints`/`taskPoints` seams.
 let private buildPoints (defs: SeriesDef list) (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : Point list =
     let start = now - window
-    let sorted = snapshots |> List.sortBy (fun s -> s.Timestamp)
+    let sorted = snapshots |> List.sortBy _.Timestamp
     let before = sorted |> List.filter (fun s -> s.Timestamp <= start) |> List.tryLast
     let inside = sorted |> List.filter (fun s -> s.Timestamp > start)
     let countsOf (s: OverviewSnapshot) = defs |> List.map (fun d -> d.ValueAt s)
