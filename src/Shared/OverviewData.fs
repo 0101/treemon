@@ -21,6 +21,7 @@ module OverviewData
 // which already splits archived worktrees into a separate field — the Done filter needs archived
 // worktrees present-but-flagged, so callers pass the un-split RepoWorktrees list.
 
+open System
 open Shared
 
 /// A cross-worktree task status bucket. RequireQualifiedAccess keeps Done/InProgress/Blocked from
@@ -77,6 +78,32 @@ type Overview =
     { Tasks: TaskBucket list
       Agents: AgentGroup list
       Scale: int }
+
+/// One task bucket reduced to just its kind and cross-worktree count — the COUNT-ONLY shape the
+/// activity-history log persists. Deliberately NOT `TaskBucket`, which now carries the drill-down
+/// `Members` list: the history log stays lean (spec decision #10) and change-detection tracks count
+/// transitions, not per-worktree membership churn.
+type TaskCount = { Kind: TaskBucketKind; Count: int }
+
+/// One agent group reduced to its kind and count — the count-only companion to `TaskCount` (see it
+/// for why this is distinct from the `Members`-carrying `AgentGroup`).
+type AgentCount = { Kind: AgentGroupKind; Count: int }
+
+/// One persisted point in the Overview band's history: the moment it was captured plus the count-only
+/// task-bucket and agent-group rolls (Members dropped, Scale re-derived by the view). This is the
+/// per-line shape of `logs/overview-history.jsonl` and what `IWorktreeApi.getOverviewHistory` returns.
+type OverviewSnapshot =
+    { Timestamp: DateTimeOffset
+      Tasks: TaskCount list
+      Agents: AgentCount list }
+
+/// Project the full Overview roll-up down to its count-only lenses, dropping every `Members` list.
+/// Both logging and change-detection run on this projection, so identical counts with churning
+/// membership never produce a log line. Returns an anonymous record (structural equality) so the
+/// scheduler can compare two projections directly.
+let toCounts (overview: Overview) =
+    {| Tasks = overview.Tasks |> List.map (fun b -> { TaskCount.Kind = b.Kind; Count = b.Count })
+       Agents = overview.Agents |> List.map (fun g -> { AgentCount.Kind = g.Kind; Count = g.Count }) |}
 
 /// Which Overview-band group the drill-down panel is currently showing. Single-select across both
 /// sections (at most one is set): an agent group (Active agents section) or a task bucket (Tasks
