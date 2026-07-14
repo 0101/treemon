@@ -162,7 +162,7 @@
             flex: 0 0 auto; padding: 6px 8px; margin: -6px -2px; border-radius: 6px;
             cursor: pointer; border: 1px solid transparent; transition: background 0.12s, border-color 0.12s;
         }
-        .overview-item:hover { background: #2a2a3c; }
+        .overview-item:not(.overview-item-selected):hover { background: #2a2a3c; }
         /* Selected group = a black "tab" with rounded TOP corners. Its content keeps the base
            item's padding so it stays aligned with the sibling columns (only the background changes);
            the extra bottom padding + align-self: stretch drop its bottom edge flush against the
