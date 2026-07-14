@@ -51,6 +51,11 @@ These were settled with the user during investigation and prototyping:
     Active sessions are included so the logged roll-up matches the client band exactly. The
     change-detection + append + immutably-threaded `lastLoggedSnapshot` accumulator all stay inside
     `loop` as intended.
+12. **`OverviewChartWindow` cases are `Hidden | Hours24 | Hours72`** (client `AppTypes.fs`,
+    `[<RequireQualifiedAccess>]`). Named `Hidden` rather than the §5 sketch's `None` to avoid
+    colliding with `Option.None` in the reducer. The cycle button advances
+    `Hidden → Hours24 → Hours72 → Hidden`; the ephemeral snapshots fetched for the active window live
+    in `Model.OverviewHistory` (both reset on reload).
 
 ## Expected Behavior
 

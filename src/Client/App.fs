@@ -19,6 +19,11 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
+// Fetch the Overview band's recent history (last 72h) for the in-band chart. On failure it degrades to
+// an empty snapshot list rather than an error, matching the spec's "renders nothing" fallback.
+let fetchOverviewHistory () =
+    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory () OverviewHistoryLoaded (fun _ -> OverviewHistoryLoaded [])
+
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
     |> Map.exists (fun _ evts ->
@@ -52,7 +57,9 @@ let init () =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
-      SelectedOverviewGroup = None },
+      SelectedOverviewGroup = None
+      OverviewChartWindow = OverviewChartWindow.Hidden
+      OverviewHistory = [] },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -489,7 +496,29 @@ let update msg model =
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
-        { model with SelectedOverviewGroup = next }, Cmd.none
+        // Mutual exclusivity: opening a drill-down group hides the history chart (mirrors how
+        // ToggleOverviewPanel clears the selection). Only reset when a selection is actually set.
+        let chartWindow = if Option.isSome next then OverviewChartWindow.Hidden else model.OverviewChartWindow
+        { model with SelectedOverviewGroup = next; OverviewChartWindow = chartWindow }, Cmd.none
+
+    | CycleOverviewChart ->
+        // Advance the ephemeral window: Hidden -> 24h -> 72h -> Hidden.
+        let next =
+            match model.OverviewChartWindow with
+            | OverviewChartWindow.Hidden -> OverviewChartWindow.Hours24
+            | OverviewChartWindow.Hours24 -> OverviewChartWindow.Hours72
+            | OverviewChartWindow.Hours72 -> OverviewChartWindow.Hidden
+        match next with
+        | OverviewChartWindow.Hidden ->
+            // Cycling back to hidden just closes the chart; nothing to fetch.
+            { model with OverviewChartWindow = next }, Cmd.none
+        | _ ->
+            // Entering a non-hidden window is the band's other mutually-exclusive detail view: clear any
+            // drill-down selection and (re)fetch the history that scopes the chart.
+            { model with OverviewChartWindow = next; SelectedOverviewGroup = None }, fetchOverviewHistory ()
+
+    | OverviewHistoryLoaded history ->
+        { model with OverviewHistory = history }, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -842,6 +871,8 @@ let view model dispatch =
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)
+                        model.OverviewChartWindow
+                        (fun () -> dispatch CycleOverviewChart)
                         model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then

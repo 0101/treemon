@@ -26,6 +26,7 @@ open Shared
 open Navigation
 open Feliz
 open OverviewData
+open AppTypes
 
 // Display label per task bucket, in the aggregate's canonical left-to-right order.
 let private taskLabel =
@@ -283,15 +284,39 @@ let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel li
     | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
     | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
 
+/// The band's single history-window cycle button (spec: docs/spec/overview-activity-history.md,
+/// decision #5). Clicking advances Hidden -> 24h -> 72h -> Hidden via onCycleChart; the label mirrors
+/// the state (◷ History / ◷ 24h / ◷ 72h) and aria-pressed reflects whether a window is open. Styled
+/// like the band's controls (.history-toggle), pinned to the band's top-right toolbar.
+let private cycleButton (chartWindow: OverviewChartWindow) (onCycleChart: unit -> unit) =
+    let label =
+        match chartWindow with
+        | OverviewChartWindow.Hidden -> "\u25F7 History"
+        | OverviewChartWindow.Hours24 -> "\u25F7 24h"
+        | OverviewChartWindow.Hours72 -> "\u25F7 72h"
+
+    Html.div
+        [ prop.className "overview-toolbar"
+          prop.children
+              [ Html.button
+                    [ prop.className "history-toggle"
+                      prop.ariaPressed (chartWindow <> OverviewChartWindow.Hidden)
+                      prop.title "Cycle history window (hidden \u2192 24h \u2192 72h)"
+                      prop.onClick (fun _ -> onCycleChart ())
+                      prop.text label ] ] ]
+
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
 /// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the
 /// currently drilled-down group (if any); `onSelectGroup` toggles a group's selection when its column
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
-/// arrow-nav parity.
+/// arrow-nav parity. `chartWindow`/`onCycleChart` drive the ephemeral in-band history chart's cycle
+/// button (Hidden -> 24h -> 72h -> Hidden), mutually exclusive with the drill-down.
 let view
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
+    (chartWindow: OverviewChartWindow)
+    (onCycleChart: unit -> unit)
     (repos: RepoModel list)
     : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
@@ -317,7 +342,8 @@ let view
         Html.div
             [ prop.className "overview-band"
               prop.children
-                  [ match agents with
+                  [ cycleButton chartWindow onCycleChart
+                    match agents with
                     | [] -> Html.none
                     | groups ->
                         // Uppercase muted section header (CSS upper-cases it): count of red-dot

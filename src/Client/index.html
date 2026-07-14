@@ -149,6 +149,15 @@
            box/title bar or hairlines (the toggle button is the header); the category columns wrap to
            the next line when the pane is too narrow (overview-drilldown). */
         .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
+        /* History cycle button toolbar (spec: docs/spec/overview-activity-history.md). Pinned top-right,
+           styled like the band's controls; aria-pressed=true tints it while a window is open. */
+        .overview-toolbar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+        .history-toggle {
+            font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+            background: #313244; color: #a6adc8; border: 1px solid #45475a;
+        }
+        .history-toggle:hover { background: #3b3f52; color: #cdd6f4; }
+        .history-toggle[aria-pressed="true"] { background: #2e3245; color: #cba6f7; border-color: #585b70; }
         .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
         /* Shared column layout — identical for both sections; only the visual row differs. The
