@@ -19,13 +19,14 @@ type RepoModel =
       Provider: RepoProvider option
       BaseBranch: string }
 
-/// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
-/// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
-/// filter can still see them (spec decision (f)). Recombine here — the shared adapter both
-/// OverviewBand.view and App's DataLoaded stale-selection check consume — so archived worktrees keep
-/// contributing to every non-Done bucket instead of silently vanishing. Lives in Navigation (which
-/// owns RepoModel) rather than the view module so the RepoModel->RepoWorktrees data-prep detail is
-/// not part of the view's public surface (module-cohesion; keeps the view/update boundary clean).
+/// RepoModel splits archived worktrees into their own field; recombine into the faithful un-split
+/// RepoWorktrees shape (every worktree present, archived flagged via IsArchived). OverviewData.aggregate
+/// owns the archived policy — it excludes IsArchived worktrees from the ENTIRE roll-up (every task
+/// bucket AND every agent group), so this adapter just hands aggregate the complete picture and lets
+/// it drop archived. The shared adapter both OverviewBand.view and App's DataLoaded stale-selection
+/// check consume. Lives in Navigation (which owns RepoModel) rather than the view module so the
+/// RepoModel->RepoWorktrees data-prep detail is not part of the view's public surface (module-cohesion;
+/// keeps the view/update boundary clean).
 let toRepoWorktrees (repo: RepoModel) : RepoWorktrees =
     { RepoId = repo.RepoId
       RootFolderName = repo.Name
@@ -264,6 +265,13 @@ let adjustFocusForVisibility (repos: RepoModel list) (focusedElement: FocusTarge
             match targets with
             | [] -> None
             | _ -> Some targets.Head
+
+/// Focus target to restore when the user reclaims keyboard navigation focus (Escape): keep the
+/// current focus if it is still visible, otherwise fall back to the first visible element.
+let reclaimFocusTarget (repos: RepoModel list) (focusedElement: FocusTarget option) =
+    focusedElement
+    |> adjustFocusForVisibility repos
+    |> Option.orElse (navigateToFirst repos)
 
 /// Expand the repo that owns the worktree at the given scoped key so its card becomes a visible
 /// focus target. Focusing a card inside a collapsed repo would otherwise get reset to the first

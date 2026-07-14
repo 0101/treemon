@@ -325,6 +325,15 @@
         .status-time { color: #585b70; text-align: right; white-space: nowrap; }
         .status-badge.pending { color: #585b70; font-style: italic; }
 
+        .nav-hint {
+            max-width: 580px; margin: 6px auto 0; text-align: center;
+            color: #9399b2; font-size: 0.95em;
+        }
+        .nav-hint kbd {
+            background: #313244; border: 1px solid #45475a; border-radius: 4px;
+            padding: 0 5px; color: #cdd6f4; font-family: inherit; font-size: 0.9em;
+        }
+
         .main-behind-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
         .main-behind-row .main-behind { margin-bottom: 0; }
 
@@ -829,6 +838,9 @@
         .canvas-overview-doc:hover {
             color: #89b4fa;
             text-decoration-color: #89b4fa;
+        }
+        .canvas-overview-doc-unviewed {
+            color: #fff;
         }
 
         .canvas-liveness-dot {
