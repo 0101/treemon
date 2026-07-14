@@ -542,12 +542,12 @@ type CloseCreateModalTests() =
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
-    member _.``CloseCreateModal produces no command``() =
+    member _.``CloseCreateModal refocuses the dashboard``() =
         let openForm =
             Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let _, cmd = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
-        Assert.That(cmd, Is.Empty)
+        Assert.That(cmd, Is.Not.Empty)
 
     [<Test>]
     member _.``CloseCreateModal from Creating resets to Closed``() =
@@ -589,12 +589,12 @@ type EscapeKeyClosesModalTests() =
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
-    member _.``Escape key produces no command when modal is open``() =
+    member _.``Escape refocuses the dashboard when modal is open``() =
         let openForm =
             Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
         let _, cmd = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
-        Assert.That(cmd, Is.Empty)
+        Assert.That(cmd, Is.Not.Empty)
 
 
 [<TestFixture>]

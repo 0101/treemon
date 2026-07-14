@@ -44,6 +44,7 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
+| Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
 
 Adding new bindings = adding a match arm in `keyBinding`.
 
@@ -53,7 +54,20 @@ Adding new bindings = adding a match arm in `keyBinding`.
 - Modifier keys (Ctrl/Alt/Cmd) suppress letter bindings
 - `onKeyDown` on `.dashboard` div with `tabIndex 0`, auto-focused on mount
 
+### Reclaiming Focus
+
+Navigation only works while DOM focus is on (or inside) the `.dashboard` div, since that element
+owns the `onKeyDown` handler. When focus escapes to a sibling (canvas pane, header, mascot) or
+`<body>`, arrow keys go dead. A global document-level `keydown` subscription catches **Escape** from
+anywhere outside the dashboard and refocuses it, restoring the focus target
+(`Navigation.reclaimFocusTarget`). It is skipped when focus is already inside the dashboard (its own
+handler applies) or in an editable field. Escape while the caret is inside the cross-origin canvas
+doc iframe (`127.0.0.1:5002`) cannot be caught — the keystroke does not cross the origin boundary, so
+the user must click out of the iframe first.
+
 ## Key Files
 
-- `src/Client/App.fs` — `FocusTarget` DU, `navigateSpatial`, `keyBinding`, `KeyPressed` handler, view focus rendering
-- `src/Client/index.html` — `.focused` CSS class (outline: 2px solid #4a9eff)
+- `src/Client/App.fs` — `keyBinding`, `KeyPressed` handler (incl. Escape reclaim), `focusReclaim` global subscription, view focus rendering
+- `src/Client/Navigation.fs` — `FocusTarget` DU, `navigateSpatial`, `reclaimFocusTarget` (focus target to restore on Escape)
+- `src/Client/index.html` — `.focused` CSS class (outline: 2px solid #4a9eff), `.nav-hint` footer hint
+

@@ -96,6 +96,12 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
     | _ -> None
 
+let private focusDashboard: Cmd<Msg> =
+    Cmd.ofEffect (fun _ ->
+        Dom.document.querySelector ".dashboard"
+        |> Option.ofObj
+        |> Option.iter (fun el -> el?focus()))
+
 let update msg model =
     match msg with
     | DataLoaded (response, now) ->
@@ -341,11 +347,7 @@ let update msg model =
         let model = { model with ConfirmModal = confirmModal }
         match action with
         | ConfirmModal.NoAction ->
-            model,
-            Cmd.ofEffect (fun _ ->
-                Dom.document.querySelector ".dashboard"
-                |> Option.ofObj
-                |> Option.iter (fun el -> el?focus()))
+            model, focusDashboard
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
             Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
@@ -421,8 +423,12 @@ let update msg model =
         let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
         let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+        let refocusCmd =
+            if CreateWorktreeModal.isOpen model.CreateModal && not (CreateWorktreeModal.isOpen result.Modal) then
+                focusDashboard
+            else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
-        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
+        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
 
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
@@ -430,11 +436,7 @@ let update msg model =
         if model.ConfirmModal <> ConfirmModal.NoConfirm then
             match key with
             | "Escape" ->
-                { model with ConfirmModal = ConfirmModal.NoConfirm },
-                Cmd.ofEffect (fun _ ->
-                    Dom.document.querySelector ".dashboard"
-                    |> Option.ofObj
-                    |> Option.iter (fun el -> el?focus()))
+                { model with ConfirmModal = ConfirmModal.NoConfirm }, focusDashboard
             | _ -> model, Cmd.none
         elif CreateWorktreeModal.isOpen model.CreateModal then
             match key with
@@ -444,7 +446,7 @@ let update msg model =
                     |> Option.map RepoHeader
                     |> Option.orElse model.FocusedElement
                 { model with CreateModal = CreateWorktreeModal.Closed; FocusedElement = restoredFocus },
-                Cmd.none
+                focusDashboard
             | _ -> model, Cmd.none
         else
         let focusWithRetarget newFocus scrollHint extra =
@@ -467,6 +469,10 @@ let update msg model =
             focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
         | "End" ->
             focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
+        | "Escape" ->
+            let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
+            { model with FocusedElement = newFocus },
+            Cmd.batch [ focusDashboard; scrollToFocus Normal newFocus ]
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -596,6 +602,11 @@ let update msg model =
 
     | NoOp -> model, Cmd.none
 
+let private isEditableElement (el: Browser.Types.Element) =
+    match el.tagName.ToUpper() with
+    | "INPUT" | "TEXTAREA" | "SELECT" -> true
+    | _ -> el?isContentEditable = true
+
 let appSubscriptions (model: Model) : Sub<Msg> =
     let pollingIntervalMs =
         match model.Activity.ActivityLevel with
@@ -620,10 +631,32 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
+    // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
+    // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
+    // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
+    // catches Escape from anywhere outside the dashboard and routes it through the normal handler,
+    // which refocuses the dashboard and restores a focus target. Skips when focus is already inside
+    // the dashboard (its onKeyDown handles it) or in an editable field (which owns its own Escape).
+    let focusReclaim (dispatch: Dispatch<Msg>) =
+        let insideDashboard (el: Browser.Types.Element) =
+            let ancestor: Browser.Types.Element = el?closest(".dashboard")
+            ancestor |> Option.ofObj |> Option.isSome
+        let handler =
+            fun (e: Browser.Types.Event) ->
+                let ke = e :?> Browser.Types.KeyboardEvent
+                if ke.key = "Escape" then
+                    match Option.ofObj Dom.document.activeElement with
+                    | Some el when insideDashboard el || isEditableElement el -> ()
+                    | _ -> dispatch (KeyPressed ("Escape", false))
+        Dom.document.addEventListener ("keydown", handler)
+        { new System.IDisposable with
+            member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
+
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
-          [ "canvas-messages" ], CanvasUpdate.messageListener ]
+          [ "canvas-messages" ], CanvasUpdate.messageListener
+          [ "focus-reclaim" ], focusReclaim ]
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
@@ -766,12 +799,9 @@ let viewAppHeader model dispatch =
     ]
 
 let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
-    let target = e.target
-    if isNull (box target) then
-        false
-    else
-        let tag: string = target?tagName
-        tag = "INPUT" || tag = "TEXTAREA" || tag = "SELECT" || target?isContentEditable = true
+    match Option.ofObj (box e.target) with
+    | Some target -> isEditableElement (unbox target)
+    | None -> false
 
 let view model dispatch =
     let canvasPositionClass =

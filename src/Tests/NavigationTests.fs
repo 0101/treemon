@@ -188,6 +188,36 @@ type ExpandRepoOwningTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type ReclaimFocusTargetTests() =
+
+    [<Test>]
+    member _.``no current focus falls back to the first visible element``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a"; "b" ] ]
+        let result = reclaimFocusTarget repos None
+        Assert.That(result, Is.EqualTo(Some (RepoHeader (RepoId "r1"))))
+
+    [<Test>]
+    member _.``a still-visible current focus is preserved``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a"; "b" ] ]
+        let focused = Some (NavHelpers.cardTarget "r1" "b")
+        let result = reclaimFocusTarget repos focused
+        Assert.That(result, Is.EqualTo(focused))
+
+    [<Test>]
+    member _.``a no-longer-visible current focus falls back to the first visible element``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a" ] ]
+        let focused = Some (NavHelpers.cardTarget "r1" "gone")
+        let result = reclaimFocusTarget repos focused
+        Assert.That(result, Is.EqualTo(Some (RepoHeader (RepoId "r1"))))
+
+    [<Test>]
+    member _.``no repos yields no focus target``() =
+        let result = reclaimFocusTarget [] (Some (NavHelpers.cardTarget "r1" "a"))
+        Assert.That(result, Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type ResolvesToFocusableCardTests() =
 
     // Archived worktrees live in ArchivedWorktrees and never render as focusable .focused cards
