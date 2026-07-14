@@ -135,15 +135,20 @@ let update msg model =
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
+            let currentCanvasModified = canvasModifiedByScopedKey repos
             let canvasEvents =
                 if isFirstLoad then model.Canvas.CanvasEvents
                 else
-                    let newEvents = detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    let newEvents =
+                        detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                        |> gateCanvasEventsByFreshness now currentCanvasModified
                     mergeCanvasEvents model.Canvas.CanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
-                else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                else
+                    detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    |> List.filter (fun (scopedKey, filename) -> isCanvasDocFresh now currentCanvasModified scopedKey filename)
             let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads

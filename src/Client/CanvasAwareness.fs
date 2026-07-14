@@ -81,20 +81,39 @@ let mostRecentUnviewedDoc (repos: RepoModel list) (lastViewedHashes: Map<string,
         |> List.tryHead
         |> Option.map _.Filename)
 
-let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, string>> =
+let private canvasDocFieldByScopedKey (project: CanvasDoc -> 'a) (repos: RepoModel list) : Map<string, Map<string, 'a>> =
     repos
     |> List.collect (fun r ->
         r.Worktrees
         |> List.choose (fun wt ->
-            let hashes =
+            let fields =
                 awarenessDocs wt.CanvasDocs
-                |> List.map (fun d -> d.Filename, d.ContentHash)
+                |> List.map (fun d -> d.Filename, project d)
                 |> Map.ofList
-            if Map.isEmpty hashes then None
-            else Some (WorktreePath.value wt.Path, hashes)))
+            if Map.isEmpty fields then None
+            else Some (WorktreePath.value wt.Path, fields)))
     |> Map.ofList
 
-let canvasEventExpiryMs = 5.0 * 60.0 * 1000.0
+/// filename -> ContentHash per worktree scopedKey (AgentDocs only). Stored as PreviousCanvasHashes
+/// and diffed by detectCanvasEvents to find appeared/changed docs.
+let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, string>> =
+    repos |> canvasDocFieldByScopedKey _.ContentHash
+
+/// filename -> real file LastModified per worktree scopedKey (AgentDocs only). Feeds the freshness
+/// gate so a doc's *actual* write time — not merely its (re)appearance in a poll — decides whether
+/// a detected change counts as a genuine publish/update.
+let canvasModifiedByScopedKey (repos: RepoModel list) : Map<string, Map<string, System.DateTimeOffset>> =
+    repos |> canvasDocFieldByScopedKey _.LastModified
+
+let canvasEventExpiryMs = 24.0 * 60.0 * 60.0 * 1000.0
+
+/// How recently a doc's file must have been written for a detected hash change to count as a real
+/// publish/update. Deliberately short and *separate* from canvasEventExpiryMs (how long a shown
+/// event lingers, 24 h): detectCanvasEvents fires on hash presence deltas between polls, so a
+/// pre-existing doc that merely reappears after an incomplete snapshot — e.g. right after a server
+/// restart, before the canvas scan has populated CanvasData — would otherwise be misreported as
+/// "just published". Gating on the real mtime suppresses those phantoms.
+let canvasEventFreshnessMs = 5.0 * 60.0 * 1000.0
 
 let detectCanvasEvents (now: System.DateTimeOffset) (previousHashes: Map<string, Map<string, string>>) (currentHashes: Map<string, Map<string, string>>) : Map<string, CanvasEvent list> =
     currentHashes
@@ -115,6 +134,39 @@ let detectCanvasEvents (now: System.DateTimeOffset) (previousHashes: Map<string,
         if List.isEmpty events then None
         else Some (scopedKey, events))
     |> Map.ofList
+
+/// Keep only the events whose doc was genuinely written within the freshness window, restamping
+/// each survivor with its real LastModified so the card shows a truthful time. detectCanvasEvents
+/// fires on hash *presence* deltas between polls, which misreports a pre-existing doc as new
+/// whenever the previous snapshot was incomplete (notably the empty-CanvasDocs window right after a
+/// server restart). This gate is where those phantom "published/updated" entries are dropped —
+/// see canvasEventFreshnessMs.
+let gateCanvasEventsByFreshness (now: System.DateTimeOffset) (currentModified: Map<string, Map<string, System.DateTimeOffset>>) (events: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
+    let cutoff = now.AddMilliseconds(-canvasEventFreshnessMs)
+    events
+    |> Map.toList
+    |> List.choose (fun (scopedKey, evts) ->
+        let modifiedForKey = currentModified |> Map.tryFind scopedKey |> Option.defaultValue Map.empty
+        let fresh =
+            evts
+            |> List.choose (fun e ->
+                modifiedForKey
+                |> Map.tryFind e.Filename
+                |> Option.filter (fun lastModified -> lastModified > cutoff)
+                |> Option.map (fun lastModified -> { e with Timestamp = lastModified }))
+        if List.isEmpty fresh then None
+        else Some (scopedKey, fresh))
+    |> Map.ofList
+
+/// Whether a doc's file was written within the freshness window — the changedDocs (idle
+/// auto-display) counterpart to gateCanvasEventsByFreshness, so a reappearing pre-existing doc
+/// never focus-steals on restart.
+let isCanvasDocFresh (now: System.DateTimeOffset) (currentModified: Map<string, Map<string, System.DateTimeOffset>>) (scopedKey: string) (filename: string) : bool =
+    let cutoff = now.AddMilliseconds(-canvasEventFreshnessMs)
+    currentModified
+    |> Map.tryFind scopedKey
+    |> Option.bind (Map.tryFind filename)
+    |> Option.exists (fun lastModified -> lastModified > cutoff)
 
 let mergeCanvasEvents (existing: Map<string, CanvasEvent list>) (newEvents: Map<string, CanvasEvent list>) : Map<string, CanvasEvent list> =
     newEvents
