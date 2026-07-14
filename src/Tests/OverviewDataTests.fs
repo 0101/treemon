@@ -6,13 +6,14 @@ open OverviewData
 open Tests.WorktreeFixtures
 
 /// Tests for the pure cross-worktree aggregation (OverviewData.aggregate), the data behind the
-/// Overview band. It folds a RepoWorktrees list into: task buckets (Planned folds in Loose; Done
-/// counts only non-archived worktrees; In-progress and Queued count only where the worktree has an
-/// ACTIVE agent — Working or WaitingForUser — otherwise folding into the muted Unattended catch-all;
-/// every other bucket sums across all), agent groups (red-dot WORKING worktrees grouped by
-/// Activity.classify of their CurrentSkill, plus a distinct Waiting group for CodingTool =
-/// WaitingForUser), and Scale (the largest bucket count). Empty buckets and groups are omitted; both
-/// lists come back in canonical order (Unattended trails Done; Waiting sorts last).
+/// Overview band. It folds a RepoWorktrees list into: task buckets (Planned folds in Loose;
+/// In-progress and Queued count only where the worktree has an ACTIVE agent — Working or
+/// WaitingForUser — otherwise folding into the muted Unattended catch-all; every other bucket sums
+/// across all), agent groups (red-dot WORKING worktrees grouped by Activity.classify of their
+/// CurrentSkill, plus a distinct Waiting group for CodingTool = WaitingForUser), and Scale (the
+/// largest bucket count). Archived worktrees are excluded from the whole roll-up (every task bucket
+/// and every agent group). Empty buckets and groups are omitted; both lists come back in canonical
+/// order (Unattended trails Done; Waiting sorts last).
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -136,20 +137,32 @@ type OverviewDataTests() =
         Assert.That(taskCount TaskBucketKind.Done result, Is.EqualTo(Some 7))
 
     [<Test>]
-    member _.``Only Done filters archived - every other bucket still counts archived worktrees``() =
-        // Locks decision #7: the archived filter is scoped to Done alone. An archived worktree's
-        // open/in_progress/blocked/planned work still rolls up; only its Closed count is dropped.
-        // Both worktrees are active so In-progress/Queued stay in their live buckets (not Unattended).
+    member _.``Archived worktrees are excluded from every task bucket``() =
+        // Archiving removes a worktree from the whole roll-up: none of its task counts contribute,
+        // not just its Closed count. Both worktrees are active, so the non-archived one's
+        // In-progress/Queued stay in their live buckets (not Unattended).
         let result =
             aggregate
                 [ repo
                     [ { activeTaskWt (beads 0 5 2 7) (planning 3 4 0) with IsArchived = false }
                       { activeTaskWt (beads 0 6 8 100) (planning 9 10 1) with IsArchived = true } ] ]
-        Assert.That(taskCount TaskBucketKind.Planned result, Is.EqualTo(Some 13))    // (3+0)+(9+1)
-        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 14))     // 4+10
-        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 11)) // 5+6
-        Assert.That(taskCount TaskBucketKind.Blocked result, Is.EqualTo(Some 10))    // 2+8
-        Assert.That(taskCount TaskBucketKind.Done result, Is.EqualTo(Some 7))        // 7 only
+        Assert.That(taskCount TaskBucketKind.Planned result, Is.EqualTo(Some 3))     // 3+0 (archived 9+1 dropped)
+        Assert.That(taskCount TaskBucketKind.Queued result, Is.EqualTo(Some 4))      // 4 (archived 10 dropped)
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 5))  // 5 (archived 6 dropped)
+        Assert.That(taskCount TaskBucketKind.Blocked result, Is.EqualTo(Some 2))     // 2 (archived 8 dropped)
+        Assert.That(taskCount TaskBucketKind.Done result, Is.EqualTo(Some 7))        // 7 (archived 100 dropped)
+        Assert.That(taskCount TaskBucketKind.Unattended result, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Archived worktrees are excluded from agent groups``() =
+        // An archived worktree in a Working or WaitingForUser state must not surface as an active
+        // agent — archiving removes it from the agent lens as well as the task buckets.
+        let result =
+            aggregate
+                [ repo
+                    [ { workingWt (Some "investigate") with IsArchived = true }
+                      { agentWt CodingToolStatus.WaitingForUser None with IsArchived = true } ] ]
+        Assert.That(result.Agents, Is.Empty)
 
     [<Test>]
     member _.``Scale is not inflated by an archived worktree's Closed count``() =
@@ -522,18 +535,17 @@ type OverviewDataTests() =
         Assert.That(unattended |> List.map (fun m -> m.ScopedKey, m.Contribution), Is.EqualTo([ ("/wt/idle", 5) ])) // 3 + 2
 
     [<Test>]
-    member _.``An archived worktree is never a Done member, but is still a member of the buckets that count it``() =
+    member _.``An archived worktree is a member of no task bucket``() =
         let result =
             aggregate
                 [ repo
                     [ at "/wt/live" "b1" ({ activeTaskWt (beads 0 0 2 7) BeadsPlanning.zero with IsArchived = false })
                       at "/wt/arch" "b2" ({ activeTaskWt (beads 0 0 5 100) BeadsPlanning.zero with IsArchived = true }) ] ]
-        // Done: only the non-archived worktree is a member.
+        // Only the non-archived worktree is ever a member — the archived one is dropped from every bucket.
         Assert.That(taskMembers TaskBucketKind.Done result |> List.map _.ScopedKey, Is.EqualTo([ "/wt/live" ]))
-        // Blocked still counts the archived worktree, so both are Blocked members.
         Assert.That(
             taskMembers TaskBucketKind.Blocked result |> List.map (fun m -> m.ScopedKey, m.Contribution),
-            Is.EqualTo([ ("/wt/live", 2); ("/wt/arch", 5) ]))
+            Is.EqualTo([ ("/wt/live", 2) ]))
 
     [<Test>]
     member _.``Members carry their owning repo name and preserve repo then worktree order``() =
