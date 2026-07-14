@@ -9,6 +9,7 @@
     <Compile Include="Formatting.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="OverviewData.fs" />
+    <Compile Include="WorktreeApi.fs" />
     <Compile Include="EventUtils.fs" />
   </ItemGroup>
 

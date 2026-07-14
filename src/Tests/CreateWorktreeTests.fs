@@ -398,7 +398,8 @@ type SubmitCreateWorktreeRequestMappingTests() =
           getBridgeLiveness = fun _ -> failwith "unused"
           addRoot = fun _ -> failwith "unused"
           removeRoot = fun _ -> failwith "unused"
-          getRoots = fun _ -> failwith "unused" }
+          getRoots = fun _ -> failwith "unused"
+          getOverviewHistory = fun _ -> failwith "unused" }
 
     let baseForm prompt : Modal.CreateWorktreeForm =
         { RepoId = testRepoId

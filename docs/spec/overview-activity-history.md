@@ -132,6 +132,14 @@ Add `getOverviewHistory` to `IWorktreeApi` (Shared) and implement it in the serv
 (`OverviewHistory.readWindow (TimeSpan.FromHours 72)`). Update every `IWorktreeApi` implementer/stub
 (demo fixture, test doubles, CLI proxy usage) — no compat shim.
 
+> **Compile-order note.** `OverviewSnapshot` lives in `module OverviewData`, which compiles *after*
+> `Types.fs`, so `IWorktreeApi` (which now returns `OverviewData.OverviewSnapshot list`) cannot stay
+> in `Types.fs`. It was moved verbatim into a new `src/Shared/WorktreeApi.fs` (`namespace Shared`,
+> registered after `OverviewData.fs`), so all `IWorktreeApi` references resolve unchanged. The demo/
+> fixture stub (`WorktreeApi.readOnlyApi`) returns `[]` (nothing is logged in those modes); the
+> `{ readOnlyApi ... with ... }` fixture branch and `Program.buildDemoApi` inherit that. The CLI/
+> client `Remoting.buildProxy<IWorktreeApi>` usages need no change (auto-derived).
+
 ### 5. Client: ephemeral window state + charts
 - `AppTypes.fs`: add ephemeral `OverviewChartWindow` (e.g. `None | Hours24 | Hours72`) to the model
   and a `CycleOverviewChart` message; hold fetched `OverviewSnapshot list` in the model.
@@ -149,7 +157,8 @@ Add `getOverviewHistory` to `IWorktreeApi` (Shared) and implement it in the serv
 
 ## Key Files
 
-- `src/Shared/OverviewData.fs` (relocated), `src/Shared/Types.fs` (`OverviewSnapshot`, `IWorktreeApi`)
+- `src/Shared/OverviewData.fs` (relocated, holds `OverviewSnapshot`), `src/Shared/WorktreeApi.fs`
+  (`IWorktreeApi`, split out of `Types.fs` for compile order)
 - `src/Server/OverviewHistory.fs` (new), `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs`
 - `src/Client/OverviewChart.fs` (new), `src/Client/OverviewBand.fs`, `src/Client/App.fs`,
   `src/Client/AppTypes.fs`, `src/Client/Client.fsproj`, `src/Shared/Shared.fsproj`

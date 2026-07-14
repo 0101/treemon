@@ -332,36 +332,5 @@ type CanvasShareResult =
     { Url: string
       Title: string }
 
-type IWorktreeApi =
-    { getWorktrees: unit -> Async<DashboardResponse>
-      openTerminal: WorktreePath -> Async<unit>
-      openEditor: WorktreePath -> Async<unit>
-      startSync: WorktreePath -> Async<Result<unit, string>>
-      cancelSync: WorktreePath -> Async<unit>
-      getSyncStatus: unit -> Async<Map<string, CardEvent list>>
-      deleteWorktree: WorktreePath -> Async<Result<unit, string>>
-      launchSession: LaunchRequest -> Async<Result<unit, string>>
-      focusSession: WorktreePath -> Async<Result<unit, string>>
-      killSession: WorktreePath -> Async<Result<unit, string>>
-      archiveWorktree: WorktreePath -> Async<Result<unit, string>>
-      unarchiveWorktree: WorktreePath -> Async<Result<unit, string>>
-      getBranches: string -> Async<string list>
-      createWorktree: CreateWorktreeRequest -> Async<Result<CreateWorktreeWarnings, string>>
-      openNewTab: WorktreePath -> Async<Result<unit, string>>
-      launchAction: ActionRequest -> Async<Result<unit, string>>
-      reportActivity: ActivityLevel -> Async<unit>
-      saveCollapsedRepos: RepoId list -> Async<unit>
-      saveCanvasPaneOpen: bool -> Async<unit>
-      saveOverviewPanelOpen: bool -> Async<unit>
-      saveCanvasPosition: CanvasPosition -> Async<unit>
-      saveCanvasSize: CanvasSize -> Async<unit>
-      resumeSession: WorktreePath -> Async<Result<unit, string>>
-      sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
-      archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
-      shareCanvasDoc: ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>
-      saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
-      loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>>
-      getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>>
-      addRoot: string -> Async<Result<unit, string>>
-      removeRoot: string -> Async<Result<unit, string>>
-      getRoots: unit -> Async<string list> }
+// IWorktreeApi (the Fable.Remoting contract) lives in WorktreeApi.fs, compiled after OverviewData.fs
+// so it can name OverviewData.OverviewSnapshot in getOverviewHistory.

@@ -77,7 +77,9 @@ let readOnlyApi
       // Root management is unavailable in demo/fixture modes (roots stay []); getRoots is just empty.
       addRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       removeRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
-      getRoots = fun () -> async { return [] } }
+      getRoots = fun () -> async { return [] }
+      // No activity history in demo/fixture modes (nothing is logged there).
+      getOverviewHistory = fun () -> async { return [] } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -734,4 +736,6 @@ let worktreeApi
           // (re)starts (the treemon.ps1 add/remove shims trigger the restart).
           addRoot = fun path -> async { return addRootToConfig path }
           removeRoot = fun path -> async { return removeRootFromConfig path }
-          getRoots = fun () -> async { return readWorktreeRootsConfig () } }
+          getRoots = fun () -> async { return readWorktreeRootsConfig () }
+          // 72h is the widest window the in-band chart offers; the client narrows to 24h itself.
+          getOverviewHistory = fun () -> async { return OverviewHistory.readWindow (TimeSpan.FromHours 72.0) } }
