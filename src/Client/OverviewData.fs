@@ -60,8 +60,7 @@ type TaskBucket = { Kind: TaskBucketKind; Count: int; Members: GroupMember list 
 /// What an agent group represents: a skill-derived activity (a red-dot WORKING agent), the distinct
 /// "waiting for user" state (yellow dot), or the "stopped" state (blue dot — an agent that finished
 /// its turn, CodingTool = Done). Modeled as a kind so the band can render Waiting and Stopped
-/// alongside the activity groups while keeping the header counts — N working, M waiting, K stopped —
-/// separable. Stopped is a second track sharing the same Agents row.
+/// alongside the activity groups; Stopped is a second track sharing the same Agents row.
 [<RequireQualifiedAccess>]
 type AgentGroupKind =
     | Activity of CurrentActivity
