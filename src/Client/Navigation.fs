@@ -18,6 +18,21 @@ type RepoModel =
       Provider: RepoProvider option
       BaseBranch: string }
 
+/// RepoModel splits archived worktrees into their own field, but OverviewData.aggregate wants the
+/// server-shaped RepoWorktrees (every worktree present, archived flagged via IsArchived) so its Done
+/// filter can still see them (spec decision (f)). Recombine here — the shared adapter both
+/// OverviewBand.view and App's DataLoaded stale-selection check consume — so archived worktrees keep
+/// contributing to every non-Done bucket instead of silently vanishing. Lives in Navigation (which
+/// owns RepoModel) rather than the view module so the RepoModel->RepoWorktrees data-prep detail is
+/// not part of the view's public surface (module-cohesion; keeps the view/update boundary clean).
+let toRepoWorktrees (repo: RepoModel) : RepoWorktrees =
+    { RepoId = repo.RepoId
+      RootFolderName = repo.Name
+      Worktrees = repo.Worktrees @ repo.ArchivedWorktrees
+      IsReady = repo.IsReady
+      Provider = repo.Provider
+      BaseBranch = repo.BaseBranch }
+
 type NavAction =
     | NoAction
     | CollapseRepo of RepoId
@@ -253,3 +268,10 @@ let expandRepoOwning (scopedKey: string) (repos: RepoModel list) =
     let expanded = repos |> List.exists (fun r -> r.IsCollapsed && owns r)
     let updated = repos |> List.map (fun r -> if r.IsCollapsed && owns r then { r with IsCollapsed = false } else r)
     updated, expanded
+
+/// Whether the scoped key resolves to a focusable (non-archived) worktree card. Archived worktrees
+/// live in repo.ArchivedWorktrees and never render as .focused cards, so focusing them is invalid.
+/// Guards drill-down selection against archived breakdown rows (only the Done bucket filters
+/// archived; other buckets can list archived worktrees as clickable rows).
+let resolvesToFocusableCard (scopedKey: string) (repos: RepoModel list) =
+    repos |> List.exists (fun r -> r.Worktrees |> List.exists (fun wt -> WorktreePath.value wt.Path = scopedKey))
