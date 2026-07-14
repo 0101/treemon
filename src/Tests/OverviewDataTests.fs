@@ -55,6 +55,36 @@ type OverviewDataTests() =
     let activityCount act (o: Overview) =
         agentCount (AgentGroupKind.Activity act) o
 
+    /// Members of a task bucket, or [] when the bucket was omitted.
+    let taskMembers kind (o: Overview) =
+        o.Tasks |> List.tryFind (fun t -> t.Kind = kind) |> Option.map _.Members |> Option.defaultValue []
+
+    /// Members of an agent group, or [] when the group was omitted.
+    let agentMembers kind (o: Overview) =
+        o.Agents |> List.tryFind (fun g -> g.Kind = kind) |> Option.map _.Members |> Option.defaultValue []
+
+    /// A repo with a distinct name (RepoId + RootFolderName), for repo-membership tests.
+    let namedRepo name (wts: WorktreeStatus list) : RepoWorktrees =
+        { RepoId = RepoId name
+          RootFolderName = name
+          Worktrees = wts
+          IsReady = true
+          Provider = None
+          BaseBranch = "main" }
+
+    /// A repo with a stable RepoId decoupled from its display RootFolderName — for the drill-down's
+    /// repo-identity tests, where two DISTINCT repos can legitimately share a folder name.
+    let idNamedRepo id name (wts: WorktreeStatus list) : RepoWorktrees =
+        { RepoId = RepoId id
+          RootFolderName = name
+          Worktrees = wts
+          IsReady = true
+          Provider = None
+          BaseBranch = "main" }
+
+    /// Give a worktree a distinct path (the focus/ScopedKey) and branch.
+    let at path branch (wt: WorktreeStatus) = { wt with Path = WorktreePath path; Branch = branch }
+
     // ----- Task-bucket sums -----
 
     [<Test>]
@@ -407,3 +437,152 @@ type OverviewDataTests() =
         let result = aggregate [ repo [ wt ] ]
         Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 2))
         Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 1))
+
+    // ----- Group membership (drill-down): the worktrees behind each aggregate -----
+
+    [<Test>]
+    member _.``Each agent group carries one member per worktree with ScopedKey, Branch, RepoName and Contribution 1``() =
+        let result =
+            aggregate
+                [ namedRepo "alpha" [ at "/wt/a1" "feat-a1" (workingWt (Some "investigate")) ] ]
+        let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Investigating) result
+        Assert.That(members |> List.length, Is.EqualTo(1))
+        let m = List.head members
+        Assert.That(m.ScopedKey, Is.EqualTo("/wt/a1"))
+        Assert.That(m.Branch, Is.EqualTo("feat-a1"))
+        Assert.That(m.RepoName, Is.EqualTo("alpha"))
+        Assert.That(m.Contribution, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``Agent group Count equals its Members length``() =
+        let result =
+            aggregate
+                [ repo
+                    [ at "/wt/1" "b1" (workingWt (Some "investigate"))
+                      at "/wt/2" "b2" (workingWt (Some "investigate"))
+                      at "/wt/3" "b3" (workingWt (Some "investigate")) ] ]
+        for g in result.Agents do
+            Assert.That(g.Count, Is.EqualTo(g.Members |> List.length))
+        let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Investigating) result
+        Assert.That(members |> List.map _.ScopedKey, Is.EqualTo([ "/wt/1"; "/wt/2"; "/wt/3" ]))
+
+    [<Test>]
+    member _.``The Waiting group carries its waiting worktrees as members, each contributing 1``() =
+        let result =
+            aggregate
+                [ repo
+                    [ at "/wt/w1" "wait-1" (agentWt CodingToolStatus.WaitingForUser None)
+                      at "/wt/w2" "wait-2" (agentWt CodingToolStatus.WaitingForUser None) ] ]
+        let members = agentMembers AgentGroupKind.Waiting result
+        Assert.That(members |> List.map _.ScopedKey, Is.EqualTo([ "/wt/w1"; "/wt/w2" ]))
+        Assert.That(members |> List.forall (fun m -> m.Contribution = 1))
+        Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some(members |> List.length)))
+
+    [<Test>]
+    member _.``Task bucket Count equals the sum of its member Contributions``() =
+        let result =
+            aggregate
+                [ repo
+                    [ at "/wt/1" "b1" (activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero)
+                      at "/wt/2" "b2" (activeTaskWt (beads 0 3 0 0) BeadsPlanning.zero) ] ]
+        let members = taskMembers TaskBucketKind.InProgress result
+        Assert.That(taskCount TaskBucketKind.InProgress result, Is.EqualTo(Some 5))
+        Assert.That(members |> List.sumBy _.Contribution, Is.EqualTo(5))
+        // Each worktree's contribution is exactly its own in-progress count.
+        Assert.That(
+            members |> List.map (fun m -> m.ScopedKey, m.Contribution),
+            Is.EqualTo([ ("/wt/1", 2); ("/wt/2", 3) ]))
+
+    [<Test>]
+    member _.``A worktree is a task-bucket member iff its contribution to that bucket is greater than zero``() =
+        // /wt/1 has in-progress work; /wt/2 has none. Only /wt/1 is an InProgress member.
+        let result =
+            aggregate
+                [ repo
+                    [ at "/wt/1" "b1" (activeTaskWt (beads 0 4 0 0) BeadsPlanning.zero)
+                      at "/wt/2" "b2" (activeTaskWt (beads 0 0 0 7) BeadsPlanning.zero) ] ]
+        let inProgress = taskMembers TaskBucketKind.InProgress result
+        Assert.That(inProgress |> List.map _.ScopedKey, Is.EqualTo([ "/wt/1" ]))
+        // /wt/2's Closed work makes it (and only it) a Done member.
+        let done_ = taskMembers TaskBucketKind.Done result
+        Assert.That(done_ |> List.map _.ScopedKey, Is.EqualTo([ "/wt/2" ]))
+
+    [<Test>]
+    member _.``Planned members carry Planned + Loose as their contribution``() =
+        let result = aggregate [ repo [ at "/wt/1" "b1" (taskWt BeadsSummary.zero (planning 4 0 3)) ] ]
+        let members = taskMembers TaskBucketKind.Planned result
+        Assert.That(members |> List.map (fun m -> m.ScopedKey, m.Contribution), Is.EqualTo([ ("/wt/1", 7) ]))
+
+    [<Test>]
+    member _.``Inactive in-progress/queued work becomes an Unattended member, not an InProgress/Queued member``() =
+        let result = aggregate [ repo [ at "/wt/idle" "b" (taskWt (beads 0 3 0 0) (planning 0 2 0)) ] ]
+        Assert.That(taskMembers TaskBucketKind.InProgress result, Is.Empty)
+        Assert.That(taskMembers TaskBucketKind.Queued result, Is.Empty)
+        let unattended = taskMembers TaskBucketKind.Unattended result
+        Assert.That(unattended |> List.map (fun m -> m.ScopedKey, m.Contribution), Is.EqualTo([ ("/wt/idle", 5) ])) // 3 + 2
+
+    [<Test>]
+    member _.``An archived worktree is never a Done member, but is still a member of the buckets that count it``() =
+        let result =
+            aggregate
+                [ repo
+                    [ at "/wt/live" "b1" ({ activeTaskWt (beads 0 0 2 7) BeadsPlanning.zero with IsArchived = false })
+                      at "/wt/arch" "b2" ({ activeTaskWt (beads 0 0 5 100) BeadsPlanning.zero with IsArchived = true }) ] ]
+        // Done: only the non-archived worktree is a member.
+        Assert.That(taskMembers TaskBucketKind.Done result |> List.map _.ScopedKey, Is.EqualTo([ "/wt/live" ]))
+        // Blocked still counts the archived worktree, so both are Blocked members.
+        Assert.That(
+            taskMembers TaskBucketKind.Blocked result |> List.map (fun m -> m.ScopedKey, m.Contribution),
+            Is.EqualTo([ ("/wt/live", 2); ("/wt/arch", 5) ]))
+
+    [<Test>]
+    member _.``Members carry their owning repo name and preserve repo then worktree order``() =
+        let result =
+            aggregate
+                [ namedRepo "alpha" [ at "/a/1" "a1" (workingWt (Some "investigate")) ]
+                  namedRepo "bravo"
+                      [ at "/b/1" "b1" (workingWt (Some "investigate"))
+                        at "/b/2" "b2" (workingWt (Some "investigate")) ] ]
+        let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Investigating) result
+        Assert.That(
+            members |> List.map (fun m -> m.RepoName, m.ScopedKey),
+            Is.EqualTo([ ("alpha", "/a/1"); ("bravo", "/b/1"); ("bravo", "/b/2") ]))
+
+    [<Test>]
+    member _.``Invariants hold across a mixed multi-repo roll-up``() =
+        // A blend of active/inactive/archived task worktrees and red-dot/waiting agents.
+        let result =
+            aggregate
+                [ namedRepo "alpha"
+                    [ at "/a/work" "w" (activeTaskWt (beads 0 2 1 3) (planning 1 4 0))
+                      at "/a/idle" "i" (taskWt (beads 0 5 0 0) (planning 0 2 0)) ]
+                  namedRepo "bravo"
+                    [ at "/b/wait" "wa" ({ agentWt CodingToolStatus.WaitingForUser None with Beads = beads 0 1 0 0 })
+                      at "/b/arch" "ar" ({ activeTaskWt (beads 0 0 0 9) BeadsPlanning.zero with IsArchived = true }) ] ]
+        // Every agent group: Count = Members.Length.
+        for g in result.Agents do
+            Assert.That(g.Count, Is.EqualTo(g.Members |> List.length))
+        // Every task bucket: Count = Σ member Contribution, and every member contributes > 0.
+        for b in result.Tasks do
+            Assert.That(b.Count, Is.EqualTo(b.Members |> List.sumBy _.Contribution))
+            Assert.That(b.Members |> List.forall (fun m -> m.Contribution > 0))
+            Assert.That(b.Members |> List.forall (fun m -> m.RepoName <> ""))
+
+    [<Test>]
+    member _.``Members carry a stable RepoId so two distinct same-named repos stay separable``() =
+        // Two DISTINCT repos (different RepoId) that happen to share a folder name ("dup"). The
+        // drill-down groups/counts/keys repo blocks on RepoId, so these must NOT collapse: each
+        // worktree keeps its own repo identity even though the display label is identical.
+        let result =
+            aggregate
+                [ idNamedRepo "repo-a" "dup" [ at "/a/1" "a1" (workingWt (Some "investigate")) ]
+                  idNamedRepo "repo-b" "dup" [ at "/b/1" "b1" (workingWt (Some "investigate")) ] ]
+        let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Investigating) result
+        // Both worktrees are members, in repo/worktree order, each tagged with its own RepoId but the
+        // shared display name.
+        Assert.That(
+            members |> List.map (fun m -> m.RepoId, m.RepoName, m.ScopedKey),
+            Is.EqualTo([ (RepoId "repo-a", "dup", "/a/1"); (RepoId "repo-b", "dup", "/b/1") ]))
+        // The two distinct repos stay distinct by identity (2 RepoIds) though they share one name.
+        Assert.That(members |> List.map _.RepoId |> List.distinct |> List.length, Is.EqualTo(2))
+        Assert.That(members |> List.map _.RepoName |> List.distinct |> List.length, Is.EqualTo(1))
