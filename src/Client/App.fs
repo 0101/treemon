@@ -873,6 +873,7 @@ let view model dispatch =
                         (SelectOverviewWorktree >> dispatch)
                         model.OverviewChartWindow
                         (fun () -> dispatch CycleOverviewChart)
+                        model.OverviewHistory
                         model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then

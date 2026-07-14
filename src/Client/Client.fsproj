@@ -25,6 +25,7 @@
     <Compile Include="CanvasUpdate.fs" />
     <Compile Include="ActivityUpdate.fs" />
     <Compile Include="CanvasView.fs" />
+    <Compile Include="OverviewChart.fs" />
     <Compile Include="OverviewBand.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>

@@ -310,16 +310,23 @@ let private cycleButton (chartWindow: OverviewChartWindow) (onCycleChart: unit -
 /// currently drilled-down group (if any); `onSelectGroup` toggles a group's selection when its column
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
 /// arrow-nav parity. `chartWindow`/`onCycleChart` drive the ephemeral in-band history chart's cycle
-/// button (Hidden -> 24h -> 72h -> Hidden), mutually exclusive with the drill-down.
+/// button (Hidden -> 24h -> 72h -> Hidden), mutually exclusive with the drill-down; `history` is the
+/// OverviewSnapshot list last fetched for the active window, which OverviewChart turns into the stacked
+/// stepped-area charts rendered directly under each section (agents live -> agents history -> tasks live
+/// -> tasks history) whenever a window is open.
 let view
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
     (chartWindow: OverviewChartWindow)
     (onCycleChart: unit -> unit)
+    (history: OverviewSnapshot list)
     (repos: RepoModel list)
     : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    // "Now" anchors the charts' right edge (right-edge hold to now); computed once so both charts agree.
+    let now = System.DateTimeOffset.Now
+    let chartsOpen = chartWindow <> OverviewChartWindow.Hidden
 
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
@@ -365,6 +372,13 @@ let view
                                 |> Option.map (agentBreakdown onSelectGroup onSelectWorktree)
                                 |> Option.defaultValue Html.none
                             | _ -> Html.none)
+                    // Agents history chart, directly under the agents live section (order: agents live ->
+                    // agents history -> tasks live -> tasks history). Only when a window is open and the
+                    // agents section is present; mutually exclusive with the drill-down (enforced in state).
+                    match agents, chartsOpen with
+                    | [], _ -> Html.none
+                    | _, false -> Html.none
+                    | _, true -> OverviewChart.agentsChart chartWindow now history
                     match tasks with
                     | [] -> Html.none
                     | buckets ->
@@ -377,4 +391,9 @@ let view
                                  |> List.tryFind (fun b -> b.Kind = kind)
                                  |> Option.map (taskBreakdown onSelectGroup onSelectWorktree overview.Scale)
                                  |> Option.defaultValue Html.none
-                             | _ -> Html.none) ] ]
+                             | _ -> Html.none)
+                    // Tasks history chart, directly under the tasks live section.
+                    match tasks, chartsOpen with
+                    | [], _ -> Html.none
+                    | _, false -> Html.none
+                    | _, true -> OverviewChart.tasksChart chartWindow now history ] ]

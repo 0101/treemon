@@ -56,6 +56,17 @@ These were settled with the user during investigation and prototyping:
     colliding with `Option.None` in the reducer. The cycle button advances
     `Hidden → Hours24 → Hours72 → Hidden`; the ephemeral snapshots fetched for the active window live
     in `Model.OverviewHistory` (both reset on reload).
+13. **`OverviewChart.fs` renders the static stacked chart + legend only; the crosshair tooltip is
+    deferred** to its own follow-up task (`tm-activity-history-zx6`). The module exposes pure
+    windowing seams (`agentPoints`/`taskPoints` returning a `Point list` — fraction 0..1 across the
+    window + per-series counts in canonical order) that the tooltip task can reuse, plus the
+    `agentsChart`/`tasksChart` `ReactElement` builders `OverviewBand.view` calls.
+14. **A section's history chart renders only when that live section is present.** The agents chart
+    renders under the agents section only when `overview.Agents` is non-empty, and likewise the tasks
+    chart under a non-empty `overview.Tasks` — so an idle roll-up with only tasks shows just the tasks
+    history, matching the "chart directly under its section" framing. Coordinates are rounded to
+    integer pixels (culture-invariant, deterministic under both Fable and the .NET test compile);
+    adjacent stacked edges share the identical rounding formula so no seams appear.
 
 ## Expected Behavior
 
