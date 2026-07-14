@@ -75,11 +75,13 @@ type WrapperTypeSerializationTests() =
             { RepoId = "my-repo"
               BranchName = BranchName.create "feature/new"
               BaseBranch = BranchName.create "main"
-              Prompt = None }
+              Prompt = None
+              Skill = Some "investigate" }
 
         let result = roundTrip original
         Assert.That(result.BranchName, Is.EqualTo(original.BranchName))
         Assert.That(result.BaseBranch, Is.EqualTo(original.BaseBranch))
+        Assert.That(result.Skill, Is.EqualTo(original.Skill))
 
 [<TestFixture>]
 [<Category("Unit")>]

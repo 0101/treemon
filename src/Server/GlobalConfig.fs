@@ -68,6 +68,22 @@ let readIgnoreWorktreePatterns () : string list =
             |> Seq.toList
         | _ -> [])
 
+/// Reads the machine-level `worktreeSkills` — the skills offered in the create-worktree modal's
+/// radio group. Blank entries are dropped. Absent or empty yields `[]`, which the modal renders
+/// as "None only" plus an onboarding hint pointing here. Order is preserved; the first entry is
+/// the modal's default selection.
+let readWorktreeSkills () : string list =
+    withConfigDocument [] (fun root ->
+        match root.TryGetProperty("worktreeSkills") with
+        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
+            prop.EnumerateArray()
+            |> Seq.choose (fun el ->
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
+                else None)
+            |> Seq.filter (not << String.IsNullOrWhiteSpace)
+            |> Seq.toList
+        | _ -> [])
+
 let buildIgnorePredicate (patterns: string list) : string -> bool =
     let regexes =
         patterns

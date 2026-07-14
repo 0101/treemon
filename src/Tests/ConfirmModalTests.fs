@@ -60,6 +60,7 @@ let private defaultModel : Model =
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
+      WorktreeSkills = []
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty

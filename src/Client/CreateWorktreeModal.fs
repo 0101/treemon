@@ -10,22 +10,25 @@ type CreateWorktreeForm =
       Branches: string list
       Name: string
       BaseBranch: string
-      Prompt: string }
+      Prompt: string
+      AvailableSkills: string list
+      Skill: string option }
 
 type ModalState =
     | Closed
-    | LoadingBranches of RepoId
+    | LoadingBranches of RepoId * skills: string list
     | Open of CreateWorktreeForm
     | Creating of RepoId
     | CreateError of repoId: RepoId * message: string
     | CreateWarning of repoId: RepoId * messages: string list
 
 type Msg =
-    | OpenCreateWorktree of RepoId
+    | OpenCreateWorktree of RepoId * skills: string list
     | BranchesLoaded of Result<string list, exn>
     | SetNewWorktreeName of string
     | SetBaseBranch of string
     | SetPrompt of string
+    | SetSkill of string option
     | SubmitCreateWorktree
     | CreateWorktreeCompleted of Result<string list, string>
     | CloseCreateModal
@@ -33,7 +36,7 @@ type Msg =
 let repoId =
     function
     | Closed -> None
-    | LoadingBranches repoId -> Some repoId
+    | LoadingBranches (repoId, _) -> Some repoId
     | Open form -> Some form.RepoId
     | Creating repoId -> Some repoId
     | CreateError (repoId, _) -> Some repoId
@@ -54,16 +57,17 @@ let private just modal =
 
 let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResult * Cmd<Msg> =
     match msg, modal with
-    | OpenCreateWorktree rid, _ ->
-        { Modal = LoadingBranches rid; RestoredFocus = None; RefreshWorktrees = false },
+    | OpenCreateWorktree (rid, skills), _ ->
+        { Modal = LoadingBranches (rid, skills); RestoredFocus = None; RefreshWorktrees = false },
         Cmd.OfAsync.either api.Value.getBranches (RepoId.value rid) (Ok >> BranchesLoaded) (Error >> BranchesLoaded)
 
-    | BranchesLoaded (Ok branches), LoadingBranches rid ->
+    | BranchesLoaded (Ok branches), LoadingBranches (rid, skills) ->
         let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
-        just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch; Prompt = "" })
+        just (Open { RepoId = rid; Branches = branches; Name = ""; BaseBranch = baseBranch; Prompt = ""
+                     AvailableSkills = skills; Skill = List.tryHead skills })
     | BranchesLoaded (Ok _), _ -> just modal
 
-    | BranchesLoaded (Error _), LoadingBranches rid -> just (CreateError (rid, "Failed to load branches"))
+    | BranchesLoaded (Error _), LoadingBranches (rid, _) -> just (CreateError (rid, "Failed to load branches"))
     | BranchesLoaded (Error _), _ -> just modal
 
     | SetNewWorktreeName name, Open form -> just (Open { form with Name = name })
@@ -75,12 +79,16 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
     | SetPrompt prompt, Open form -> just (Open { form with Prompt = prompt })
     | SetPrompt _, _ -> just modal
 
+    | SetSkill skill, Open form -> just (Open { form with Skill = skill })
+    | SetSkill _, _ -> just modal
+
     | SubmitCreateWorktree, Open form when form.Name.Trim().Length > 0 ->
         let request: CreateWorktreeRequest =
             { RepoId = RepoId.value form.RepoId
               BranchName = BranchName.create (form.Name.Trim())
               BaseBranch = BranchName.create form.BaseBranch
-              Prompt = (let t = form.Prompt.Trim() in if t = "" then None else Some t) }
+              Prompt = (let t = form.Prompt.Trim() in if t = "" then None else Some t)
+              Skill = form.Skill }
         { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
         Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
     | SubmitCreateWorktree, _ -> just modal
@@ -101,6 +109,44 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
 let private modalOverlay (dispatch: Msg -> unit) (dismissible: bool) (children: ReactElement list) =
     let onDismiss = if dismissible then Some (fun () -> dispatch CloseCreateModal) else None
     ModalOverlay.modalOverlay onDismiss children
+
+/// Radio group choosing which skill wraps the prompt. Always offers a built-in "None"
+/// (verbatim prompt) plus each configured skill. When no skills are configured, only "None"
+/// is selectable and a subtle hint points to where skills are configured.
+let private skillSelector (dispatch: Msg -> unit) (form: CreateWorktreeForm) =
+    let radio (label: string) (isSelected: bool) (skill: string option) =
+        Html.label [
+            prop.className "modal-radio"
+            prop.children [
+                Html.input [
+                    prop.type'.radio
+                    prop.name "wt-skill"
+                    prop.isChecked isSelected
+                    prop.onChange (fun (_: bool) -> dispatch (SetSkill skill))
+                ]
+                Html.span [ prop.text label ]
+            ]
+        ]
+    let skillRadios =
+        form.AvailableSkills
+        |> List.map (fun s -> radio s (form.Skill = Some s) (Some s))
+    let noneRadio = radio "None" (form.Skill = None) None
+    let hint =
+        if List.isEmpty form.AvailableSkills then
+            [ Html.span [
+                prop.className "modal-skill-hint"
+                prop.text "Configure skills in ~/.treemon/config.json (worktreeSkills)" ] ]
+        else []
+    Html.div [
+        prop.className "modal-skill-group"
+        prop.children [
+            Html.span [ prop.className "modal-field-label"; prop.text "Skill" ]
+            Html.div [
+                prop.className "modal-radios"
+                prop.children (skillRadios @ [ noneRadio ] @ hint)
+            ]
+        ]
+    ]
 
 let view (dispatch: Msg -> unit) (modal: ModalState) =
     match modal with
@@ -145,10 +191,11 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                             |> List.map (fun b ->
                                 Html.option [ prop.value b; prop.text b ]))
                     ]
+                    skillSelector dispatch form
                     Html.textarea [
                         prop.className "modal-textarea"
                         prop.rows 3
-                        prop.placeholder "Optional prompt — a non-empty value launches an investigate session in the new worktree"
+                        prop.placeholder "Optional prompt — sent to the coding agent in the new worktree, wrapped in the chosen skill"
                         prop.value form.Prompt
                         prop.onChange (fun (v: string) -> dispatch (SetPrompt v))
                         prop.onKeyDown (fun e ->
