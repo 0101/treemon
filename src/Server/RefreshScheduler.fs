@@ -726,8 +726,11 @@ let start
                         let lastLoggedSnapshot =
                             if OverviewHistory.changed lastLoggedSnapshot overview then
                                 let snap = OverviewHistory.snapshot DateTimeOffset.UtcNow overview
-                                OverviewHistory.append snap
-                                Some snap
+                                // Only advance the accumulator when the write actually reached disk;
+                                // on a failed append keep the previous snapshot so the next iteration
+                                // retries and the changed transition is not lost (finding F4).
+                                if OverviewHistory.append snap then Some snap
+                                else lastLoggedSnapshot
                             else
                                 lastLoggedSnapshot
 

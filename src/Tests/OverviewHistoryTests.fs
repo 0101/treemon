@@ -154,8 +154,10 @@ type OverviewHistoryTests() =
         TestUtils.withTempCwd (fun () ->
             let a = sampleSnapshot (DateTimeOffset.UtcNow.AddHours(-1.0))
             let b = sampleSnapshot (DateTimeOffset.UtcNow.AddMinutes(-5.0))
-            OverviewHistory.append a
-            OverviewHistory.append b
+            // append reports write success so the scheduler only advances its accumulator on a
+            // real write (finding F4); a successful append to a writable temp cwd returns true.
+            Assert.That(OverviewHistory.append a, Is.True)
+            Assert.That(OverviewHistory.append b, Is.True)
             let read = OverviewHistory.readWindow (TimeSpan.FromHours 24.0)
             Assert.That(read, Is.EqualTo([ a; b ])))
 

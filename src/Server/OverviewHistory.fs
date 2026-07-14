@@ -83,8 +83,11 @@ let parseWindow (now: DateTimeOffset) (window: TimeSpan) (lines: string seq) : O
 
 /// Append one snapshot as a JSONL line to logs/overview-history.jsonl, reusing Log.fs's append-mode
 /// FileStream + lock pattern (creating logs/ on first write). Append + FileShare.ReadWrite keep the
-/// file crash-safe and readable concurrently; write failures are swallowed like Log.log.
-let append (snap: OverviewSnapshot) : unit =
+/// file crash-safe and readable concurrently. Returns `true` when the line reached disk and `false`
+/// when a write error was caught (the failure is logged, not swallowed silently): the caller MUST
+/// only advance its "last logged" accumulator on `true`, so a transient failure (file locked,
+/// read-only, disk error) is retried on the next iteration instead of losing the changed snapshot.
+let append (snap: OverviewSnapshot) : bool =
     let path = historyPath ()
     path |> Path.GetDirectoryName |> Directory.CreateDirectory |> ignore
     let line = serialize snap + "\n"
@@ -93,7 +96,10 @@ let append (snap: OverviewSnapshot) : unit =
             use stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)
             use writer = new StreamWriter(stream)
             writer.Write(line)
-        with _ -> ())
+            true
+        with ex ->
+            Log.log "OverviewHistory" $"append failed, will retry next iteration: {ex.Message}"
+            false)
 
 /// Read the append-only history file and return the snapshots logged within the last `window`
 /// (newest data included), tolerating a partial trailing line. A missing file yields an empty list.
