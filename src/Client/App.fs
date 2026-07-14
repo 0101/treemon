@@ -32,7 +32,7 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
             e.Status = Some StepStatus.Running))
 
 // Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
-// OverviewBand.overviewSelectionPresent (same pure roll-up pipeline as the band view).
+// Navigation.overviewSelectionPresent (same pure roll-up pipeline as the band view).
 
 let init () =
     { Repos = []
@@ -200,7 +200,7 @@ let update msg model =
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
                 // the selected group (its count fell to 0), clear it so the panel closes.
                 match m.SelectedOverviewGroup with
-                | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) ->
+                | Some selection when not (Navigation.overviewSelectionPresent selection m.Repos) ->
                     { m with SelectedOverviewGroup = None }
                 | _ -> m)
             |> (fun m ->

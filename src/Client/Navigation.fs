@@ -1,6 +1,7 @@
 module Navigation
 
 open Shared
+open OverviewData
 open Browser
 open Fable.Core.JsInterop
 
@@ -32,6 +33,18 @@ let toRepoWorktrees (repo: RepoModel) : RepoWorktrees =
       IsReady = repo.IsReady
       Provider = repo.Provider
       BaseBranch = repo.BaseBranch }
+
+/// Whether an Overview drill-down selection still maps to a present (non-empty) group in the given
+/// repos' fresh roll-up. Empty groups are dropped by aggregate, so a selection is stale once its
+/// group's count hits 0 — App's DataLoaded reducer uses this to clear the selection and close the
+/// panel. Lives here (beside toRepoWorktrees, which owns the RepoModel->RepoWorktrees prep) rather
+/// than in the OverviewBand view module: it is a pure Overview data query consumed only by
+/// App.update, so it belongs on the update side of the view/update boundary, not in a Feliz view.
+let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
+    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    match selection with
+    | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
+    | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
 
 type NavAction =
     | NoAction

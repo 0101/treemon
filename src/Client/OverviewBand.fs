@@ -273,17 +273,6 @@ let private section (header: string) (columns: ReactElement list) (breakdown: Re
                 Html.div [ prop.className "overview-items"; prop.children columns ]
                 breakdown ] ]
 
-/// Whether an Overview drill-down selection still maps to a present (non-empty) group in the given
-/// repos' fresh roll-up. Empty groups are dropped by aggregate, so a selection is stale once its
-/// group's count hits 0 — App's DataLoaded reducer uses this to clear the selection and close the
-/// panel. Lives here because it runs the exact same `repos |> List.map toRepoWorktrees |>
-/// OverviewData.aggregate` pipeline the view does — a pure Overview data query, not App/Elmish state.
-let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
-    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
-    match selection with
-    | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
-    | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
-
 /// The band's single history-window cycle button (spec: docs/spec/overview-activity-history.md,
 /// decision #5). Clicking advances Hidden -> 24h -> 72h -> Hidden via onCycleChart; the label mirrors
 /// the state (◷ History / ◷ 24h / ◷ 72h) and aria-pressed reflects whether a window is open. Styled
