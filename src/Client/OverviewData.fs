@@ -1,13 +1,13 @@
 module OverviewData
 
 // Pure cross-worktree aggregation behind the Overview band (spec: docs/spec/beads-overview-band.md).
-// Folds every monitored worktree into the band's two aggregate lenses:
+// Folds every monitored NON-ARCHIVED worktree into the band's two aggregate lenses (archived
+// worktrees are dropped up front, so they contribute to nothing — no task bucket and no agent group):
 //   - Tasks: the status buckets (Planned · Queued · In progress · Blocked · Done · Unattended), each
-//     a cross-worktree sum. Planned folds in Loose (decision #6); Done counts only NON-archived
-//     worktrees (decision #7). In progress and Queued count only where the worktree has an ACTIVE
-//     agent (CodingTool = Working or WaitingForUser); on an inactive worktree those tasks are likely
-//     stale beads status and fold into the muted Unattended catch-all instead. Every other bucket
-//     sums across all worktrees.
+//     a cross-worktree sum. Planned folds in Loose (decision #6). In progress and Queued count only
+//     where the worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser); on an inactive
+//     worktree those tasks are likely stale beads status and fold into the muted Unattended catch-all
+//     instead. Every other bucket sums across all (non-archived) worktrees.
 //   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
 //     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
 //     agents parked on the user (CodingTool = WaitingForUser, yellow dot). Terminal presence
@@ -18,8 +18,9 @@ module OverviewData
 //
 // Pure and Fable-safe: no IO, no Model/RepoModel dependency. It folds the Shared RepoWorktrees shape
 // (every worktree present, archived ones flagged via IsArchived) rather than the client RepoModel,
-// which already splits archived worktrees into a separate field — the Done filter needs archived
-// worktrees present-but-flagged, so callers pass the un-split RepoWorktrees list.
+// which already splits archived worktrees into a separate field. aggregate owns the archived policy:
+// it excludes IsArchived worktrees from the whole roll-up, so callers can hand it the un-split list
+// (archived flagged) and let aggregate drop them.
 
 open Shared
 
@@ -118,13 +119,18 @@ let private activityOf (wt: WorktreeStatus) =
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
-    // Tag each worktree with its owning repo's stable RepoId and display RootFolderName BEFORE
-    // flattening, so every GroupMember can carry both its repo identity (RepoId) and its display
-    // label (RepoName). Repo order and within-repo worktree order are preserved, so member lists
-    // come back in the band's repo/worktree order.
+    // Drop archived worktrees first: archiving removes a worktree from the entire roll-up, so it
+    // contributes to no task bucket and no agent group. Then tag each remaining worktree with its
+    // owning repo's stable RepoId and display RootFolderName BEFORE flattening, so every GroupMember
+    // can carry both its repo identity (RepoId) and its display label (RepoName). Repo order and
+    // within-repo worktree order are preserved, so member lists come back in the band's repo/worktree
+    // order.
     let taggedWorktrees =
         repos
-        |> List.collect (fun r -> r.Worktrees |> List.map (fun w -> r.RepoId, r.RootFolderName, w))
+        |> List.collect (fun r ->
+            r.Worktrees
+            |> List.filter (fun w -> not w.IsArchived)
+            |> List.map (fun w -> r.RepoId, r.RootFolderName, w))
 
     let memberOf repoId repoName (w: WorktreeStatus) contribution =
         { ScopedKey = WorktreePath.value w.Path
@@ -136,10 +142,11 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
     // live buckets when their worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser);
     // on an inactive worktree (Done/Idle) they are likely stale beads status nobody is working, so
-    // they fold into the muted Unattended catch-all instead. Only Done filters archived worktrees;
-    // every other bucket sums across all worktrees. Planned folds Loose in (Loose -> Planned,
-    // decision #6). This single per-worktree predicate is the one source of truth: the bucket Count
-    // sums it and Members keep every worktree whose contribution is > 0 — they can never diverge.
+    // they fold into the muted Unattended catch-all instead. Archived worktrees never reach here
+    // (dropped when building taggedWorktrees), so every bucket sums only non-archived worktrees.
+    // Planned folds Loose in (Loose -> Planned, decision #6). This single per-worktree predicate is
+    // the one source of truth: the bucket Count sums it and Members keep every worktree whose
+    // contribution is > 0 — they can never diverge.
     let isActive w =
         w.CodingTool = CodingToolStatus.Working || w.CodingTool = CodingToolStatus.WaitingForUser
 
@@ -149,7 +156,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
         | TaskBucketKind.Queued     -> if isActive w then w.Planning.Queued else 0
         | TaskBucketKind.InProgress -> if isActive w then w.Beads.InProgress else 0
         | TaskBucketKind.Blocked    -> w.Beads.Blocked
-        | TaskBucketKind.Done       -> if w.IsArchived then 0 else w.Beads.Closed
+        | TaskBucketKind.Done       -> w.Beads.Closed
         | TaskBucketKind.Unattended -> if isActive w then 0 else w.Beads.InProgress + w.Planning.Queued
 
     // Members of one task bucket, in repo/worktree order: every worktree whose contribution is > 0.
