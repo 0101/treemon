@@ -93,6 +93,7 @@ that already compute the counts (single source of truth):
 type GroupMember =
     { ScopedKey: string      // WorktreePath.value — the focus/selection key
       Branch: string
+      RepoId: RepoId         // stable repo identity — keeps two same-named repos separable
       RepoName: string
       Contribution: int }    // agent group: 1; task bucket: this worktree's task count in the bucket
 
