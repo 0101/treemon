@@ -675,7 +675,12 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
-let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
+let start
+    (agent: MailboxProcessor<StateMsg>)
+    (assembleOverview: DashboardState -> Async<OverviewData.Overview>)
+    (worktreeRoots: string list)
+    (ct: CancellationToken)
+    =
     let rootPaths = buildRootPaths worktreeRoots
 
     let initialRepos =
@@ -688,7 +693,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
     /// Mutable ref for the latest canvas file watchers, shared between the reconcile
     /// callback and the main scheduler loop so watcher updates are visible across iterations.
-    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
+    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) (lastLoggedSnapshot: OverviewData.OverviewSnapshot option) =
         async {
             let! state = agent.PostAndAsyncReply(GetState)
 
@@ -698,6 +703,21 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
             let! watchers = CanvasWatchers.reconcile agent repos watchers
             latestWatchers.Value <- watchers
+
+            // 24/7 overview activity-history logging (spec: docs/spec/overview-activity-history.md,
+            // decisions #1/#3). Assemble the SAME cross-worktree roll-up the client band shows and
+            // append one JSONL record only when its count-only projection changed since the last
+            // logged snapshot. The accumulator threads immutably through the recursion, exactly like
+            // lastRuns/watchers — no `let mutable`. `assembleOverview` is injected by the caller
+            // because assembleRepos lives in a later-compiled module (WorktreeApi/SyncEngine).
+            let! overview = assembleOverview state
+            let lastLoggedSnapshot =
+                if OverviewHistory.changed lastLoggedSnapshot overview then
+                    let snap = OverviewHistory.snapshot DateTimeOffset.UtcNow overview
+                    OverviewHistory.append snap
+                    Some snap
+                else
+                    lastLoggedSnapshot
 
             let archivedBranchSets = readArchivedBranchSets rootPaths
             let archivedPaths = resolveArchivedPaths archivedBranchSets repos
@@ -726,11 +746,11 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
                 | _ -> ()
 
                 let updatedRuns = lastRuns |> Map.add task now
-                return! loop latestWatchers updatedRuns watchers
+                return! loop latestWatchers updatedRuns watchers lastLoggedSnapshot
             | None ->
                 let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                 do! Async.Sleep sleepMs
-                return! loop latestWatchers lastRuns watchers
+                return! loop latestWatchers lastRuns watchers lastLoggedSnapshot
         }
 
     let startup =
@@ -740,7 +760,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
             let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
             let latestWatchers = ref initialWatchers
             try
-                return! loop latestWatchers lastRuns latestWatchers.Value
+                return! loop latestWatchers lastRuns latestWatchers.Value None
             finally
                 CanvasWatchers.disposeAll latestWatchers.Value
         }

@@ -43,6 +43,14 @@ These were settled with the user during investigation and prototyping:
 10. **Snapshot stores counts only.** The persisted record carries just `{Kind; Count}` per bucket/
     group — never the drill-down `Members` — so the JSONL stays lean and change-detection tracks
     count transitions, not per-worktree membership churn.
+11. **Loop assembly is injected, not called directly.** `RefreshScheduler.fs` is compiled *before*
+    `WorktreeApi.fs`/`SyncEngine.fs`, so `RefreshScheduler.loop` cannot name `WorktreeApi.assembleRepos`
+    (which depends on `SyncEngine`). `RefreshScheduler.start` therefore takes an injected
+    `assembleOverview : DashboardState -> Async<Overview>`; `Program.fs` supplies the closure
+    (`getActiveSessions` → `assembleRepos rootPaths activeSessionPaths state` → `OverviewData.aggregate`).
+    Active sessions are included so the logged roll-up matches the client band exactly. The
+    change-detection + append + immutably-threaded `lastLoggedSnapshot` accumulator all stay inside
+    `loop` as intended.
 
 ## Expected Behavior
 

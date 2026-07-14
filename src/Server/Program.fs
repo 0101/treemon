@@ -282,7 +282,19 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
             | None ->
-                RefreshScheduler.start agent worktreeRoots cts.Token
+                // 24/7 overview activity-history logging: give the scheduler the SAME roll-up the
+                // client-poll path builds (assembleRepos + OverviewData.aggregate), including active
+                // agent sessions, so the logged history matches what the band shows. Injected here
+                // because assembleRepos/SessionManager live in modules compiled after RefreshScheduler.
+                let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+                let assembleOverview (state: RefreshScheduler.DashboardState) =
+                    async {
+                        let! activeSessions = SessionManager.getActiveSessions sessionAgent
+                        let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
+                        let repos = WorktreeApi.assembleRepos rootPaths activeSessionPaths state
+                        return OverviewData.aggregate repos
+                    }
+                RefreshScheduler.start agent assembleOverview worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
             WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
