@@ -348,7 +348,12 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   the detector test files + `ClaudeSessionReplayTests.fs` are deleted, `CodingToolOrchestratorTests`
   keeps only `ReadConfiguredProviderTests` (the scaffolding fixtures go), `ServerParsingTests` drops
   `EncodeWorktreePathTests` (its `encodeWorktreePath` lived in the deleted `ClaudeDetector`), and
-  `SchedulerTests` per-worktree task counts go 3→2 (Git+Beads). Build is push-only.
+  `SchedulerTests` per-worktree task counts go 3→2 (Git+Beads). Build is push-only. Removing the
+  residual inert plumbing (`UpdateCodingTool` case, `CodingToolData` field, the dead
+  `effectiveActivity.hasCodingToolActivity` branch) and repointing `WorktreeApi.resolveProvider`
+  to a direct `readConfiguredProvider` config read is deferred to a follow-up task (cc4,
+  discovered-from 9k8) so per-worktree provider config is honored rather than relying on the
+  `Copilot` default.
 
 ## Key Files
 
