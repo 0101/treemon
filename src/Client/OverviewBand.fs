@@ -139,9 +139,6 @@ let private taskColumn (selection: OverviewSelection option) (onSelectGroup: Ove
                     [ prop.className ("overview-bar " + accent)
                       prop.style [ style.custom ("--bar-fill", string fill) ] ] ] ]
 
-/// "1 agent" / "3 agents": count + word, pluralized, for the muted breakdown summary line.
-let private plural (n: int) (word: string) = $"""{n} {word}{if n = 1 then "" else "s"}"""
-
 /// Group a group's members by owning repo IDENTITY (RepoId), PRESERVING the aggregate's repo/worktree
 /// order (members from one repo arrive contiguous, so folding keeps first-appearance repo order).
 /// Grouping on RepoId — not the display name — keeps two distinct repos that happen to share a folder
@@ -156,31 +153,26 @@ let private membersByRepo (members: GroupMember list) : (RepoId * string * Group
     |> List.map (fun (repoId, name, ms) -> repoId, name, List.rev ms)
     |> List.rev
 
-/// The shared black breakdown-panel shell: an accent-tinted title, a muted summary, and the ✕ close
-/// button, above the repo-grouped member blocks. `accent` tints the title and, via currentColor, the
-/// chip dots / task bars. The ✕ raises onClose (App re-selects the group, toggling the panel shut).
+/// The shared black breakdown-panel shell: just the ✕ close button (absolutely positioned so it adds
+/// no vertical space), above the repo-grouped member blocks. The title/summary the header used to show
+/// only repeated the selected column tab sitting flush above the panel, so they're dropped. `accent`
+/// tints the members via currentColor (chip dots / task bars). The ✕ raises onClose (App re-selects
+/// the group, toggling the panel shut); Esc and re-clicking the tab close it too.
 let private breakdownPanel
     (accent: string)
-    (title: string)
-    (sub: string)
     (onClose: unit -> unit)
     (repoBlocks: ReactElement list)
     =
-    let head =
-        Html.div
-            [ prop.className "overview-bd-head"
-              prop.children
-                  [ Html.span [ prop.className "overview-bd-title"; prop.text title ]
-                    Html.span [ prop.className "overview-bd-sub"; prop.text sub ]
-                    Html.button
-                        [ prop.className "overview-bd-close"
-                          prop.title "Close (Esc)"
-                          prop.onClick (fun _ -> onClose ())
-                          prop.text "\u2715" ] ] ]
+    let closeButton =
+        Html.button
+            [ prop.className "overview-bd-close"
+              prop.title "Close (Esc)"
+              prop.onClick (fun _ -> onClose ())
+              prop.text "\u2715" ]
 
     Html.div
         [ prop.className [ "overview-breakdown"; accent ]
-          prop.children (head :: repoBlocks) ]
+          prop.children (closeButton :: repoBlocks) ]
 
 /// The small uppercase muted repo name introducing each repo's members (band-header style).
 let private repoNameLabel (name: string) =
@@ -216,11 +208,7 @@ let private agentBreakdown
                                                 [ Html.span [ prop.className "overview-chip-dot" ]
                                                   Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ] ] ])) ] ] ])
 
-    let repoCount = group.Members |> List.map _.RepoId |> List.distinct |> List.length
-    let agentsPart = plural group.Count "agent"
-    let reposPart = plural repoCount "repo"
-    let sub = $"{agentsPart} · {reposPart}"
-    breakdownPanel accent (agentLabel group.Kind) sub (fun () -> onSelectGroup (OverviewSelection.Agents group.Kind)) repoBlocks
+    breakdownPanel accent (fun () -> onSelectGroup (OverviewSelection.Agents group.Kind)) repoBlocks
 
 /// Task breakdown for one selected task bucket: per repo, one `branch + bar` row per member worktree.
 /// The bar is the bucket colour and sized on the SAME shared scale as the band bars above
@@ -258,10 +246,7 @@ let private taskBreakdown
                                                           [ prop.className [ "overview-task-bar"; accent ]
                                                             prop.style [ style.custom ("--bar-fill", string fill) ] ] ] ] ] ]))) ])
 
-    let tasksPart = plural bucket.Count "task"
-    let worktreesPart = plural bucket.Members.Length "worktree"
-    let sub = $"{tasksPart} · {worktreesPart}"
-    breakdownPanel accent (taskLabel bucket.Kind) sub (fun () -> onSelectGroup (OverviewSelection.Tasks bucket.Kind)) repoBlocks
+    breakdownPanel accent (fun () -> onSelectGroup (OverviewSelection.Tasks bucket.Kind)) repoBlocks
 
 /// A section shell: an uppercase header over the (wrapping) row of category columns, plus the
 /// (optional) drill-down breakdown panel rendered INSIDE the section, flush beneath its row — so the

@@ -169,7 +169,8 @@ let newCmd =
                     { RepoId = repo
                       BranchName = BranchName.create branch
                       BaseBranch = BranchName.create baseBranch
-                      Prompt = None }
+                      Prompt = None
+                      Skill = None }
 
                 match api.createWorktree request |> Async.RunSynchronously with
                 | Ok warnings ->
