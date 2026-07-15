@@ -26,6 +26,7 @@
     <Compile Include="CopilotDetectorTests.fs" />
     <Compile Include="SessionActivityTests.fs" />
     <Compile Include="SessionActivityStoreTests.fs" />
+    <Compile Include="SessionActivityServiceTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />
     <Compile Include="CardEventLogTests.fs" />

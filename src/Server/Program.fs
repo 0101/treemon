@@ -288,10 +288,28 @@ let main args =
             WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
 
+    // Push-model status ingestion. Instance-specific SQLite path keyed by the server's port so a
+    // side-by-side validation instance (a second Treemon on another port) never collides with main
+    // on the DB file. The service owns its store: it rebuilds live status from SQLite on Start and
+    // arms the retention timer, and disposes the store on shutdown. Started only in the real
+    // monitoring path — demo mode has no scheduler agent, and fixture mode serves synthetic data and
+    // receives no activity posts (mirrors skipping the scheduler background loop).
+    let sessionActivityService =
+        match schedulerAgent with
+        | Some agent when config.TestFixtures.IsNone ->
+            let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
+            let store = new SessionActivityStore.SessionActivityStore(dbPath)
+            let svc = new SessionActivityService.SessionActivityService(store, agent)
+            svc.Start()
+            Log.log "Startup" $"Session activity ingestion started (db: {dbPath})"
+            Some svc
+        | _ -> None
+
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"
         cts.Cancel()
-        cts.Dispose())
+        cts.Dispose()
+        sessionActivityService |> Option.iter (fun svc -> (svc :> System.IDisposable).Dispose()))
 
     match schedulerAgent, config.CanvasPort with
     | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
@@ -314,9 +332,19 @@ let main args =
               route "/api/canvas/attribute" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 
+    // POST /api/session/activity: the push-model status ingestion endpoint. Same cross-origin
+    // vector as the canvas POSTs, so it carries the same HttpSecurity.csrfGuard (a non-loopback
+    // Origin/Referer is rejected 403; a MISSING one — the non-browser reporting extension's Node
+    // fetch — is allowed). POST filters first so the guard only evaluates the request it protects.
+    let sessionActivityRoutes =
+        match sessionActivityService with
+        | Some svc -> [ route "/api/session/activity" >=> POST >=> HttpSecurity.csrfGuard >=> svc.Handler ]
+        | None -> []
+
     let combinedRouter =
         choose (
             canvasAgentRoutes
+            @ sessionActivityRoutes
             @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
                 // CSRF hardening: the Fable.Remoting surface has no auth/CSRF token and does not
                 // enforce a content type, so a cross-origin page could POST to state-changing

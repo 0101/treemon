@@ -43,7 +43,12 @@ type DashboardState =
       LatestByCategory: Map<string, CardEvent>
       ExpeditedRepos: Set<RepoId>
       ClientActivity: ActivityLevel
-      ClientActivityAt: DateTimeOffset }
+      ClientActivityAt: DateTimeOffset
+      // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
+      // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. This is the
+      // substrate the worktree card's coding-tool fields collapse over (pickActive) — see the
+      // push-only repoint task; today it is populated but not yet read by WorktreeApi.
+      SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus> }
 
 module DashboardState =
     let empty =
@@ -53,7 +58,8 @@ module DashboardState =
           LatestByCategory = Map.empty
           ExpeditedRepos = Set.empty
           ClientActivity = ActivityLevel.Idle
-          ClientActivityAt = DateTimeOffset.MinValue }
+          ClientActivityAt = DateTimeOffset.MinValue
+          SessionStatuses = Map.empty }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
@@ -71,6 +77,10 @@ type StateMsg =
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
     | ReportClientActivity of ActivityLevel * DateTimeOffset
+    /// Push-model live status for one session, produced by the SessionActivity single-writer
+    /// mailbox after folding an ingested event. Stored keyed by SessionId so a worktree's live
+    /// sessions can later be collapsed (pickActive) into the card's coding-tool fields.
+    | UpdateSessionStatus of SessionActivityStore.StoredStatus
 
 let private maxEvents = 50
 
@@ -192,6 +202,9 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
     | ReportClientActivity(activity, timestamp) ->
         { state with ClientActivity = activity; ClientActivityAt = timestamp }
+
+    | UpdateSessionStatus stored ->
+        { state with SessionStatuses = state.SessionStatuses |> Map.add stored.SessionId stored }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->

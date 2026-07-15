@@ -305,6 +305,18 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   alongside the untouched `canvas-bridge` — keeping the canvas path byte-for-byte unchanged
   and avoiding a `canvas_take_ownership` collision between two canvas-capable extensions.
   Consolidation to one is the final post-validation step.
+- **Ingestion concretions (as built in `SessionActivityService.fs`).** The DB path is
+  `data/session-activity-{port}.db` (keyed by the server's `--port`, so a side-by-side
+  validation instance never collides). The service is started only in the **real monitoring
+  path** — demo mode has no scheduler agent, and fixture mode serves synthetic data and takes
+  no activity posts (mirrors skipping the scheduler background loop). `LastSeen` and
+  `UpdatedAt` are both set to the report's `OccurredAt` on every ingested event (an event is
+  also the heartbeat). The in-memory live map applies the **same last-write-wins ordering
+  guard** as the store: an out-of-order (older) event is still appended to `activity_events`
+  (history substrate) but does not regress the live fold state, the shown card, or the
+  `session_status` row. Retention timer: `pruneOld(now − 14d)` every 1h, on the store's own
+  connection (WAL + `busy_timeout` handle the concurrent delete); the service owns the store's
+  lifetime and disposes it on shutdown.
 
 ## Key Files
 
