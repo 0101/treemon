@@ -151,7 +151,7 @@ reach the server:
 
 - `POST /api/session/activity` handler mirrors `canvasRegisterHandler`: JSON DTO →
   domain `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
-- **Wire contract — the single coupling point between `reporting.mjs` (producer) and the
+- **Wire contract — the single coupling point between `extension.mjs` (producer) and the
   handler (consumer); both tasks MUST implement this exact set.** The POST body is one report:
   `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }`,
   where `kind` is exactly one of the seven the fold consumes and maps 1:1 onto `SessionEvent`
@@ -255,7 +255,7 @@ untouched. Remove the agent half of the per-cycle snapshot logging in `RefreshSc
 ### Extension (two phases: additive, then consolidated)
 
 **Phase 1 — reporting-only, additive.** A new `treemon-reporting` extension contains only
-`reporting.mjs`: subscribe → filter (drop `agentId` sub-agent events + `<skill-context>`
+`extension.mjs`: subscribe → filter (drop `agentId` sub-agent events + `<skill-context>`
 injections) → POST `/api/session/activity` to a **configurable list of Treemon ports**
 (fan-out; default one) → `getEvents()` replay on join → status-ping heartbeat carrying
 `last_seen`; on `awaiting_user_input` it carries the ask_user question text (surfaced as
@@ -293,7 +293,7 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   `last_seen` makes that negative, so the session reads perpetually fresh and never decays (stuck
   non-Idle). `parseReport` clamps any `occurredAt` beyond `now + 5 min` skew down to `now`;
   minor skew passes through. (See `SessionActivityService.clampFutureTimestamp`.)
-- **Free text is length-capped server-side, not trusted from the client.** `reporting.mjs` caps
+- **Free text is length-capped server-side, not trusted from the client.** `extension.mjs` caps
   message/skill text at 2000 chars, but the loopback ingest endpoint must not trust the producer's
   bound. `parseReport`/`parseEvent` truncate `message.text`, the ask_user question, and `skillName`
   to `maxTextLength` (8 KB) before they are persisted to SQLite or held in memory — well above the
@@ -388,7 +388,7 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   non-E2E suite 1078 pass / 0 fail / 10 skip.
 - **Reporting extension concretions (Phase 1, as built in `src/Extension/reporting/`).** The
   reporting-only extension is its own installable dir `src/Extension/reporting/`
-  (`reporting.mjs` + a `@treemon/reporting` `package.json`, `main: reporting.mjs`), installed to
+  (`extension.mjs` + a `@treemon/reporting` `package.json`, `main: extension.mjs`), installed to
   `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas-bridge` by a new
   `Install-ReportingExtension` step in `treemon.ps1` (called from `Deploy-Frontend` next to the
   existing `Install-Extension`). It **passive-joins** (`joinSession()` with no tools/canvas, never
@@ -445,7 +445,7 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
 | `src/Server/Program.fs` | Route `/api/session/activity`; start the SessionActivity service + rebuild. |
 | `src/Server/Server.fsproj` | Add `Microsoft.Data.Sqlite`; add/remove `<Compile>` entries. |
 | `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs` | **Deleted.** |
-| `src/Extension/` (`reporting.mjs`; later `+canvas.mjs`/`extension.mjs`) | Phase 1: reporting-only extension (as built: `src/Extension/reporting/` — `reporting.mjs` + its own `package.json`). Phase 2: consolidate canvas + reporting into one `treemon-bridge`. |
+| `src/Extension/` (`extension.mjs`; later `+canvas.mjs`) | Phase 1: reporting-only extension (as built: `src/Extension/reporting/` — `extension.mjs` + its own `package.json`). Phase 2: consolidate canvas + reporting into one `treemon-bridge`. |
 | `treemon.ps1` | Phase 1: install `treemon-reporting` alongside `canvas-bridge` (as built: `Install-ReportingExtension`, called from `Deploy-Frontend`). Phase 2: install unified `treemon-bridge`, delete `canvas-bridge` + `treemon-reporting`. |
 | `src/Tests/` | Port fold tests to `SessionActivity`; store tests; remove detector tests. |
 

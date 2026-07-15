@@ -600,7 +600,7 @@ function Install-ReportingExtension {
     $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
     $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "treemon-reporting"
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $src "reporting.mjs") $dest -Force
+    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
     Copy-Item (Join-Path $src "package.json") $dest -Force
     Write-Host "Reporting extension installed to $dest" -ForegroundColor Green
 }

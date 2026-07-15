@@ -21,7 +21,7 @@ open Server.SessionActivityStore
 
 // --- Wire contract DTO ------------------------------------------------------------------------
 
-// The single coupling point with reporting.mjs (producer). The POST body is one report; `kind` is
+// The single coupling point with extension.mjs (producer). The POST body is one report; `kind` is
 // exactly one of the seven the fold consumes and maps 1:1 onto SessionEvent (no catch-all). An
 // unknown `kind` is a validation error (rejected), never silently dropped. `message` is present for
 // user_prompt / assistant_message / awaiting_user_input (the ask_user question); `skillName` only
@@ -54,7 +54,7 @@ let private tryParseTimestamp (s: string) : Result<DateTimeOffset, string> =
     | false, _ -> Error $"malformed timestamp '{s}'"
 
 /// Server-side hard cap on any free-text field (message text, the ask_user question, skillName),
-/// enforced independently of the client. reporting.mjs caps at 2000 chars, but this loopback +
+/// enforced independently of the client. extension.mjs caps at 2000 chars, but this loopback +
 /// csrfGuard endpoint must not trust the producer's bound — a runaway/malicious multi-KB (or larger)
 /// payload would otherwise be persisted to SQLite and held in memory verbatim. Set well above the
 /// client's 2000-char cap so legitimate traffic is never touched; this is purely a defence-in-depth
