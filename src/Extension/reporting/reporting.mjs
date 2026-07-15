@@ -310,9 +310,23 @@ const unsubscribes = SUBSCRIBED_TYPES.map((type) => session.on(type, (event) => 
 
 try {
   const history = await session.getEvents();
+  // Deterministic replay order. Subtracting Date.parse() values breaks when a timestamp is
+  // malformed/unparseable: Date.parse returns NaN, `NaN - x` is NaN, and a comparator that returns
+  // NaN is inconsistent — the sort becomes unpredictable and can let the newest-wins status guard be
+  // rewound by out-of-order replay. Normalize unparseable timestamps to a sentinel that sorts them
+  // first (oldest), and compare with </> rather than subtraction so the comparator is a stable total
+  // order for any input.
+  const replayMs = (event) => {
+    const ms = Date.parse(event?.timestamp);
+    return Number.isNaN(ms) ? -Infinity : ms;
+  };
   history
     .slice()
-    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+    .sort((a, b) => {
+      const ta = replayMs(a);
+      const tb = replayMs(b);
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    })
     .forEach((event) => handle(event, false));
   log(
     `joined ${sessionId} — replayed ${history.length} historical event(s), reporting to ${activityUrls.join(", ")}`,
