@@ -13,7 +13,6 @@ type PerRepoState =
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
       PlanningData: Map<string, BeadsPlanning>
-      CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
       PrData: Map<string, PrStatus>
       CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
@@ -28,7 +27,6 @@ module PerRepoState =
           GitData = Map.empty
           BeadsData = Map.empty
           PlanningData = Map.empty
-          CodingToolData = Map.empty
           PrData = Map.empty
           CanvasData = Map.empty
           Provider = None
@@ -65,7 +63,6 @@ type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
-    | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
     | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
@@ -110,7 +107,6 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
         PlanningData = repo.PlanningData |> Map.remove path
-        CodingToolData = repo.CodingToolData |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
@@ -147,13 +143,6 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                     BeadsData = repo.BeadsData |> Map.add path beads
                     PlanningData = repo.PlanningData |> Map.add path planning }
                 state
-        else
-            state
-
-    | UpdateCodingTool(repoId, path, data) ->
-        let repo = getRepo repoId state
-        if Set.contains path repo.KnownPaths then
-            updateRepo repoId { repo with CodingToolData = repo.CodingToolData |> Map.add path data } state
         else
             state
 
@@ -249,26 +238,15 @@ let internal intervalOf (activity: ActivityLevel) (task: RefreshTask) =
     | ActivityLevel.Idle,     RefreshFetch _        -> TimeSpan.FromSeconds(120.0)
     | ActivityLevel.DeepIdle, RefreshFetch _        -> TimeSpan.FromSeconds(600.0)
 
-let private codingToolActivityThreshold = TimeSpan.FromMinutes(5.0)
 let private clientActivityTimeout = TimeSpan.FromMinutes(5.0)
 let private clientDeepIdleTimeout = TimeSpan.FromMinutes(20.0)
 
 let effectiveActivity (now: DateTimeOffset) (state: DashboardState) =
-    let hasCodingToolActivity =
-        state.Repos
-        |> Map.exists (fun _ repo ->
-            repo.CodingToolData
-            |> Map.exists (fun _ ct ->
-                ct.LastUserMessage
-                |> Option.exists (fun (_, ts) -> now - ts < codingToolActivityThreshold)))
+    let elapsed = now - state.ClientActivityAt
 
-    if hasCodingToolActivity then ActivityLevel.Active
-    else
-        let elapsed = now - state.ClientActivityAt
-
-        if elapsed >= clientDeepIdleTimeout then ActivityLevel.DeepIdle
-        elif elapsed >= clientActivityTimeout && state.ClientActivity = ActivityLevel.Active then ActivityLevel.Idle
-        else state.ClientActivity
+    if elapsed >= clientDeepIdleTimeout then ActivityLevel.DeepIdle
+    elif elapsed >= clientActivityTimeout && state.ClientActivity = ActivityLevel.Active then ActivityLevel.Idle
+    else state.ClientActivity
 
 let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths

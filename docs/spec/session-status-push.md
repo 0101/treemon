@@ -333,8 +333,9 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   recent-messages endpoint. `getLastSessionId` is the **distinct resume pick** — most-recent-any
   by `last_seen` over the worktree's `SessionStatuses` (no drop-Idle, no freshness), returning the
   stored session id (→ `copilot --resume <id>`, or `--continue` when the worktree never reported).
-  `resolveProvider` still reads the detector-fed `CodingToolData` for command-building; it
-  harmlessly degrades to the `Copilot` default once the detectors stop populating it (task 9k8).
+  Provider for command-building comes from a direct `CodingToolStatus.readConfiguredProvider`
+  per-worktree `.treemon.json` read (task cc4) — no longer routed through the retired
+  detector-fed `CodingToolData` map.
 - **Delete concretions (task 9k8, as built).** Detectors `CopilotDetector.fs`/`ClaudeDetector.fs`/
   `VsCodeCopilotDetector.fs` and their tests are deleted; the three-surface resolution scaffolding
   (`ProviderResult`, `mostRecentActive`, `pickActiveProvider`, `pickActiveSkill`, `resolveStatus`,
@@ -349,11 +350,22 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   keeps only `ReadConfiguredProviderTests` (the scaffolding fixtures go), `ServerParsingTests` drops
   `EncodeWorktreePathTests` (its `encodeWorktreePath` lived in the deleted `ClaudeDetector`), and
   `SchedulerTests` per-worktree task counts go 3→2 (Git+Beads). Build is push-only. Removing the
-  residual inert plumbing (`UpdateCodingTool` case, `CodingToolData` field, the dead
-  `effectiveActivity.hasCodingToolActivity` branch) and repointing `WorktreeApi.resolveProvider`
-  to a direct `readConfiguredProvider` config read is deferred to a follow-up task (cc4,
-  discovered-from 9k8) so per-worktree provider config is honored rather than relying on the
-  `Copilot` default.
+  residual inert plumbing and repointing the launch sites to `readConfiguredProvider` is done in
+  the follow-up task cc4 (below).
+- **Cleanup concretions (task cc4, as built).** The inert pull-model coding-tool plumbing is
+  deleted: `WorktreeApi.resolveProvider` is removed and the 5 launch sites (`startSync`,
+  `launchSession`, `launchAction`, `resumeSession`, `sendCanvasMessage`) now call
+  `CodingToolStatus.readConfiguredProvider path` directly (per-worktree `.treemon.json`, matching
+  the post-fork site) so per-worktree provider config is honored instead of always defaulting to
+  `Copilot`; `launchSession`/`sendCanvasMessage` drop their now-unused `GetState` fetch.
+  `RefreshScheduler` loses the `CodingToolData` field (from `PerRepoState`, `PerRepoState.empty`,
+  and `removeWorktreeData`), the `UpdateCodingTool` `StateMsg` case (union + `processMessage`
+  branch), and the always-false `effectiveActivity.hasCodingToolActivity` branch (plus its unused
+  `codingToolActivityThreshold`) — `effectiveActivity` is now purely client-activity decay.
+  `IdleDetectionTests` drops the six coding-tool-override tests + `dashboardWithCodingTool` helper,
+  keeping the client-activity decay + `computeActivityLevel` tests. `CodingToolStatus.CodingToolResult`
+  is retained (still used by the push `collapseByWorktree`/`fromPushSessions` path). Build 0 warn/0 err;
+  non-E2E suite 1078 pass / 0 fail / 10 skip.
 - **Reporting extension concretions (Phase 1, as built in `src/Extension/reporting/`).** The
   reporting-only extension is its own installable dir `src/Extension/reporting/`
   (`reporting.mjs` + a `@treemon/reporting` `package.json`, `main: reporting.mjs`), installed to

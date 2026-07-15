@@ -205,14 +205,6 @@ let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value
 
 let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 
-let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
-    state.Repos
-    |> Map.values
-    |> Seq.tryPick (fun repo ->
-        repo.CodingToolData
-        |> Map.tryFind path
-        |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
-
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -425,7 +417,7 @@ let worktreeApi
                       | Some { Branch = None } -> Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
                       | Some ({ Branch = Some branch } as ctx) -> Ok (ctx, branch)
                   let syncKey = scopedBranchKey ctx.RepoId branch
-                  let provider = resolveProvider state ctx.Worktree.Path
+                  let provider = CodingToolStatus.readConfiguredProvider ctx.Worktree.Path
 
                   let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
                   cardLog.Post(CardEventLog.SyncStarted syncKey)
@@ -526,8 +518,7 @@ let worktreeApi
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       let inv = CodingToolCli.build provider (CodingToolCli.Interactive req.Prompt)
                       return! SessionManager.spawnSession sessionAgent req.Path inv.AsShellString
                   })
@@ -577,10 +568,9 @@ let worktreeApi
                           let newPath = fork.WorktreePath
                           // Provider is read directly from .treemon.json — the new worktree first (its
                           // config exists once create returns and can differ from the root working
-                          // copy), then the root as fallback. This intentionally does NOT go through
-                          // resolveProvider (the scheduler-state routing the other launch sites use): a
-                          // just-created worktree is not yet in KnownPaths/CodingToolData, so
-                          // resolveProvider would return None here. Keep this a direct config read.
+                          // copy), then the root as fallback. A just-created worktree needs the root
+                          // fallback because its own config may not exist yet; the other launch sites
+                          // read the (already-present) per-worktree config directly.
                           let provider =
                               CodingToolStatus.readConfiguredProvider newPath
                               |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
@@ -640,7 +630,7 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       let prompt =
                           match req.Action with
                           | ConfigureTests ->
@@ -661,7 +651,7 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value wtPath
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       // Resume pick is the most-recent session for this worktree regardless of
                       // active/idle (distinct from the display pick) — read from the push live state.
                       let sessions =
@@ -683,8 +673,7 @@ let worktreeApi
                       if canvasSpawnInFlight.TryAdd(guardKey, true) then
                           try
                               let! owner = CanvasDocOwnership.getOwner path request.Filename
-                              let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                              let provider = resolveProvider state path
+                              let provider = CodingToolStatus.readConfiguredProvider path
                               // Open a new tab in the live session window when one is tracked, and
                               // spawn only when none exists (launchAction semantics). This path is
                               // reached automatically by a canvas-iframe postMessage and has no
