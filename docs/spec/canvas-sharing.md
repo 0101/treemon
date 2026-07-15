@@ -80,6 +80,12 @@ The title is the doc's `<title>`, falling back to a prettified filename
 (`build-status.html` → `Build status`). Because the URL is hidden behind the title, its length does
 not matter.
 
+Authoring note: the prettified fallback only sentence-cases a lowercase kebab filename
+(`mtp-testexplorer-hang.html` → "Mtp testexplorer hang") and can't recover acronyms or camelCase, so
+canvas docs should set a well-cased `<title>` (e.g. `MTP TestExplorer Hang`) to control the shared
+link text. The canvas skill's minimal template and authoring guidance cover this
+(`src/Extension/skill/SKILL.md`).
+
 The clipboard write is async and its outcome is **routed back into the update** (`ClipboardWriteResult`)
 rather than being fire-and-forget: the success banner confirms `Shared — link copied` only once the
 write actually lands, and a rejected write (transient activation lost across the share round-trip, a
