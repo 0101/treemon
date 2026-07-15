@@ -8,8 +8,9 @@ module OverviewBand
 // two STACKED sections split by a 1px dashed rule, each opening with an uppercase muted header, each
 // category a column whose count+label meta line sits ABOVE its visual (count FIRST in the accent
 // colour, label neutral, same size/weight):
-//   - Active agents -> a row of ~15px CIRCLES, one per red-dot working agent, grouped by activity,
-//                      plus the distinct Waiting group.
+//   - Agents        -> a row of ~15px CIRCLES, one per agent, grouped by activity (red-dot working
+//                      agents), plus the distinct Waiting group (yellow) and Stopped group (blue-dot
+//                      Done agents that finished a turn).
 //   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. Each bar
 //                      carries an inline `--bar-fill` custom property = count / Overview.Scale (its
 //                      share of the largest bucket); CSS multiplies that by a RESPONSIVE shared max
@@ -68,17 +69,20 @@ let private activityClass =
     | CurrentActivity.Fixing -> "activity-fixing"
     | CurrentActivity.Working -> "activity-working"
 
-// Display label per agent group: the skill-derived activity, or the distinct Waiting group.
+// Display label per agent group: the skill-derived activity, the distinct Waiting group, or the
+// distinct Stopped group (blue-dot Done agents).
 let private agentLabel =
     function
     | AgentGroupKind.Activity activity -> activityLabel activity
     | AgentGroupKind.Waiting -> "Waiting"
+    | AgentGroupKind.Stopped -> "Stopped"
 
 // Accent-color modifier class per agent group (same currentColor scheme as activityClass).
 let private agentClass =
     function
     | AgentGroupKind.Activity activity -> activityClass activity
     | AgentGroupKind.Waiting -> "activity-waiting"
+    | AgentGroupKind.Stopped -> "activity-stopped"
 
 /// The count+label meta line shown ABOVE each visual: count FIRST in the accent colour, label
 /// neutral, both the same font size/weight so they differ only by colour (prototype `.ulbl`). The
@@ -299,39 +303,15 @@ let view
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
     | agents, tasks ->
-        // Header counts: N red-dot working agents, and M waiting (only when a Waiting group exists).
-        let workingCount =
-            agents
-            |> List.sumBy (fun g ->
-                match g.Kind with
-                | AgentGroupKind.Activity _ -> g.Count
-                | AgentGroupKind.Waiting -> 0)
-
-        let waitingCount =
-            agents
-            |> List.tryPick (fun g ->
-                match g.Kind with
-                | AgentGroupKind.Waiting -> Some g.Count
-                | AgentGroupKind.Activity _ -> None)
-
         Html.div
             [ prop.className "overview-band"
               prop.children
                   [ match agents with
                     | [] -> Html.none
                     | groups ->
-                        // Uppercase muted section header (CSS upper-cases it): count of red-dot
-                        // working agents, extended with the waiting count only when a Waiting group
-                        // is present, e.g. "ACTIVE AGENTS · 9 WORKING · 2 WAITING". Per the "never
-                        // render a 0" invariant, the "N working" fragment is dropped when none are
-                        // working (a Waiting-only band reads "ACTIVE AGENTS · 2 WAITING").
-                        let header =
-                            match waitingCount with
-                            | Some m when workingCount > 0 -> $"Active agents · {workingCount} working · {m} waiting"
-                            | Some m -> $"Active agents · {m} waiting"
-                            | None -> $"Active agents · {workingCount} working"
-
-                        section header (groups |> List.map (agentColumn selection onSelectGroup)) (
+                        // Bare uppercase muted section header (CSS upper-cases it): the per-group
+                        // counts live in the columns right below, so the header stays just "AGENTS".
+                        section "Agents" (groups |> List.map (agentColumn selection onSelectGroup)) (
                             match selection with
                             | Some (OverviewSelection.Agents kind) ->
                                 groups
@@ -343,7 +323,7 @@ let view
                     | [] -> Html.none
                     | buckets ->
                         section
-                            "Tasks · across all worktrees"
+                            "Tasks"
                             (buckets |> List.map (taskColumn selection onSelectGroup overview.Scale))
                             (match selection with
                              | Some (OverviewSelection.Tasks kind) ->
