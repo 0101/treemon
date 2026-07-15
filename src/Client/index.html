@@ -198,17 +198,15 @@
         .activity-stopped { color: #89b4fa; }
 
         /* Drill-down breakdown panel (overview-drilldown): the black panel rendered INSIDE a section,
-           flush beneath the selected group's black tab. Header = accent-tinted title + muted summary +
-           ✕ close; members grouped by repo (small uppercase muted repo name matching the band header);
-           agent groups show borderless [dot name] chips (dot in the group's activity colour), task
-           buckets show name + bar rows on the SAME shared scale as the band bars above (--bar-fill is
-           the documented inline-width exception). The panel's accent class tints the title and, via
-           currentColor, the chip dots and task bars. */
-        .overview-breakdown { background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
-        .overview-bd-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
-        .overview-bd-title { font-size: 13.5px; font-weight: 600; color: currentColor; }
-        .overview-bd-sub { font-size: 12px; color: #6c7086; }
-        .overview-bd-close { margin-left: auto; align-self: flex-start; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
+           flush beneath the selected group's black tab. Only the ✕ close button remains as chrome
+           (absolutely positioned in the top-right corner so it adds no vertical space); the old title +
+           summary just repeated the selected tab above, so they're gone. Members grouped by repo (small
+           uppercase muted repo name matching the band header); agent groups show borderless [dot name]
+           chips (dot in the group's activity colour), task buckets show name + bar rows on the SAME
+           shared scale as the band bars above (--bar-fill is the documented inline-width exception). The
+           panel's accent class tints the chip dots and task bars via currentColor. */
+        .overview-breakdown { position: relative; background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-bd-close { position: absolute; top: 10px; right: 12px; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
         .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
         .overview-bd-repo { margin: 0 0 13px; }
         .overview-bd-repo:last-child { margin-bottom: 0; }
