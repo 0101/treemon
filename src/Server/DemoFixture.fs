@@ -369,6 +369,7 @@ let private baseDashboard: DashboardResponse =
       DeployBranch = None
       SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code"
+      WorktreeSkills = [ "investigate"; "review" ]
       CollapsedRepos = Set.empty
       CanvasPaneOpen = false
       OverviewPanelOpen = false
