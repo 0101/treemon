@@ -21,6 +21,10 @@ open Tests.TestUtils
 let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
 let private msg text t : Message = { Text = text; At = ts t }
 
+/// Reference "now" for the pure parse tests — just after every baseReq occurredAt used below, so a
+/// past/current occurredAt passes the future-skew clamp untouched.
+let private refNow = ts "2026-03-01T10:05:00Z"
+
 // --- DTO builders ------------------------------------------------------------------------------
 
 let private noMsg: MessageDto = Unchecked.defaultof<MessageDto>
@@ -37,14 +41,14 @@ let private baseReq kind : SessionActivityRequest =
       skillName = null }
 
 let private parseOk req =
-    match parseReport req with
+    match parseReport refNow req with
     | Ok r -> r
     | Error e ->
         Assert.Fail $"expected Ok, got Error: {e}"
         failwith "unreachable"
 
 let private parseErr req =
-    match parseReport req with
+    match parseReport refNow req with
     | Ok _ ->
         Assert.Fail "expected Error, got Ok"
         failwith "unreachable"
@@ -165,6 +169,18 @@ type ParseReportTests() =
     [<Test>]
     member _.``a malformed occurredAt is rejected``() =
         Assert.That(parseErr { baseReq "turn_started" with occurredAt = "not-a-date" }, Does.Contain "timestamp")
+
+    [<Test>]
+    member _.``an occurredAt far in the future is clamped to now (so freshness can still decay)``() =
+        let req = { baseReq "turn_started" with occurredAt = "2999-01-01T00:00:00Z" }
+        Assert.That((parseOk req).OccurredAt, Is.EqualTo refNow)
+
+    [<Test>]
+    member _.``an occurredAt within the skew allowance is kept as-is``() =
+        // refNow + 2 min, inside the 5-min skew window — minor client/server clock skew is tolerated.
+        let within = "2026-03-01T10:07:00Z"
+        let req = { baseReq "turn_started" with occurredAt = within }
+        Assert.That((parseOk req).OccurredAt, Is.EqualTo(ts within))
 
     [<Test>]
     member _.``a blank sessionId is rejected``() =

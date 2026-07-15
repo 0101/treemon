@@ -288,6 +288,11 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   (compiler assistance + ported tests). The extension is a thin forwarder — no Fable/TS.
 - **`session.idle` sets Idle directly; freshness is only a crash net.** Unlike the parser,
   which derived Idle purely from age.
+- **Future `occurredAt` is clamped, not trusted.** `last_seen` comes from `occurredAt`, and the
+  freshness net decays a session once `now - last_seen` exceeds the staleness timeout — a future
+  `last_seen` makes that negative, so the session reads perpetually fresh and never decays (stuck
+  non-Idle). `parseReport` clamps any `occurredAt` beyond `now + 5 min` skew down to `now`;
+  minor skew passes through. (See `SessionActivityService.clampFutureTimestamp`.)
 - **Display pick ≠ resume pick.** Display = most-recent-active; resume = most-recent-any.
 - **Overview-history unification (rebased onto `activity-history`).** This feature is based
   on top of the `activity-history` branch (landed first), so `OverviewHistory.fs`,

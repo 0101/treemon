@@ -53,6 +53,18 @@ let private tryParseTimestamp (s: string) : Result<DateTimeOffset, string> =
     | true, dto -> Ok dto
     | false, _ -> Error $"malformed timestamp '{s}'"
 
+/// Clock-skew allowance for the producer's `occurredAt`. Minor skew between the reporting client's
+/// clock and the server's is tolerated as-is; anything further ahead is implausible.
+let internal futureSkewAllowance = TimeSpan.FromMinutes 5.0
+
+/// Guard the freshness/staleness net against a future `occurredAt`. `last_seen` is set from
+/// `occurredAt`, and `freshnessAdjusted` decays a session once `now - last_seen` exceeds the
+/// staleness timeout — but a future `last_seen` makes that difference negative, so the session
+/// reads perpetually fresh and never decays to Idle (stuck non-Idle). Clamp any timestamp beyond
+/// `now + skew` down to `now` so decay always proceeds; timestamps at/before that bound pass through.
+let internal clampFutureTimestamp (now: DateTimeOffset) (ts: DateTimeOffset) : DateTimeOffset =
+    if ts > now + futureSkewAllowance then now else ts
+
 /// A message DTO → domain Message: both text and a parseable timestamp are required (used for
 /// user_prompt / assistant_message, where the message is mandatory).
 let private parseMessage (dto: MessageDto) : Result<Message, string> =
@@ -94,10 +106,11 @@ let internal kindText =
     | WentIdle -> "went_idle"
 
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
-/// worktree path is normalised here so it matches the scheduler's known-path set. Pure, so the
-/// whole contract (7 kinds, unknown rejected, per-kind message/skill rules) is unit-testable
-/// without HTTP plumbing.
-let parseReport (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
+/// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
+/// is clamped against `now` so a future timestamp can't poison the freshness/staleness net. Pure
+/// (given `now`), so the whole contract (7 kinds, unknown rejected, per-kind message/skill rules,
+/// future-timestamp clamp) is unit-testable without HTTP plumbing.
+let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
     elif String.IsNullOrWhiteSpace req.sessionId then Error "missing sessionId"
     elif String.IsNullOrWhiteSpace req.worktreePath then Error "missing worktreePath"
@@ -115,7 +128,7 @@ let parseReport (req: SessionActivityRequest) : Result<SessionActivityReport, st
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
                       Provider = provider
                       EventId = EventId req.eventId
-                      OccurredAt = occurredAt
+                      OccurredAt = clampFutureTimestamp now occurredAt
                       Event = ev })))
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
@@ -144,7 +157,7 @@ type AcceptOutcome =
 /// outcome so the handler can map it to a response and tests can assert it directly.
 let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: SessionActivityRequest) : Async<AcceptOutcome> =
     async {
-        match parseReport req with
+        match parseReport DateTimeOffset.UtcNow req with
         | Error reason -> return Rejected reason
         | Ok report ->
             let path = WorktreePath.value report.WorktreePath
