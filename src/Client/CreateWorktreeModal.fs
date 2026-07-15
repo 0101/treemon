@@ -140,9 +140,11 @@ let private skillSelector (dispatch: Msg -> unit) (form: CreateWorktreeForm) =
     Html.div [
         prop.className "modal-skill-group"
         prop.children [
-            Html.span [ prop.className "modal-field-label"; prop.text "Skill" ]
+            Html.span [ prop.id "skill-group-label"; prop.className "modal-field-label"; prop.text "Skill" ]
             Html.div [
                 prop.className "modal-radios"
+                prop.role "radiogroup"
+                prop.ariaLabelledBy "skill-group-label"
                 prop.children (skillRadios @ [ noneRadio ] @ hint)
             ]
         ]
@@ -195,7 +197,7 @@ let view (dispatch: Msg -> unit) (modal: ModalState) =
                     Html.textarea [
                         prop.className "modal-textarea"
                         prop.rows 3
-                        prop.placeholder "Optional prompt — sent to the coding agent in the new worktree, wrapped in the chosen skill"
+                        prop.placeholder "Optional prompt — sent to the coding agent in the new worktree, wrapped in the chosen skill (or verbatim when None)"
                         prop.value form.Prompt
                         prop.onChange (fun (v: string) -> dispatch (SetPrompt v))
                         prop.onKeyDown (fun e ->
