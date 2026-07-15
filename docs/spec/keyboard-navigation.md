@@ -62,12 +62,17 @@ owns the `onKeyDown` handler. When focus escapes to a sibling (canvas pane, head
 anywhere outside the dashboard and refocuses it, restoring the focus target
 (`Navigation.reclaimFocusTarget`). It is skipped when focus is already inside the dashboard (its own
 handler applies) or in an editable field. Escape while the caret is inside the cross-origin canvas
-doc iframe (`127.0.0.1:5002`) cannot be caught — the keystroke does not cross the origin boundary, so
-the user must click out of the iframe first.
+doc iframe (`127.0.0.1:5002`) can't reach this listener directly (the keystroke does not cross the
+origin boundary), so the doc server injects a keydown bridge (`CanvasDocServer.reclaimFocusScript`)
+that posts `{action:'reclaim-focus'}` to the pane on Escape; `CanvasPane.messageListener` routes it to
+the same reclaim (honored only from the active doc). The bridge is likewise skipped when the caret is
+in an editable field inside the doc.
 
 ## Key Files
 
 - `src/Client/App.fs` — `keyBinding`, `KeyPressed` handler (incl. Escape reclaim), `focusReclaim` global subscription, view focus rendering
 - `src/Client/Navigation.fs` — `FocusTarget` DU, `navigateSpatial`, `reclaimFocusTarget` (focus target to restore on Escape)
+- `src/Server/CanvasDocServer.fs` — `reclaimFocusScript` (Escape→`reclaim-focus` bridge injected into every canvas doc)
+- `src/Client/CanvasPane.fs` — routes the `reclaim-focus` doc message to the Escape reclaim
 - `src/Client/index.html` — `.focused` CSS class (outline: 2px solid #4a9eff), `.nav-hint` footer hint
 

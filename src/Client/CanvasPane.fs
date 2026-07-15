@@ -506,14 +506,19 @@ type MessageListenerCallbacks =
       OnDocError: string -> string -> string -> unit
       /// A canvas-origin object message arrived with no usable top-level string `action`, from the
       /// active (non-hidden) doc — surfaced instead of silently dropped.
-      OnMalformedMessage: unit -> unit }
+      OnMalformedMessage: unit -> unit
+      /// Escape was pressed inside a canvas doc (reclaim-focus): a cross-origin doc's keydown can't
+      /// reach the dashboard's global focus-reclaim listener, so pull keyboard focus back to the
+      /// dashboard and revive navigation.
+      OnReclaimFocus: unit -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
           SelectDoc = selectDoc
           OnMorphComplete = onMorphComplete
           OnDocError = onDocError
-          OnMalformedMessage = onMalformedMessage } = callbacks
+          OnMalformedMessage = onMalformedMessage
+          OnReclaimFocus = onReclaimFocus } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -543,6 +548,16 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                     elif action = "morph-complete" then
                         Fable.Core.JS.console.log "[canvas] morph-complete received"
                         onMorphComplete ()
+                    elif action = "reclaim-focus" then
+                        // Escape inside a cross-origin canvas doc can't reach the dashboard's global
+                        // focus-reclaim listener, so the doc posts this instead (reclaimFocusScript).
+                        // Honor it only from the active doc — a hidden background iframe has no focus
+                        // and must never yank the dashboard.
+                        if isFromHiddenCanvasIframe () then
+                            Fable.Core.JS.console.warn "[canvas] reclaim-focus DROPPED: from a hidden background doc iframe"
+                        else
+                            Fable.Core.JS.console.log "[canvas] reclaim-focus received"
+                            onReclaimFocus ()
                     elif action = "canvas-doc-error" then
                         // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                         // in the doc-error banner, never forwarded to the session like a normal payload.
