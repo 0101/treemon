@@ -199,6 +199,40 @@ type ParseReportTests() =
         let req = { baseReq "turn_started" with worktreePath = "C:\\wt\\a" }
         Assert.That((parseOk req).WorktreePath, Is.EqualTo(WorktreePath(PathUtils.normalizePath "C:\\wt\\a")))
 
+    // --- Server-side max text length (defence-in-depth; independent of the client's 2000-char cap) ---
+
+    [<Test>]
+    member _.``a message text over the server cap is truncated (not trusted from the client)``() =
+        let long = String('x', maxTextLength + 500)
+        let req = { baseReq "user_prompt" with message = msgDto long "2026-03-01T10:00:00Z" }
+        match (parseOk req).Event with
+        | UserPrompt m -> Assert.That(m.Text.Length, Is.EqualTo maxTextLength)
+        | other -> Assert.Fail $"expected UserPrompt, got {other}"
+
+    [<Test>]
+    member _.``a message text at exactly the server cap is kept intact``() =
+        let atCap = String('x', maxTextLength)
+        let req = { baseReq "assistant_message" with message = msgDto atCap "2026-03-01T10:00:00Z" }
+        match (parseOk req).Event with
+        | AssistantMessage m -> Assert.That(m.Text, Is.EqualTo atCap)
+        | other -> Assert.Fail $"expected AssistantMessage, got {other}"
+
+    [<Test>]
+    member _.``an ask_user question over the server cap is truncated``() =
+        let long = String('q', maxTextLength + 1)
+        let req = { baseReq "awaiting_user_input" with message = msgDto long "2026-03-01T10:00:00Z" }
+        match (parseOk req).Event with
+        | AwaitingUserInput(Some m) -> Assert.That(m.Text.Length, Is.EqualTo maxTextLength)
+        | other -> Assert.Fail $"expected AwaitingUserInput Some, got {other}"
+
+    [<Test>]
+    member _.``a skillName over the server cap is truncated``() =
+        let long = String('s', maxTextLength + 42)
+        let req = { baseReq "skill_invoked" with skillName = long }
+        match (parseOk req).Event with
+        | SkillInvoked name -> Assert.That(name.Length, Is.EqualTo maxTextLength)
+        | other -> Assert.Fail $"expected SkillInvoked, got {other}"
+
 
 // ── known-worktree guard ──────────────────────────────────────────────────────
 [<TestFixture>]

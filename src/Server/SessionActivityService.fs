@@ -53,6 +53,21 @@ let private tryParseTimestamp (s: string) : Result<DateTimeOffset, string> =
     | true, dto -> Ok dto
     | false, _ -> Error $"malformed timestamp '{s}'"
 
+/// Server-side hard cap on any free-text field (message text, the ask_user question, skillName),
+/// enforced independently of the client. reporting.mjs caps at 2000 chars, but this loopback +
+/// csrfGuard endpoint must not trust the producer's bound — a runaway/malicious multi-KB (or larger)
+/// payload would otherwise be persisted to SQLite and held in memory verbatim. Set well above the
+/// client's 2000-char cap so legitimate traffic is never touched; this is purely a defence-in-depth
+/// storage/memory bound (downstream display truncation to 80/120 chars still happens in
+/// CodingToolStatus). Truncate (not reject) so an over-long field never drops the whole event and
+/// regresses the live fold.
+let internal maxTextLength = 8192
+
+/// Truncate a free-text field to the server-side cap (see maxTextLength). Null-safe: a null string
+/// passes through unchanged (field presence is validated separately).
+let internal capText (s: string) : string =
+    if isNull s || s.Length <= maxTextLength then s else s.Substring(0, maxTextLength)
+
 /// Clock-skew allowance for the producer's `occurredAt`. Minor skew between the reporting client's
 /// clock and the server's is tolerated as-is; anything further ahead is implausible.
 let internal futureSkewAllowance = TimeSpan.FromMinutes 5.0
@@ -70,7 +85,7 @@ let internal clampFutureTimestamp (now: DateTimeOffset) (ts: DateTimeOffset) : D
 let private parseMessage (dto: MessageDto) : Result<Message, string> =
     if obj.ReferenceEquals(dto, null) then Error "missing message"
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
-    else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = dto.text; At = at })
+    else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
 /// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The seven cases are
 /// the whole contract; anything else is rejected. message is mandatory for user_prompt /
@@ -84,14 +99,14 @@ let internal parseEvent (kind: string) (message: MessageDto) (skillName: string)
     | "assistant_message" -> parseMessage message |> Result.map AssistantMessage
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
-        else Ok(SkillInvoked skillName)
+        else Ok(SkillInvoked(capText skillName))
     | "awaiting_user_input" ->
         // The question text is optional; a blank/absent message just means "no question to surface".
         if obj.ReferenceEquals(message, null) || String.IsNullOrWhiteSpace message.text then
             Ok(AwaitingUserInput None)
         else
             tryParseTimestamp message.at
-            |> Result.map (fun at -> AwaitingUserInput(Some { Text = message.text; At = at }))
+            |> Result.map (fun at -> AwaitingUserInput(Some { Text = capText message.text; At = at }))
     | other -> Error $"unknown kind '{other}'"
 
 /// The inverse of parseEvent for persistence: the wire `kind` string stored on the raw event row.

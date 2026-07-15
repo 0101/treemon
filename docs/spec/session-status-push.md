@@ -293,6 +293,14 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   `last_seen` makes that negative, so the session reads perpetually fresh and never decays (stuck
   non-Idle). `parseReport` clamps any `occurredAt` beyond `now + 5 min` skew down to `now`;
   minor skew passes through. (See `SessionActivityService.clampFutureTimestamp`.)
+- **Free text is length-capped server-side, not trusted from the client.** `reporting.mjs` caps
+  message/skill text at 2000 chars, but the loopback ingest endpoint must not trust the producer's
+  bound. `parseReport`/`parseEvent` truncate `message.text`, the ask_user question, and `skillName`
+  to `maxTextLength` (8 KB) before they are persisted to SQLite or held in memory — well above the
+  client cap so legitimate traffic is untouched, purely a defence-in-depth storage/memory bound.
+  Truncated (not rejected) so an over-long field never drops the whole event and regresses the live
+  fold. (See `SessionActivityService.capText`; display truncation to 80/120 chars is still
+  downstream in `CodingToolStatus`.)
 - **Display pick ≠ resume pick.** Display = most-recent-active; resume = most-recent-any.
 - **Overview-history unification (rebased onto `activity-history`).** This feature is based
   on top of the `activity-history` branch (landed first), so `OverviewHistory.fs`,
