@@ -51,6 +51,18 @@ let private shareIcon =
         ]
     ]
 
+/// The Start-session glyph (a filled play triangle), styled like `shareIcon` (`btn-icon`, 24×24,
+/// `currentColor`) so the icon-only launch button matches the Share and Archive buttons.
+let private playIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [ svg.d "M8 5v14l11-7z" ]
+        ]
+    ]
+
 /// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
 /// server-generated and has no owner session, so liveness is meaningless and the dot is omitted.
 let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
@@ -296,7 +308,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                                 prop.className "canvas-launch-btn"
                                 prop.onClick (fun _ -> launchSession ())
                                 prop.title "Start a session to work on the selected canvas doc"
-                                prop.text "▶ Start session"
+                                prop.children [ playIcon ]
                             ]
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
