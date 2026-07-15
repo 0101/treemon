@@ -206,7 +206,13 @@ let private agentBreakdown
                                             prop.onClick (fun _ -> onSelectWorktree m.ScopedKey)
                                             prop.children
                                                 [ Html.span [ prop.className "overview-chip-dot" ]
-                                                  Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ] ] ])) ] ] ])
+                                                  Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ]
+                                                  match m.Since with
+                                                  | Some since ->
+                                                      Html.span
+                                                          [ prop.className "overview-chip-since"
+                                                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now since) ]
+                                                  | None -> Html.none ] ])) ] ] ])
 
     breakdownPanel accent (fun () -> onSelectGroup (OverviewSelection.Agents group.Kind)) repoBlocks
 

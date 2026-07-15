@@ -21,7 +21,8 @@ let private dashboardWithCodingTool (lastMessageAge: TimeSpan) =
           CurrentSkill = None
           LastUserMessage = Some("hello", now - lastMessageAge)
           LastAssistantMessage = None
-          LastMessageProvider = None }
+          LastMessageProvider = None
+          LastActivity = None }
 
     let repo =
         { PerRepoState.empty with
@@ -69,7 +70,8 @@ type EffectiveActivityTests() =
               CurrentSkill = None
               LastUserMessage = Some("test", now - TimeSpan.FromSeconds(1.0))
               LastAssistantMessage = None
-              LastMessageProvider = None }
+              LastMessageProvider = None
+              LastActivity = None }
 
         let repo =
             { PerRepoState.empty with
@@ -140,7 +142,8 @@ type EffectiveActivityTests() =
               CurrentSkill = None
               LastUserMessage = None
               LastAssistantMessage = None
-              LastMessageProvider = None }
+              LastMessageProvider = None
+              LastActivity = None }
 
         let repo =
             { PerRepoState.empty with
@@ -162,7 +165,8 @@ type EffectiveActivityTests() =
               CurrentSkill = None
               LastUserMessage = Some("recent", now - TimeSpan.FromMinutes(1.0))
               LastAssistantMessage = None
-              LastMessageProvider = None }
+              LastMessageProvider = None
+              LastActivity = None }
 
         let staleCt: CodingToolResult =
             { Status = CodingToolStatus.Idle
@@ -170,7 +174,8 @@ type EffectiveActivityTests() =
               CurrentSkill = None
               LastUserMessage = Some("stale", now - TimeSpan.FromMinutes(10.0))
               LastAssistantMessage = None
-              LastMessageProvider = None }
+              LastMessageProvider = None
+              LastActivity = None }
 
         let repo1 =
             { PerRepoState.empty with

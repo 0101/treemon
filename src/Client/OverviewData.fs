@@ -49,6 +49,9 @@ type GroupMember =
       Branch: string
       RepoId: RepoId
       RepoName: string
+      /// When the agent entered its current state (Overview agent groups only) — used to show the
+      /// per-agent "time in category" in the drill-down. None for task-bucket members and Idle agents.
+      Since: System.DateTimeOffset option
       Contribution: int }
 
 /// One non-empty task bucket: its kind, cross-worktree count, and the member worktrees that make it
@@ -138,6 +141,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
           Branch = w.Branch
           RepoId = repoId
           RepoName = repoName
+          Since = w.CodingToolSince
           Contribution = contribution }
 
     // A worktree's contribution to one task bucket. In-progress and Queued only count toward their

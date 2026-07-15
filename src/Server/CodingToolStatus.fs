@@ -35,7 +35,11 @@ type CodingToolResult =
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
-      LastMessageProvider: CodingToolProvider option }
+      LastMessageProvider: CodingToolProvider option
+      /// Mtime of the active session surface that won status resolution (its last write) — the best
+      /// available "the agent last did something" time, and the value the scheduler freezes as the
+      /// state-transition timestamp. None when every surface is Idle.
+      LastActivity: DateTimeOffset option }
 
 type internal ProviderResult =
     { Provider: CodingToolProvider
@@ -68,23 +72,26 @@ let internal pickActiveSkill (surfaces: (ProviderResult * (unit -> string option
     |> Option.bind (fun (_, getSkill) -> getSkill ())
 
 // Uses pickActiveProvider (filter non-Idle, pick most recent) instead of tryFind
-// so that when multiple providers report status, the most recently active wins.
+// so that when multiple providers report status, the most recently active wins. Honors the
+// configured provider by restricting the candidates to it first. Returns the winning surface so
+// callers get its Status, Provider AND Mtime from one resolution (None => every surface Idle).
+let internal resolveActiveProvider
+    (configuredProvider: CodingToolProvider option)
+    (providerResults: ProviderResult list)
+    : ProviderResult option =
+
+    match configuredProvider with
+    | Some provider -> providerResults |> List.filter (fun r -> r.Provider = provider) |> pickActiveProvider
+    | None -> pickActiveProvider providerResults
+
 let internal resolveStatus
     (configuredProvider: CodingToolProvider option)
     (providerResults: ProviderResult list)
     : CodingToolStatus * CodingToolProvider option =
 
-    match configuredProvider with
-    | Some provider ->
-        let matching = providerResults |> List.filter (fun r -> r.Provider = provider)
-
-        match pickActiveProvider matching with
-        | Some r -> r.Status, Some provider
-        | None -> Idle, Some provider
-    | None ->
-        match pickActiveProvider providerResults with
-        | Some r -> r.Status, Some r.Provider
-        | None -> Idle, None
+    match resolveActiveProvider configuredProvider providerResults with
+    | Some r -> r.Status, Some r.Provider
+    | None -> Idle, configuredProvider
 
 // The three session surfaces scanned per refresh: Claude, Copilot CLI, and VS Code Copilot. Kept as
 // named results so status resolution and running-skill selection reuse the SAME status/mtime reads.
@@ -117,8 +124,12 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
     let copilot = CopilotDetector.getRefreshData worktreePath
     let results = gatherResultsFromFiles worktreePath claudeFiles copilot
 
-    let status, provider =
-        resolveStatus configured [ results.Claude; results.CopilotCli; results.VsCodeCopilot ]
+    let active =
+        resolveActiveProvider configured [ results.Claude; results.CopilotCli; results.VsCodeCopilot ]
+
+    let status = active |> Option.map _.Status |> Option.defaultValue Idle
+    let provider = active |> Option.map _.Provider |> Option.orElse configured
+    let lastActivity = active |> Option.bind _.Mtime
 
     let target = configured |> Option.orElse provider
 
@@ -174,7 +185,7 @@ let getRefreshData (worktreePath: string) : CodingToolResult =
                   results.VsCodeCopilot, (fun () -> VsCodeCopilotDetector.getCurrentSkill worktreePath) ]
         | None -> None
 
-    { Status = status; Provider = provider; CurrentSkill = currentSkill; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
+    { Status = status; Provider = provider; CurrentSkill = currentSkill; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider; LastActivity = lastActivity }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "

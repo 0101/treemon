@@ -14,6 +14,10 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       PlanningData: Map<string, BeadsPlanning>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
+      /// When each worktree ENTERED its current coding-tool status, stamped at the transition and
+      /// frozen until the next one (dropped when it goes Idle). Drives the Overview band's per-agent
+      /// "time in category".
+      CodingToolSince: Map<string, DateTimeOffset>
       PrData: Map<string, PrStatus>
       CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
@@ -29,6 +33,7 @@ module PerRepoState =
           BeadsData = Map.empty
           PlanningData = Map.empty
           CodingToolData = Map.empty
+          CodingToolSince = Map.empty
           PrData = Map.empty
           CanvasData = Map.empty
           Provider = None
@@ -101,7 +106,26 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         BeadsData = repo.BeadsData |> Map.remove path
         PlanningData = repo.PlanningData |> Map.remove path
         CodingToolData = repo.CodingToolData |> Map.remove path
+        CodingToolSince = repo.CodingToolSince |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
+
+/// Update the per-worktree "entered current status at" stamp after observing a fresh coding-tool
+/// scan. Stamps (freezes) the moment a worktree ENTERS a non-Idle status, keeps the existing stamp
+/// while the status is unchanged (so a Working agent shows time-since-it-started-working, not
+/// time-since-last-write), and drops it when the agent goes Idle. The transition time is the winning
+/// surface's mtime (LastActivity) so it stays accurate across a server restart; `now` is the fallback
+/// when the scan carried no mtime.
+let recordCodingToolSince
+    (now: DateTimeOffset)
+    (path: string)
+    (prevStatus: CodingToolStatus option)
+    (data: CodingToolStatus.CodingToolResult)
+    (since: Map<string, DateTimeOffset>)
+    : Map<string, DateTimeOffset> =
+    match data.Status with
+    | CodingToolStatus.Idle -> since |> Map.remove path
+    | _ when prevStatus = Some data.Status && Map.containsKey path since -> since
+    | _ -> since |> Map.add path (data.LastActivity |> Option.defaultValue now)
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -143,7 +167,13 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | UpdateCodingTool(repoId, path, data) ->
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
-            updateRepo repoId { repo with CodingToolData = repo.CodingToolData |> Map.add path data } state
+            let prevStatus = repo.CodingToolData |> Map.tryFind path |> Option.map _.Status
+            let since = recordCodingToolSince DateTimeOffset.UtcNow path prevStatus data repo.CodingToolSince
+            updateRepo repoId
+                { repo with
+                    CodingToolData = repo.CodingToolData |> Map.add path data
+                    CodingToolSince = since }
+                state
         else
             state
 
