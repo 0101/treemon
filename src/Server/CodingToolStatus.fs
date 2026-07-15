@@ -126,7 +126,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
 /// endpoint read from the result.
 let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<string, CodingToolResult> =
     sessions
-    |> Seq.groupBy (fun s -> WorktreePath.value s.WorktreePath)
+    |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
     |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
     |> Map.ofSeq
 
@@ -138,5 +138,5 @@ let getLastSessionId (sessions: StoredStatus list) : string option =
     sessions
     |> List.sortByDescending _.LastSeen
     |> List.tryHead
-    |> Option.map (fun s -> SessionId.value s.SessionId)
+    |> Option.map (_.SessionId >> SessionId.value)
 

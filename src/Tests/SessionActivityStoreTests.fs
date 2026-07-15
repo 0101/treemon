@@ -2,19 +2,16 @@ module Tests.SessionActivityStoreTests
 
 open System
 open System.IO
-open System.Globalization
 open NUnit.Framework
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared
+open Tests.TestUtils
 
 // These exercise the SQLite (WAL) durable mirror behind the push-model live state: last-write-wins
 // upserts, INSERT OR IGNORE event dedupe, the restart rebuild (loadLiveStatuses within the idle
 // window), the history-substrate window query, and retention pruning. Each test runs against a fresh
 // temp .db file that is disposed + deleted in teardown.
-
-let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
-let private msg text t : Message = { Text = text; At = ts t }
 
 /// A fresh store over a throwaway temp .db, disposed (releasing the file handle) and its dir deleted
 /// afterwards. Store construction creates the schema, so the DB is ready to use inside `action`.
@@ -204,7 +201,7 @@ type LoadLiveStatusesTests() =
             store.UpsertStatus(storedOf "stale" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
 
             let rows = store.LoadLiveStatuses now
-            Assert.That(rows |> List.map (fun r -> SessionId.value r.SessionId), Is.EquivalentTo([ "live" ])))
+            Assert.That(rows |> List.map (_.SessionId >> SessionId.value), Is.EquivalentTo([ "live" ])))
 
     [<Test>]
     member _.``Live state survives a restart (new store instance over the same file)``() =
@@ -246,7 +243,7 @@ type StatusesForWorktreeTests() =
 
             Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window")
 
-            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (fun r -> SessionId.value r.SessionId)
+            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
             Assert.That(ids, Is.EqualTo([ "recent"; "old" ]), "durable rows returned newest last_seen first, no idle filter"))
 
     [<Test>]
@@ -255,7 +252,7 @@ type StatusesForWorktreeTests() =
             store.UpsertStatus(storedOf "a1" "C:/wt/a" emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
             store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
 
-            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (fun r -> SessionId.value r.SessionId)
+            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
             Assert.That(ids, Is.EqualTo([ "a1" ])))
 
     [<Test>]
@@ -283,7 +280,7 @@ type QueryWindowTests() =
             let rows = store.QueryWindow(ts "2026-03-01T09:30:00Z", ts "2026-03-01T11:30:00Z")
 
             Assert.That(
-                rows |> List.map (fun r -> EventId.value r.EventId),
+                rows |> List.map (_.EventId >> EventId.value),
                 Is.EqualTo([ "e1"; "e2" ]),
                 "window should drop out-of-range events and stay ordered by ts"
             ))
@@ -293,7 +290,7 @@ type QueryWindowTests() =
         withStore (fun store ->
             seed store
             let rows = store.QueryWindow(ts "2026-03-01T10:00:00Z", ts "2026-03-01T11:00:00Z")
-            Assert.That(rows |> List.map (fun r -> EventId.value r.EventId), Is.EqualTo([ "e1"; "e2" ])))
+            Assert.That(rows |> List.map (_.EventId >> EventId.value), Is.EqualTo([ "e1"; "e2" ])))
 
     [<Test>]
     member _.``A window covering nothing yields an empty list``() =
@@ -323,13 +320,13 @@ type PruneOldTests() =
 
             let remainingEvents =
                 store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-01T23:59:59Z")
-                |> List.map (fun r -> EventId.value r.EventId)
+                |> List.map (_.EventId >> EventId.value)
 
             Assert.That(remainingEvents, Is.EqualTo([ "e3" ]))
 
             let remainingSessions =
                 store.LoadLiveStatuses(ts "2026-03-01T03:30:00Z")
-                |> List.map (fun r -> SessionId.value r.SessionId)
+                |> List.map (_.SessionId >> SessionId.value)
 
             Assert.That(remainingSessions, Is.EqualTo([ "recent" ])))
 

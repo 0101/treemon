@@ -4,16 +4,13 @@ open System
 open NUnit.Framework
 open Server.SessionActivity
 open Shared
+open Tests.TestUtils
 
 // These port the CopilotDetector forward-fold tests onto the push-model `fold`. The old fold parsed
 // JSONL and carried sub-agent depth + injection filtering; the new fold consumes already-classified
 // `SessionEvent`s (the extension filters sub-agent/injection events at the source), so the ported
 // tests build SessionEvent lists directly instead of JSONL. Sub-agent/injection scenarios are gone
 // by construction — the fold has no branch for them — so those tests are intentionally not ported.
-
-let private ts (s: string) = DateTimeOffset.Parse(s, System.Globalization.CultureInfo.InvariantCulture)
-
-let private msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 
 let private skillOf (events: SessionEvent list) =
     (foldMany emptyStatus events).Skill

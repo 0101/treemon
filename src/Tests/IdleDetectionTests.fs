@@ -15,8 +15,7 @@ let private dashboardWithClientActivity (level: ActivityLevel) (activityAge: Tim
         ClientActivityAt = now - activityAge }
 
 // ==================== effectiveActivity tests ====================
-// effectiveActivity is now driven purely by client activity decay. The old coding-tool
-// override was removed with the pull-model CodingToolData plumbing (push-only build).
+// effectiveActivity is now driven purely by client activity decay.
 
 [<TestFixture>]
 [<Category("Unit")>]

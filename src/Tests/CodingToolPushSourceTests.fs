@@ -153,16 +153,16 @@ type CollapseByWorktreeTests() =
 
         let byWt = collapseByWorktree now sessions
 
-        Assert.That(byWt.["wt-a"].Status, Is.EqualTo Working)
-        Assert.That(byWt.["wt-a"].CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(byWt.["wt-b"].Status, Is.EqualTo WaitingForUser)
-        Assert.That(byWt.["wt-b"].CurrentSkill, Is.EqualTo(Some "investigate"))
+        Assert.That(byWt["wt-a"].Status, Is.EqualTo Working)
+        Assert.That(byWt["wt-a"].CurrentSkill, Is.EqualTo(Some "review"))
+        Assert.That(byWt["wt-b"].Status, Is.EqualTo WaitingForUser)
+        Assert.That(byWt["wt-b"].CurrentSkill, Is.EqualTo(Some "investigate"))
 
     [<Test>]
     member _.``A worktree with only idle sessions collapses to the blank Idle card``() =
         let sessions = [ stored "a" "wt-a" Idle None None None "2026-03-01T11:59:00Z" ]
         let byWt = collapseByWorktree now sessions
-        Assert.That(byWt.["wt-a"], Is.EqualTo idlePushResult)
+        Assert.That(byWt["wt-a"], Is.EqualTo idlePushResult)
 
     [<Test>]
     member _.``An empty live set yields an empty map``() =

@@ -263,7 +263,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
             loop Map.empty)
 
-    let mutable pruneTimer: Timer = null
+    let mutable pruneTimer: Timer option = None
 
     let prune _ =
         try
@@ -309,13 +309,13 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         loaded |> List.iter (fun s -> scheduler.Post(RefreshScheduler.UpdateSessionStatus s))
         mailbox.Post(Seed loaded)
         Log.log "Activity" $"Rebuilt {List.length loaded} live session status(es) from store"
-        pruneTimer <- new Timer(TimerCallback(prune), null, pruneInterval, pruneInterval)
+        pruneTimer <- Some(new Timer(TimerCallback(prune), null, pruneInterval, pruneInterval))
 
     /// The current in-memory live map (test seam; live reads for cards go via the scheduler).
     member _.LiveSnapshot() : Map<SessionId, StoredStatus> = mailbox.PostAndReply Snapshot
 
     interface IDisposable with
         member _.Dispose() =
-            if not (isNull pruneTimer) then pruneTimer.Dispose()
+            pruneTimer |> Option.iter (fun t -> t.Dispose())
             (mailbox :> IDisposable).Dispose()
             (store :> IDisposable).Dispose()

@@ -2,7 +2,6 @@ module Tests.SessionActivityServiceTests
 
 open System
 open System.IO
-open System.Globalization
 open NUnit.Framework
 open Shared
 open Server
@@ -17,9 +16,6 @@ open Tests.TestUtils
 // upsert → feed RefreshScheduler), plus the restart rebuild from the store. Fast/in-process — no
 // HTTP; the handler is a thin wrapper over these tested seams (its known-worktree guard is exactly
 // the CanvasDocServer pattern, tested there too).
-
-let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
-let private msg text t : Message = { Text = text; At = ts t }
 
 /// Reference "now" for the pure parse tests — just after every baseReq occurredAt used below, so a
 /// past/current occurredAt passes the future-skew clamp untouched.
