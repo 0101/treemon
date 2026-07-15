@@ -43,46 +43,37 @@ let private readGlobalConfig () =
             else None)
         |> Map.ofSeq)
 
-let internal readCollapsedRepos () : Set<RepoId> =
-    withConfigDocument Set.empty (fun root ->
-        match root.TryGetProperty("collapsedRepos") with
+/// Reads a JSON string array from the machine-level config by key, returning `[]` when the key is
+/// absent or not an array. Shared by the config readers that each pull a list of strings and then
+/// apply their own post-processing (element wrapping, trimming, filtering, container choice).
+let private readStringArray (key: string) : string list =
+    withConfigDocument [] (fun root ->
+        match root.TryGetProperty(key) with
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
             prop.EnumerateArray()
             |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (RepoId (el.GetString()))
+                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
                 else None)
-            |> Set.ofSeq
-        | _ -> Set.empty)
+            |> Seq.toList
+        | _ -> [])
+
+let internal readCollapsedRepos () : Set<RepoId> =
+    readStringArray "collapsedRepos" |> List.map RepoId |> Set.ofList
 
 /// Reads `ignoreWorktreePatterns` from the machine-level config — the regexes for worktrees the
 /// dashboard should hide. Lives here so all global-config reads share the one
 /// `TREEMON_CONFIG_DIR`-aware path.
 let readIgnoreWorktreePatterns () : string list =
-    withConfigDocument [] (fun root ->
-        match root.TryGetProperty("ignoreWorktreePatterns") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-            prop.EnumerateArray()
-            |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
-                else None)
-            |> Seq.toList
-        | _ -> [])
+    readStringArray "ignoreWorktreePatterns"
 
 /// Reads the machine-level `worktreeSkills` — the skills offered in the create-worktree modal's
-/// radio group. Blank entries are dropped. Absent or empty yields `[]`, which the modal renders
+/// radio group. Entries are trimmed and blanks dropped. Absent or empty yields `[]`, which the modal renders
 /// as "None only" plus an onboarding hint pointing here. Order is preserved; the first entry is
 /// the modal's default selection.
 let readWorktreeSkills () : string list =
-    withConfigDocument [] (fun root ->
-        match root.TryGetProperty("worktreeSkills") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-            prop.EnumerateArray()
-            |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (el.GetString())
-                else None)
-            |> Seq.filter (not << String.IsNullOrWhiteSpace)
-            |> Seq.toList
-        | _ -> [])
+    readStringArray "worktreeSkills"
+    |> List.map _.Trim()
+    |> List.filter (fun s -> s <> "")
 
 let buildIgnorePredicate (patterns: string list) : string -> bool =
     let regexes =

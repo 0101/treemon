@@ -220,6 +220,12 @@ type WorktreeSkillsConfigTests() =
             Assert.That(readWorktreeSkills (), Is.EqualTo([ "investigate"; "review" ])))
 
     [<Test>]
+    member _.``readWorktreeSkills trims surrounding whitespace from entries``() =
+        withTempConfigDir "treemon-skills-test" (fun tempDir ->
+            File.WriteAllText(Path.Combine(tempDir, "config.json"), """{ "worktreeSkills": [" investigate ", "review\t"] }""")
+            Assert.That(readWorktreeSkills (), Is.EqualTo([ "investigate"; "review" ])))
+
+    [<Test>]
     member _.``readWorktreeSkills returns empty for an empty array``() =
         withTempConfigDir "treemon-skills-test" (fun tempDir ->
             File.WriteAllText(Path.Combine(tempDir, "config.json"), """{ "worktreeSkills": [] }""")
