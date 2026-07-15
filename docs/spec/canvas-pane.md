@@ -127,7 +127,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
 - Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
-- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds receive scrollbar CSS and the canvas link interceptor; an `AgentDoc` additionally receives the bridge heartbeat script, the idiomorph runtime, and the morph controller, whereas a `SystemView` receives none of those three.
+- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds receive scrollbar CSS, the canvas link interceptor, and the Escape focus-reclaim bridge (`reclaimFocusScript`, which posts `reclaim-focus` to the pane); an `AgentDoc` additionally receives the bridge heartbeat script, the idiomorph runtime, and the morph controller, whereas a `SystemView` receives none of those three.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.

@@ -506,14 +506,19 @@ type MessageListenerCallbacks =
       OnDocError: string -> string -> string -> unit
       /// A canvas-origin object message arrived with no usable top-level string `action`, from the
       /// active (non-hidden) doc — surfaced instead of silently dropped.
-      OnMalformedMessage: unit -> unit }
+      OnMalformedMessage: unit -> unit
+      /// Escape was pressed inside a canvas doc (reclaim-focus): a cross-origin doc's keydown can't
+      /// reach the dashboard's global focus-reclaim listener, so pull keyboard focus back to the
+      /// dashboard and revive navigation.
+      OnReclaimFocus: unit -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
           SelectDoc = selectDoc
           OnMorphComplete = onMorphComplete
           OnDocError = onDocError
-          OnMalformedMessage = onMalformedMessage } = callbacks
+          OnMalformedMessage = onMalformedMessage
+          OnReclaimFocus = onReclaimFocus } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -529,6 +534,12 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                 // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
                 let isFromHiddenCanvasIframe () =
                     Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe:not(.canvas-iframe-active)'), function(f){return f.contentWindow === $0.source})"
+                // Positively identify the ACTIVE doc as sender: me.source must equal the active iframe's
+                // window. Unlike the negative hidden-iframe filter, this rejects any canvas-origin sender
+                // that isn't the active doc — a detached/stale iframe, or a synthetic message with no
+                // source — rather than treating "not hidden" as "active".
+                let isFromActiveCanvasIframe () =
+                    Fable.Core.JsInterop.emitJsExpr<bool> me "(function(f){return !!f && f.contentWindow === $0.source})(document.querySelector('.canvas-iframe-active'))"
                 if Fable.Core.JsInterop.emitJsExpr<bool> me.data "typeof $0.action === 'string'" then
                     let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                     if action = "navigate-canvas-doc" then
@@ -543,6 +554,16 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                     elif action = "morph-complete" then
                         Fable.Core.JS.console.log "[canvas] morph-complete received"
                         onMorphComplete ()
+                    elif action = "reclaim-focus" then
+                        // Escape inside a cross-origin canvas doc can't reach the dashboard's global
+                        // focus-reclaim listener, so the doc posts this instead (reclaimFocusScript).
+                        // Positively require the ACTIVE doc's window as sender — a hidden background,
+                        // stale/detached, or sourceless sender must never yank the dashboard.
+                        if isFromActiveCanvasIframe () then
+                            Fable.Core.JS.console.log "[canvas] reclaim-focus received"
+                            onReclaimFocus ()
+                        else
+                            Fable.Core.JS.console.warn "[canvas] reclaim-focus DROPPED: not from the active canvas doc iframe"
                     elif action = "canvas-doc-error" then
                         // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                         // in the doc-error banner, never forwarded to the session like a normal payload.
