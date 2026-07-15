@@ -4,6 +4,8 @@ open System
 open System.IO
 open System.Text.Json
 open Shared
+open Server.SessionActivity
+open Server.SessionActivityStore
 
 
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
@@ -201,9 +203,79 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | CreatePr -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
     | CanvasSession prompt -> prompt
 
-let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) =
-    match provider |> Option.defaultValue CodingToolProvider.Default with
-    | CodingToolProvider.Claude ->
-        ClaudeDetector.enumerateFiles worktreePath
-        |> ClaudeDetector.getLastSessionIdFromFiles
-    | CodingToolProvider.Copilot -> CopilotDetector.getLastSessionId worktreePath
+// --- Push-model live-state sourcing -----------------------------------------------------------
+//
+// The card's coding-tool fields (status / skill / last-user / last-assistant) come from the push
+// model's live per-session state, not the log-parsing detectors. A worktree's live sessions are
+// collapsed to ONE winner via SessionActivity.pickActive (drop Idle, most-recent active wins) and
+// EVERY displayed field is read from that one winning session — per-field cherry-picking across
+// sessions is unrepresentable. Resume is a DISTINCT pick (getLastSessionId): the most-recent
+// session regardless of active/idle (the session the user last touched).
+
+/// The Idle default a worktree card shows when it has no live/active push session (all Idle, all
+/// stale, or none reported) — the same blank card an unmonitored worktree shows.
+let idlePushResult: CodingToolResult =
+    { Status = Idle
+      Provider = None
+      CurrentSkill = None
+      LastUserMessage = None
+      LastAssistantMessage = None
+      LastMessageProvider = None }
+
+/// The push model has a single provider today (Copilot CLI); `pickActive` collapses to a bare
+/// `SessionStatus` (provider-free), so an active push session always reads as Copilot on the card.
+let private pushCardProvider (p: PushProvider) : CodingToolProvider =
+    match p with
+    | CopilotCli -> Copilot
+
+/// The last assistant message as the card's `CardEvent` (the exact shape the detectors produced): a
+/// single line truncated to 80 chars, tagged with the push provider's source string.
+let private toLastAssistantEvent (m: Message) : CardEvent =
+    { Source = "copilot"
+      Message = FileUtils.truncateMessage 80 m.Text
+      Timestamp = m.At
+      Status = None
+      Duration = None }
+
+/// Collapse a worktree's live push sessions into the card's coding-tool fields. Each session is
+/// freshness-adjusted first (a Working/WaitingForUser/Done whose `last_seen` is older than the
+/// staleness timeout reads as Idle — the crash safety-net — so it drops out of the pick), then
+/// `pickActive` picks the most-recent ACTIVE winner and ALL displayed fields are read from that ONE
+/// session. No live/active session → the Idle default (blank fields).
+let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
+    let winner =
+        sessions
+        |> List.map (fun s -> SessionActivity.freshnessAdjusted now s.LastSeen s.Status, s.LastSeen)
+        |> SessionActivity.pickActive
+
+    match winner with
+    | None -> idlePushResult
+    | Some s ->
+        { Status = s.Status
+          Provider = Some(pushCardProvider CopilotCli)
+          CurrentSkill = s.Skill
+          LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+          LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
+          LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> pushCardProvider CopilotCli) }
+
+/// Group a flat set of live push session-statuses by worktree path and collapse each group into the
+/// card's coding-tool fields (the `pickActive` winner). Keyed by the normalised worktree path stored
+/// on each session, so callers look it up by the (already-normalised) `WorktreeInfo.Path`. The single
+/// place the push live state becomes card fields — both the worktree assembly and the recent-messages
+/// endpoint read from the result.
+let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<string, CodingToolResult> =
+    sessions
+    |> Seq.groupBy (fun s -> WorktreePath.value s.WorktreePath)
+    |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
+    |> Map.ofSeq
+
+/// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recent session for the
+/// worktree regardless of active/idle (the session the user last touched). Reads the id from the
+/// push live state (the store's in-memory reflection) instead of scanning log directories. `None`
+/// when the worktree has never reported (→ the CLI `--continue` fallback in CodingToolCli).
+let getLastSessionId (sessions: StoredStatus list) : string option =
+    sessions
+    |> List.sortByDescending _.LastSeen
+    |> List.tryHead
+    |> Option.map (fun s -> SessionId.value s.SessionId)
+

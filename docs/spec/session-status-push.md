@@ -317,6 +317,24 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   `session_status` row. Retention timer: `pruneOld(now − 14d)` every 1h, on the store's own
   connection (WAL + `busy_timeout` handle the concurrent delete); the service owns the store's
   lifetime and disposes it on shutdown.
+- **Repoint concretions (as built in `CodingToolStatus.fs` + `WorktreeApi.fs`).** The card's
+  coding-tool fields now come from the push live state, not the detectors:
+  `CodingToolStatus.collapseByWorktree` groups `DashboardState.SessionStatuses` (the store's
+  in-memory reflection) by worktree path and `fromPushSessions` collapses each group —
+  freshness-adjust each session (the 5-min staleness net rewrites a quiet Working/Waiting/Done
+  to Idle), then `SessionActivity.pickActive` (drop Idle, most-recent active wins) with **all**
+  fields (status/skill/last-user/last-assistant/provider) taken from the one winner. The push
+  provider is Copilot-only, so an active card always reads `Copilot`; last-user/last-assistant
+  keep the detectors' 80/120-char single-line truncation and `"copilot"` source. The 5-min
+  freshness **subsumes** the 2h idle window for the *display* pick (anything quiet >5 min is
+  already Idle and dropped), so `fromPushSessions` needs no separate window filter. The collapse
+  map is built once per `getWorktrees` / `getSyncStatus` call (SessionStatuses is global, keyed by
+  the same normalised path as `WorktreeInfo.Path`) and feeds both the worktree cards and the
+  recent-messages endpoint. `getLastSessionId` is the **distinct resume pick** — most-recent-any
+  by `last_seen` over the worktree's `SessionStatuses` (no drop-Idle, no freshness), returning the
+  stored session id (→ `copilot --resume <id>`, or `--continue` when the worktree never reported).
+  `resolveProvider` still reads the detector-fed `CodingToolData` for command-building; it
+  harmlessly degrades to the `Copilot` default once the detectors stop populating it (task 9k8).
 
 ## Key Files
 

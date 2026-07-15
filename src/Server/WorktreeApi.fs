@@ -130,22 +130,20 @@ let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
     (hasTestFailureLog: bool)
+    (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
     let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
+    // Card coding-tool fields now come from the push live state (SessionActivity), collapsed per
+    // worktree via pickActive — NOT the log-parsing detectors (repointed here; detectors deleted next
+    // task). An unknown/quiet worktree falls back to the same blank Idle card as before.
     let codingToolData =
-        repo.CodingToolData
+        pushByWorktree
         |> Map.tryFind wt.Path
-        |> Option.defaultValue
-            { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
-              Provider = None
-              CurrentSkill = None
-              LastUserMessage = None
-              LastAssistantMessage = None
-              LastMessageProvider = None }
+        |> Option.defaultValue CodingToolStatus.idlePushResult
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -229,6 +227,12 @@ let getWorktrees
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
         let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
 
+        // Collapse the push live state (all live sessions, keyed by SessionId) to one coding-tool
+        // result per worktree once, up front: each worktree's sessions → pickActive winner. Shared
+        // across every repo/worktree assembly below (SessionStatuses is global, not per-repo).
+        let pushByWorktree =
+            CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+
         let repos =
             state.Repos
             |> Map.toList
@@ -243,7 +247,7 @@ let getWorktrees
                     |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
+                        assembleFromState activeSessionPaths archivedBranches hasLog pushByWorktree repo wt)
 
                 let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -475,14 +479,17 @@ let worktreeApi
                         yield! syncKeyToPath |> Map.keys ]
                       |> List.distinct
 
+                  // The card's last-assistant message per worktree now comes from the push live state
+                  // (collapsed via pickActive), not the log-parsing detectors — same repoint as the
+                  // worktree cards. Merged with sync events below to build each card's recent-message pair.
+                  let pushByWorktree =
+                      CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+
                   let cachedLastMessages =
-                      state.Repos
+                      pushByWorktree
                       |> Map.toList
-                      |> List.collect (fun (_, repo) ->
-                          repo.CodingToolData
-                          |> Map.toList
-                          |> List.choose (fun (path, data) ->
-                              data.LastAssistantMessage |> Option.map (fun msg -> path, msg)))
+                      |> List.choose (fun (path, data) ->
+                          data.LastAssistantMessage |> Option.map (fun msg -> path, msg))
                       |> Map.ofList
 
                   return
@@ -655,7 +662,14 @@ let worktreeApi
                       let path = WorktreePath.value wtPath
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = resolveProvider state path
-                      let sessionId = CodingToolStatus.getLastSessionId provider path
+                      // Resume pick is the most-recent session for this worktree regardless of
+                      // active/idle (distinct from the display pick) — read from the push live state.
+                      let sessions =
+                          state.SessionStatuses
+                          |> Map.values
+                          |> Seq.filter (fun s -> pathEquals (WorktreePath.value s.WorktreePath) path)
+                          |> List.ofSeq
+                      let sessionId = CodingToolStatus.getLastSessionId sessions
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
