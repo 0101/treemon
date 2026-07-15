@@ -336,8 +336,15 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   map is built once per `getWorktrees` / `getSyncStatus` call (SessionStatuses is global, keyed by
   the same normalised path as `WorktreeInfo.Path`) and feeds both the worktree cards and the
   recent-messages endpoint. `getLastSessionId` is the **distinct resume pick** — most-recent-any
-  by `last_seen` over the worktree's `SessionStatuses` (no drop-Idle, no freshness), returning the
-  stored session id (→ `copilot --resume <id>`, or `--continue` when the worktree never reported).
+  by `last_seen` (no drop-Idle, no freshness), returning the stored session id (→ `copilot --resume
+  <id>`, or `--continue` when the worktree never reported). The resume path feeds it from the
+  **durable store** (`SessionActivityStore.StatusesForWorktree`), NOT the idle-window live cache
+  (`SessionStatuses`): after a restart a session last active >2h ago is absent from the live cache,
+  so a live-cache-only pick returned None and resume wrongly fell back to `--continue` instead of
+  `--resume <id>` (F10/C-02). `session_status` keeps the row until the 14d retention prune, so the
+  resume identity survives a restart. `WorktreeApi.worktreeApi` takes the store as an option
+  (`Some` in the real monitoring path, `None` in demo/fixture where resume is unavailable), shared
+  with the ingestion service; `resumeSession` no longer fetches scheduler state.
   Provider for command-building comes from a direct `CodingToolStatus.readConfiguredProvider`
   per-worktree `.treemon.json` read (task cc4) — no longer routed through the retired
   detector-fed `CodingToolData` map.

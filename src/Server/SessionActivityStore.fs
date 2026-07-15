@@ -198,6 +198,19 @@ WHERE last_seen >= $cutoff
 ORDER BY last_seen;
 """
 
+// Every stored session for one worktree, newest first, with NO idle-window filter (unlike loadSql).
+// The resume path reads this: after a restart the idle-window live cache drops sessions last active
+// >2h ago, so a resume pick over that cache returns None (→ wrong `--continue` fallback); this keeps
+// the durable identity available until the 14d retention prune. Uses the ix_status_worktree index.
+let private worktreeStatusesSql =
+    """
+SELECT session_id, worktree_path, provider, status, current_skill,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen
+FROM session_status
+WHERE worktree_path = $wt
+ORDER BY last_seen DESC;
+"""
+
 let private queryWindowSql =
     """
 SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
@@ -300,6 +313,22 @@ type SessionActivityStore(dbPath: string) =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- loadSql
         cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+        use reader = cmd.ExecuteReader()
+
+        [ while reader.Read() do
+              yield readStored reader ]
+
+    /// Every stored session for a worktree, newest `last_seen` first, INDEPENDENT of the idle window
+    /// (unlike LoadLiveStatuses). The RESUME substrate: after a restart a session last active >2h ago
+    /// is absent from the idle-window live cache, so a resume pick over that cache returned None and
+    /// resume wrongly fell back to `--continue` instead of `--resume <id>` (F10/C-02). Reading
+    /// session_status directly by worktree_path returns those older sessions too (kept until the 14d
+    /// retention prune), so `getLastSessionId` still finds the most-recent one across a restart.
+    member _.StatusesForWorktree(worktreePath: WorktreePath) : StoredStatus list =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- worktreeStatusesSql
+        cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
         use reader = cmd.ExecuteReader()
 
         [ while reader.Read() do

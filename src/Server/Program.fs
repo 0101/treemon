@@ -261,6 +261,20 @@ let main args =
 
     let cts = new CancellationTokenSource()
 
+    // The push-model durable store, created up front (real monitoring path only — not demo/fixture)
+    // so it can back BOTH the resume-identity lookup in the worktree API (getLastSessionId reads the
+    // durable store, not the idle-window live cache — see F10/C-02) AND the activity ingestion
+    // service below. Instance-specific SQLite path keyed by the server's port so a side-by-side
+    // validation instance never collides on the DB file. The service (below) owns disposal on
+    // shutdown; when no service is started (demo/fixture) there is no store to dispose.
+    let sessionActivityStore =
+        if not config.Demo && config.TestFixtures.IsNone then
+            let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
+            Log.log "Startup" $"Session activity store db: {dbPath}"
+            Some(new SessionActivityStore.SessionActivityStore(dbPath))
+        else
+            None
+
     let remotingApi, schedulerAgent =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
@@ -285,23 +299,20 @@ let main args =
                 RefreshScheduler.start agent worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
+            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
 
-    // Push-model status ingestion. Instance-specific SQLite path keyed by the server's port so a
-    // side-by-side validation instance (a second Treemon on another port) never collides with main
-    // on the DB file. The service owns its store: it rebuilds live status from SQLite on Start and
-    // arms the retention timer, and disposes the store on shutdown. Started only in the real
-    // monitoring path — demo mode has no scheduler agent, and fixture mode serves synthetic data and
-    // receives no activity posts (mirrors skipping the scheduler background loop).
+    // Push-model status ingestion. Reuses the durable store created above (shared with the worktree
+    // API's resume-identity lookup). The service owns that store: it rebuilds live status from SQLite
+    // on Start and arms the retention timer, and disposes the store on shutdown. Started only in the
+    // real monitoring path — demo mode has no scheduler agent (and no store), and fixture mode serves
+    // synthetic data and receives no activity posts (mirrors skipping the scheduler background loop).
     let sessionActivityService =
-        match schedulerAgent with
-        | Some agent when config.TestFixtures.IsNone ->
-            let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
-            let store = new SessionActivityStore.SessionActivityStore(dbPath)
+        match schedulerAgent, sessionActivityStore with
+        | Some agent, Some store when config.TestFixtures.IsNone ->
             let svc = new SessionActivityService.SessionActivityService(store, agent)
             svc.Start()
-            Log.log "Startup" $"Session activity ingestion started (db: {dbPath})"
+            Log.log "Startup" "Session activity ingestion started"
             Some svc
         | _ -> None
 

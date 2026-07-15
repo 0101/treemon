@@ -65,7 +65,7 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             let targetPath = normPath $"{Path.GetFullPath tempDirA}/feature-x"
             let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
@@ -117,7 +117,7 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             let targetPath = normPath $"{Path.GetFullPath tempDirB}/main"
             let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
@@ -159,7 +159,7 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
 
             let! result = api.deleteWorktree (PathUtils.toWorktreePath "/nonexistent/path/main")
 
@@ -207,7 +207,7 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
@@ -238,7 +238,7 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirB}/main")
 
@@ -272,7 +272,7 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             let! result = api.unarchiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
@@ -298,7 +298,7 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
 
             let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/detached")
 
@@ -348,7 +348,7 @@ type SyncResolutionTests() =
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
             let cardLog = CardEventLog.createAgent ()
-            let api = WorktreeApi.worktreeApi agent syncAgent cardLog (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent syncAgent cardLog (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             let! result = api.startSync (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
@@ -387,7 +387,7 @@ type SyncResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktrees ]
 
-            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
 
             let! result = api.startSync (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/detached")
 
@@ -410,7 +410,7 @@ type SyncResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktrees ]
 
-            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
 
             let! result = api.startSync (PathUtils.toWorktreePath "/nonexistent/path/main")
 
@@ -438,7 +438,7 @@ type SyncResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA; tempDirB ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
 
             do! api.cancelSync (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
 
@@ -457,7 +457,7 @@ type SyncResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktrees ]
 
-            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) [ tempDirA ] None "1.0" None
+            let api = WorktreeApi.worktreeApi agent syncAgent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
 
             do! api.cancelSync (PathUtils.toWorktreePath "/nonexistent/path/main")
 

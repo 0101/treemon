@@ -365,6 +365,7 @@ let worktreeApi
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -650,15 +651,18 @@ let worktreeApi
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {
                       let path = WorktreePath.value wtPath
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = CodingToolStatus.readConfiguredProvider path
                       // Resume pick is the most-recent session for this worktree regardless of
-                      // active/idle (distinct from the display pick) — read from the push live state.
+                      // active/idle (distinct from the display pick). Read from the DURABLE store,
+                      // not the idle-window live cache (state.SessionStatuses): after a restart a
+                      // session last active >2h ago is absent from that cache, so the pick returned
+                      // None and resume wrongly fell back to `--continue` instead of `--resume <id>`
+                      // (F10/C-02). session_status keeps the row until the 14d retention prune, so
+                      // the resume identity survives a restart.
                       let sessions =
-                          state.SessionStatuses
-                          |> Map.values
-                          |> Seq.filter (fun s -> pathEquals (WorktreePath.value s.WorktreePath) path)
-                          |> List.ofSeq
+                          activityStore
+                          |> Option.map (fun s -> s.StatusesForWorktree(PathUtils.toWorktreePath path))
+                          |> Option.defaultValue []
                       let sessionId = CodingToolStatus.getLastSessionId sessions
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
