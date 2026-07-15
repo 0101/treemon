@@ -335,6 +335,20 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   stored session id (→ `copilot --resume <id>`, or `--continue` when the worktree never reported).
   `resolveProvider` still reads the detector-fed `CodingToolData` for command-building; it
   harmlessly degrades to the `Copilot` default once the detectors stop populating it (task 9k8).
+- **Delete concretions (task 9k8, as built).** Detectors `CopilotDetector.fs`/`ClaudeDetector.fs`/
+  `VsCodeCopilotDetector.fs` and their tests are deleted; the three-surface resolution scaffolding
+  (`ProviderResult`, `mostRecentActive`, `pickActiveProvider`, `pickActiveSkill`, `resolveStatus`,
+  `SessionResults`, `getClaudeResult`, `gatherResultsFromFiles`, `getRefreshData`) is removed from
+  `CodingToolStatus.fs` — kept: `readConfiguredProvider`, `CodingToolResult`, the prompt builders
+  (`configureTestsPrompt`/`skillInvocation`/`actionPrompt`), and the push funcs. `RefreshScheduler`
+  drops the `RefreshCodingTool` task entirely (union case + task-list wiring + `executeTask` branch);
+  the now-unfed `UpdateCodingTool` message and `CodingToolData` map are **retained** (out of this
+  task's scope) — `effectiveActivity` and `WorktreeApi.resolveProvider` read the now-always-empty
+  map and harmlessly degrade (no coding-tool activity signal; `Copilot` provider default). Tests:
+  the detector test files + `ClaudeSessionReplayTests.fs` are deleted, `CodingToolOrchestratorTests`
+  keeps only `ReadConfiguredProviderTests` (the scaffolding fixtures go), `ServerParsingTests` drops
+  `EncodeWorktreePathTests` (its `encodeWorktreePath` lived in the deleted `ClaudeDetector`), and
+  `SchedulerTests` per-worktree task counts go 3→2 (Git+Beads). Build is push-only.
 
 ## Key Files
 
@@ -343,7 +357,7 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
 | `src/Server/SessionActivity.fs` | **New.** Domain (`SessionEvent`, `SessionActivityReport`, value types), `SessionStatus`, pure `fold`, freshness wrapper, `pickActive`. |
 | `src/Server/SessionActivityStore.fs` | **New.** SQLite (WAL) schema + `upsertStatus`/`appendEvent`/`loadLiveStatuses`/`pruneOld`/`queryWindow`. |
 | `src/Server/SessionActivityService.fs` | **New.** `SessionActivity` mailbox (single writer) + `POST /api/session/activity` handler + startup rebuild. |
-| `src/Server/CodingToolStatus.fs` | Source status/skill/messages/`getLastSessionId` from push live state; keep `mostRecentActive`; drop three-surface resolution. |
+| `src/Server/CodingToolStatus.fs` | Source status/skill/messages/`getLastSessionId` from push live state; drop the three-surface resolution scaffolding (incl. `mostRecentActive`/`ProviderResult`) — the collapse logic lives in `SessionActivity.pickActive`. |
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus` message; stop scheduling `RefreshCodingTool`. |
 | `src/Server/WorktreeApi.fs` | Build `WorktreeStatus` coding-tool fields from push state. |
 | `src/Server/Program.fs` | Route `/api/session/activity`; start the SessionActivity service + rebuild. |

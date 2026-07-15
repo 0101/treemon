@@ -26,9 +26,6 @@
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
     <Compile Include="SessionActivityStore.fs" />
-    <Compile Include="ClaudeDetector.fs" />
-    <Compile Include="CopilotDetector.fs" />
-    <Compile Include="VsCodeCopilotDetector.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
     <Compile Include="GithubPrStatus.fs" />

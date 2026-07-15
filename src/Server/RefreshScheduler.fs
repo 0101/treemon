@@ -221,7 +221,6 @@ type RefreshTask =
     | RefreshWorktreeList of repoId: RepoId
     | RefreshGit of repoId: RepoId * path: string
     | RefreshBeads of repoId: RepoId * path: string
-    | RefreshCodingTool of repoId: RepoId * path: string
     | RefreshPr of repoId: RepoId
     | RefreshFetch of repoId: RepoId
 
@@ -229,7 +228,6 @@ let private taskLabel = function
     | RefreshWorktreeList repoId -> "WorktreeList", RepoId.value repoId
     | RefreshGit(repoId, path) -> "GitRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
     | RefreshBeads(repoId, path) -> "BeadsRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
-    | RefreshCodingTool(repoId, path) -> "CodingToolRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
@@ -244,9 +242,6 @@ let internal intervalOf (activity: ActivityLevel) (task: RefreshTask) =
     | ActivityLevel.Active,   RefreshBeads _        -> TimeSpan.FromSeconds(30.0)
     | ActivityLevel.Idle,     RefreshBeads _        -> TimeSpan.FromSeconds(60.0)
     | ActivityLevel.DeepIdle, RefreshBeads _        -> TimeSpan.FromSeconds(240.0)
-    | ActivityLevel.Active,   RefreshCodingTool _   -> TimeSpan.FromSeconds(5.0)
-    | ActivityLevel.Idle,     RefreshCodingTool _   -> TimeSpan.FromSeconds(15.0)
-    | ActivityLevel.DeepIdle, RefreshCodingTool _   -> TimeSpan.FromSeconds(60.0)
     | ActivityLevel.Active,   RefreshPr _           -> TimeSpan.FromSeconds(10.0)
     | ActivityLevel.Idle,     RefreshPr _           -> TimeSpan.FromSeconds(120.0)
     | ActivityLevel.DeepIdle, RefreshPr _           -> TimeSpan.FromSeconds(600.0)
@@ -328,8 +323,7 @@ let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
                 && not (isPathInSet filters.Ignored repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
-                  RefreshBeads(repoId, wt.Path)
-                  RefreshCodingTool(repoId, wt.Path) ]))
+                  RefreshBeads(repoId, wt.Path) ]))
 
     let networkTasks =
         repoList
@@ -352,8 +346,7 @@ let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
                 let archived = isPathInSet filters.Archived repoId wt.Path
                 [ RefreshGit(repoId, wt.Path)
                   if not archived then
-                      RefreshBeads(repoId, wt.Path)
-                      RefreshCodingTool(repoId, wt.Path) ])
+                      RefreshBeads(repoId, wt.Path) ])
 
         RefreshFetch repoId :: perWorktree)
 
@@ -430,10 +423,6 @@ let private executeTask
 
             BeadspaceProvisioner.provisionDashboard path beads
             |> Option.iter (Log.log "BeadspaceProvisioner")
-
-        | RefreshCodingTool(repoId, path) ->
-            let result = CodingToolStatus.getRefreshData path
-            agent.Post(UpdateCodingTool(repoId, path, result))
 
         | RefreshPr repoId ->
             let root = rootPaths |> Map.find repoId

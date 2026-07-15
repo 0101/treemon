@@ -576,7 +576,7 @@ type BuildTaskListTests() =
         let tasks = buildTaskList noFilters repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
-        let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
+        let isPerWorktree = function RefreshGit _ | RefreshBeads _ -> true | _ -> false
 
         let lastWorktreeListIdx =
             tasks
@@ -593,7 +593,7 @@ type BuildTaskListTests() =
             |> List.min
 
         Assert.That(lastWorktreeListIdx, Is.LessThan(firstPerWorktreeIdx),
-            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads/CodingTool tasks")
+            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads tasks")
 
     [<Test>]
     member _.``All local tasks come before any network tasks``() =
@@ -604,7 +604,7 @@ type BuildTaskListTests() =
 
         let tasks = buildTaskList noFilters repos
 
-        let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
+        let isLocal = function RefreshGit _ | RefreshBeads _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
 
         let lastLocalIdx =
@@ -633,8 +633,8 @@ type BuildTaskListTests() =
 
         let tasks = buildTaskList noFilters repos
 
-        // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
-        Assert.That(tasks.Length, Is.EqualTo(15))
+        // 2 worktree lists + 3 worktrees * 2 task types + 2 repos * 2 network tasks = 2 + 6 + 4 = 12
+        Assert.That(tasks.Length, Is.EqualTo(12))
 
     [<Test>]
     member _.``Local tasks are interleaved across repos not grouped by repo``() =
@@ -647,18 +647,17 @@ type BuildTaskListTests() =
 
         let localTasks =
             tasks
-            |> List.filter (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+            |> List.filter (function RefreshGit _ | RefreshBeads _ -> true | _ -> false)
 
         let repoIds =
             localTasks
             |> List.map (function
                 | RefreshGit(r, _) -> r
                 | RefreshBeads(r, _) -> r
-                | RefreshCodingTool(r, _) -> r
                 | _ -> RepoId "")
 
-        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(3))
-        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(3))
+        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(2))
+        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(2))
 
     [<Test>]
     member _.``Archived worktree excluded from per-worktree tasks``() =
@@ -673,13 +672,13 @@ type BuildTaskListTests() =
         let perWorktreePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
 
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"),
             "Archived worktree should not appear in per-worktree tasks")
-        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
-            "Non-archived worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(2),
+            "Non-archived worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``Repo-level tasks unaffected by archived paths``() =
@@ -722,7 +721,7 @@ type BuildTaskListTests() =
         let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasPerWorktree =
-            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ -> true | _ -> false)
 
         Assert.That(hasPerWorktree, Is.False, "No per-worktree tasks when all worktrees archived")
         Assert.That(tasks.Length, Is.EqualTo(3), "Should have WorktreeList + Pr + Fetch")
@@ -764,7 +763,7 @@ type BuildPhase1TasksTests() =
 type BuildPhase2TasksTests() =
 
     [<Test>]
-    member _.``Contains Git, Beads, CodingTool per worktree plus Fetch per repo``() =
+    member _.``Contains Git, Beads per worktree plus Fetch per repo``() =
         let repos =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
@@ -774,12 +773,10 @@ type BuildPhase2TasksTests() =
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
-        let claudeCount = tasks |> List.filter (function RefreshCodingTool _ -> true | _ -> false) |> List.length
         let fetchCount = tasks |> List.filter (function RefreshFetch _ -> true | _ -> false) |> List.length
 
         Assert.That(gitCount, Is.EqualTo(3), "One RefreshGit per worktree")
         Assert.That(beadsCount, Is.EqualTo(3), "One RefreshBeads per worktree")
-        Assert.That(claudeCount, Is.EqualTo(3), "One RefreshCodingTool per worktree")
         Assert.That(fetchCount, Is.EqualTo(2), "One RefreshFetch per repo")
 
     [<Test>]
@@ -813,7 +810,7 @@ type BuildPhase2TasksTests() =
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
 
     [<Test>]
-    member _.``Archived worktree gets Git but not Beads or CodingTool``() =
+    member _.``Archived worktree gets Git but not Beads``() =
         let repo1 = RepoId "Repo1"
         let repos =
             [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
@@ -824,24 +821,21 @@ type BuildPhase2TasksTests() =
 
         let archivedGit = tasks |> List.filter (function RefreshGit(_, p) -> p = "/r1/feat" | _ -> false)
         let archivedBeads = tasks |> List.filter (function RefreshBeads(_, p) -> p = "/r1/feat" | _ -> false)
-        let archivedCoding = tasks |> List.filter (function RefreshCodingTool(_, p) -> p = "/r1/feat" | _ -> false)
 
         Assert.That(archivedGit.Length, Is.EqualTo(1),
             "Archived worktree should still get RefreshGit for commit data")
         Assert.That(archivedBeads.Length, Is.EqualTo(0),
             "Archived worktree should not get RefreshBeads")
-        Assert.That(archivedCoding.Length, Is.EqualTo(0),
-            "Archived worktree should not get RefreshCodingTool")
 
         let activePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/main")
 
-        Assert.That(activePaths.Length, Is.EqualTo(3),
-            "Non-archived worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(activePaths.Length, Is.EqualTo(2),
+            "Non-archived worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``RefreshFetch unaffected by archived paths``() =
@@ -885,7 +879,7 @@ type BuildPhase2TasksTests() =
         let ignoredTaskPaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/feat")
 
@@ -895,12 +889,12 @@ type BuildPhase2TasksTests() =
         let activePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/main")
 
-        Assert.That(activePaths.Length, Is.EqualTo(3),
-            "Non-ignored worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(activePaths.Length, Is.EqualTo(2),
+            "Non-ignored worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``RefreshFetch unaffected by ignored paths``() =
@@ -930,7 +924,7 @@ type BuildPhase2TasksTests() =
         let featTasks =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/feat")
 
@@ -956,13 +950,13 @@ type BuildTaskListIgnoredTests() =
         let perWorktreePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
 
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"),
             "Ignored worktree should not appear in per-worktree tasks")
-        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
-            "Non-ignored worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(2),
+            "Non-ignored worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``Repo-level tasks unaffected by ignored paths``() =
@@ -993,7 +987,7 @@ type BuildTaskListIgnoredTests() =
         let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let hasPerWorktree =
-            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ -> true | _ -> false)
 
         Assert.That(hasPerWorktree, Is.False, "No per-worktree tasks when all worktrees ignored")
         Assert.That(tasks.Length, Is.EqualTo(3), "Should have WorktreeList + Pr + Fetch")
@@ -1012,13 +1006,13 @@ type BuildTaskListIgnoredTests() =
         let perWorktreePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
 
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"), "Archived excluded")
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/dev"), "Ignored excluded")
-        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
-            "Active worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(2),
+            "Active worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``Empty ignored set produces same results as no filtering``() =
