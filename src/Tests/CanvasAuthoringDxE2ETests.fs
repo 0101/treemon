@@ -303,3 +303,86 @@ type CanvasAuthoringDxPaneE2ETests() =
             Assert.That(bannerCount, Is.EqualTo(0),
                 "a well-formed string action must route normally and never raise the missing-action banner")
         }
+
+
+// ============================================================================
+// Escape focus-reclaim bridge (reclaimFocusScript)
+//
+// The doc-side half of the cross-origin Escape reclaim: the injected keydown
+// listener must post {action:'reclaim-focus'} to the parent ONLY for Escape and
+// ONLY when the key did not originate in an editable field. Served top-level
+// (parent === self), so the page can capture the message it posts to itself —
+// this exercises the real injected script in a browser, catching regressions the
+// injection-string unit test can't (non-Escape keys, broken editable exemption).
+// ============================================================================
+[<TestFixture>]
+[<Category("E2E")>]
+[<Category("Canvas")>]
+[<Category("AuthoringDxE2E")>]
+type CanvasReclaimBridgeE2ETests() =
+    inherit PageTest()
+
+    override this.ContextOptions() =
+        let opts = base.ContextOptions()
+        opts.IgnoreHTTPSErrors <- true
+        opts
+
+    /// Serve the injected doc top-level and install a counter for the reclaim-focus messages the
+    /// injected bridge posts to `parent` (the page itself when loaded top-level). A `__sentinel`
+    /// flag lets tests settle deterministically (see Settle).
+    member private this.ServeDoc() =
+        task {
+            let doc =
+                "<!doctype html><html><head><title>reclaim</title></head>"
+                + "<body><input id=\"field\"><button id=\"btn\">b</button></body></html>"
+            let served = injectInto SystemView "reclaim.html" doc
+            do! this.Page.RouteAsync("**/reclaim.html", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "text/html; charset=utf-8", Body = served)))
+            let! _ = this.Page.GotoAsync($"{ServerFixture.canvasUrl}/wt/reclaim.html", PageGotoOptions(WaitUntil = WaitUntilState.Load))
+            let! _ = this.Page.EvaluateAsync(
+                        "() => { window.__reclaims = 0; window.__sentinelSeen = false; window.addEventListener('message', function(e){ if (e.data && e.data.action === 'reclaim-focus') window.__reclaims++; if (e.data && e.data.action === '__sentinel') window.__sentinelSeen = true; }); }")
+            ()
+        }
+
+    /// Post a sentinel after the key event and wait for it. Message delivery to the same window is
+    /// FIFO, so once the sentinel lands, any reclaim-focus the keydown posted has already been
+    /// counted — a deterministic settle with no fixed sleep.
+    member private this.Settle() =
+        task {
+            let! _ = this.Page.EvaluateAsync("() => window.postMessage({action:'__sentinel'}, '*')")
+            let! _ = this.Page.WaitForFunctionAsync("() => window.__sentinelSeen === true", null, PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
+        }
+
+    [<Test>]
+    member this.``Escape outside an editable field posts a reclaim-focus message``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#btn").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Escape")
+            do! this.Settle()
+            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            Assert.That(n, Is.EqualTo(1), "Escape from a non-editable element must post reclaim-focus to the pane")
+        }
+
+    [<Test>]
+    member this.``Escape inside an editable field does not post reclaim-focus``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#field").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Escape")
+            do! this.Settle()
+            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            Assert.That(n, Is.EqualTo(0), "Escape originating in an editable field must be left to the field, not reclaimed")
+        }
+
+    [<Test>]
+    member this.``a non-Escape key does not post reclaim-focus``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#btn").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Settle()
+            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            Assert.That(n, Is.EqualTo(0), "Only Escape may post reclaim-focus")
+        }
