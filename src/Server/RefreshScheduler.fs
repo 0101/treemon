@@ -43,9 +43,12 @@ type DashboardState =
       ClientActivity: ActivityLevel
       ClientActivityAt: DateTimeOffset
       // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
-      // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. This is the
-      // substrate the worktree card's coding-tool fields collapse over (pickActive) — see the
-      // push-only repoint task; today it is populated but not yet read by WorktreeApi.
+      // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. Kept bounded by
+      // evicting entries older than the idle window (relative to the newest LastSeen) on each update
+      // (evictStaleStatuses), so it mirrors the store's live cache (LoadLiveStatuses) rather than
+      // growing append-only. This is the substrate the worktree card's coding-tool fields collapse
+      // over (pickActive) — see the push-only repoint task; today it is populated but not yet read by
+      // WorktreeApi.
       SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus> }
 
 module DashboardState =
@@ -108,6 +111,22 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         BeadsData = repo.BeadsData |> Map.remove path
         PlanningData = repo.PlanningData |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
+
+/// Evict live session-status entries older than the idle window. `SessionStatuses` is otherwise
+/// append-only, so without this it grows unboundedly and drifts from the store's live cache
+/// (`LoadLiveStatuses`, same `idleWindow` cutoff) — long-dead sessions would linger in memory forever.
+/// The window is measured against the NEWEST `LastSeen` in the map (the freshest heartbeat observed)
+/// rather than wall-clock, so it stays deterministic and replay-safe (events can carry historical
+/// timestamps) and never drops the entry that was just added. Applied on every `UpdateSessionStatus`.
+let internal evictStaleStatuses
+    (statuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>)
+    =
+    if Map.isEmpty statuses then
+        statuses
+    else
+        let newest = statuses |> Seq.map (fun kv -> kv.Value.LastSeen) |> Seq.max
+        let cutoff = newest - SessionActivity.idleWindow
+        statuses |> Map.filter (fun _ s -> s.LastSeen >= cutoff)
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -193,7 +212,14 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         { state with ClientActivity = activity; ClientActivityAt = timestamp }
 
     | UpdateSessionStatus stored ->
-        { state with SessionStatuses = state.SessionStatuses |> Map.add stored.SessionId stored }
+        // Add the fresh report, then evict entries past the idle window (measured against the newest
+        // LastSeen) so the map stays bounded and mirrors the store's live cache instead of growing
+        // append-only.
+        { state with
+            SessionStatuses =
+                state.SessionStatuses
+                |> Map.add stored.SessionId stored
+                |> evictStaleStatuses }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->

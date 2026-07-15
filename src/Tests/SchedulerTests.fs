@@ -4,6 +4,8 @@ open System
 open NUnit.Framework
 open Server.GitWorktree
 open Server.RefreshScheduler
+open Server.SessionActivity
+open Server.SessionActivityStore
 open Shared
 
 let private testRepoId = RepoId "TestRepo"
@@ -1240,5 +1242,80 @@ type ExpediteRefreshTests() =
             Assert.That(state2.ExpeditedRepos |> Set.count, Is.EqualTo(1))
             Assert.That(state2.ExpeditedRepos |> Set.contains repo1, Is.False)
             Assert.That(state2.ExpeditedRepos |> Set.contains repo2, Is.True)
+        }
+        |> Async.RunSynchronously
+
+
+// F5/C-07: the push live map (SessionStatuses) is bounded to the idle window. Without eviction it was
+// append-only, so long-dead sessions lingered in memory forever and drifted from the store's live
+// cache. evictStaleStatuses drops entries older than idleWindow, measured against the NEWEST LastSeen
+// in the map, on every UpdateSessionStatus.
+
+let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
+    { SessionId = SessionId sid
+      WorktreePath = WorktreePath "C:/wt/a"
+      Provider = CopilotCli
+      Status = { emptyStatus with Status = Working }
+      UpdatedAt = seen
+      LastSeen = seen }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SessionStatusEvictionTests() =
+
+    let now = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+
+    let statusMap (entries: (string * DateTimeOffset) list) =
+        entries
+        |> List.map (fun (sid, seen) -> SessionId sid, storedSeen sid seen)
+        |> Map.ofList
+
+    let keptIds (m: Map<SessionId, StoredStatus>) =
+        m |> Map.keys |> Seq.map SessionId.value |> List.ofSeq |> List.sort
+
+    [<Test>]
+    member _.``evictStaleStatuses drops entries older than the idle window before the newest session``() =
+        // newest = "fresh" at `now`; "stale" is just past the idle window behind it.
+        let statuses =
+            statusMap
+                [ "fresh", now
+                  "stale", now - (idleWindow + TimeSpan.FromMinutes 1.0) ]
+
+        Assert.That(evictStaleStatuses statuses |> keptIds, Is.EqualTo([ "fresh" ]))
+
+    [<Test>]
+    member _.``evictStaleStatuses keeps an entry exactly at the idle-window cutoff``() =
+        // "edge" sits exactly idleWindow behind the newest ("fresh") — the >= cutoff keeps it.
+        let atCutoff = statusMap [ "fresh", now; "edge", now - idleWindow ]
+
+        Assert.That(evictStaleStatuses atCutoff |> keptIds, Is.EqualTo([ "edge"; "fresh" ]))
+
+    [<Test>]
+    member _.``evictStaleStatuses leaves a fully-live map untouched``() =
+        let live = statusMap [ "a", now; "b", now - TimeSpan.FromHours 1.0 ]
+
+        Assert.That(evictStaleStatuses live, Is.EqualTo(live))
+
+    [<Test>]
+    member _.``evictStaleStatuses never drops the single newest session even if its LastSeen is historical``() =
+        // A lone entry (or the newest one) is always its own reference, so it can never evict itself —
+        // this is what keeps a freshly-ingested report (with a possibly-historical timestamp) in place.
+        let lone = statusMap [ "only", now - TimeSpan.FromDays 400.0 ]
+
+        Assert.That(evictStaleStatuses lone |> keptIds, Is.EqualTo([ "only" ]))
+
+    [<Test>]
+    member _.``UpdateSessionStatus evicts a now-stale sibling when a fresher session arrives``() =
+        async {
+            let agent = createAgent ()
+            let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+            // "old" first (kept as the lone newest), then "fresh" 5h later pushes "old" past the window.
+            agent.Post(UpdateSessionStatus(storedSeen "old" t0))
+            agent.Post(UpdateSessionStatus(storedSeen "fresh" (t0 + TimeSpan.FromHours 5.0)))
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            let ids = state.SessionStatuses |> Map.keys |> Seq.map SessionId.value |> Set.ofSeq
+            Assert.That(ids, Is.EqualTo(Set.ofList [ "fresh" ]))
         }
         |> Async.RunSynchronously

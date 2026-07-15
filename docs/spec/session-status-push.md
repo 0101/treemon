@@ -411,6 +411,18 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   (`lastStatusMs`) means the **subscribe-live-first, then `getEvents()` replay** ordering can't rewind
   live status; server `eventId` dedupe + the ingestion ordering guard make the replay/live overlap
   harmless.
+- **In-memory live map is idle-window bounded (F5/C-07, as built in `RefreshScheduler.fs`).**
+  `DashboardState.SessionStatuses` was append-only — `UpdateSessionStatus` only ever `Map.add`ed, so
+  dead sessions accumulated in memory forever and drifted from the store's live cache. `UpdateSessionStatus`
+  now runs `evictStaleStatuses` after the add: drop any entry whose `LastSeen` is older than `idleWindow`
+  (2h). The window is measured against the **newest `LastSeen` in the map** (the freshest heartbeat
+  observed), *not* wall-clock `DateTimeOffset.UtcNow`. Rationale: the map is fed by ingested reports whose
+  `LastSeen` is the event's `OccurredAt`, which can be historical (replay, fixtures, tests); anchoring the
+  cutoff to wall-clock would wrongly evict a legitimately-fresh-but-timestamp-old report the instant it
+  lands (and can never drop the entry just added). This mirrors the store's `LoadLiveStatuses` idle-window
+  policy while staying deterministic and replay-safe. The display path is unaffected — it already
+  freshness-adjusts against real `now` at read time (5-min staleness net subsumes the 2h window for the
+  *display* pick).
 
 ## Key Files
 
