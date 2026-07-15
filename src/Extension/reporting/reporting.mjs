@@ -85,7 +85,9 @@ let lastStatusMs = -Infinity;
 
 // True between a `user_input.requested` (ask_user) and its `user_input.completed`. While pending, a
 // `session.idle` must not be forwarded — the SDK may report the session idle while it blocks on the
-// user, and the fold would otherwise flip the card off WaitingForUser to Idle.
+// user, and the fold would otherwise flip the card off WaitingForUser to Idle. This flag is live-only
+// (not rebuilt on rejoin); the went_idle suppression also falls back to `currentStatus === "waiting"`
+// (which replay DOES rebuild) so a rejoin can't downgrade a genuinely-waiting session.
 let pendingAskUser = false;
 
 function statusForKind(kind) {
@@ -217,9 +219,14 @@ function mapEvent(event) {
   }
 }
 
-// Handle one event. `isLive` distinguishes the live stream from the join-time getEvents() replay: the
-// ask_user window and the went_idle suppression are live-only concerns (user_input.* and session.idle
-// are ephemeral and never replayed), while replayed events still reconstruct status/skill/messages.
+// Handle one event. `isLive` distinguishes the live stream from the join-time getEvents() replay.
+// `session.idle` (the only source of `went_idle`) is ephemeral and only ever arrives live, so both the
+// pendingAskUser bookkeeping and the went_idle suppression sit in the `isLive` block. The live-only
+// `pendingAskUser` flag is NOT rebuilt on a rejoin (crash / editor reload / manual restart), so the
+// suppression also consults `currentStatus`: a replayed `awaiting_user_input` rebuilds `currentStatus`
+// to "waiting", so guarding on it keeps a genuinely-waiting session from being downgraded to Idle by a
+// live `session.idle` after a rejoin — and matches the heartbeat, which likewise treats
+// `currentStatus === "waiting"` as the source of truth. Replayed events still reconstruct status/skill/messages.
 function handle(event, isLive) {
   if (event.agentId) return; // sub-agent event — never the user's top-level status
 
@@ -234,8 +241,11 @@ function handle(event, isLive) {
   if (isLive) {
     // A genuine user prompt implies the pending ask_user was answered (belt-and-suspenders clear).
     if (report.kind === "user_prompt") pendingAskUser = false;
-    // Keep WaitingForUser visible while a prompt is unanswered.
-    if (report.kind === "went_idle" && pendingAskUser) return;
+    // Keep WaitingForUser visible while a prompt is unanswered. `pendingAskUser` catches the live
+    // ask_user window; `currentStatus === "waiting"` additionally covers a rejoin, where the waiting
+    // status is rebuilt from replay but the live-only flag starts false — so a live `session.idle`
+    // never rewinds a genuinely-waiting session to Idle.
+    if (report.kind === "went_idle" && (pendingAskUser || currentStatus === "waiting")) return;
   }
 
   updateStatus(report.kind, event.timestamp);

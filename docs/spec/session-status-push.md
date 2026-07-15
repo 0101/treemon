@@ -400,7 +400,10 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   **ask_user exactness:** a live-only `pendingAskUser` flag (set on `user_input.requested`, cleared
   on `user_input.completed` or a genuine `user_prompt`) suppresses `went_idle` while a prompt is
   unanswered, so the card stays `WaitingForUser` even if the SDK reports the session idle
-  (`session.idle` is ephemeral, never replayed). **Heartbeat** (60s) re-asserts only the two
+  (`session.idle` is ephemeral, never replayed). Because `pendingAskUser` is not rebuilt on a rejoin
+  (crash / editor reload / restart), the suppression **also** fires when `currentStatus === "waiting"`
+  (which a replayed `awaiting_user_input` DOES rebuild), matching the heartbeat's source of truth so a
+  post-rejoin `session.idle` can't downgrade a genuinely-waiting session. **Heartbeat** (60s) re-asserts only the two
   long-lived active states — `working`→synthetic `turn_started`, `waiting`→synthetic
   `awaiting_user_input` (no message) — with a fresh `eventId` + now `occurredAt`, so the server bumps
   `last_seen` while re-folding a status-preserving no-op; `done`/`idle` carry no heartbeat and decay
