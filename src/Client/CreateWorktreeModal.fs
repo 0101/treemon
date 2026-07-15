@@ -114,9 +114,9 @@ let private modalOverlay (dispatch: Msg -> unit) (dismissible: bool) (children: 
 /// (verbatim prompt) plus each configured skill. When no skills are configured, only "None"
 /// is selectable and a subtle hint points to where skills are configured.
 let private skillSelector (dispatch: Msg -> unit) (form: CreateWorktreeForm) =
-    let radio (label: string) (isSelected: bool) (skill: string option) =
+    let radio (extraClass: string) (label: string) (isSelected: bool) (skill: string option) =
         Html.label [
-            prop.className "modal-radio"
+            prop.className (if extraClass = "" then "modal-radio" else $"modal-radio {extraClass}")
             prop.children [
                 Html.input [
                     prop.type'.radio
@@ -129,8 +129,8 @@ let private skillSelector (dispatch: Msg -> unit) (form: CreateWorktreeForm) =
         ]
     let skillRadios =
         form.AvailableSkills
-        |> List.map (fun s -> radio s (form.Skill = Some s) (Some s))
-    let noneRadio = radio "None" (form.Skill = None) None
+        |> List.map (fun s -> radio "" s (form.Skill = Some s) (Some s))
+    let noneRadio = radio "none" "None" (form.Skill = None) None
     let hint =
         if List.isEmpty form.AvailableSkills then
             [ Html.span [
