@@ -24,6 +24,7 @@
     <Compile Include="JsonHelpers.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
+    <Compile Include="SessionActivity.fs" />
     <Compile Include="ClaudeDetector.fs" />
     <Compile Include="CopilotDetector.fs" />
     <Compile Include="VsCodeCopilotDetector.fs" />
