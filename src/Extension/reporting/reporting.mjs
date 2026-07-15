@@ -278,10 +278,20 @@ try {
   process.exit(0);
 }
 
-// Read the id defensively: the native runtime populates `session.sessionId`, older/other SDK shapes
-// expose `session.id`. A missing id yields anonymous reports the server can still fold (keyed by the
-// empty session id) but which never collapse per-session — so prefer whichever is present.
-sessionId = session.sessionId ?? session.id ?? "";
+// Read the id defensively: the native runtime populates `session.sessionId`; older/other SDK shapes
+// expose `session.id`. The wire contract AND the server's parseReport both require a NON-EMPTY
+// sessionId — a blank id is rejected as "missing sessionId", so a `?? ""` fallback would silently
+// drop EVERY report from this session. There is no useful anonymous fallback either: reports must
+// key onto the real session so they collapse per-session and the stored id can drive `--resume`
+// (a fabricated id would resume nothing, and `--continue` is the correct never-reported fallback).
+// So when no real id is present we simply don't report — bailing the same clean way, and for the
+// same reason, as the joinSession failure above, rather than POSTing blanks the server will reject.
+const rawSessionId = session.sessionId ?? session.id;
+sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
+if (!sessionId) {
+  log("no session id (session.sessionId/session.id both absent) — reporting disabled for this session");
+  process.exit(0);
+}
 
 // Subscribe to the live stream first so no event is missed, then replay history. Overlap between the
 // two is harmless: the server dedupes on eventId, and the newest-wins status guard keeps live status
@@ -295,7 +305,7 @@ try {
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
     .forEach((event) => handle(event, false));
   log(
-    `joined ${sessionId || "(anonymous)"} — replayed ${history.length} historical event(s), reporting to ${activityUrls.join(", ")}`,
+    `joined ${sessionId} — replayed ${history.length} historical event(s), reporting to ${activityUrls.join(", ")}`,
   );
 } catch (err) {
   log(`getEvents replay failed: ${err?.message ?? err}`);
