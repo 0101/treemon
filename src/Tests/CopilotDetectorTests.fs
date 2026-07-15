@@ -296,6 +296,16 @@ let private makeSubagentStarted (toolCallId: string) (timestamp: string) =
 let private makeSubagentCompleted (toolCallId: string) (timestamp: string) =
     $"""{{"type":"subagent.completed","data":{{"toolCallId":"{toolCallId}"}},"timestamp":"{timestamp}"}}"""
 
+let private makeBackgroundLaunch (name: string) (timestamp: string) =
+    // An assistant.message launching a background agent: a `task` tool call with mode "background".
+    // The main session keeps working alongside it and is woken by an agent_idle notification later.
+    $"""{{"type":"assistant.message","data":{{"content":"launching {name}","toolRequests":[{{"toolCallId":"tc-{name}","name":"task","arguments":{{"name":"{name}","agent_type":"review-runner","mode":"background","description":"Review rule {name}"}},"type":"function"}}]}},"timestamp":"{timestamp}"}}"""
+
+let private makeAgentIdle (agentId: string) (timestamp: string) =
+    // A system.notification reporting a background agent has finished its run and is now idle; the
+    // structured data.kind ({ type = "agent_idle"; agentId = … }) drives the outstanding-set removal.
+    $"""{{"type":"system.notification","data":{{"content":"<system_notification>Agent \"{agentId}\" is now idle</system_notification>","kind":{{"type":"agent_idle","agentId":"{agentId}","agentType":"review-runner"}}}},"timestamp":"{timestamp}"}}"""
+
 /// The exact event streams of the CurrentSkillTests scenarios, paired with the skill each should
 /// report. Used to prove the forward fold is equivalent to the backward scanSkill (and returns the
 /// same known-good values) on every no-sub-agent scenario.
@@ -543,6 +553,113 @@ type ForwardFoldTests() =
         Assert.That(scan.LastAssistantMessage, Is.EqualTo(None))
         Assert.That(scan.RawStatus, Is.EqualTo(Idle))
         Assert.That(scan.SubagentDepth, Is.EqualTo(0))
+        Assert.That(scan.RunningBackgroundAgents, Is.EqualTo(Set.empty<string>))
+
+
+/// A turn that ends while background agents (`task`, `mode: "background"`) are still running is the
+/// review-skill scenario that regressed: the session launches N reviewers, ends its turn to wait for
+/// them, and — with the file mtime frozen at that turn_end — must keep reading Working (red dot), not
+/// decay to Done (blue). Only once every launched agent has reported idle does turn_end mean Done.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BackgroundAgentStatusTests() =
+
+    [<Test>]
+    member _.``A turn ending with an outstanding background agent is Working``() =
+        let events =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeBackgroundLaunch "incomplete-changes" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "Waiting for `incomplete-changes`." "2026-03-01T10:00:03Z"
+              makeTurnEnd "2026-03-01T10:00:04Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.RawStatus, Is.EqualTo(Working))
+        Assert.That(scan.RunningBackgroundAgents, Is.EqualTo(Set.ofList [ "incomplete-changes" ]))
+
+    [<Test>]
+    member _.``A turn ending after every launched agent reported idle is Done``() =
+        let events =
+            [ makeUserEvent "/review the changes" "2026-03-01T10:00:00Z"
+              makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeBackgroundLaunch "immutability" "2026-03-01T10:00:02Z"
+              makeBackgroundLaunch "no-loops" "2026-03-01T10:00:03Z"
+              makeAssistantEvent "Waiting for the reviewers." "2026-03-01T10:00:04Z"
+              makeTurnEnd "2026-03-01T10:00:05Z"
+              makeAgentIdle "immutability" "2026-03-01T10:00:30Z"
+              makeAgentIdle "no-loops" "2026-03-01T10:00:40Z"
+              makeAssistantEvent "All reviewers done; summarizing." "2026-03-01T10:00:41Z"
+              makeTurnEnd "2026-03-01T10:00:42Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.RawStatus, Is.EqualTo(Done))
+        Assert.That(scan.RunningBackgroundAgents, Is.EqualTo(Set.empty<string>))
+
+    [<Test>]
+    member _.``A turn ending with some reviewers still running is Working``() =
+        // Two launched, only one idle: the session is genuinely waiting on the other, so Working.
+        let events =
+            [ makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeBackgroundLaunch "incomplete-changes" "2026-03-01T10:00:02Z"
+              makeBackgroundLaunch "no-null" "2026-03-01T10:00:03Z"
+              makeAssistantEvent "reviewers launched" "2026-03-01T10:00:04Z"
+              makeTurnEnd "2026-03-01T10:00:05Z"
+              makeAgentIdle "no-null" "2026-03-01T10:00:30Z"
+              makeAssistantEvent "Still waiting for `incomplete-changes`." "2026-03-01T10:00:31Z"
+              makeTurnEnd "2026-03-01T10:00:32Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.RawStatus, Is.EqualTo(Working))
+        Assert.That(scan.RunningBackgroundAgents, Is.EqualTo(Set.ofList [ "incomplete-changes" ]))
+
+    [<Test>]
+    member _.``A waiting-on-background turn stays Working past the Done grace window``() =
+        // The regression itself: past the 15 s grace a normal finished turn reads Done, but a turn left
+        // waiting on a background agent must still read Working (red dot) through getStatusFromEventsFile.
+        let content =
+            [ makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeBackgroundLaunch "incomplete-changes" "2026-03-01T10:00:02Z"
+              makeAssistantEvent "Waiting for `incomplete-changes`." "2026-03-01T10:00:03Z"
+              makeTurnEnd "2026-03-01T10:00:04Z" ]
+            |> String.concat Environment.NewLine
+
+        withTempEventsFile content (fun path ->
+            let pastGrace = DateTimeOffset.UtcNow.AddSeconds(20.0)
+            let status = getStatusFromEventsFile path pastGrace
+            Assert.That(status, Is.EqualTo(Working)))
+
+    [<Test>]
+    member _.``A background launch inside a sub-agent bracket does not count as outstanding``() =
+        // A launch nested in a subagent.started/…completed bracket belongs to the sub-agent, not the
+        // top-level session, so it must not keep the top-level turn Working (mirrors skill depth gating).
+        let events =
+            [ makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeSubagentStarted "toolu_x" "2026-03-01T10:00:02Z"
+              makeBackgroundLaunch "nested-agent" "2026-03-01T10:00:03Z"
+              makeSubagentCompleted "toolu_x" "2026-03-01T10:00:04Z"
+              makeAssistantEvent "sub-agent done" "2026-03-01T10:00:05Z"
+              makeTurnEnd "2026-03-01T10:00:06Z" ]
+
+        let scan = scanSessionEvents events
+        Assert.That(scan.RawStatus, Is.EqualTo(Done))
+        Assert.That(scan.RunningBackgroundAgents, Is.EqualTo(Set.empty<string>))
+
+    [<Test>]
+    member _.``Folding appended background events equals folding the whole stream``() =
+        let events =
+            [ makeSkillInvoked "review" "2026-03-01T10:00:01Z"
+              makeBackgroundLaunch "immutability" "2026-03-01T10:00:02Z"
+              makeBackgroundLaunch "no-loops" "2026-03-01T10:00:03Z"
+              makeTurnEnd "2026-03-01T10:00:04Z"
+              makeAgentIdle "immutability" "2026-03-01T10:00:30Z"
+              makeAgentIdle "no-loops" "2026-03-01T10:00:40Z"
+              makeTurnEnd "2026-03-01T10:00:41Z" ]
+
+        let whole = scanSessionEvents events
+        let firstBatch, secondBatch = List.splitAt 3 events
+        let incremental = foldSessionEvents (scanSessionEvents firstBatch) secondBatch
+        Assert.That(incremental, Is.EqualTo(whole))
 
 
 /// Join event lines the way a real events.jsonl is written: every line, including the last, is

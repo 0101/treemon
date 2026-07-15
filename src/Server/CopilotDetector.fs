@@ -121,16 +121,16 @@ type private SkillEvent =
     /// A plain user.message: a genuine new request UNLESS it turns out to be an ask_user reply.
     | UserRequest
 
-let private tryReadSkillArgument (req: JsonElement) =
-    let skillFromObject (obj: JsonElement) =
-        match obj.TryGetProperty("skill") with
-        | true, s when s.ValueKind = JsonValueKind.String ->
-            let name = s.GetString()
-            if String.IsNullOrWhiteSpace(name) then None else Some name
-        | _ -> None
+let private toolRequestName (req: JsonElement) : string option =
+    match req.TryGetProperty("name") with
+    | true, n when n.ValueKind = JsonValueKind.String -> Some(n.GetString())
+    | _ -> None
 
-    // Real events.jsonl encodes arguments as a nested object ({"skill":"..."}); the session-store
-    // schema names it arguments_json as a JSON string. Handle both so the source doesn't matter.
+/// Apply an extractor to a tool call's arguments, whether they are a nested object (real
+/// events.jsonl encodes `arguments` as `{"skill":"..."}`) or a JSON string (the session-store schema
+/// names it `arguments_json`). The extractor must return a value, not a `JsonElement`: a parsed
+/// `arguments_json` document is disposed on return, so any element read from it would dangle.
+let private withToolArguments (extract: JsonElement -> 'a option) (req: JsonElement) : 'a option =
     let argsElement =
         match req.TryGetProperty("arguments"), req.TryGetProperty("arguments_json") with
         | (true, a), _ -> Some a
@@ -140,13 +140,48 @@ let private tryReadSkillArgument (req: JsonElement) =
     argsElement
     |> Option.bind (fun args ->
         match args.ValueKind with
-        | JsonValueKind.Object -> skillFromObject args
+        | JsonValueKind.Object -> extract args
         | JsonValueKind.String ->
             try
                 use argsDoc = JsonDocument.Parse(args.GetString())
-                skillFromObject argsDoc.RootElement
+                extract argsDoc.RootElement
             with _ -> None
         | _ -> None)
+
+let private tryReadSkillArgument (req: JsonElement) =
+    req
+    |> withToolArguments (fun obj ->
+        match obj.TryGetProperty("skill") with
+        | true, s when s.ValueKind = JsonValueKind.String ->
+            let name = s.GetString()
+            if String.IsNullOrWhiteSpace(name) then None else Some name
+        | _ -> None)
+
+/// The agent id of a `task` tool call launched with `mode: "background"` (a fire-and-forget agent the
+/// session keeps working alongside and is later woken about via a `system.notification`), or None for
+/// any other tool call. A SYNC task agent blocks the turn, so only background launches leave work
+/// outstanding once the turn ends — the signal that separates a "waiting on background agents"
+/// (Working) session from a genuinely finished (Done) one.
+let private backgroundAgentName (req: JsonElement) : string option =
+    if toolRequestName req <> Some "task" then
+        None
+    else
+        req
+        |> withToolArguments (fun args ->
+            let isBackground =
+                match args.TryGetProperty("mode") with
+                | true, m when m.ValueKind = JsonValueKind.String ->
+                    String.Equals(m.GetString(), "background", StringComparison.OrdinalIgnoreCase)
+                | _ -> false
+
+            if not isBackground then
+                None
+            else
+                match args.TryGetProperty("name") with
+                | true, n when n.ValueKind = JsonValueKind.String ->
+                    let s = n.GetString()
+                    if String.IsNullOrWhiteSpace s then None else Some s
+                | _ -> None)
 
 /// A user.message that is a skill's own context injection (written immediately after skill.invoked)
 /// rather than a genuine new request. Copilot CLI tags these with BOTH a `source` of `skill-<name>`
@@ -176,10 +211,7 @@ let private assistantMessageEvent (data: JsonElement) : SkillEvent =
     | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
         // A single assistant.message can carry several tool calls; a `skill` call wins (the skill is
         // starting), otherwise an `ask_user` call marks the request the user will reply to.
-        let toolNamed (name: string) (req: JsonElement) =
-            match req.TryGetProperty("name") with
-            | true, n when n.ValueKind = JsonValueKind.String -> n.GetString() = name
-            | _ -> false
+        let toolNamed (name: string) (req: JsonElement) = toolRequestName req = Some name
 
         let skill =
             reqs.EnumerateArray()
@@ -199,6 +231,35 @@ let private skillInvokedName (data: JsonElement) : string option =
     | true, n when n.ValueKind = JsonValueKind.String ->
         let name = n.GetString()
         if String.IsNullOrWhiteSpace(name) then None else Some name
+    | _ -> None
+
+/// The background-agent ids launched by one assistant.message — its `task` tool calls with
+/// `mode: "background"`. Empty when the message launches no background agents.
+let private backgroundTaskLaunches (data: JsonElement) : string list =
+    match data.TryGetProperty("toolRequests") with
+    | true, reqs when reqs.ValueKind = JsonValueKind.Array ->
+        reqs.EnumerateArray() |> Seq.choose backgroundAgentName |> Seq.toList
+    | _ -> []
+
+/// The agent id a `system.notification` reports as having gone idle (its background run finished),
+/// read from the structured `data.kind` (`{ type = "agent_idle"; agentId = … }`) rather than the
+/// prose content. None for any other notification kind.
+let private agentIdleId (data: JsonElement) : string option =
+    match data.TryGetProperty("kind") with
+    | true, kind when kind.ValueKind = JsonValueKind.Object ->
+        let isIdle =
+            match kind.TryGetProperty("type") with
+            | true, t when t.ValueKind = JsonValueKind.String -> t.GetString() = "agent_idle"
+            | _ -> false
+
+        if not isIdle then
+            None
+        else
+            match kind.TryGetProperty("agentId") with
+            | true, a when a.ValueKind = JsonValueKind.String ->
+                let s = a.GetString()
+                if String.IsNullOrWhiteSpace s then None else Some s
+            | _ -> None
     | _ -> None
 
 // --- Forward fold (oldest→newest) -------------------------------------------------------------
@@ -229,7 +290,11 @@ type SessionScanCache =
       /// Was the most recent assistant.message an `ask_user` request? Distinguishes a user reply
       /// (skill resumes) from a genuine new request (skill's run is over).
       LastAssistantWasAskUser: bool
-      SubagentDepth: int }
+      SubagentDepth: int
+      /// Background agents (`task`, `mode: "background"`) launched but not yet reported idle. While
+      /// this is non-empty a turn that ends is still Working — the session is waiting on background
+      /// work, not the user — so it keeps its red dot instead of decaying to a blue Done dot.
+      RunningBackgroundAgents: Set<string> }
 
 let internal emptySessionScan =
     { CurrentSkill = None
@@ -237,7 +302,8 @@ let internal emptySessionScan =
       LastAssistantMessage = None
       RawStatus = Idle
       LastAssistantWasAskUser = false
-      SubagentDepth = 0 }
+      SubagentDepth = 0
+      RunningBackgroundAgents = Set.empty }
 
 /// One event's bearing on the forward fold. Reuses the same classification as the backward
 /// `classifySkillEvent`, and adds the events that scan ignored but the fold needs: sub-agent brackets,
@@ -257,8 +323,16 @@ type private ForwardEvent =
     /// marks the agent as Working like any user.message (matches the backward status scan).
     | InjectionUserMessage
     /// An assistant.message: whether it requested `ask_user`, the skill it started (a `skill` tool-call,
-    /// depth-0 only), and its text content when non-empty.
-    | AssistantMessage of isAskUser: bool * skill: string option * content: (string * DateTimeOffset) option
+    /// depth-0 only), its text content when non-empty, and any background agents it launched (`task`
+    /// calls with `mode: "background"`, depth-0 only).
+    | AssistantMessage of
+        isAskUser: bool *
+        skill: string option *
+        content: (string * DateTimeOffset) option *
+        backgroundLaunches: string list
+    /// A `system.notification` reporting a launched background agent has gone idle (its run finished),
+    /// carrying that agent's id — the signal that clears it from the outstanding set.
+    | AgentIdle of string
     | TurnStarted
     | TurnEnded
 
@@ -293,13 +367,16 @@ let private classifyForwardEvent (line: string) : ForwardEvent option =
             | "assistant.turn_end" -> Some TurnEnded
             | "skill.invoked" -> data () |> Option.bind skillInvokedName |> Option.map SkillInvoked
             | "assistant.message" ->
-                let content = data () |> Option.bind (fun d -> readMessageContent d (readMessageTimestamp root))
-                let kind = data () |> Option.map assistantMessageEvent |> Option.defaultValue AssistantWork
+                let d = data ()
+                let content = d |> Option.bind (fun d -> readMessageContent d (readMessageTimestamp root))
+                let kind = d |> Option.map assistantMessageEvent |> Option.defaultValue AssistantWork
+                let launches = d |> Option.map backgroundTaskLaunches |> Option.defaultValue []
                 match kind with
-                | SkillSignal name -> Some(AssistantMessage(false, Some name, content))
-                | AssistantAskUser -> Some(AssistantMessage(true, None, content))
+                | SkillSignal name -> Some(AssistantMessage(false, Some name, content, launches))
+                | AssistantAskUser -> Some(AssistantMessage(true, None, content, launches))
                 | AssistantWork
-                | UserRequest -> Some(AssistantMessage(false, None, content))
+                | UserRequest -> Some(AssistantMessage(false, None, content, launches))
+            | "system.notification" -> data () |> Option.bind agentIdleId |> Option.map AgentIdle
             | "user.message" ->
                 match data () with
                 | Some d when isSkillContextMessage d -> Some InjectionUserMessage
@@ -343,17 +420,33 @@ let private foldForwardEvent (state: SessionScanCache) (ev: ForwardEvent) : Sess
             LastUserMessage = (match content with Some c -> Some c | None -> state.LastUserMessage)
             LastAssistantWasAskUser = false
             RawStatus = Working }
-    | AssistantMessage(isAskUser, skill, content) ->
+    | AssistantMessage(isAskUser, skill, content, backgroundLaunches) ->
         let withSkill =
             match skill with
             | Some name when state.SubagentDepth = 0 -> { state with CurrentSkill = Some name }
             | _ -> state
+        // Background launches inside a sub-agent bracket belong to the sub-agent, not the top-level
+        // session, so only depth-0 launches count toward the outstanding set (mirrors skill gating).
+        let running =
+            if state.SubagentDepth = 0 then
+                backgroundLaunches |> List.fold (fun acc name -> Set.add name acc) withSkill.RunningBackgroundAgents
+            else
+                withSkill.RunningBackgroundAgents
         { withSkill with
             LastAssistantMessage = (match content with Some c -> Some c | None -> withSkill.LastAssistantMessage)
             LastAssistantWasAskUser = isAskUser
+            RunningBackgroundAgents = running
             RawStatus = (if isAskUser then WaitingForUser else Working) }
+    | AgentIdle agentId ->
+        // A launched background agent went idle (its run finished); drop it from the outstanding set.
+        // A no-op when the id was never tracked (e.g. launched before the scan window).
+        { state with RunningBackgroundAgents = Set.remove agentId state.RunningBackgroundAgents }
     | TurnStarted -> { state with RawStatus = Working }
-    | TurnEnded -> { state with RawStatus = Done }
+    | TurnEnded ->
+        // A finished turn is Done — UNLESS background agents are still running. The session launched
+        // them and ended its turn to wait for their idle notifications, so it is genuinely Working
+        // (red dot), not a blue Done dot, until they all report back (or the file goes stale).
+        { state with RawStatus = (if state.RunningBackgroundAgents.IsEmpty then Done else Working) }
 
 /// Fold event lines (oldest→newest) onto an existing state. Unknown/irrelevant lines are skipped.
 /// Pure and append-friendly: folding a later batch onto the state from an earlier batch yields the
