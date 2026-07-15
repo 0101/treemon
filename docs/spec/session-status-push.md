@@ -187,6 +187,20 @@ PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; driver
 `queryWindow` (history substrate — see Decisions). WAL lets `queryWindow` read concurrently
 with the mailbox writer.
 
+**Store contract (as built in `SessionActivityStore.fs`).** The store is a class
+`SessionActivityStore(dbPath)` (IDisposable; creates the schema on construction) whose ops each
+run on their own short-lived `Pooling=false` connection — thread-safe against the single-writer
+mailbox and concurrent WAL readers; a keep-alive connection holds the file/WAL open for the
+store's lifetime. Row shapes: `StoredStatus` (`SessionId`/`WorktreePath`/`Provider`/`SessionStatus`
++ `UpdatedAt`/`LastSeen`) and `ActivityEventRow` (event fields + post-fold `Status`/`Skill`). All
+timestamps persist as **UTC round-trip ("O") strings**, so lexical string comparison equals
+chronological order — the `ts`/`last_seen` range filters depend on this. `upsertStatus` is
+last-write-wins via `ON CONFLICT(session_id) … WHERE excluded.updated_at >= session_status.updated_at`
+(a stale report is a full no-op, not even bumping `last_seen`); `appendEvent` is `INSERT OR IGNORE`
+and returns whether it inserted (false = duplicate `event_id`); `pruneOld(cutoff)` trims **both**
+tables past the cutoff (`activity_events.ts` and `session_status.last_seen`) and returns the total
+rows deleted.
+
 ### Multi-session collapse
 
 One function returns the whole winning record, so per-field cherry-picking is
