@@ -546,9 +546,10 @@ type OverviewDataTests() =
         Assert.That(members |> List.map _.Since, Is.EqualTo([ Some since ]))
 
     [<Test>]
-    member _.``Task-bucket members leave Since as the worktree's value (None by default)``() =
-        let result =
-            aggregate [ repo [ at "/wt/1" "b1" (activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero) ] ]
+    member _.``Task-bucket members always have Since = None, even when the worktree carries one``() =
+        let since = System.DateTimeOffset(2025, 1, 1, 12, 0, 0, System.TimeSpan.Zero)
+        let wt = { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with CodingToolSince = Some since }
+        let result = aggregate [ repo [ at "/wt/1" "b1" wt ] ]
         let members = taskMembers TaskBucketKind.InProgress result
         Assert.That(members |> List.forall (fun m -> m.Since = None))
 

@@ -113,8 +113,11 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
 /// scan. Stamps (freezes) the moment a worktree ENTERS a non-Idle status, keeps the existing stamp
 /// while the status is unchanged (so a Working agent shows time-since-it-started-working, not
 /// time-since-last-write), and drops it when the agent goes Idle. The transition time is the winning
-/// surface's mtime (LastActivity) so it stays accurate across a server restart; `now` is the fallback
-/// when the scan carried no mtime.
+/// surface's mtime (LastActivity), with `now` as the fallback when the scan carried no mtime. Since
+/// this map is in-memory, a restart re-derives every stamp from the current mtime on first
+/// observation: exact for a terminal Done/WaitingForUser surface (its mtime IS when it stopped), but
+/// a still-Working agent's stamp collapses to its recent last-write time until the next real
+/// transition.
 let recordCodingToolSince
     (now: DateTimeOffset)
     (path: string)

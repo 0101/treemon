@@ -158,10 +158,7 @@ let private assembleFromState
       Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
-      CodingToolSince =
-        match codingToolData.Status with
-        | CodingToolStatus.Idle -> None
-        | _ -> repo.CodingToolSince |> Map.tryFind wt.Path
+      CodingToolSince = repo.CodingToolSince |> Map.tryFind wt.Path
       CurrentSkill = codingToolData.CurrentSkill
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
