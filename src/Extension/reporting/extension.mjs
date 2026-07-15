@@ -22,7 +22,7 @@ import { randomUUID } from "node:crypto";
 //   user.message (genuine) -> user_prompt         (message required)
 //   assistant.message      -> assistant_message   (message required)
 //   skill.invoked          -> skill_invoked        (skillName required)
-//   user_input.requested   -> awaiting_user_input  (message = the ask_user question, optional)
+//   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
 //   assistant.turn_end     -> turn_ended
 //   session.idle           -> went_idle
 // `message` is { text, at }; the server truncates for display, so raw text is forwarded (bounded by
@@ -57,9 +57,12 @@ const HEARTBEAT_INTERVAL_MS = 60000;
 // truncation, keeping this extension a thin forwarder.
 const MAX_MESSAGE_CHARS = 2000;
 
-// The relevant SDK event types (the seven mapped kinds + user_input.completed, which is unmapped but
-// closes the ask_user window). Subscribing per-type avoids handling the high-volume streaming/delta
-// events at all.
+// The relevant SDK event types (the seven mapped kinds + the two ask_user "completed" events, which
+// are unmapped but close the ask_user window). ask_user in Copilot CLI 1.0.71+ emits
+// `elicitation.requested`/`elicitation.completed` (question in `data.message`); older builds emitted
+// `user_input.requested`/`user_input.completed` (question in `data.question`) — both shapes are
+// subscribed for forward/backward compat. Subscribing per-type avoids handling the high-volume
+// streaming/delta events at all.
 const SUBSCRIBED_TYPES = [
   "assistant.turn_start",
   "assistant.turn_end",
@@ -67,6 +70,8 @@ const SUBSCRIBED_TYPES = [
   "skill.invoked",
   "assistant.message",
   "user.message",
+  "elicitation.requested",
+  "elicitation.completed",
   "user_input.requested",
   "user_input.completed",
 ];
@@ -208,8 +213,12 @@ function mapEvent(event) {
       const text = String(data.content ?? "");
       return text.trim() ? { ...base(event, "user_prompt"), message: message(text, event.timestamp) } : null;
     }
+    case "elicitation.requested":
     case "user_input.requested": {
-      const question = String(data.question ?? "");
+      // ask_user in Copilot CLI 1.0.71+ emits elicitation.requested carrying the prompt in
+      // `data.message`; older builds emitted user_input.requested carrying it in `data.question`.
+      // Accept either shape so the ask_user question surfaces as LastAssistantMessage.
+      const question = String(data.message ?? data.question ?? "");
       return question.trim()
         ? { ...base(event, "awaiting_user_input"), message: message(question, event.timestamp) }
         : base(event, "awaiting_user_input");
@@ -231,8 +240,10 @@ function handle(event, isLive) {
   if (event.agentId) return; // sub-agent event — never the user's top-level status
 
   if (isLive) {
-    if (event.type === "user_input.requested") pendingAskUser = true;
-    else if (event.type === "user_input.completed") pendingAskUser = false;
+    // ask_user opens the window via elicitation.requested (CLI 1.0.71+) or user_input.requested
+    // (older builds), and closes it via the matching *.completed event.
+    if (event.type === "elicitation.requested" || event.type === "user_input.requested") pendingAskUser = true;
+    else if (event.type === "elicitation.completed" || event.type === "user_input.completed") pendingAskUser = false;
   }
 
   const report = mapEvent(event);

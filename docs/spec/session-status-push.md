@@ -29,7 +29,7 @@
   client's next poll (existing polling; no SSE).
 - The status shown per worktree is exactly what the fold derives:
   - `assistant.turn_start` / a genuine user prompt / an assistant message → **Working**
-  - `user_input.requested` (i.e. `ask_user`) → **WaitingForUser**
+  - `elicitation.requested` / `user_input.requested` (i.e. `ask_user`) → **WaitingForUser**
   - `assistant.turn_end` → **Done**
   - `session.idle` → **Idle**
 - **Current skill**, **last user message**, and **last assistant message** are surfaced from
@@ -398,15 +398,20 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   drop a `user.message` skill-context injection (**both** `source` starting `skill-` AND trimmed
   `content` starting `<skill-context` required). **SDK→wire mapping:** `assistant.turn_start`→
   `turn_started`, `assistant.message`(non-blank content)→`assistant_message`, genuine `user.message`
-  (non-blank)→`user_prompt`, `skill.invoked`(`data.name`)→`skill_invoked`, `user_input.requested`→
+  (non-blank)→`user_prompt`, `skill.invoked`(`data.name`)→`skill_invoked`,
+  `elicitation.requested`/`user_input.requested`→
   `awaiting_user_input` (question optional, carried as the message → surfaced as
-  `LastAssistantMessage`), `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`. Blank-text
+  `LastAssistantMessage`), `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`.
+  (`ask_user` in Copilot CLI 1.0.71+ emits `elicitation.requested`/`elicitation.completed` with the
+  prompt in `data.message`; older builds emitted `user_input.requested`/`user_input.completed` with
+  it in `data.question` — both shapes are subscribed and the question reads `data.message ?? data.question`.) Blank-text
   messages are dropped (a content-less `user.message` boundary is already covered by the paired
   `assistant.turn_start`; an empty `assistant.message` is a pure tool-call). Raw message text is
   forwarded (server owns display truncation), capped at 2000 chars only to bound the POST body.
   `provider` is always `copilot_cli`; `eventId`/`occurredAt` are the SDK event's `id`/`timestamp`.
-  **ask_user exactness:** a live-only `pendingAskUser` flag (set on `user_input.requested`, cleared
-  on `user_input.completed` or a genuine `user_prompt`) suppresses `went_idle` while a prompt is
+  **ask_user exactness:** a live-only `pendingAskUser` flag (set on `elicitation.requested`/
+  `user_input.requested`, cleared on `elicitation.completed`/`user_input.completed` or a genuine
+  `user_prompt`) suppresses `went_idle` while a prompt is
   unanswered, so the card stays `WaitingForUser` even if the SDK reports the session idle
   (`session.idle` is ephemeral, never replayed). Because `pendingAskUser` is not rebuilt on a rejoin
   (crash / editor reload / restart), the suppression **also** fires when `currentStatus === "waiting"`
