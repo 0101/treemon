@@ -12,6 +12,8 @@ Canvas docs are HTML files in `.agents/canvas/` that Treemon auto-detects and di
 
 Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files automatically. Use a descriptive filename — it becomes the tab name (e.g. `build-status.html`, `test-results.html`).
 
+Give the doc a `<title>` too, with the casing you want to read — e.g. `<title>MTP TestExplorer Hang</title>`. It's the human-readable name used for the **shared link** and for the standalone page's browser tab. The filename stays a lowercase kebab slug (it's the tab id and URL), so a doc with **no** `<title>` can only be shared under a sentence-cased version of that slug (`mtp-testexplorer-hang.html` → "Mtp testexplorer hang"), which can't recover acronyms or camelCase. Setting a `<title>` is how you get "MTP TestExplorer Hang" instead.
+
 ## Styling
 
 Canvas docs render in a dark-themed IDE pane, and Treemon **already injects a typographic base into every doc** — so most docs need little or no CSS of their own. Out of the box you get:
@@ -125,6 +127,7 @@ The base theme already styles `body`, headings, and the form controls, so an inp
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<title>Comment</title>
 </head>
 <body>
   <h1>Comment</h1>
