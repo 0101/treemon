@@ -591,6 +591,20 @@ function Install-Extension {
     }
 }
 
+function Install-ReportingExtension {
+    # Phase 1 of the push status model: the passive, reporting-only extension. Installed ALONGSIDE
+    # canvas-bridge (a separate extension dir), never replacing it — reporting registers no canvas
+    # and no tools, so both load per session with no canvas_take_ownership collision. It forwards
+    # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
+    # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
+    $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "treemon-reporting"
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Copy-Item (Join-Path $src "reporting.mjs") $dest -Force
+    Copy-Item (Join-Path $src "package.json") $dest -Force
+    Write-Host "Reporting extension installed to $dest" -ForegroundColor Green
+}
+
 function Test-WorktreeRootPaths([string[]]$Roots) {
     # Validate that each provided worktree root exists before launching the server.
     # exit inside a function still terminates the script, so callers need no extra guard.
@@ -633,6 +647,7 @@ function Deploy-Frontend {
     try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
     try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
+    try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
 
     Restart-ServerIfRunning -Message "Restarting production server..." -NotRunningMessage "Production server is not running, skipping restart"
 }

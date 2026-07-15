@@ -354,6 +354,36 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
   to a direct `readConfiguredProvider` config read is deferred to a follow-up task (cc4,
   discovered-from 9k8) so per-worktree provider config is honored rather than relying on the
   `Copilot` default.
+- **Reporting extension concretions (Phase 1, as built in `src/Extension/reporting/`).** The
+  reporting-only extension is its own installable dir `src/Extension/reporting/`
+  (`reporting.mjs` + a `@treemon/reporting` `package.json`, `main: reporting.mjs`), installed to
+  `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas-bridge` by a new
+  `Install-ReportingExtension` step in `treemon.ps1` (called from `Deploy-Frontend` next to the
+  existing `Install-Extension`). It **passive-joins** (`joinSession()` with no tools/canvas, never
+  `session.send`). Fan-out ports come from `TREEMON_PORTS` (comma-separated) → `TREEMON_PORT` →
+  `5000`; each report is a fire-and-forget `POST /api/session/activity` to every port (a non-owning
+  instance 404s — swallowed). **Source-side filtering:** drop any event with `agentId` (sub-agent);
+  drop a `user.message` skill-context injection (**both** `source` starting `skill-` AND trimmed
+  `content` starting `<skill-context` required). **SDK→wire mapping:** `assistant.turn_start`→
+  `turn_started`, `assistant.message`(non-blank content)→`assistant_message`, genuine `user.message`
+  (non-blank)→`user_prompt`, `skill.invoked`(`data.name`)→`skill_invoked`, `user_input.requested`→
+  `awaiting_user_input` (question optional, carried as the message → surfaced as
+  `LastAssistantMessage`), `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`. Blank-text
+  messages are dropped (a content-less `user.message` boundary is already covered by the paired
+  `assistant.turn_start`; an empty `assistant.message` is a pure tool-call). Raw message text is
+  forwarded (server owns display truncation), capped at 2000 chars only to bound the POST body.
+  `provider` is always `copilot_cli`; `eventId`/`occurredAt` are the SDK event's `id`/`timestamp`.
+  **ask_user exactness:** a live-only `pendingAskUser` flag (set on `user_input.requested`, cleared
+  on `user_input.completed` or a genuine `user_prompt`) suppresses `went_idle` while a prompt is
+  unanswered, so the card stays `WaitingForUser` even if the SDK reports the session idle
+  (`session.idle` is ephemeral, never replayed). **Heartbeat** (60s) re-asserts only the two
+  long-lived active states — `working`→synthetic `turn_started`, `waiting`→synthetic
+  `awaiting_user_input` (no message) — with a fresh `eventId` + now `occurredAt`, so the server bumps
+  `last_seen` while re-folding a status-preserving no-op; `done`/`idle` carry no heartbeat and decay
+  via the staleness net (matching the old mtime freeze). A local newest-wins status guard
+  (`lastStatusMs`) means the **subscribe-live-first, then `getEvents()` replay** ordering can't rewind
+  live status; server `eventId` dedupe + the ingestion ordering guard make the replay/live overlap
+  harmless.
 
 ## Key Files
 
@@ -368,8 +398,8 @@ and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (el
 | `src/Server/Program.fs` | Route `/api/session/activity`; start the SessionActivity service + rebuild. |
 | `src/Server/Server.fsproj` | Add `Microsoft.Data.Sqlite`; add/remove `<Compile>` entries. |
 | `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs` | **Deleted.** |
-| `src/Extension/` (`reporting.mjs`; later `+canvas.mjs`/`extension.mjs`) | Phase 1: reporting-only extension. Phase 2: consolidate canvas + reporting into one `treemon-bridge`. |
-| `treemon.ps1` | Phase 1: install `treemon-reporting` alongside `canvas-bridge`. Phase 2: install unified `treemon-bridge`, delete `canvas-bridge` + `treemon-reporting`. |
+| `src/Extension/` (`reporting.mjs`; later `+canvas.mjs`/`extension.mjs`) | Phase 1: reporting-only extension (as built: `src/Extension/reporting/` — `reporting.mjs` + its own `package.json`). Phase 2: consolidate canvas + reporting into one `treemon-bridge`. |
+| `treemon.ps1` | Phase 1: install `treemon-reporting` alongside `canvas-bridge` (as built: `Install-ReportingExtension`, called from `Deploy-Frontend`). Phase 2: install unified `treemon-bridge`, delete `canvas-bridge` + `treemon-reporting`. |
 | `src/Tests/` | Port fold tests to `SessionActivity`; store tests; remove detector tests. |
 
 ## Related Specs
