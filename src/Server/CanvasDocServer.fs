@@ -231,15 +231,15 @@ let private linkInterceptor = "<script>document.addEventListener('click',functio
 
 /// Bridge Escape from a cross-origin canvas doc back to the dashboard's focus reclaim. The doc is a
 /// separate origin, so its keydown never reaches the pane's document-level focus-reclaim listener;
-/// this injected listener posts {action:'reclaim-focus'} on Escape (unless the caret is in an
-/// editable field inside the doc, which owns its own Escape). The pane routes it to the same Escape
-/// reclaim. Injected into both doc kinds — reclaim should work from any doc the user is looking at.
+/// this injected listener posts {action:'reclaim-focus'} on Escape (unless the key originated in an
+/// editable field — checked via e.target, which owns its own Escape). The pane routes it to the same
+/// Escape reclaim. Injected into both doc kinds — reclaim should work from any doc the user looks at.
 let private reclaimFocusScript =
     [ "<script>document.addEventListener('keydown',function(e){"
       "if(e.key!=='Escape')return;"
-      "var a=document.activeElement;"
-      "if(a){var t=(a.tagName||'').toUpperCase();"
-      "if(t==='INPUT'||t==='TEXTAREA'||t==='SELECT'||a.isContentEditable)return}"
+      "var t=e.target;"
+      "if(t){var n=(t.tagName||'').toUpperCase();"
+      "if(n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable)return}"
       "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
     |> String.concat ""
 
@@ -370,7 +370,8 @@ let private errorOverlayScript (filename: string) =
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
-/// them, and they post nothing back — so the bridge, canvasSend, and morph pieces are all omitted.
+/// them, and the only message they post back is the shared Escape focus-reclaim bridge — the session
+/// bridge (heartbeat), canvasSend, and morph pieces are all omitted.
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript
