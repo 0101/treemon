@@ -68,15 +68,17 @@ let parseWorktreeList (porcelainOutput: string) =
         | _ -> None)
     |> Array.toList
 
-let listWorktrees (repoRoot: string) =
+/// Discovers the repo's worktrees. Returns `None` when the underlying git command
+/// failed (timeout / non-zero exit / failed-to-start), so callers can distinguish a
+/// transient git failure from a repo that genuinely has zero worktrees (`Some []`)
+/// and retain last-known-good instead of blanking the list on a git hiccup.
+let listWorktrees (repoRoot: string) : Async<WorktreeInfo list option> =
     async {
         let! output = runGit repoRoot "worktree list --porcelain"
 
         return
             output
-            |> Option.map parseWorktreeList
-            |> Option.defaultValue []
-            |> List.filter (fun wt -> Directory.Exists(wt.Path))
+            |> Option.map (parseWorktreeList >> List.filter (fun wt -> Directory.Exists(wt.Path)))
     }
 
 let parseCommitOutput (worktreePath: string) (output: string option) =
