@@ -47,7 +47,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
-- Coding tool status dot (Working / WaitingForUser / Done / Idle) with tooltip showing provider name
+- Coding tool status dot (Working / WaitingForUser / Idle / NoSession) with tooltip showing provider name
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
@@ -68,9 +68,19 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Coding Tool Detection
 
+> **Legacy — superseded by the push model.** The per-provider **log-parsing detectors** described in
+> this section (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`, and the pure-logic
+> `getStatusFromFiles`) were **removed**: Treemon no longer polls session files to infer status. The
+> Copilot CLI extension now **pushes** session-activity events and the server collapses live
+> per-session state in `CodingToolStatus.fs` (`fromPushSessions`). See
+> `docs/spec/session-status-push.md` and `docs/spec/idle-only-status.md`. The current status
+> vocabulary is `CodingToolStatus = Working | WaitingForUser | Idle | NoSession` — the transient
+> `Done` was **retired** (a finished turn now reads **Idle**; a worktree with no open session collapses
+> to **NoSession**). The subsections below are retained for historical context only.
+
 - Supports multiple providers: Claude Code, Copilot CLI, VS Code Copilot. Adding a new provider = one detector module + registration in orchestrator. Both CLI and VS Code Copilot report as `Provider = Copilot`; `pickActiveProvider` selects the most recently active one.
 - Every 15s refresh cycle checks all registered providers for each worktree
-- Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Done/Idle)
+- Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Idle — a per-session status is never `NoSession`, which is only ever a worktree-level collapse result)
 - Orchestrator picks the most recently active non-Idle provider (by session file mtime)
 - `.treemon.json` optional `"codingTool": "claude"|"copilot"` overrides auto-detect
 - Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
@@ -96,7 +106,7 @@ Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.
 
 **Temporal adjustments** (applied after raw status is determined from events):
 
-- **Grace period (15s):** `Done → Working` when the events file was modified within 15 seconds. Copilot CLI emits `turn_end` between every turn in a multi-turn interaction, and LLM thinking gaps of 27-35 seconds are common between `turn_start` and the next `assistant.message`. Without the grace window, the dashboard flickers to Done during these gaps. The 15s value (vs Claude's 10s) accounts for Copilot's longer inter-turn gaps and background agent startup time.
+- **Grace period (15s):** a just-finished turn was held as `Working` when the events file was modified within 15 seconds. Copilot CLI emits `turn_end` between every turn in a multi-turn interaction, and LLM thinking gaps of 27-35 seconds are common between `turn_start` and the next `assistant.message`. Without the grace window, the dashboard flickered to the finished (Idle) state during these gaps. The 15s value (vs Claude's 10s) accounts for Copilot's longer inter-turn gaps and background agent startup time. (In the push model this heuristic is unnecessary — the next `turn_start` re-asserts `Working` within ≤0.1 s.)
 - **Staleness (30min):** `Working → Idle` when the events file hasn't been modified for 30 minutes. Catches abandoned sessions where the CLI exited without writing a final `turn_end`.
 - **Age cutoff (2h):** Any file older than 2 hours returns `Idle` regardless of last event.
 
@@ -114,15 +124,14 @@ Claude Code spawns subagent sessions (via the Task tool) that write to nested JS
 
 `SessionFileKind` (Parent | Subagent) is determined by path: any `.jsonl` inside a `subagents/` subdirectory is a subagent; top-level `.jsonl` files are parent sessions.
 
-**Status resolution rules:**
+**Status resolution rules** (historical — this override logic lived in the removed `getStatusFromFiles`; the transient `Done` has since folded into `Idle`):
 
-1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
-2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
+1. Compute per-file status (staleness, a finished-turn grace period within 10s, 2-hour age cutoff) for all files
+2. Take the highest-priority parent status (Working > WaitingForUser > Idle)
 3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
-4. If parent status is `Done` -- return `Done` (parent Done is authoritative; all subagents have completed before parent reaches end_turn)
-5. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle`
+4. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle` (a finished parent turn, historically the transient `Done`, now settles on `Idle` here)
 
-Parent `Done` and `WaitingForUser` are never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
+Parent `WaitingForUser` is never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
 
 **Scoping rules:**
 - `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
@@ -278,7 +287,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Repo ID = folder name: simple, human-readable, no config needed
 - `CommentSummary` DU over nullable fields: cleanly models provider capability differences
 - Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
-- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
+- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Idle to Working, never downgrade WaitingForUser
 - Claude subagent detection is path-based only (directory structure), no content parsing needed
 - Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed

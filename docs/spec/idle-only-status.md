@@ -190,6 +190,24 @@ Resolved during the `frvsched` implementation (F10/F11 lifecycle hygiene for `Co
    delivers the accepted "resets on restart" behaviour of Decision #8 **without** reversing the seed
    order to DESC.
 
+Resolved during the `frvw` implementation (worktree-monitor.md `Done`-vocab reconciliation, F4/F5/F6/F7/F12):
+
+11. **`worktree-monitor.md` stale `Done` reconciled by marking dead sections legacy, not by a blind
+   `Done`→`Idle` swap.** The card dot (F4) and the `Done`/`Idle`→`Working` Decisions line (F12) describe
+   the live model and were updated directly (`Working / WaitingForUser / Idle / NoSession`; "upgrade
+   `Idle` to `Working`"). The remaining hits (F5/F6/F7 plus the neighbouring grace-period/parent-subagent
+   lines) live in the **Coding Tool Detection** section, which documents the *removed* log-parsing
+   detectors (`ClaudeDetector`/`CopilotDetector`/`VsCodeCopilotDetector`/`getStatusFromFiles`, superseded
+   by the push model). Per the review's rule-quality note, that section got a single **"Legacy —
+   superseded by the push model"** marker and its `Done` references were folded to the historical
+   framing (transient `Done` → `Idle`) rather than swapped in place to look current. **Divergence from
+   the F5 reviewer suggestion:** the per-provider/per-session enumeration (line 73) is
+   `Working/WaitingForUser/Idle` — **not** `…/NoSession` — because `NoSession` is only ever a
+   *worktree-level* collapse result, never a stored per-session status (matches the `Types.fs`
+   `CodingToolStatus` domain comment and F6's pull-model note that a missing session is `Idle`). The
+   broader push-model rewrite of that section (and the stale Key-Files/detector inventory) stays out of
+   scope — the orphaned `expected-statuses.jsonl` fixture is still untouched per Decision #6.
+
 ## Related Specs
 
 - `docs/spec/session-status-push.md` — the push model this refines (feature s16).
