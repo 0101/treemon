@@ -130,7 +130,7 @@ let recordCodingToolSince
     | _ when prevStatus = Some data.Status && Map.containsKey path since -> since
     | _ -> since |> Map.add path (data.LastActivity |> Option.defaultValue now)
 
-let private processMessage (state: DashboardState) (msg: StateMsg) =
+let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList(repoId, worktrees) ->
         let repo = getRepo repoId state
@@ -171,7 +171,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
             let prevStatus = repo.CodingToolData |> Map.tryFind path |> Option.map _.Status
-            let since = recordCodingToolSince DateTimeOffset.UtcNow path prevStatus data repo.CodingToolSince
+            let since = recordCodingToolSince now path prevStatus data repo.CodingToolSince
             updateRepo repoId
                 { repo with
                     CodingToolData = repo.CodingToolData |> Map.add path data
@@ -231,7 +231,7 @@ let createAgent () =
         let rec loop (state: DashboardState) =
             async {
                 let! msg = inbox.Receive()
-                let newState = processMessage state msg
+                let newState = processMessage DateTimeOffset.UtcNow state msg
                 return! loop newState
             }
 
