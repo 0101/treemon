@@ -37,7 +37,11 @@ type CodingToolResult =
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
-      LastMessageProvider: CodingToolProvider option }
+      LastMessageProvider: CodingToolProvider option
+      /// Mtime of the active session surface that won status resolution (its last write) — the best
+      /// available "the agent last did something" time, and the value the scheduler freezes as the
+      /// state-transition timestamp. None when every surface is Idle.
+      LastActivity: DateTimeOffset option }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "
@@ -81,7 +85,8 @@ let idlePushResult: CodingToolResult =
       CurrentSkill = None
       LastUserMessage = None
       LastAssistantMessage = None
-      LastMessageProvider = None }
+      LastMessageProvider = None
+      LastActivity = None }
 
 /// The push model has a single provider today (Copilot CLI); `pickActive` collapses to a bare
 /// `SessionStatus` (provider-free), so an active push session always reads as Copilot on the card.
@@ -104,20 +109,27 @@ let private toLastAssistantEvent (m: Message) : CardEvent =
 /// `pickActive` picks the most-recent ACTIVE winner and ALL displayed fields are read from that ONE
 /// session. No live/active session → the Idle default (blank fields).
 let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
-    let winner =
+    let adjusted =
         sessions
         |> List.map (fun s -> SessionActivity.freshnessAdjusted now s.LastSeen s.Status, s.LastSeen)
-        |> SessionActivity.pickActive
 
-    match winner with
+    match SessionActivity.pickActive adjusted with
     | None -> idlePushResult
     | Some s ->
+        // The winner is the most-recent ACTIVE session, so its last-seen (the newest among the
+        // non-Idle sessions) is the card's "last did something" time.
+        let lastActivity =
+            adjusted
+            |> List.filter (fun (st, _) -> st.Status <> Idle)
+            |> List.map snd
+            |> List.max
         { Status = s.Status
           Provider = Some(pushCardProvider CopilotCli)
           CurrentSkill = s.Skill
           LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
           LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
-          LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> pushCardProvider CopilotCli) }
+          LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> pushCardProvider CopilotCli)
+          LastActivity = Some lastActivity }
 
 /// Group a flat set of live push session-statuses by worktree path and collapse each group into the
 /// card's coding-tool fields (the `pickActive` winner). Keyed by the normalised worktree path stored

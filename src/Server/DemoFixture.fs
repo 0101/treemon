@@ -157,6 +157,7 @@ let private wtAzDoMain: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Idle
       CodingToolProvider = None
+      CodingToolSince = None
       CurrentSkill = None
       LastUserMessage = None
       Pr = NoPr
@@ -178,6 +179,7 @@ let private wtRetryLogic: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Working
       CodingToolProvider = Some Claude
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
       CurrentSkill = None
       LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
       Pr = HasPr prRetryBuilding
@@ -199,6 +201,7 @@ let private wtConfigLoading: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Working
       CodingToolProvider = Some Claude
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
       CurrentSkill = None
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
       Pr = NoPr
@@ -220,6 +223,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Done
       CodingToolProvider = Some Copilot
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
       CurrentSkill = None
       LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
       Pr = HasPr prAuth
@@ -241,6 +245,7 @@ let private wtArchived: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Done
       CodingToolProvider = Some Claude
+      CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
       CurrentSkill = None
       LastUserMessage = None
       Pr = NoPr
@@ -262,6 +267,7 @@ let private wtGithubMain: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Idle
       CodingToolProvider = None
+      CodingToolSince = None
       CurrentSkill = None
       LastUserMessage = None
       Pr = NoPr
@@ -283,6 +289,7 @@ let private wtStreaming: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Working
       CodingToolProvider = Some Copilot
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
       CurrentSkill = None
       LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
       Pr = HasPr prStreaming
@@ -304,6 +311,7 @@ let private wtCsvFix: WorktreeStatus =
       Planning = BeadsPlanning.zero
       CodingTool = Done
       CodingToolProvider = Some Copilot
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
       CurrentSkill = None
       LastUserMessage = None
       Pr = HasPr prCsvMerged
@@ -369,6 +377,7 @@ let private baseDashboard: DashboardResponse =
       DeployBranch = None
       SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code"
+      WorktreeSkills = [ "investigate"; "review" ]
       CollapsedRepos = Set.empty
       CanvasPaneOpen = false
       OverviewPanelOpen = false
@@ -406,7 +415,7 @@ let private f2 =
 // F3 (4-6s): Auth — Copilot starts working (dot changes, event updates)
 let private f3 =
     f2
-    |> withAuth (fun wt -> { wt with CodingTool = Working })
+    |> withAuth (fun wt -> { wt with CodingTool = Working; CodingToolSince = Some baseTimestamp })
     |> withCardEvt authKey
         (evt "copilot" "Reading authorization middleware" 1 None None)
     |> withCpu 45.0 14800
@@ -449,7 +458,7 @@ let private f7 =
 // F8 (14-16s): Auth — Copilot finishes, back to Done (matches base)
 let private f8 =
     f7
-    |> withAuth (fun wt -> { wt with CodingTool = Done })
+    |> withAuth (fun wt -> { wt with CodingTool = Done; CodingToolSince = Some baseTimestamp })
     |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800
@@ -512,6 +521,7 @@ let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) 
     let shift = now - baseTimestamp
     { wt with
         LastCommitTime = wt.LastCommitTime + shift
+        CodingToolSince = wt.CodingToolSince |> Option.map (fun ts -> ts + shift)
         LastUserMessage =
             wt.LastUserMessage
             |> Option.map (fun (msg, ts) -> msg, ts + shift) }

@@ -15,6 +15,7 @@ module NavHelpers =
           Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          CodingToolSince = None
           CurrentSkill = None
           LastUserMessage = None
           Pr = PrStatus.NoPr

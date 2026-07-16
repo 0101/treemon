@@ -21,7 +21,7 @@ chosen by `buildInjection` (`src/Server/CanvasDocServer.fs`):
 
 | Doc kind | Injected today |
 |---|---|
-| `SystemView` | `baseStyle` (scrollbar CSS only) + `linkInterceptor` |
+| `SystemView` | `baseStyle` (scrollbar CSS only) + `linkInterceptor` + `reclaimFocusScript` |
 | `AgentDoc` | the above + `bridgeScript` + idiomorph runtime + morph controller |
 
 ### 1. Base dark-theme CSS reset (Phase 6.1)

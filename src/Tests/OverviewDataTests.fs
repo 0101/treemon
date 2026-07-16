@@ -322,14 +322,17 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``Done and Idle worktrees are excluded from the activity groups even with a skill``() =
-        // Done (blue) and Idle (grey) dots are finished/parked terminals — they never contribute to
-        // an activity group, even though CurrentSkill may still be populated (last-seen skill).
+        // Done (blue) and Idle (grey) dots never contribute to an ACTIVITY group, even though
+        // CurrentSkill may still be populated (last-seen skill). Done forms the distinct Stopped
+        // group; Idle contributes to nothing.
         let result =
             aggregate
                 [ repo
                     [ agentWt CodingToolStatus.Done (Some "investigate")
                       agentWt CodingToolStatus.Idle (Some "bd-plan") ] ]
-        Assert.That(result.Agents, Is.Empty)
+        Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(None))
+        Assert.That(activityCount CurrentActivity.Planning result, Is.EqualTo(None))
+        Assert.That(agentCount AgentGroupKind.Stopped result, Is.EqualTo(Some 1))
 
     [<Test>]
     member _.``A red-dot agent with no skill falls back to the Working group``() =
@@ -364,10 +367,41 @@ type OverviewDataTests() =
         Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(None))
 
     [<Test>]
-    member _.``No red-dot or waiting agents yields no agent groups``() =
+    member _.``Only Idle worktrees yield no agent groups``() =
+        // Idle (grey) is the sole terminal excluded from every agent group — including Stopped.
         let result =
-            aggregate [ repo [ agentWt CodingToolStatus.Idle (Some "investigate"); agentWt CodingToolStatus.Done None ] ]
+            aggregate [ repo [ agentWt CodingToolStatus.Idle (Some "investigate"); agentWt CodingToolStatus.Idle None ] ]
         Assert.That(result.Agents, Is.Empty)
+
+    [<Test>]
+    member _.``Done worktrees form a distinct Stopped group``() =
+        let result =
+            aggregate [ repo [ agentWt CodingToolStatus.Done None
+                               agentWt CodingToolStatus.Done (Some "investigate") ] ]
+        Assert.That(agentCount AgentGroupKind.Stopped result, Is.EqualTo(Some 2))
+
+    [<Test>]
+    member _.``Idle worktrees never join the Stopped group``() =
+        // Stopped is blue-dot Done only; grey Idle stays out even alongside a Done worktree.
+        let result =
+            aggregate [ repo [ agentWt CodingToolStatus.Done None; agentWt CodingToolStatus.Idle None ] ]
+        Assert.That(agentCount AgentGroupKind.Stopped result, Is.EqualTo(Some 1))
+
+    [<Test>]
+    member _.``The Stopped group sorts after the Waiting group (canonical order)``() =
+        let result =
+            aggregate
+                [ repo
+                    [ agentWt CodingToolStatus.Done None             // Stopped
+                      agentWt CodingToolStatus.WaitingForUser None   // Waiting
+                      workingWt (Some "investigate") ] ]            // Investigating
+        let order = result.Agents |> List.map _.Kind
+        Assert.That(
+            order,
+            Is.EqualTo(
+                [ AgentGroupKind.Activity CurrentActivity.Investigating
+                  AgentGroupKind.Waiting
+                  AgentGroupKind.Stopped ]))
 
     [<Test>]
     member _.``WaitingForUser worktrees form a distinct Waiting group``() =
@@ -490,6 +524,34 @@ type OverviewDataTests() =
         Assert.That(members |> List.map _.ScopedKey, Is.EqualTo([ "/wt/w1"; "/wt/w2" ]))
         Assert.That(members |> List.forall (fun m -> m.Contribution = 1))
         Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some(members |> List.length)))
+
+    [<Test>]
+    member _.``The Stopped group carries its Done worktrees as members, each contributing 1``() =
+        let result =
+            aggregate
+                [ repo
+                    [ at "/wt/s1" "stop-1" (agentWt CodingToolStatus.Done None)
+                      at "/wt/s2" "stop-2" (agentWt CodingToolStatus.Done None) ] ]
+        let members = agentMembers AgentGroupKind.Stopped result
+        Assert.That(members |> List.map _.ScopedKey, Is.EqualTo([ "/wt/s1"; "/wt/s2" ]))
+        Assert.That(members |> List.forall (fun m -> m.Contribution = 1))
+        Assert.That(agentCount AgentGroupKind.Stopped result, Is.EqualTo(Some(members |> List.length)))
+
+    [<Test>]
+    member _.``Agent members carry the worktree's CodingToolSince (time in category)``() =
+        let since = System.DateTimeOffset(2025, 1, 1, 12, 0, 0, System.TimeSpan.Zero)
+        let stopped = { agentWt CodingToolStatus.Done None with CodingToolSince = Some since }
+        let result = aggregate [ repo [ at "/wt/s1" "stop-1" stopped ] ]
+        let members = agentMembers AgentGroupKind.Stopped result
+        Assert.That(members |> List.map _.Since, Is.EqualTo([ Some since ]))
+
+    [<Test>]
+    member _.``Task-bucket members always have Since = None, even when the worktree carries one``() =
+        let since = System.DateTimeOffset(2025, 1, 1, 12, 0, 0, System.TimeSpan.Zero)
+        let wt = { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with CodingToolSince = Some since }
+        let result = aggregate [ repo [ at "/wt/1" "b1" wt ] ]
+        let members = taskMembers TaskBucketKind.InProgress result
+        Assert.That(members |> List.forall (fun m -> m.Since = None))
 
     [<Test>]
     member _.``Task bucket Count equals the sum of its member Contributions``() =

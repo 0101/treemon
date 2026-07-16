@@ -113,12 +113,14 @@ let private bandProbeJs =
           taskPlanned: bg(itemByLabel(tasksSec, 'Planned') && itemByLabel(tasksSec, 'Planned').querySelector('.overview-bar')),
           agentPlanning: bg(itemByLabel(agentsSec, 'Planning') && itemByLabel(agentsSec, 'Planning').querySelector('.overview-circle')),
           agentReviewing: bg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
-          agentWaiting: bg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle'))
+          agentWaiting: bg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle')),
+          agentStopped: bg(itemByLabel(agentsSec, 'Stopped') && itemByLabel(agentsSec, 'Stopped').querySelector('.overview-circle'))
         },
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
         queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
         fixingPresent: !!itemByLabel(agentsSec, 'Fixing'),
         genericWorkingPresent: !!itemByLabel(agentsSec, 'Working'),
+        stoppedPresent: !!itemByLabel(agentsSec, 'Stopped'),
         zeroTextCount: qa('.overview-band .overview-count').filter(c => c.textContent.trim() === '0').length
       });
     }
@@ -217,8 +219,8 @@ type OverviewBandE2ETests() =
 
         let agentsHeader = probe.Value<string>("agentsHeader")
         let tasksHeader = probe.Value<string>("tasksHeader")
-        Assert.That(agentsHeader.ToUpperInvariant(), Does.StartWith("ACTIVE AGENTS"), "agents header begins ACTIVE AGENTS")
-        Assert.That(tasksHeader.ToUpperInvariant(), Does.StartWith("TASKS"), "tasks header begins TASKS")
+        Assert.That(agentsHeader.ToUpperInvariant(), Is.EqualTo("AGENTS"), "agents header is the bare label AGENTS")
+        Assert.That(tasksHeader.ToUpperInvariant(), Is.EqualTo("TASKS"), "tasks header is the bare label TASKS")
         Assert.That(probe.Value<string>("agentsHeaderTransform"), Is.EqualTo("uppercase"), "agents header rendered uppercase")
         Assert.That(probe.Value<string>("tasksHeaderTransform"), Is.EqualTo("uppercase"), "tasks header rendered uppercase")
 
@@ -273,6 +275,8 @@ type OverviewBandE2ETests() =
         Assert.That(colors.Value<string>("agentPlanning"), Is.EqualTo(rgb "#cba6f7"), "agent Planning = mauve")
         Assert.That(colors.Value<string>("agentReviewing"), Is.EqualTo(rgb "#f5c2e7"), "agent Reviewing = pink")
         Assert.That(colors.Value<string>("agentWaiting"), Is.EqualTo(rgb "#f9e2af"), "Waiting = yellow")
+        Assert.That(probe.Value<bool>("stoppedPresent"), Is.True, "Stopped group (blue-dot Done agents) renders in the Agents row")
+        Assert.That(colors.Value<string>("agentStopped"), Is.EqualTo(rgb "#89b4fa"), "Stopped = blue")
 
     // Step 6: zero-count buckets are omitted, never rendered as 0.
     [<Test>]

@@ -41,6 +41,7 @@ let init () =
       SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
+      WorktreeSkills = []
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
@@ -93,7 +94,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.bind (fun wt -> if not wt.IsMainWorktree then Some (ConfirmDeleteWorktree scopedKey) else None)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
-    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
     | _ -> None
 
 let private focusDashboard: Cmd<Msg> =
@@ -135,15 +136,20 @@ let update msg model =
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
+            let currentCanvasModified = canvasModifiedByScopedKey repos
             let canvasEvents =
                 if isFirstLoad then model.Canvas.CanvasEvents
                 else
-                    let newEvents = detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    let newEvents =
+                        detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                        |> gateCanvasEventsByFreshness now currentCanvasModified
                     mergeCanvasEvents model.Canvas.CanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
-                else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                else
+                    detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    |> List.filter (fun (scopedKey, filename) -> isCanvasDocFresh now currentCanvasModified scopedKey filename)
             let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
@@ -183,6 +189,7 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
+                WorktreeSkills = response.WorktreeSkills
                 Mascot.EyeDirection = MascotState.randomEyeDirection ()
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
@@ -839,7 +846,7 @@ let view model dispatch =
     let cardCallbacks: CardCallbacks =
         { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
           ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
-          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
           OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)

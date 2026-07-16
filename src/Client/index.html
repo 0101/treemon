@@ -195,19 +195,18 @@
         .activity-fixing { color: #fab387; }
         .activity-working { color: #ff0000; }
         .activity-waiting { color: #f9e2af; }
+        .activity-stopped { color: #89b4fa; }
 
         /* Drill-down breakdown panel (overview-drilldown): the black panel rendered INSIDE a section,
-           flush beneath the selected group's black tab. Header = accent-tinted title + muted summary +
-           ✕ close; members grouped by repo (small uppercase muted repo name matching the band header);
-           agent groups show borderless [dot name] chips (dot in the group's activity colour), task
-           buckets show name + bar rows on the SAME shared scale as the band bars above (--bar-fill is
-           the documented inline-width exception). The panel's accent class tints the title and, via
-           currentColor, the chip dots and task bars. */
-        .overview-breakdown { background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
-        .overview-bd-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
-        .overview-bd-title { font-size: 13.5px; font-weight: 600; color: currentColor; }
-        .overview-bd-sub { font-size: 12px; color: #6c7086; }
-        .overview-bd-close { margin-left: auto; align-self: flex-start; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
+           flush beneath the selected group's black tab. Only the ✕ close button remains as chrome
+           (absolutely positioned in the top-right corner so it adds no vertical space); the old title +
+           summary just repeated the selected tab above, so they're gone. Members grouped by repo (small
+           uppercase muted repo name matching the band header); agent groups show borderless [dot name]
+           chips (dot in the group's activity colour), task buckets show name + bar rows on the SAME
+           shared scale as the band bars above (--bar-fill is the documented inline-width exception). The
+           panel's accent class tints the chip dots and task bars via currentColor. */
+        .overview-breakdown { position: relative; background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-bd-close { position: absolute; top: 10px; right: 12px; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
         .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
         .overview-bd-repo { margin: 0 0 13px; }
         .overview-bd-repo:last-child { margin-bottom: 0; }
@@ -218,6 +217,7 @@
         .overview-chip:hover { background: #242438; }
         .overview-chip-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex: none; }
         .overview-chip-name { color: #cdd6f4; }
+        .overview-chip-since { color: #9399b2; font-size: 0.85em; font-variant-numeric: tabular-nums; }
         /* Task breakdown: worktree name + a bar in the bucket colour, sized on the SAME shared scale as
            the band bars (width = --bar-fill * the same responsive max, floored at the visible min-width),
            so one task is the same pixel width here as in the band above. */
@@ -341,9 +341,9 @@
         .card-footer .user-prompt > span:last-child {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
         }
-        .card-footer .user-prompt.skill-line { color: #a6e3a1; font-style: normal; }
+        .card-footer .user-prompt.skill-line { color: #89dceb; font-style: normal; }
         .card-footer .user-prompt.skill-line .skill-indicator {
-            color: #a6e3a1; flex-shrink: 0; font-style: normal;
+            color: #89dceb; flex-shrink: 0; font-style: normal;
         }
         .card-footer .user-prompt.skill-line .skill-name {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
@@ -496,6 +496,14 @@
             outline: none; cursor: pointer;
         }
         .modal-select:focus { border-color: #89b4fa; }
+        .modal-skill-group { display: flex; flex-direction: column; gap: 6px; }
+        .modal-field-label { font-size: 0.8em; color: #a6adc8; text-transform: uppercase; letter-spacing: 0.04em; }
+        .modal-radios { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+        .modal-radio { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; color: #cdd6f4; font-size: 0.92em; }
+        .modal-radio input { accent-color: #89b4fa; cursor: pointer; margin: 0; }
+        .modal-radio.none { color: #9399b2; font-style: italic; padding-left: 12px; border-left: 1px solid #45475a; }
+        .modal-radio.none input { accent-color: #9399b2; }
+        .modal-skill-hint { color: #9399b2; font-size: 0.82em; font-style: italic; }
         .modal-footer { padding: 0 18px 14px; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
         .modal-btn {
             border-radius: 6px; padding: 6px 14px; cursor: pointer;
@@ -584,7 +592,7 @@
         .canvas-tab-bar {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
             padding: 4px 8px;
             background: #181825;
             border-bottom: 1px solid #313244;
@@ -593,7 +601,7 @@
         .canvas-tab-group {
             display: flex;
             gap: 2px;
-            overflow-x: auto;
+            flex-wrap: wrap;
             flex: 1;
             min-width: 0;
         }
@@ -633,10 +641,11 @@
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
             color: #a6adc8; cursor: pointer;
-            padding: 2px 8px; font-size: 0.75em; font-family: inherit;
+            padding: 2px 6px; display: flex; align-items: center;
             transition: color 0.15s, border-color 0.15s, opacity 0.15s;
             opacity: 0.6;
         }
+        .canvas-launch-btn .btn-icon { width: 14px; height: 14px; }
         .canvas-launch-btn:hover { color: #a6e3a1; border-color: #a6e3a1; opacity: 1; }
         .canvas-pos-btn, .canvas-size-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;

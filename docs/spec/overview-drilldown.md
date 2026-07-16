@@ -23,13 +23,13 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 
 ### Selecting a group
 
-- Each agent-group column (Active agents section) and task-bucket column (Tasks section) is
+- Each agent-group column (Agents section) and task-bucket column (Tasks section) is
   clickable. Clicking a column selects that group; clicking the selected group again deselects it.
 - **Single-select**: at most one group is selected at a time (across both sections).
 - The selected column renders as a **black "tab"** with rounded top corners, sitting flush against a
   black **breakdown panel** rendered directly beneath the group's row.
 - The breakdown panel appears **inside its own section**:
-  - Agent-group breakdown renders **between the Active agents row and the Tasks section**.
+  - Agent-group breakdown renders **between the Agents row and the Tasks section**.
   - Task-bucket breakdown renders **directly below the Tasks row**.
 - Within each section, the group columns **wrap** to the next line when the pane is too narrow (a
   row-gap keeps wrapped lines legible), instead of a horizontal scrollbar.
@@ -40,9 +40,11 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 
 ### Breakdown panel content
 
-- A header shows the group label in the group's accent color plus a muted summary
-  (e.g. `Executing · 3 agents · 2 repos`; `In progress · 12 tasks · 4 worktrees`) and the ✕ close
-  button.
+- The panel's only chrome is the ✕ close button, positioned in the top-right corner so it takes no
+  vertical space. (An earlier design placed a header above the members showing the group label in the
+  group's accent color plus a muted summary — e.g. `Executing · 3 agents · 2 repos`;
+  `In progress · 12 tasks · 4 worktrees` — but that only repeated the selected column tab sitting
+  flush above the panel, so it was removed.)
 - Member worktrees are **grouped by repo**, each repo introduced by a small uppercase muted repo
   name (matching the band's section-header style).
 - **Agent-group breakdown**: per repo, borderless inline **chips**, each `[● branch-name]` with the
@@ -139,8 +141,8 @@ type OverviewSelection =
   `OverviewBand.view model.Repos`).
 - Each `agentColumn` / `taskColumn` becomes clickable (raises `onSelectGroup`) and gets an
   `overview-item-selected`/tab class when it is the selected group.
-- Render the breakdown panel inside the relevant section when a matching group is selected: header +
-  ✕, repo-grouped members, agent chips vs. task bars (task bar width = `member.Contribution * barMaxPx / overview.Scale`, floored at the existing visible minimum).
+- Render the breakdown panel inside the relevant section when a matching group is selected: the ✕
+  close button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members, agent chips vs. task bars (task bar width = `member.Contribution * barMaxPx / overview.Scale`, floored at the existing visible minimum).
 - CSS additions near the existing `.overview-*` rules (`index.html`): the selected black tab
   (rounded top corners), the `.overview-breakdown` panel, `.overview-chips`/chip, the task
   `name + bar` rows, the close button, and `.overview-items` wrapping (`flex-wrap: wrap`, no

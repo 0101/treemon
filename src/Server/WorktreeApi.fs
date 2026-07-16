@@ -155,6 +155,7 @@ let private assembleFromState
       Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
+      CodingToolSince = None
       CurrentSkill = codingToolData.CurrentSkill
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
@@ -258,6 +259,7 @@ let getWorktrees
               DeployBranch = deployBranch
               SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd
+              WorktreeSkills = readWorktreeSkills ()
               CollapsedRepos = readCollapsedRepos ()
               CanvasPaneOpen = readCanvasPaneOpen ()
               OverviewPanelOpen = readOverviewPanelOpen ()
@@ -398,7 +400,7 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; OverviewPanelOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; WorktreeSkills = readWorktreeSkills (); CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; OverviewPanelOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -575,8 +577,12 @@ let worktreeApi
                           let provider =
                               CodingToolStatus.readConfiguredProvider newPath
                               |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
-                          let skill = TreemonConfig.readDefaultSkill root
-                          let wrapped = CodingToolStatus.skillInvocation provider skill prompt
+                          // The chosen skill wraps the prompt; "None" (req.Skill = None) launches
+                          // the prompt verbatim, with no skill invocation.
+                          let wrapped =
+                              match req.Skill with
+                              | Some skill -> CodingToolStatus.skillInvocation provider skill prompt
+                              | None -> prompt
                           let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
                           // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
                           // throws on timeout, and Async.Ignore would swallow the Error case — an

@@ -248,6 +248,7 @@ type NavigationArchiveTests() =
           Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          CodingToolSince = None
           CurrentSkill = None
           LastUserMessage = None
           Pr = NoPr
@@ -362,7 +363,7 @@ type ArchiveE2ETests() =
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
-        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","CollapsedRepos":[],"CanvasPaneOpen":false,"OverviewPanelOpen":false,"CanvasPosition":"Right","CanvasSize":"Ratio1To1"}}"""
+        $"""{{"Repos":[{{"RepoId":{{"RepoId":"TestRepo"}},"RootFolderName":"TestRepo","Worktrees":[{wts}],"IsReady":true,"BaseBranch":"main"}}],"SchedulerEvents":[],"LatestByCategory":{{}},"AppVersion":"test","EditorName":"","WorktreeSkills":[],"CollapsedRepos":[],"CanvasPaneOpen":false,"OverviewPanelOpen":false,"CanvasPosition":"Right","CanvasSize":"Ratio1To1"}}"""
 
     let emptySyncStatus = "{}"
 
