@@ -3,6 +3,7 @@ module Tests.SessionActivityStoreTests
 open System
 open System.IO
 open NUnit.Framework
+open Microsoft.Data.Sqlite
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared
@@ -333,3 +334,75 @@ type PruneOldTests() =
     [<Test>]
     member _.``pruneOld on an empty store deletes nothing``() =
         withStore (fun store -> Assert.That(store.PruneOld(ts "2026-03-01T12:00:00Z"), Is.EqualTo(0)))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LegacyDoneStatusTests() =
+
+    // Pre-idle-only builds persisted the retired "done" status; live DBs still hold such rows. These
+    // exercise the two safety nets that keep those rows from crashing the unguarded reads
+    // (LoadLiveStatuses at startup, StatusesForWorktree on resume): the parseStatus "done" -> Idle read
+    // arm and the idempotent construction-time migration that rewrites 'done' rows to 'idle'.
+
+    let connStr (dbPath: string) =
+        SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+
+    /// Insert a raw session_status row with an arbitrary status text, bypassing the store's typed
+    /// writers (which can only emit the live vocabulary) — the shape of a row a pre-idle-only build
+    /// persisted with status='done'.
+    let insertRawStatus (dbPath: string) (sessionId: string) (worktree: string) (status: string) (tsStr: string) =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+
+        cmd.CommandText <-
+            "INSERT INTO session_status (session_id, worktree_path, provider, status, updated_at, last_seen)
+             VALUES ($sid, $wt, 'copilot_cli', $status, $ts, $ts);"
+
+        cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$wt", worktree) |> ignore
+        cmd.Parameters.AddWithValue("$status", status) |> ignore
+        cmd.Parameters.AddWithValue("$ts", (ts tsStr).ToUniversalTime().ToString("O")) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
+
+    let readRawStatus (dbPath: string) (sessionId: string) : string =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- "SELECT status FROM session_status WHERE session_id = $sid;"
+        cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
+        cmd.ExecuteScalar() :?> string
+
+    [<Test>]
+    member _.``A legacy 'done' status row reads back as Idle (parseStatus read arm)``() =
+        withDbPath (fun dbPath ->
+            use store = new SessionActivityStore(dbPath)
+            // Written AFTER construction so the migration does not touch it: proves parseStatus itself
+            // maps 'done' -> Idle rather than the read only surviving because of the migration.
+            insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:00:00Z"
+
+            let row = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.exactlyOne
+            Assert.That(row.Status.Status, Is.EqualTo(Idle), "legacy 'done' row must read as Idle, not crash"))
+
+    [<Test>]
+    member _.``LoadLiveStatuses does not crash on a legacy 'done' row (startup rehydrate)``() =
+        withDbPath (fun dbPath ->
+            (use _ = new SessionActivityStore(dbPath)
+             insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:30:00Z")
+
+            // Fresh instance = a server restart: LoadLiveStatuses is the unguarded startup read.
+            use reopened = new SessionActivityStore(dbPath)
+            let rows = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
+            Assert.That(rows |> List.map (fun r -> r.Status.Status), Is.EqualTo([ Idle ])))
+
+    [<Test>]
+    member _.``Construction migrates legacy 'done' status rows to 'idle' in place``() =
+        withDbPath (fun dbPath ->
+            // Seed a 'done' row, dispose, then reopen: the second construction runs the migration.
+            (use _ = new SessionActivityStore(dbPath)
+             insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:00:00Z")
+
+            use reopened = new SessionActivityStore(dbPath)
+            Assert.That(readRawStatus dbPath "legacy", Is.EqualTo("idle"), "stored row should be rewritten to 'idle'"))

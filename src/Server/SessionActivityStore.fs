@@ -69,6 +69,10 @@ let private parseStatus =
     | "working" -> Working
     | "waiting_for_user" -> WaitingForUser
     | "idle" -> Idle
+    // Backward-compat read arm: pre-idle-only builds persisted the retired "done" status. Live data/
+    // DBs still hold such rows; map them to Idle so startup rehydrate (LoadLiveStatuses) and the
+    // resume path (StatusesForWorktree) — both unguarded — don't hit failwithf and crash the read.
+    | "done" -> Idle
     | other -> failwithf "SessionActivityStore: unknown status text %A" other
 
 let private providerText =
@@ -154,6 +158,17 @@ CREATE TABLE IF NOT EXISTS activity_events (
     ts            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
+"""
+
+// One-time normalisation of legacy rows: pre-idle-only builds persisted the retired "done" status, so
+// existing DBs still carry status='done' rows. Rewrite them to 'idle' (the value 'done' now folds to)
+// so stored data matches the current vocabulary. Idempotent — a no-op once no 'done' rows remain — so
+// it is safe to re-run on every store construction. The parseStatus read arm still covers any 'done'
+// row written between construction and this migration landing (defence in depth).
+let private migrateSql =
+    """
+UPDATE session_status SET status = 'idle' WHERE status = 'done';
+UPDATE activity_events SET status = 'idle' WHERE status = 'done';
 """
 
 // Last-write-wins: on a session_id conflict the incoming row overwrites only when its updated_at is
@@ -262,7 +277,7 @@ type SessionActivityStore(dbPath: string) =
     let keepAlive =
         let c = openConn ()
         use cmd = c.CreateCommand()
-        cmd.CommandText <- schemaSql
+        cmd.CommandText <- schemaSql + migrateSql
         cmd.ExecuteNonQuery() |> ignore
         c
 
