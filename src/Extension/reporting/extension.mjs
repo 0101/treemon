@@ -265,16 +265,28 @@ function handle(event, isLive) {
 
 // --- Heartbeat ---------------------------------------------------------------------------------
 
-// Re-assert the current status so `last_seen` stays fresh. Only the two long-lived active states are
-// refreshed: a quiet Working (a long tool run) or a pending WaitingForUser must not decay to Idle via
-// the staleness net. Done is transient (session.idle follows) and Idle needs no refresh, so both are
-// left to decay naturally. The synthetic event uses a status-preserving kind (re-folding it is a
-// no-op on skill/messages) with a fresh eventId + now timestamp, so the server bumps last_seen without
-// altering anything else.
+// Re-assert the current status so `last_seen` stays fresh — the server's OPENNESS signal that
+// separates an idle-but-OPEN session (blue) from a closed one that has decayed (grey). EVERY live
+// status is refreshed:
+//   * working -> synthetic turn_started         (a quiet Working, e.g. a long tool run, must not
+//                                                 wrongly decay to Idle via the staleness net);
+//   * waiting -> synthetic awaiting_user_input   (a pending ask_user must not decay to Idle);
+//   * done / idle -> synthetic went_idle         (a status-preserving no-op fold — the server folds
+//                                                 BOTH turn_ended and went_idle -> Idle — so an OPEN
+//                                                 resting session keeps refreshing last_seen and stays
+//                                                 blue instead of decaying to grey).
+// We refresh on BOTH "done" and "idle": "done" (turn_ended) is normally transient with session.idle
+// following, but a finished-but-open turn that has not yet emitted session.idle must still stay fresh.
+// A genuinely-waiting session is never refreshed as idle — it collapses to "waiting" above (mapping to
+// awaiting_user_input), so the went_idle suppression / pendingAskUser invariant stays intact (while
+// pendingAskUser is set, currentStatus is "waiting"). The synthetic event uses a status-preserving kind
+// (re-folding it is a no-op on skill/messages) with a fresh eventId + now timestamp, so the server bumps
+// last_seen without altering anything else. Cadence (60s) stays comfortably under the server openWindow.
 function heartbeatTick() {
   let kind = null;
   if (currentStatus === "working") kind = "turn_started";
   else if (currentStatus === "waiting") kind = "awaiting_user_input";
+  else if (currentStatus === "done" || currentStatus === "idle") kind = "went_idle";
   if (!kind) return;
 
   postReport({

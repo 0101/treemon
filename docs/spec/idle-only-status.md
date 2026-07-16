@@ -130,6 +130,10 @@ Resolved during planning:
 3. **Explicit session-closed event.** **Decided: optional / nice-to-have.** A close-ping on
    SIGTERM/SIGINT gives an instant grey on clean exit; implement only if trivial, otherwise the
    openness window (~3 min) covers both clean exit and hard crash. Not required for correctness.
+   *(Evaluated and deferred during the `79w` heartbeat work: it is NOT trivial — none of the seven
+   wire kinds signals "closed", so an instant-grey close-ping would need a NEW server-side kind, out
+   of scope for the extension-only task. The openness window covers clean exit and hard crash alike,
+   so `cleanup` stays a pure timer-clear + unsubscribe.)*
 4. **`HasActiveSession` reconciliation.** **Decided: leave `HasActiveSession` (tmux/window) as-is** —
    it stays distinct from push "open session"; the coding-tool dot uses push openness only. No merge.
 
