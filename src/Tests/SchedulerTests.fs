@@ -1303,3 +1303,69 @@ type ExpediteRefreshTests() =
             Assert.That(state2.ExpeditedRepos |> Set.contains repo2, Is.True)
         }
         |> Async.RunSynchronously
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type RecordCodingToolSinceTests() =
+    let now = DateTimeOffset(2025, 1, 1, 12, 0, 0, TimeSpan.Zero)
+    let mtime = now.AddMinutes(-15.0)
+    let path = "/repo/a"
+
+    let ctS status skill lastActivity : Server.CodingToolStatus.CodingToolResult =
+        { Status = status
+          Provider = None
+          CurrentSkill = skill
+          LastUserMessage = None
+          LastAssistantMessage = None
+          LastMessageProvider = None
+          LastActivity = lastActivity }
+
+    let ct status lastActivity = ctS status None lastActivity
+
+    [<Test>]
+    member _.``First observation of an active status stamps the winning surface mtime``() =
+        let result = recordCodingToolSince now path None (ct Working (Some mtime)) Map.empty
+        Assert.That(Map.tryFind path result, Is.EqualTo(Some mtime))
+
+    [<Test>]
+    member _.``First observation without an mtime falls back to now``() =
+        let result = recordCodingToolSince now path None (ct Working None) Map.empty
+        Assert.That(Map.tryFind path result, Is.EqualTo(Some now))
+
+    [<Test>]
+    member _.``Unchanged status keeps the original stamp (time in category, not last write)``() =
+        let existing = Map.ofList [ path, mtime ]
+        let laterWrite = now.AddMinutes(-1.0)
+        let result = recordCodingToolSince now path (Some(ct Working None)) (ct Working (Some laterWrite)) existing
+        Assert.That(Map.tryFind path result, Is.EqualTo(Some mtime))
+
+    [<Test>]
+    member _.``A status transition re-stamps to the new surface mtime``() =
+        let existing = Map.ofList [ path, mtime ]
+        let stoppedAt = now.AddMinutes(-2.0)
+        let result = recordCodingToolSince now path (Some(ct Working None)) (ct Done (Some stoppedAt)) existing
+        Assert.That(Map.tryFind path result, Is.EqualTo(Some stoppedAt))
+
+    [<Test>]
+    member _.``Going Idle clears the stamp``() =
+        let existing = Map.ofList [ path, mtime ]
+        let result = recordCodingToolSince now path (Some(ct Working None)) (ct Idle None) existing
+        Assert.That(Map.containsKey path result, Is.False)
+
+    [<Test>]
+    member _.``A skill change that moves the activity re-stamps even though status stays Working``() =
+        let existing = Map.ofList [ path, mtime ]
+        let movedAt = now.AddMinutes(-1.0)
+        let prev = ctS Working (Some "investigate") None
+        let data = ctS Working (Some "bd-execute") (Some movedAt)
+        let result = recordCodingToolSince now path (Some prev) data existing
+        Assert.That(Map.tryFind path result, Is.EqualTo(Some movedAt))
+
+    [<Test>]
+    member _.``A skill change within the same activity keeps the stamp``() =
+        let existing = Map.ofList [ path, mtime ]
+        let prev = ctS Working (Some "investigate") None
+        let data = ctS Working (Some "investigate deeper") (Some(now.AddMinutes(-1.0)))
+        let result = recordCodingToolSince now path (Some prev) data existing
+        Assert.That(Map.tryFind path result, Is.EqualTo(Some mtime))

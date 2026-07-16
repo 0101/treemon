@@ -49,6 +49,11 @@ type GroupMember =
       Branch: string
       RepoId: RepoId
       RepoName: string
+      /// When the agent entered its current state — used to show the per-agent "time in category"
+      /// in the agent-group drill-down. Set (from the worktree's CodingToolSince) only for agent-group
+      /// members; always None for task-bucket members (passed explicitly, so the contract holds by
+      /// construction rather than convention).
+      Since: System.DateTimeOffset option
       Contribution: int }
 
 /// One non-empty task bucket: its kind, cross-worktree count, and the member worktrees that make it
@@ -133,11 +138,12 @@ let aggregate (repos: RepoWorktrees list) : Overview =
             |> List.filter (fun w -> not w.IsArchived)
             |> List.map (fun w -> r.RepoId, r.RootFolderName, w))
 
-    let memberOf repoId repoName (w: WorktreeStatus) contribution =
+    let memberOf repoId repoName since (w: WorktreeStatus) contribution =
         { ScopedKey = WorktreePath.value w.Path
           Branch = w.Branch
           RepoId = repoId
           RepoName = repoName
+          Since = since
           Contribution = contribution }
 
     // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
@@ -165,7 +171,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
             match contributionFor kind w with
-            | c when c > 0 -> Some(memberOf repoId repoName w c)
+            | c when c > 0 -> Some(memberOf repoId repoName None w c)
             | _ -> None)
 
     // Build members once per bucket, in canonical order; the count is Σ contribution over them.
@@ -199,7 +205,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
                     w.CodingTool = CodingToolStatus.Working && activityOf w = activity
                 | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
                 | AgentGroupKind.Stopped -> w.CodingTool = CodingToolStatus.Done
-            if isMember then Some(memberOf repoId repoName w 1) else None)
+            if isMember then Some(memberOf repoId repoName w.CodingToolSince w 1) else None)
 
     let agents =
         agentGroupOrder

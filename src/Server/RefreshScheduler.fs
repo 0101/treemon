@@ -14,6 +14,10 @@ type PerRepoState =
       BeadsData: Map<string, BeadsSummary>
       PlanningData: Map<string, BeadsPlanning>
       CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
+      /// When each worktree ENTERED its current coding-tool status, stamped at the transition and
+      /// frozen until the next one (dropped when it goes Idle). Drives the Overview band's per-agent
+      /// "time in category".
+      CodingToolSince: Map<string, DateTimeOffset>
       PrData: Map<string, PrStatus>
       CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
@@ -29,6 +33,7 @@ module PerRepoState =
           BeadsData = Map.empty
           PlanningData = Map.empty
           CodingToolData = Map.empty
+          CodingToolSince = Map.empty
           PrData = Map.empty
           CanvasData = Map.empty
           Provider = None
@@ -101,9 +106,42 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         BeadsData = repo.BeadsData |> Map.remove path
         PlanningData = repo.PlanningData |> Map.remove path
         CodingToolData = repo.CodingToolData |> Map.remove path
+        CodingToolSince = repo.CodingToolSince |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
 
-let private processMessage (state: DashboardState) (msg: StateMsg) =
+/// The Overview "category" a coding-tool scan maps to — the granularity CodingToolSince tracks so the
+/// drill-down's per-agent time reflects time-in-category. A Working agent is bucketed by its classified
+/// activity (Investigating/Executing/…, via the shared Activity.classify, matching the client's band
+/// grouping), so a mid-session skill switch is a real transition; every other status is its own single
+/// category. Idle is dropped before this is consulted.
+let private codingToolCategory (data: CodingToolStatus.CodingToolResult) : CodingToolStatus * CurrentActivity option =
+    match data.Status with
+    | CodingToolStatus.Working -> CodingToolStatus.Working, Some(Activity.classify (data.CurrentSkill |> Option.defaultValue ""))
+    | status -> status, None
+
+/// Update the per-worktree "entered current category at" stamp after observing a fresh coding-tool
+/// scan. Stamps (freezes) the moment a worktree ENTERS a new non-Idle Overview category — its
+/// classified activity while Working (so a mid-session skill switch re-stamps), else its status —
+/// keeps the existing stamp while the category is unchanged (so an agent shows time-in-its-current-
+/// activity, not time-since-last-write), and drops it when the agent goes Idle. The transition time is
+/// the winning surface's mtime (LastActivity), with `now` as the fallback when the scan carried no
+/// mtime. Since this map is in-memory, a restart re-derives every stamp from the current mtime on
+/// first observation: exact for a terminal Done/WaitingForUser surface (its mtime IS when it stopped),
+/// but a still-Working agent's stamp collapses to its recent last-write time until its next category
+/// change.
+let recordCodingToolSince
+    (now: DateTimeOffset)
+    (path: string)
+    (prev: CodingToolStatus.CodingToolResult option)
+    (data: CodingToolStatus.CodingToolResult)
+    (since: Map<string, DateTimeOffset>)
+    : Map<string, DateTimeOffset> =
+    match data.Status with
+    | CodingToolStatus.Idle -> since |> Map.remove path
+    | _ when prev |> Option.map codingToolCategory = Some(codingToolCategory data) && Map.containsKey path since -> since
+    | _ -> since |> Map.add path (data.LastActivity |> Option.defaultValue now)
+
+let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList(repoId, worktrees) ->
         let repo = getRepo repoId state
@@ -143,7 +181,13 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
     | UpdateCodingTool(repoId, path, data) ->
         let repo = getRepo repoId state
         if Set.contains path repo.KnownPaths then
-            updateRepo repoId { repo with CodingToolData = repo.CodingToolData |> Map.add path data } state
+            let prev = repo.CodingToolData |> Map.tryFind path
+            let since = recordCodingToolSince now path prev data repo.CodingToolSince
+            updateRepo repoId
+                { repo with
+                    CodingToolData = repo.CodingToolData |> Map.add path data
+                    CodingToolSince = since }
+                state
         else
             state
 
@@ -198,7 +242,7 @@ let createAgent () =
         let rec loop (state: DashboardState) =
             async {
                 let! msg = inbox.Receive()
-                let newState = processMessage state msg
+                let newState = processMessage DateTimeOffset.UtcNow state msg
                 return! loop newState
             }
 

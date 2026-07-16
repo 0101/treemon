@@ -145,7 +145,8 @@ let private assembleFromState
               CurrentSkill = None
               LastUserMessage = None
               LastAssistantMessage = None
-              LastMessageProvider = None }
+              LastMessageProvider = None
+              LastActivity = None }
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -157,6 +158,7 @@ let private assembleFromState
       Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
+      CodingToolSince = repo.CodingToolSince |> Map.tryFind wt.Path
       CurrentSkill = codingToolData.CurrentSkill
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr

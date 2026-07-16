@@ -248,6 +248,7 @@ type NavigationArchiveTests() =
           Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          CodingToolSince = None
           CurrentSkill = None
           LastUserMessage = None
           Pr = NoPr

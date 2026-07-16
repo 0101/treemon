@@ -538,6 +538,22 @@ type OverviewDataTests() =
         Assert.That(agentCount AgentGroupKind.Stopped result, Is.EqualTo(Some(members |> List.length)))
 
     [<Test>]
+    member _.``Agent members carry the worktree's CodingToolSince (time in category)``() =
+        let since = System.DateTimeOffset(2025, 1, 1, 12, 0, 0, System.TimeSpan.Zero)
+        let stopped = { agentWt CodingToolStatus.Done None with CodingToolSince = Some since }
+        let result = aggregate [ repo [ at "/wt/s1" "stop-1" stopped ] ]
+        let members = agentMembers AgentGroupKind.Stopped result
+        Assert.That(members |> List.map _.Since, Is.EqualTo([ Some since ]))
+
+    [<Test>]
+    member _.``Task-bucket members always have Since = None, even when the worktree carries one``() =
+        let since = System.DateTimeOffset(2025, 1, 1, 12, 0, 0, System.TimeSpan.Zero)
+        let wt = { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with CodingToolSince = Some since }
+        let result = aggregate [ repo [ at "/wt/1" "b1" wt ] ]
+        let members = taskMembers TaskBucketKind.InProgress result
+        Assert.That(members |> List.forall (fun m -> m.Since = None))
+
+    [<Test>]
     member _.``Task bucket Count equals the sum of its member Contributions``() =
         let result =
             aggregate

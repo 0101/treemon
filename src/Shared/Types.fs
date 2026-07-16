@@ -248,6 +248,10 @@ type WorktreeStatus =
       Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      /// When the agent entered its current Overview category — its classified activity while Working
+      /// (Investigating/Executing/…), else its status (WaitingForUser/Done). Recorded at the transition
+      /// so the Overview band can show "time in category". None when Idle or no session was observed.
+      CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
