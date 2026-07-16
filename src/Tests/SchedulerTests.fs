@@ -266,6 +266,32 @@ type StateAgentTests() =
         |> Async.RunSynchronously
 
     [<Test>]
+    member _.``Failed worktree discovery retains the existing list``() =
+        async {
+            let agent = createAgent ()
+
+            let worktrees =
+                [ makeWorktree "/repo/main" "main"
+                  makeWorktree "/repo/feature" "feature" ]
+
+            agent.Post(UpdateWorktreeList(testRepoId, worktrees))
+            do! waitForAgent agent
+
+            // A git failure surfaces as None from listWorktrees, so executeTask posts
+            // nothing — driving the exact skip-on-None decision used in production.
+            worktreeListUpdate testRepoId None |> Option.iter agent.Post
+            do! waitForAgent agent
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
+
+            Assert.That(repo.WorktreeList.Length, Is.EqualTo(2), "a failed discovery must not blank the last-known-good list")
+            Assert.That(repo.WorktreeList |> List.map _.Path, Is.EquivalentTo([ "/repo/main"; "/repo/feature" ]))
+            Assert.That(repo.IsReady, Is.True)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
     member _.``Event ring buffer caps at 50``() =
         async {
             let agent = createAgent ()
@@ -435,6 +461,35 @@ type StateAgentTests() =
             Assert.That(r2.WorktreeList[0].Path, Is.EqualTo("/repo2/main"))
         }
         |> Async.RunSynchronously
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type WorktreeListUpdateTests() =
+
+    [<Test>]
+    member _.``Successful discovery produces an UpdateWorktreeList message``() =
+        let worktrees = [ makeWorktree "/repo/main" "main" ]
+
+        match worktreeListUpdate testRepoId (Some worktrees) with
+        | Some(UpdateWorktreeList(repoId, wts)) ->
+            Assert.That(repoId, Is.EqualTo(testRepoId))
+            Assert.That(wts, Is.EqualTo(worktrees))
+        | other -> Assert.Fail($"Expected Some(UpdateWorktreeList ...) but got {other}")
+
+    [<Test>]
+    member _.``Empty-but-successful discovery still produces an update``() =
+        match worktreeListUpdate testRepoId (Some []) with
+        | Some(UpdateWorktreeList(repoId, wts)) ->
+            Assert.That(repoId, Is.EqualTo(testRepoId))
+            Assert.That(wts, Is.Empty)
+        | other -> Assert.Fail($"Expected Some(UpdateWorktreeList ...) but got {other}")
+
+    [<Test>]
+    member _.``Failed discovery (None) produces no message``() =
+        let result = worktreeListUpdate testRepoId None
+        Assert.That(result, Is.EqualTo(None))
 
 
 [<TestFixture>]

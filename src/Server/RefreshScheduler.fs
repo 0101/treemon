@@ -380,6 +380,12 @@ let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
 let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
     repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
 
+/// Maps a worktree-discovery result to the state update to post. `None` means the
+/// git call failed, so no update is produced and the repo's last-known-good worktree
+/// list is retained rather than blanked by a transient git hiccup.
+let worktreeListUpdate (repoId: RepoId) (discovered: GitWorktree.WorktreeInfo list option) : StateMsg option =
+    discovered |> Option.map (fun worktrees -> UpdateWorktreeList(repoId, worktrees))
+
 let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
@@ -397,7 +403,7 @@ let private executeTask
             let root = rootPaths |> Map.find repoId
             let! worktrees = GitWorktree.listWorktrees root
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
-            agent.Post(UpdateWorktreeList(repoId, worktrees))
+            worktreeListUpdate repoId worktrees |> Option.iter agent.Post
             agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
             let baseBranch = TreemonConfig.readBaseBranch root
             agent.Post(UpdateBaseBranch(repoId, baseBranch))
