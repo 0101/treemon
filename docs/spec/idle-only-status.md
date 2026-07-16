@@ -171,6 +171,25 @@ Resolved during the `azk` implementation (openness + time-since-idle):
    stay `None` on the push path (time-in-*activity* needs the client's activity classification and is
    out of this task's scope — time-since-idle is the target).
 
+Resolved during the `frvsched` implementation (F10/F11 lifecycle hygiene for `CodingToolSinceByWorktree`):
+
+9. **Prune the global idle stamp on worktree removal (F10/C-13).** `CodingToolSinceByWorktree` lives on
+   `DashboardState` (global), so it can't be pruned inside `removeWorktreeData` (which only touches a
+   `PerRepoState`). The `RemoveWorktree` and `UpdateWorktreeList` handlers now `Map.remove` the removed
+   path(s) from it directly. Without this a removed-then-recreated path inherited a stale FROZEN stamp
+   (`stampIdleSince` freezes existing keys), overstating the chip on reuse. Impact was masked (WorktreeApi
+   only surfaces the stamp while the real-`now` status is Idle), but the leak is now closed and a
+   path-reuse regression test guards it.
+10. **Restart seeding stamps from the NEWEST per-worktree session, not the oldest replayed (F11/C-14).**
+   `LoadLiveStatuses` replays oldest-first; feeding rows one-by-one through `UpdateSessionStatus` let the
+   oldest idle row stamp and FREEZE the chip, locking in a stale timestamp so the chip OVERSTATED
+   time-since-idle for the whole post-restart idle span (not merely reset). Fixed with a batch
+   `SeedSessionStatuses` scheduler message (posted by `SessionActivityService.Start`) that seeds the map
+   in one shot (identical final live set — eviction measures against the global newest either way) and
+   stamps each worktree's chip from its newest session's `last_seen`, collapsed at that time. This
+   delivers the accepted "resets on restart" behaviour of Decision #8 **without** reversing the seed
+   order to DESC.
+
 ## Related Specs
 
 - `docs/spec/session-status-push.md` — the push model this refines (feature s16).

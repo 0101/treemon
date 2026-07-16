@@ -306,7 +306,10 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
     /// are correct before any new event arrives; then arms the retention timer.
     member _.Start() =
         let loaded = store.LoadLiveStatuses DateTimeOffset.UtcNow
-        loaded |> List.iter (fun s -> scheduler.Post(RefreshScheduler.UpdateSessionStatus s))
+        // Seed the scheduler in ONE batch so the time-since-idle chip is stamped from each worktree's
+        // NEWEST session rather than the oldest-replayed row (LoadLiveStatuses is ordered oldest-first);
+        // feeding rows individually would freeze a stale idle stamp and overstate the chip (F11/C-14).
+        scheduler.Post(RefreshScheduler.SeedSessionStatuses loaded)
         mailbox.Post(Seed loaded)
         Log.log "Activity" $"Rebuilt {List.length loaded} live session status(es) from store"
         pruneTimer <- Some(new Timer(TimerCallback(prune), null, pruneInterval, pruneInterval))

@@ -1474,3 +1474,131 @@ type CodingToolSinceByWorktreeTests() =
             Assert.That(sinceFor reidled, Is.EqualTo(Some reidledAt), "re-stamped at the new Idle transition")
         }
         |> Async.RunSynchronously
+
+
+// F10/C-13: CodingToolSinceByWorktree lives on DashboardState (GLOBAL), so — unlike SessionStatuses
+// (evicted) or the per-repo data (removeWorktreeData) — it must be pruned when a worktree leaves.
+// Otherwise a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince freezes
+// existing keys), overstating the chip on reuse.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CodingToolSincePruningTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+    let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
+
+    [<Test>]
+    member _.``RemoveWorktree drops the worktree's time-since-idle stamp``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle t0))
+            let! stamped = agent.PostAndAsyncReply(GetState)
+
+            agent.Post(RemoveWorktree(testRepoId, wtA))
+            let! pruned = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor stamped, Is.EqualTo(Some t0), "stamped on entering Idle")
+            Assert.That(sinceFor pruned, Is.EqualTo None, "stamp pruned on worktree removal")
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``UpdateWorktreeList prunes the stamp for a worktree dropped from the list``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(UpdateWorktreeList(testRepoId, [ makeWorktree wtA "feat" ]))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle t0))
+            let! stamped = agent.PostAndAsyncReply(GetState)
+
+            // The next discovery no longer lists wtA (removed) → its global stamp must be pruned.
+            agent.Post(UpdateWorktreeList(testRepoId, []))
+            let! pruned = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor stamped, Is.EqualTo(Some t0))
+            Assert.That(sinceFor pruned, Is.EqualTo None, "stamp pruned when the worktree leaves the list")
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``A reused worktree path gets a FRESH idle stamp, not the pre-removal frozen one``() =
+        async {
+            let agent = createAgent ()
+            // Worktree goes idle, is removed (pruning the stamp), then the path is reused by a NEW
+            // session that also goes idle 10 min later. Without the prune, stampIdleSince would freeze
+            // the old t0 stamp and the chip would overstate the reused session's idle time.
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle t0))
+            agent.Post(RemoveWorktree(testRepoId, wtA))
+
+            let reusedAt = t0 + TimeSpan.FromMinutes 10.0
+            agent.Post(UpdateSessionStatus(storedWt "s2" wtA Idle reusedAt))
+            let! reused = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor reused, Is.EqualTo(Some reusedAt), "fresh stamp after reuse, not the frozen t0")
+        }
+        |> Async.RunSynchronously
+
+
+// F11/C-14: on restart the store replays live statuses OLDEST-first (LoadLiveStatuses ORDER BY
+// last_seen). Feeding them one-by-one through UpdateSessionStatus lets the oldest idle row stamp and
+// FREEZE the chip, locking in a stale timestamp instead of the current open session's — the chip then
+// OVERSTATES time-since-idle. SeedSessionStatuses seeds in one batch and stamps each worktree from its
+// NEWEST session (the accepted "resets on restart" behaviour), WITHOUT reversing the seed order.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SeedSessionStatusesTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+    let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
+
+    [<Test>]
+    member _.``Seeding stamps time-since-idle from the newest per-worktree session, not the oldest replayed``() =
+        async {
+            let agent = createAgent ()
+            // Oldest-first, as LoadLiveStatuses returns: a long-stale idle session, then the current open
+            // idle session 90 min later — both within the 2h idle window (so both survive eviction).
+            let staleAt = t0
+            let currentAt = t0 + TimeSpan.FromMinutes 90.0
+            agent.Post(
+                SeedSessionStatuses
+                    [ storedWt "stale" wtA Idle staleAt
+                      storedWt "current" wtA Idle currentAt ])
+            let! seeded = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(
+                sinceFor seeded,
+                Is.EqualTo(Some currentAt),
+                "chip stamped from the newest (current) session, not the stale oldest-replayed one")
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Seeding a Working worktree leaves no idle stamp``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(SeedSessionStatuses [ storedWt "s1" wtA Working t0 ])
+            let! seeded = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor seeded, Is.EqualTo None)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Seeding preserves the full live status set (same as replaying each row)``() =
+        async {
+            let agent = createAgent ()
+            let staleAt = t0
+            let currentAt = t0 + TimeSpan.FromMinutes 90.0
+            agent.Post(
+                SeedSessionStatuses
+                    [ storedWt "stale" wtA Idle staleAt
+                      storedWt "current" wtA Idle currentAt ])
+            let! seeded = agent.PostAndAsyncReply(GetState)
+
+            let ids = seeded.SessionStatuses |> Map.keys |> Seq.map SessionId.value |> Set.ofSeq
+            Assert.That(ids, Is.EqualTo(Set.ofList [ "stale"; "current" ]))
+        }
+        |> Async.RunSynchronously

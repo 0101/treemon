@@ -89,6 +89,11 @@ type StateMsg =
     /// mailbox after folding an ingested event. Stored keyed by SessionId so a worktree's live
     /// sessions can later be collapsed (pickActive) into the card's coding-tool fields.
     | UpdateSessionStatus of SessionActivityStore.StoredStatus
+    /// Restart rebuild: seed the whole live-status map in one shot (rows arrive oldest-first from
+    /// LoadLiveStatuses) and stamp each worktree's time-since-idle from its NEWEST session — never the
+    /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
+    /// chip for the whole post-restart idle span (F11/C-14).
+    | SeedSessionStatuses of SessionActivityStore.StoredStatus list
 
 let private maxEvents = 50
 
@@ -173,7 +178,15 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                 KnownPaths = newPaths
                 IsReady = true }
 
-        updateRepo repoId updated state
+        // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
+        // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
+        // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
+        // freezes existing keys), overstating the chip on reuse (F10/C-13).
+        let prunedSince =
+            removedPaths
+            |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
+
+        updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
 
     | UpdateGit(repoId, path, gitData) ->
         let repo = getRepo repoId state
@@ -218,7 +231,10 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
     | RemoveWorktree(repoId, path) ->
         let repo = getRepo repoId state
-        updateRepo repoId (removeWorktreeData path repo) state
+        // Also drop the worktree's GLOBAL time-since-idle stamp (same reason as UpdateWorktreeList —
+        // it lives on DashboardState, not PerRepoState, so removeWorktreeData can't reach it; F10/C-13).
+        let prunedSince = state.CodingToolSinceByWorktree |> Map.remove path
+        updateRepo repoId (removeWorktreeData path repo) { state with CodingToolSinceByWorktree = prunedSince }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -264,6 +280,36 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             SessionStatuses = newStatuses
             CodingToolSinceByWorktree =
                 stampIdleSince stored.LastSeen worktreePath collapsed.Status state.CodingToolSinceByWorktree }
+
+    | SeedSessionStatuses stored ->
+        // Restart rebuild. LoadLiveStatuses replays rows OLDEST-first; feeding them one-by-one through
+        // UpdateSessionStatus lets the oldest idle row stamp+FREEZE the chip, so a long-stale idle
+        // session's timestamp gets locked in instead of the current open session's — the chip then
+        // OVERSTATES time-since-idle for the whole post-restart idle span (F11/C-14). Instead seed the
+        // map in one shot (same final set as replaying each row: evict measures against the global
+        // newest), then stamp each worktree's chip from its NEWEST session's last_seen, collapsed at
+        // that time. That yields the accepted "chip resets on restart" behaviour (Decision #8) rather
+        // than an overstated old stamp — WITHOUT reversing the seed order to DESC.
+        let seeded =
+            (state.SessionStatuses, stored)
+            ||> List.fold (fun m s -> Map.add s.SessionId s m)
+            |> evictStaleStatuses
+
+        let idleSince =
+            seeded
+            |> Map.toList
+            |> List.map snd
+            |> List.groupBy (fun s -> WorktreePath.value s.WorktreePath)
+            |> List.fold
+                (fun acc (worktreePath, sessions) ->
+                    let newestSeen = sessions |> List.map _.LastSeen |> List.max
+                    let collapsed = CodingToolStatus.fromPushSessions newestSeen sessions
+                    stampIdleSince newestSeen worktreePath collapsed.Status acc)
+                state.CodingToolSinceByWorktree
+
+        { state with
+            SessionStatuses = seeded
+            CodingToolSinceByWorktree = idleSince }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
