@@ -208,6 +208,25 @@ Resolved during the `frvw` implementation (worktree-monitor.md `Done`-vocab reco
    broader push-model rewrite of that section (and the stale Key-Files/detector inventory) stays out of
    scope — the orphaned `expected-statuses.jsonl` fixture is still untouched per Decision #6.
 
+Resolved during the `frvf9` implementation (file-size-limit F9/C-03):
+
+12. **Time-since-idle tests extracted to `CodingToolSinceTests.fs`; goal is "stop this diff from bloating
+   the file", not an absolute sub-1000 `SchedulerTests.fs`.** The `file-size-limit` rule flags a file only
+   when it is **both** over 1000 lines **and** the diff significantly grows it — "already-large files that
+   aren't growing much are not flagged". The idle-only feature added the whole `CodingToolSince` test block
+   to `SchedulerTests.fs`, so the fix is to move that diff-added block out. All four cohesive time-since-idle
+   fixtures — `StampIdleSinceTests`, `CodingToolSinceByWorktreeTests`, `CodingToolSincePruningTests`,
+   `SeedSessionStatusesTests` — plus their shared `wtA`/`storedWt` helpers moved verbatim to the new
+   `src/Tests/CodingToolSinceTests.fs` (module `Tests.CodingToolSinceTests`), registered in `Tests.fsproj`
+   **before** `SchedulerTests.fs`. The new module is self-contained: `createAgent`/`emptyStatus`/`stampIdleSince`
+   come from the opened `Server.*` modules, and the two tiny local helpers it also needs (`testRepoId`,
+   `makeWorktree`) are re-declared `let private` (they stay in `SchedulerTests.fs` too — no shared-helper
+   coupling across the compile boundary). **Divergence from the finding's "keep the remaining file under the
+   limit" wording:** `SchedulerTests.fs` lands at ~1376 lines (was 1604), still nominally over 1000, but the
+   remaining bulk (scheduler core + `BuildTaskList` phase family + eviction) is *pre-existing* and untouched by
+   this diff, so the rule no longer fires — driving it under 1000 would mean extracting unrelated fixtures,
+   which is scope creep beyond the finding. No behavior change; 89 CodingToolSince + Scheduler tests pass.
+
 ## Related Specs
 
 - `docs/spec/session-status-push.md` — the push model this refines (feature s16).

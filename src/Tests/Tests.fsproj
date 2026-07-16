@@ -13,6 +13,7 @@
     <Compile Include="MultiRepoApiTests.fs" />
     <Compile Include="DashboardTests.fs" />
     <Compile Include="GitParsingTests.fs" />
+    <Compile Include="CodingToolSinceTests.fs" />
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="IdleDetectionTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
