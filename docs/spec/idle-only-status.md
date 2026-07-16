@@ -148,6 +148,29 @@ Resolved during the `abd` implementation (the atomic DU reshape):
    replay test described in `worktree-monitor.md` doesn't exist in the tree). It belongs to the
    extension/worktree-monitor domain (task `azk`), so it's out of scope here and was not modified.
 
+Resolved during the `azk` implementation (openness + time-since-idle):
+
+7. **Footer keeps the ACTIVE winner when one runs, else falls back to most-recent-any.** The spec's
+   "footer from most-recent-*any*" is specifically the fix for the idle/no-session case where the old
+   `pickActive`-only collapse returned `None` and blanked everything. When an active session IS
+   running, its fields are still the footer (so an older Working session isn't hidden by a newer,
+   empty, just-idled sibling — the existing `pickActive` contract). So `fromPushSessions` sources the
+   footer from `pickActive` when it wins, else the most-recent session of any status. Decouples the
+   footer from the dot only where it matters (idle/no-session), keeping the active-session footer
+   intact.
+8. **`CodingToolSince` is in-memory server state, stamped event-driven in the scheduler.** Because an
+   open idle session heartbeats every ~60 s (its `last_seen` keeps advancing), the transition
+   timestamp can't be read live. `DashboardState.CodingToolSinceByWorktree` (a per-worktree
+   `Map<path, DateTimeOffset>`) is stamped once by `stampIdleSince` when `UpdateSessionStatus`
+   re-collapses a worktree into `Idle` (using the triggering event's time as the turn-end stamp),
+   frozen across subsequent idle heartbeats, and cleared when the status leaves Idle. It is fed to
+   `WorktreeStatus.CodingToolSince` only while the authoritative (real-`now` openness) status is still
+   `Idle`, so a stale stamp for a worktree that has since decayed to grey is ignored. In-memory only:
+   a restart re-stamps from the reloaded sessions (chip resets on restart — acceptable; persisting the
+   transition timestamp was the heavier alternative and not required). Working/WaitingForUser chips
+   stay `None` on the push path (time-in-*activity* needs the client's activity classification and is
+   out of this task's scope — time-since-idle is the target).
+
 ## Related Specs
 
 - `docs/spec/session-status-push.md` — the push model this refines (feature s16).

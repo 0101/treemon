@@ -51,11 +51,63 @@ type FromPushSessionsTests() =
         Assert.That(fromPushSessions now [], Is.EqualTo noSessionPushResult)
 
     [<Test>]
-    member _.``All-Idle sessions yield the blank NoSession card``() =
+    member _.``Stale idle sessions past the open window collapse to grey NoSession``() =
+        // Both were last seen well over openWindow (~3 min) ago, so neither is an OPEN session — the
+        // worktree has no live CLI and reads as NoSession (grey). They carry no footer data, so the
+        // card renders blank.
         let sessions =
             [ stored "a" "wt" Idle None None None "2026-03-01T11:00:00Z"
               stored "b" "wt" Idle None None None "2026-03-01T11:30:00Z" ]
-        Assert.That(fromPushSessions now sessions, Is.EqualTo noSessionPushResult)
+        let result = fromPushSessions now sessions
+        Assert.That(result.Status, Is.EqualTo NoSession)
+        Assert.That(result.CurrentSkill, Is.EqualTo None)
+        Assert.That(result.LastUserMessage, Is.EqualTo None)
+        Assert.That(result.LastAssistantMessage, Is.EqualTo None)
+
+    [<Test>]
+    member _.``An open idle session collapses to blue Idle``() =
+        // Seen ~1 min ago (inside openWindow) but Idle → the CLI is open and the agent is parked:
+        // blue Idle, not grey NoSession.
+        let session = stored "a" "wt" Idle None None None "2026-03-01T11:59:00Z"
+        Assert.That((fromPushSessions now [ session ]).Status, Is.EqualTo Idle)
+
+    [<Test>]
+    member _.``A session exactly at the open-window edge is not open (grey)``() =
+        // now - last_seen = openWindow exactly; the strict `< openWindow` predicate excludes it, so it
+        // is NOT open → NoSession.
+        let atEdge =
+            stored "a" "wt" Idle None None None ((now - openWindow).ToString("O"))
+        Assert.That((fromPushSessions now [ atEdge ]).Status, Is.EqualTo NoSession)
+
+    [<Test>]
+    member _.``An open idle worktree keeps its retained footer (skill + messages)``() =
+        // The bug fix: going Idle must NOT blank the footer. The just-idled session retains its last
+        // user/assistant messages and skill through the fold, so the card footer stays populated.
+        let session =
+            stored "a" "wt" Idle (Some "bd-execute")
+                (Some(msg "ship it" "2026-03-01T11:58:00Z"))
+                (Some(msg "done, all green" "2026-03-01T11:58:30Z"))
+                "2026-03-01T11:59:00Z"
+        let result = fromPushSessions now [ session ]
+        Assert.That(result.Status, Is.EqualTo Idle)
+        Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
+        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "ship it"))
+        Assert.That(result.LastAssistantMessage |> Option.map _.Message, Is.EqualTo(Some "done, all green"))
+
+    [<Test>]
+    member _.``A NoSession worktree with retained data keeps its footer``() =
+        // No OPEN session (last seen ~1 h ago, past openWindow) → grey NoSession dot, but the retained
+        // session still carries the last prompt/reply so the footer/event-log does not vanish.
+        let session =
+            stored "a" "wt" Idle (Some "review")
+                (Some(msg "look at auth" "2026-03-01T10:58:00Z"))
+                (Some(msg "which file?" "2026-03-01T10:58:30Z"))
+                "2026-03-01T11:00:00Z"
+        let result = fromPushSessions now [ session ]
+        Assert.That(result.Status, Is.EqualTo NoSession)
+        Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
+        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "look at auth"))
+        Assert.That(result.LastAssistantMessage |> Option.map _.Message, Is.EqualTo(Some "which file?"))
 
     [<Test>]
     member _.``The most-recent active session wins and every field comes from it``() =
@@ -63,7 +115,7 @@ type FromPushSessionsTests() =
             stored "old" "wt" Working (Some "old-skill")
                 (Some(msg "old prompt" "2026-03-01T10:00:00Z"))
                 (Some(msg "old reply" "2026-03-01T10:00:01Z"))
-                "2026-03-01T11:57:00Z"
+                "2026-03-01T11:58:00Z"
         let newer =
             stored "new" "wt" WaitingForUser (Some "review")
                 (Some(msg "the auth module" "2026-03-01T11:40:00Z"))
@@ -81,7 +133,8 @@ type FromPushSessionsTests() =
     [<Test>]
     member _.``A just-idled newer session does not hide an actively-working sibling``() =
         // The key collapse rule: drop Idle FIRST, then most-recent active wins — NOT raw latest
-        // last_seen. The idle sibling is newer but must not win.
+        // last_seen. The idle sibling is newer but must not win the STATUS, and the FOOTER stays on
+        // the active session (the active winner, not the newer idle one).
         let active =
             stored "active" "wt" Working (Some "bd-execute")
                 (Some(msg "go" "2026-03-01T11:58:00Z")) None
@@ -94,13 +147,14 @@ type FromPushSessionsTests() =
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
 
     [<Test>]
-    member _.``A stale (crashed) active session reads as Idle and drops out of the pick``() =
-        // No went_idle emitted, but last_seen is older than the staleness timeout → the crash net
-        // rewrites it to Idle, so pickActive drops it and the card goes blank.
+    member _.``A stale (crashed) active session is not open, so the worktree is grey NoSession``() =
+        // No went_idle emitted and last_seen is well past both openWindow and the staleness timeout →
+        // the session is not OPEN, so it drops out of the status collapse and the worktree reads as
+        // grey NoSession (a dead agent goes straight to grey, never a lingering blue).
         let stale =
             stored "stale" "wt" Working (Some "review") None None
                 (((now - stalenessTimeout).AddMinutes -1.0).ToString("O"))
-        Assert.That(fromPushSessions now [ stale ], Is.EqualTo noSessionPushResult)
+        Assert.That((fromPushSessions now [ stale ]).Status, Is.EqualTo NoSession)
 
     [<Test>]
     member _.``A stale active session loses to a fresh active sibling``() =
@@ -159,10 +213,16 @@ type CollapseByWorktreeTests() =
         Assert.That(byWt["wt-b"].CurrentSkill, Is.EqualTo(Some "investigate"))
 
     [<Test>]
-    member _.``A worktree with only idle sessions collapses to the blank NoSession card``() =
+    member _.``A worktree with only an OPEN idle session collapses to blue Idle``() =
         let sessions = [ stored "a" "wt-a" Idle None None None "2026-03-01T11:59:00Z" ]
         let byWt = collapseByWorktree now sessions
-        Assert.That(byWt["wt-a"], Is.EqualTo noSessionPushResult)
+        Assert.That(byWt["wt-a"].Status, Is.EqualTo Idle)
+
+    [<Test>]
+    member _.``A worktree with only a STALE idle session collapses to grey NoSession``() =
+        let sessions = [ stored "a" "wt-a" Idle None None None "2026-03-01T11:00:00Z" ]
+        let byWt = collapseByWorktree now sessions
+        Assert.That(byWt["wt-a"].Status, Is.EqualTo NoSession)
 
     [<Test>]
     member _.``An empty live set yields an empty map``() =

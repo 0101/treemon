@@ -1374,3 +1374,103 @@ type SessionStatusEvictionTests() =
             Assert.That(ids, Is.EqualTo(Set.ofList [ "fresh" ]))
         }
         |> Async.RunSynchronously
+
+
+// The time-since-idle chip (WorktreeStatus.CodingToolSince) is stamped ONCE when a worktree's
+// collapsed coding-tool status enters Idle, FROZEN across the idle heartbeats that keep advancing
+// last_seen (so it reads time-in-category, not time-since-last-write), and MOVED (cleared, then
+// re-stamped) by a new Working turn. stampIdleSince is the pure core; the mailbox test drives the
+// real UpdateSessionStatus path end to end.
+
+let private wtA = "C:/wt/a"
+
+let private storedWt (sid: string) (wt: string) (status: CodingToolStatus) (seen: DateTimeOffset) : StoredStatus =
+    { SessionId = SessionId sid
+      WorktreePath = WorktreePath wt
+      Provider = CopilotCli
+      Status = { emptyStatus with Status = status }
+      UpdatedAt = seen
+      LastSeen = seen }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type StampIdleSinceTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+
+    [<Test>]
+    member _.``Entering Idle stamps the transition time``() =
+        let result = stampIdleSince t0 wtA Idle Map.empty
+        Assert.That(result |> Map.tryFind wtA, Is.EqualTo(Some t0))
+
+    [<Test>]
+    member _.``A second Idle poll freezes the original stamp``() =
+        let stamped = stampIdleSince t0 wtA Idle Map.empty
+        // A later idle heartbeat (last_seen advanced) must NOT move the stamp.
+        let frozen = stampIdleSince (t0 + TimeSpan.FromSeconds 60.0) wtA Idle stamped
+        Assert.That(frozen |> Map.tryFind wtA, Is.EqualTo(Some t0))
+
+    [<Test>]
+    member _.``Leaving Idle for Working clears the stamp``() =
+        let stamped = stampIdleSince t0 wtA Idle Map.empty
+        let cleared = stampIdleSince (t0 + TimeSpan.FromSeconds 60.0) wtA Working stamped
+        Assert.That(cleared |> Map.containsKey wtA, Is.False)
+
+    [<Test>]
+    member _.``WaitingForUser and NoSession both clear the stamp``() =
+        let stamped = stampIdleSince t0 wtA Idle Map.empty
+        Assert.That(stampIdleSince t0 wtA WaitingForUser stamped |> Map.containsKey wtA, Is.False)
+        Assert.That(stampIdleSince t0 wtA NoSession stamped |> Map.containsKey wtA, Is.False)
+
+    [<Test>]
+    member _.``Stamps for different worktrees are independent``() =
+        let m = stampIdleSince t0 wtA Idle Map.empty
+        let m2 = stampIdleSince (t0 + TimeSpan.FromMinutes 1.0) "C:/wt/b" Idle m
+        Assert.That(m2 |> Map.tryFind wtA, Is.EqualTo(Some t0))
+        Assert.That(m2 |> Map.tryFind "C:/wt/b", Is.EqualTo(Some(t0 + TimeSpan.FromMinutes 1.0)))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CodingToolSinceByWorktreeTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+
+    let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
+
+    [<Test>]
+    member _.``CodingToolSince is stamped on entering Idle, frozen across idle heartbeats, and moved by a new Working turn``() =
+        async {
+            let agent = createAgent ()
+            // Working — no idle stamp yet.
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Working t0))
+            let! working = agent.PostAndAsyncReply(GetState)
+
+            // turn_ended → Idle: stamp the turn-end time (t0 + 30s).
+            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle idledAt))
+            let! entered = agent.PostAndAsyncReply(GetState)
+
+            // Two idle heartbeats 60s/120s later keep advancing last_seen — the stamp must NOT move.
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle (idledAt + TimeSpan.FromSeconds 60.0)))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle (idledAt + TimeSpan.FromSeconds 120.0)))
+            let! frozen = agent.PostAndAsyncReply(GetState)
+
+            // A new Working turn moves the chip off the idle stamp.
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Working (idledAt + TimeSpan.FromSeconds 180.0)))
+            let! resumed = agent.PostAndAsyncReply(GetState)
+
+            // Idle again → a NEW stamp at the new turn-end time.
+            let reidledAt = idledAt + TimeSpan.FromSeconds 240.0
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle reidledAt))
+            let! reidled = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor working, Is.EqualTo None, "no idle stamp while Working")
+            Assert.That(sinceFor entered, Is.EqualTo(Some idledAt), "stamped at the Idle transition")
+            Assert.That(sinceFor frozen, Is.EqualTo(Some idledAt), "frozen across idle heartbeats")
+            Assert.That(sinceFor resumed, Is.EqualTo None, "cleared by a new Working turn")
+            Assert.That(sinceFor reidled, Is.EqualTo(Some reidledAt), "re-stamped at the new Idle transition")
+        }
+        |> Async.RunSynchronously

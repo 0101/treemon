@@ -113,6 +113,16 @@ let stalenessTimeout = TimeSpan.FromMinutes 5.0
 /// existing idle cutoff): sessions quiet longer than this are not considered live.
 let idleWindow = TimeSpan.FromHours 2.0
 
+/// The OPENNESS window — how recently a session must have been seen to count as an "open" (live) CLI
+/// for the worktree's status dot. The extension heartbeats every ~60s (HEARTBEAT_INTERVAL_MS),
+/// re-asserting even an idle session, so an open CLI keeps `last_seen` fresh while a closed/crashed
+/// one goes stale within a few missed beats. Deliberately a SMALL multiple of the heartbeat (~3
+/// beats) — DISTINCT from the 2 h `idleWindow` (memory eviction / resume) and, per Decision 2,
+/// SMALLER than `stalenessTimeout` (5 min): openness filters a dead Working session out (→ grey /
+/// NoSession) before the crash-net would rewrite it to Idle, so a dead agent goes straight to grey
+/// rather than lingering blue.
+let openWindow = TimeSpan.FromMinutes 3.0
+
 /// Crash net ONLY: a Working/WaitingForUser status whose `last_seen` is older than the staleness
 /// timeout reads as Idle. `session.idle` (WentIdle) already sets Idle directly, so an explicitly-idle
 /// session is unaffected. `last_seen` is the direct analogue of the old file mtime.

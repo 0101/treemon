@@ -49,7 +49,14 @@ type DashboardState =
       // growing append-only. This is the substrate the worktree card's coding-tool fields collapse
       // over (pickActive) — see the push-only repoint task; today it is populated but not yet read by
       // WorktreeApi.
-      SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus> }
+      SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>
+      // Per-worktree "entered Idle" timestamp for the time-since-idle chip (WorktreeStatus.CodingToolSince).
+      // Keyed by the (normalised) worktree path. Stamped ONCE when a worktree's collapsed coding-tool
+      // status transitions INTO Idle (the turn-end / last-active time), then FROZEN across the idle
+      // heartbeats that keep advancing last_seen (so the chip shows time-in-category, not
+      // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
+      // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
+      CodingToolSinceByWorktree: Map<string, DateTimeOffset> }
 
 module DashboardState =
     let empty =
@@ -60,7 +67,8 @@ module DashboardState =
           ExpeditedRepos = Set.empty
           ClientActivity = ActivityLevel.Idle
           ClientActivityAt = DateTimeOffset.MinValue
-          SessionStatuses = Map.empty }
+          SessionStatuses = Map.empty
+          CodingToolSinceByWorktree = Map.empty }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
@@ -127,6 +135,26 @@ let internal evictStaleStatuses
         let newest = statuses |> Seq.map (fun kv -> kv.Value.LastSeen) |> Seq.max
         let cutoff = newest - SessionActivity.idleWindow
         statuses |> Map.filter (fun _ s -> s.LastSeen >= cutoff)
+
+/// Stamp / freeze / clear a worktree's time-since-idle timestamp from its freshly-collapsed
+/// coding-tool status. Pure so it is unit-testable in isolation:
+///   * status = Idle → stamp `now` on the FIRST entry, then FREEZE (keep the existing stamp across
+///     the idle heartbeats that keep advancing last_seen — the chip must show time-IN-category, not
+///     time-since-last-write);
+///   * status = Working / WaitingForUser / NoSession → clear the entry (a new Working turn moves the
+///     chip; a lost session leaves no idle time).
+/// `worktreePath` is the normalised path key (`WorktreePath.value`) that WorktreeApi looks up.
+let internal stampIdleSince
+    (now: DateTimeOffset)
+    (worktreePath: string)
+    (status: CodingToolStatus)
+    (idleSince: Map<string, DateTimeOffset>)
+    : Map<string, DateTimeOffset> =
+    match status with
+    | Idle -> if Map.containsKey worktreePath idleSince then idleSince else idleSince |> Map.add worktreePath now
+    | Working
+    | WaitingForUser
+    | NoSession -> idleSince |> Map.remove worktreePath
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -215,11 +243,27 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         // Add the fresh report, then evict entries past the idle window (measured against the newest
         // LastSeen) so the map stays bounded and mirrors the store's live cache instead of growing
         // append-only.
+        let newStatuses =
+            state.SessionStatuses
+            |> Map.add stored.SessionId stored
+            |> evictStaleStatuses
+
+        // Re-collapse THIS worktree's live sessions (using the freshest observed time as `now`) to see
+        // whether it just entered / left Idle, then stamp / freeze / clear the time-since-idle chip.
+        let worktreePath = WorktreePath.value stored.WorktreePath
+
+        let worktreeSessions =
+            newStatuses
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun s -> s.WorktreePath = stored.WorktreePath)
+
+        let collapsed = CodingToolStatus.fromPushSessions stored.LastSeen worktreeSessions
+
         { state with
-            SessionStatuses =
-                state.SessionStatuses
-                |> Map.add stored.SessionId stored
-                |> evictStaleStatuses }
+            SessionStatuses = newStatuses
+            CodingToolSinceByWorktree =
+                stampIdleSince stored.LastSeen worktreePath collapsed.Status state.CodingToolSinceByWorktree }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->

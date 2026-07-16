@@ -131,6 +131,7 @@ let private assembleFromState
     (archivedBranches: Set<string>)
     (hasTestFailureLog: bool)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
+    (codingToolSince: Map<string, DateTimeOffset>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
@@ -155,7 +156,15 @@ let private assembleFromState
       Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
-      CodingToolSince = None
+      // Time-since-idle: the frozen "entered Idle" timestamp for this worktree, surfaced ONLY while
+      // its authoritative (openness-driven) status is still Idle. A stale stamp for a worktree that
+      // has since decayed to NoSession/Working is ignored by the status guard.
+      CodingToolSince =
+        match codingToolData.Status with
+        | Idle -> codingToolSince |> Map.tryFind wt.Path
+        | Working
+        | WaitingForUser
+        | NoSession -> None
       CurrentSkill = codingToolData.CurrentSkill
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
@@ -221,10 +230,13 @@ let getWorktrees
         let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
 
         // Collapse the push live state (all live sessions, keyed by SessionId) to one coding-tool
-        // result per worktree once, up front: each worktree's sessions → pickActive winner. Shared
-        // across every repo/worktree assembly below (SessionStatuses is global, not per-repo).
+        // result per worktree once, up front: each worktree's sessions → openness-driven status +
+        // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
+        // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
         let pushByWorktree =
             CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+
+        let codingToolSince = state.CodingToolSinceByWorktree
 
         let repos =
             state.Repos
@@ -240,7 +252,7 @@ let getWorktrees
                     |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState activeSessionPaths archivedBranches hasLog pushByWorktree repo wt)
+                        assembleFromState activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
 
                 let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
