@@ -133,6 +133,17 @@ Resolved during planning:
 4. **`HasActiveSession` reconciliation.** **Decided: leave `HasActiveSession` (tmux/window) as-is** —
    it stays distinct from push "open session"; the coding-tool dot uses push openness only. No merge.
 
+Resolved during the `abd` implementation (the atomic DU reshape):
+
+5. **`idlePushResult` renamed to `noSessionPushResult`.** Its `Status` is now `NoSession` (the blank
+   grey default a quiet worktree collapses to until openness lights up blue `Idle`), so the old
+   `idle*` name was misleading. Same value, clearer name; call sites in `CodingToolStatus.fs`,
+   `WorktreeApi.fs`, and `CodingToolPushSourceTests.fs` updated together.
+6. **Orphaned `expected-statuses.jsonl` fixture left untouched.** `src/Tests/fixtures/claude/multi-session/expected-statuses.jsonl`
+   still carries a trailing `"status": "Done"`, but no F#/JS code references it (its `getStatusFromFiles`
+   replay test described in `worktree-monitor.md` doesn't exist in the tree). It belongs to the
+   extension/worktree-monitor domain (task `azk`), so it's out of scope here and was not modified.
+
 ## Related Specs
 
 - `docs/spec/session-status-push.md` — the push model this refines (feature s16).

@@ -97,7 +97,7 @@
             "LastCommitMessage": "Initial experiment with caching",
             "LastCommitTime": "2026-02-10T08:00:00+00:00",
             "Beads": { "Open": 1, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 42,
@@ -110,7 +110,7 @@
             "LastCommitMessage": "Final cleanup before merge",
             "LastCommitTime": "2026-02-15T16:00:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 8 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": {
               "HasPr": {
@@ -179,7 +179,7 @@
             "LastCommitMessage": "Add multi-doc canvas artifacts",
             "LastCommitTime": "2026-02-16T22:45:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 0,
@@ -195,7 +195,7 @@
             "LastCommitMessage": "Update configuration defaults",
             "LastCommitTime": "2026-02-16T18:00:00+00:00",
             "Beads": { "Open": 2, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 10,
@@ -215,7 +215,7 @@
             "LastCommitMessage": "Add CI workflow and contributing guide",
             "LastCommitTime": "2026-02-22T15:12:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": {
               "HasPr": {
@@ -248,7 +248,7 @@
             "LastCommitMessage": "Add editorconfig for consistent formatting",
             "LastCommitTime": "2026-02-22T15:10:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": {
               "HasPr": {
@@ -281,7 +281,7 @@
             "LastCommitMessage": "Multi-repo support implementation",
             "LastCommitTime": "2026-02-22T14:00:00+00:00",
             "Beads": { "Open": 1, "InProgress": 1, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 3,

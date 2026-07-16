@@ -47,15 +47,15 @@ let private now = ts "2026-03-01T12:00:00Z"
 type FromPushSessionsTests() =
 
     [<Test>]
-    member _.``No sessions yields the blank Idle card``() =
-        Assert.That(fromPushSessions now [], Is.EqualTo idlePushResult)
+    member _.``No sessions yields the blank NoSession card``() =
+        Assert.That(fromPushSessions now [], Is.EqualTo noSessionPushResult)
 
     [<Test>]
-    member _.``All-Idle sessions yield the blank Idle card``() =
+    member _.``All-Idle sessions yield the blank NoSession card``() =
         let sessions =
             [ stored "a" "wt" Idle None None None "2026-03-01T11:00:00Z"
               stored "b" "wt" Idle None None None "2026-03-01T11:30:00Z" ]
-        Assert.That(fromPushSessions now sessions, Is.EqualTo idlePushResult)
+        Assert.That(fromPushSessions now sessions, Is.EqualTo noSessionPushResult)
 
     [<Test>]
     member _.``The most-recent active session wins and every field comes from it``() =
@@ -100,7 +100,7 @@ type FromPushSessionsTests() =
         let stale =
             stored "stale" "wt" Working (Some "review") None None
                 (((now - stalenessTimeout).AddMinutes -1.0).ToString("O"))
-        Assert.That(fromPushSessions now [ stale ], Is.EqualTo idlePushResult)
+        Assert.That(fromPushSessions now [ stale ], Is.EqualTo noSessionPushResult)
 
     [<Test>]
     member _.``A stale active session loses to a fresh active sibling``() =
@@ -159,10 +159,10 @@ type CollapseByWorktreeTests() =
         Assert.That(byWt["wt-b"].CurrentSkill, Is.EqualTo(Some "investigate"))
 
     [<Test>]
-    member _.``A worktree with only idle sessions collapses to the blank Idle card``() =
+    member _.``A worktree with only idle sessions collapses to the blank NoSession card``() =
         let sessions = [ stored "a" "wt-a" Idle None None None "2026-03-01T11:59:00Z" ]
         let byWt = collapseByWorktree now sessions
-        Assert.That(byWt["wt-a"], Is.EqualTo idlePushResult)
+        Assert.That(byWt["wt-a"], Is.EqualTo noSessionPushResult)
 
     [<Test>]
     member _.``An empty live set yields an empty map``() =

@@ -128,9 +128,9 @@ type FoldStatusTests() =
         Assert.That(s.LastAssistantMessage, Is.EqualTo(Some prior))
 
     [<Test>]
-    member _.``TurnEnded yields Done``() =
+    member _.``TurnEnded yields Idle``() =
         let s = foldMany emptyStatus [ TurnStarted; TurnEnded ]
-        Assert.That(s.Status, Is.EqualTo(Done))
+        Assert.That(s.Status, Is.EqualTo(Idle))
 
     [<Test>]
     member _.``WentIdle yields Idle``() =
@@ -172,7 +172,7 @@ type FoldSkillTests() =
 
     [<Test>]
     member _.``A new request after a completed turn ends the prior skill``() =
-        // Status is Done (not WaitingForUser) when the prompt arrives, so keepSkill is false.
+        // Status is Idle (not WaitingForUser) when the prompt arrives, so keepSkill is false.
         let events =
             [ SkillInvoked "review"
               AssistantMessage(msg "review complete" "2026-03-01T10:00:02Z")

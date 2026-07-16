@@ -143,7 +143,7 @@ let private assembleFromState
     let codingToolData =
         pushByWorktree
         |> Map.tryFind wt.Path
-        |> Option.defaultValue CodingToolStatus.idlePushResult
+        |> Option.defaultValue CodingToolStatus.noSessionPushResult
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 

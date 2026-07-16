@@ -10,9 +10,9 @@ module OverviewData
 //     instead. Every other bucket sums across all (non-archived) worktrees.
 //   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
 //     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
-//     agents parked on the user (CodingTool = WaitingForUser, yellow dot), PLUS a distinct Stopped
-//     group for agents that finished their turn (CodingTool = Done, blue dot). Idle (grey) is still
-//     excluded, and terminal presence (HasActiveSession) never inflates the counts.
+//     agents parked on the user (CodingTool = WaitingForUser, yellow dot), PLUS a distinct Idle
+//     group for agents with an open-but-idle session (CodingTool = Idle, blue dot). NoSession (grey,
+//     no open session) is excluded, and terminal presence (HasActiveSession) never inflates the counts.
 // Empty buckets/groups are omitted (never surfaced as a 0), and Scale is the one true shared linear
 // scale — the largest task-bucket count — so the view sizes every bar against a single denominator.
 //
@@ -25,7 +25,7 @@ module OverviewData
 open Shared
 
 /// A cross-worktree task status bucket. RequireQualifiedAccess keeps Done/InProgress/Blocked from
-/// colliding with CodingToolStatus.Done and the BeadsSummary field labels (same reason
+/// colliding with the BeadsSummary field labels and other DU cases (same reason
 /// CurrentActivity is qualified). The case list order below is the band's canonical left-to-right
 /// display order.
 [<RequireQualifiedAccess>]
@@ -63,14 +63,14 @@ type GroupMember =
 type TaskBucket = { Kind: TaskBucketKind; Count: int; Members: GroupMember list }
 
 /// What an agent group represents: a skill-derived activity (a red-dot WORKING agent), the distinct
-/// "waiting for user" state (yellow dot), or the "stopped" state (blue dot — an agent that finished
-/// its turn, CodingTool = Done). Modeled as a kind so the band can render Waiting and Stopped
-/// alongside the activity groups; Stopped is a second track sharing the same Agents row.
+/// "waiting for user" state (yellow dot), or the "idle" state (blue dot — an agent with an
+/// open-but-idle session, CodingTool = Idle). Modeled as a kind so the band can render Waiting and
+/// Idle alongside the activity groups; Idle is a second track sharing the same Agents row.
 [<RequireQualifiedAccess>]
 type AgentGroupKind =
     | Activity of CurrentActivity
     | Waiting
-    | Stopped
+    | Idle
 
 /// One non-empty agent group: its kind, how many agents belong to it, and the member worktrees
 /// (each contributing 1, so Count = Members.Length). Empty groups are dropped, so a present group
@@ -113,9 +113,10 @@ let private activityOrder =
       CurrentActivity.Working ]
 
 // Canonical order of the agent groups: the activity groups (in the order above), then the Waiting
-// group, then the Stopped group LAST — the blue-dot Done agents trail the live (working/waiting) ones.
+// group, then the Idle group LAST — the blue-dot idle (open-but-idle) agents trail the live
+// (working/waiting) ones.
 let private agentGroupOrder =
-    (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting; AgentGroupKind.Stopped ]
+    (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting; AgentGroupKind.Idle ]
 
 /// The activity a WORKING worktree's current skill classifies to. An absent skill classifies to
 /// Working (classify normalizes "" -> Working), matching the spec's "red-dot agent, no recognized
@@ -148,7 +149,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
 
     // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
     // live buckets when their worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser);
-    // on an inactive worktree (Done/Idle) they are likely stale beads status nobody is working, so
+    // on an inactive worktree (Idle/NoSession) they are likely stale beads status nobody is working, so
     // they fold into the muted Unattended catch-all instead. Archived worktrees never reach here
     // (dropped when building taggedWorktrees), so every bucket sums only non-archived worktrees.
     // Planned folds Loose in (Loose -> Planned, decision #6). This single per-worktree predicate is
@@ -191,11 +192,12 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let scale = taskGroups |> List.map (fun (_, _, count) -> count) |> List.max
 
     // Agent groups: red-dot WORKING agents (CodingTool = Working) grouped by their classified
-    // activity, a distinct Waiting group (CodingTool = WaitingForUser), and a distinct Stopped group
-    // (CodingTool = Done — the blue-dot agents that finished a turn). HasActiveSession is NOT used —
-    // it also covers Idle terminals, which would inflate the counts with parked agents; Idle (grey)
-    // is excluded entirely. Each member contributes 1, so Count = Members.Length. Empty groups
-    // omitted; Waiting then Stopped sort last.
+    // activity, a distinct Waiting group (CodingTool = WaitingForUser), and a distinct Idle group
+    // (CodingTool = Idle — the blue-dot agents with an open-but-idle session, each carrying
+    // CodingToolSince for the time-since-idle chip). HasActiveSession is NOT used — it also covers
+    // Idle terminals, which would inflate the counts with parked agents; NoSession (grey, no open
+    // session) is excluded entirely (not an agent). Each member contributes 1, so Count =
+    // Members.Length. Empty groups omitted; Waiting then Idle sort last.
     let agentMembersFor kind =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
@@ -204,7 +206,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
                 | AgentGroupKind.Activity activity ->
                     w.CodingTool = CodingToolStatus.Working && activityOf w = activity
                 | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
-                | AgentGroupKind.Stopped -> w.CodingTool = CodingToolStatus.Done
+                | AgentGroupKind.Idle -> w.CodingTool = CodingToolStatus.Idle
             if isMember then Some(memberOf repoId repoName w.CodingToolSince w 1) else None)
 
     let agents =

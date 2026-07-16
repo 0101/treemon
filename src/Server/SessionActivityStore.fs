@@ -61,14 +61,13 @@ let private statusText =
     function
     | Working -> "working"
     | WaitingForUser -> "waiting_for_user"
-    | Done -> "done"
     | Idle -> "idle"
+    | NoSession -> failwith "SessionActivityStore: NoSession is a worktree-level collapse result, never a stored per-session status"
 
 let private parseStatus =
     function
     | "working" -> Working
     | "waiting_for_user" -> WaitingForUser
-    | "done" -> Done
     | "idle" -> Idle
     | other -> failwithf "SessionActivityStore: unknown status text %A" other
 

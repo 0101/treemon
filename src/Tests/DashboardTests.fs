@@ -75,14 +75,15 @@ type DashboardTests() =
 
     [<TestCase("working", "rgb(255, 0, 0)")>]
     [<TestCase("waiting", "rgb(249, 226, 175)")>]
-    [<TestCase("idle", "rgb(88, 91, 112)")>]
+    [<TestCase("idle", "rgb(137, 180, 250)")>]
+    [<TestCase("nosession", "rgb(88, 91, 112)")>]
     [<Category("Fast")>]
     member this.``CT dot has correct background color``(status: string, expectedColor: string) =
         task {
             let dots = this.Page.Locator($".ct-dot.{status}")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} Claude worktrees; {status} dots should be present")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} worktrees; {status} dots should be present")
 
             let! bg = dots.First |> computedStyle "backgroundColor"
             Assert.That(bg, Is.EqualTo(expectedColor), $"CT dot .{status} background color")
@@ -152,7 +153,7 @@ type DashboardTests() =
                 cssClass,
                 Does.Contain("working")
                     .Or.Contain("waiting")
-                    .Or.Contain("done")
+                    .Or.Contain("nosession")
                     .Or.Contain("idle")
             )
         }
@@ -169,8 +170,8 @@ type DashboardTests() =
                 cardClass,
                 Does.Contain("ct-working")
                     .Or.Contain("ct-waiting")
-                    .Or.Contain("ct-done")
                     .Or.Contain("ct-idle")
+                    .Or.Contain("ct-nosession")
             )
         }
 
@@ -1217,7 +1218,7 @@ type DashboardTests() =
     [<Test>]
     member this.``No commit grid on branches with zero commits``() =
         task {
-            let idleCard = this.Page.Locator(".wt-card.ct-idle")
+            let idleCard = this.Page.Locator(".wt-card.ct-nosession")
             do! idleCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let grids = idleCard.First.Locator(".commit-grid")
             let! count = grids.CountAsync()
@@ -3432,20 +3433,20 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Idle cards have no user-prompt but have git-commit-msg``() =
+    member this.``No-session cards have no user-prompt but have git-commit-msg``() =
         task {
-            let idleCard = this.Page.Locator(".wt-card.ct-idle").First
+            let idleCard = this.Page.Locator(".wt-card.ct-nosession").First
             do! idleCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let userPrompt = idleCard.Locator(".user-prompt")
             let! promptCount = userPrompt.CountAsync()
             Assert.That(promptCount, Is.EqualTo(0),
-                "Idle card without LastUserMessage should not have user-prompt")
+                "No-session card without LastUserMessage should not have user-prompt")
 
             let gitCommitMsg = idleCard.Locator(".git-commit-msg")
             let! msgCount = gitCommitMsg.CountAsync()
             Assert.That(msgCount, Is.EqualTo(1),
-                "Idle card should still have git-commit-msg in main-behind-row")
+                "No-session card should still have git-commit-msg in main-behind-row")
         }
 
     [<Test>]

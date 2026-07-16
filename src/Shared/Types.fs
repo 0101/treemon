@@ -52,8 +52,8 @@ module BeadsPlanning =
 type CodingToolStatus =
     | Working
     | WaitingForUser
-    | Done
     | Idle
+    | NoSession
 
 type CodingToolProvider =
     | Claude
@@ -249,8 +249,8 @@ type WorktreeStatus =
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
       /// When the agent entered its current Overview category — its classified activity while Working
-      /// (Investigating/Executing/…), else its status (WaitingForUser/Done). Recorded at the transition
-      /// so the Overview band can show "time in category". None when Idle or no session was observed.
+      /// (Investigating/Executing/…), else its status (WaitingForUser/Idle). Recorded at the transition
+      /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option

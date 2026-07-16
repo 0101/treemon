@@ -155,7 +155,7 @@ let private wtAzDoMain: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
       Planning = BeadsPlanning.zero
-      CodingTool = Idle
+      CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
       CurrentSkill = None
@@ -221,7 +221,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
-      CodingTool = Done
+      CodingTool = Idle
       CodingToolProvider = Some Copilot
       CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
       CurrentSkill = None
@@ -243,7 +243,7 @@ let private wtArchived: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddHours(-48.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
       Planning = BeadsPlanning.zero
-      CodingTool = Done
+      CodingTool = Idle
       CodingToolProvider = Some Claude
       CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
       CurrentSkill = None
@@ -265,7 +265,7 @@ let private wtGithubMain: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-15.0)
       Beads = BeadsSummary.zero
       Planning = BeadsPlanning.zero
-      CodingTool = Idle
+      CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
       CurrentSkill = None
@@ -309,7 +309,7 @@ let private wtCsvFix: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       Planning = BeadsPlanning.zero
-      CodingTool = Done
+      CodingTool = Idle
       CodingToolProvider = Some Copilot
       CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
       CurrentSkill = None
@@ -391,13 +391,13 @@ let private baseFixture: FixtureData =
 // ============================================================
 // FRAME SEQUENCE — 12 frames, 24s total
 //
-// Starting state: 3 Working (retry, config, streaming) + 1 Done (auth)
+// Starting state: 3 Working (retry, config, streaming) + 1 Idle (auth)
 // Each frame changes ONE card. Distributed over time.
 //
 // Story arcs:
 //   retry-logic: Building → Failed → fix → Rebuilding → Succeeded
 //   config:      working steadily, commits accumulate
-//   auth:        Done → user prompt → Working → Copilot events → Done (loops)
+//   auth:        Idle → user prompt → Working → Copilot events → Idle (loops)
 //   streaming:   steady background work
 // ============================================================
 
@@ -455,10 +455,10 @@ let private f7 =
             WorkMetrics = Some { CommitCount = 13; LinesAdded = 612; LinesRemoved = 131 } })
     |> withCpu 68.0 16800
 
-// F8 (14-16s): Auth — Copilot finishes, back to Done (matches base)
+// F8 (14-16s): Auth — Copilot finishes, back to Idle (matches base)
 let private f8 =
     f7
-    |> withAuth (fun wt -> { wt with CodingTool = Done; CodingToolSince = Some baseTimestamp })
+    |> withAuth (fun wt -> { wt with CodingTool = Idle; CodingToolSince = Some baseTimestamp })
     |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800

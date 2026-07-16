@@ -12,15 +12,15 @@ let ctClassName =
     function
     | Working        -> "working"
     | WaitingForUser -> "waiting"
-    | Done           -> "done"
     | Idle           -> "idle"
+    | NoSession      -> "nosession"
 
 let ctTooltip =
     function
     | Working        -> "Working"
     | WaitingForUser -> "Waiting for user"
-    | Done           -> "Done"
     | Idle           -> "Idle"
+    | NoSession      -> "No session"
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with

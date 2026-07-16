@@ -9,8 +9,8 @@ module OverviewBand
 // category a column whose count+label meta line sits ABOVE its visual (count FIRST in the accent
 // colour, label neutral, same size/weight):
 //   - Agents        -> a row of ~15px CIRCLES, one per agent, grouped by activity (red-dot working
-//                      agents), plus the distinct Waiting group (yellow) and Stopped group (blue-dot
-//                      Done agents that finished a turn).
+//                      agents), plus the distinct Waiting group (yellow) and Idle group (blue-dot
+//                      agents with an open-but-idle session).
 //   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. Each bar
 //                      carries an inline `--bar-fill` custom property = count / Overview.Scale (its
 //                      share of the largest bucket); CSS multiplies that by a RESPONSIVE shared max
@@ -70,19 +70,19 @@ let private activityClass =
     | CurrentActivity.Working -> "activity-working"
 
 // Display label per agent group: the skill-derived activity, the distinct Waiting group, or the
-// distinct Stopped group (blue-dot Done agents).
+// distinct Idle group (blue-dot agents with an open-but-idle session).
 let private agentLabel =
     function
     | AgentGroupKind.Activity activity -> activityLabel activity
     | AgentGroupKind.Waiting -> "Waiting"
-    | AgentGroupKind.Stopped -> "Stopped"
+    | AgentGroupKind.Idle -> "Idle"
 
 // Accent-color modifier class per agent group (same currentColor scheme as activityClass).
 let private agentClass =
     function
     | AgentGroupKind.Activity activity -> activityClass activity
     | AgentGroupKind.Waiting -> "activity-waiting"
-    | AgentGroupKind.Stopped -> "activity-stopped"
+    | AgentGroupKind.Idle -> "activity-idle"
 
 /// The count+label meta line shown ABOVE each visual: count FIRST in the accent colour, label
 /// neutral, both the same font size/weight so they differ only by colour (prototype `.ulbl`). The

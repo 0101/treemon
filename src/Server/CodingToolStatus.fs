@@ -77,10 +77,12 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 // sessions is unrepresentable. Resume is a DISTINCT pick (getLastSessionId): the most-recent
 // session regardless of active/idle (the session the user last touched).
 
-/// The Idle default a worktree card shows when it has no live/active push session (all Idle, all
-/// stale, or none reported) — the same blank card an unmonitored worktree shows.
-let idlePushResult: CodingToolResult =
-    { Status = Idle
+/// The default a worktree card shows when it has no live/active push session (all Idle, all
+/// stale, or none reported) — the same blank GREY card an unmonitored worktree shows. Until the
+/// server-openness follow-up lights up live blue Idle, the push path yields Working | WaitingForUser
+/// | NoSession, so a quiet worktree collapses here to NoSession (grey), matching today's blank card.
+let noSessionPushResult: CodingToolResult =
+    { Status = NoSession
       Provider = None
       CurrentSkill = None
       LastUserMessage = None
@@ -104,17 +106,17 @@ let private toLastAssistantEvent (m: Message) : CardEvent =
       Duration = None }
 
 /// Collapse a worktree's live push sessions into the card's coding-tool fields. Each session is
-/// freshness-adjusted first (a Working/WaitingForUser/Done whose `last_seen` is older than the
+/// freshness-adjusted first (a Working/WaitingForUser whose `last_seen` is older than the
 /// staleness timeout reads as Idle — the crash safety-net — so it drops out of the pick), then
 /// `pickActive` picks the most-recent ACTIVE winner and ALL displayed fields are read from that ONE
-/// session. No live/active session → the Idle default (blank fields).
+/// session. No live/active session → the NoSession default (blank grey fields).
 let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
     let adjusted =
         sessions
         |> List.map (fun s -> SessionActivity.freshnessAdjusted now s.LastSeen s.Status, s.LastSeen)
 
     match SessionActivity.pickActive adjusted with
-    | None -> idlePushResult
+    | None -> noSessionPushResult
     | Some s ->
         // The winner is the most-recent ACTIVE session, so its last-seen (the newest among the
         // non-Idle sessions) is the card's "last did something" time.

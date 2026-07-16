@@ -87,7 +87,7 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
         { s with
             Status = WaitingForUser
             LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage) }
-    | TurnEnded -> { s with Status = Done }
+    | TurnEnded -> { s with Status = Idle }
     | WentIdle -> { s with Status = Idle }
     | UserPrompt m ->
         // A reply to an ask_user keeps the running skill; any other prompt is a new request that ends
@@ -113,7 +113,7 @@ let stalenessTimeout = TimeSpan.FromMinutes 5.0
 /// existing idle cutoff): sessions quiet longer than this are not considered live.
 let idleWindow = TimeSpan.FromHours 2.0
 
-/// Crash net ONLY: a Working/WaitingForUser/Done status whose `last_seen` is older than the staleness
+/// Crash net ONLY: a Working/WaitingForUser status whose `last_seen` is older than the staleness
 /// timeout reads as Idle. `session.idle` (WentIdle) already sets Idle directly, so an explicitly-idle
 /// session is unaffected. `last_seen` is the direct analogue of the old file mtime.
 let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: SessionStatus) : SessionStatus =
