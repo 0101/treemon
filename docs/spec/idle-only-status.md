@@ -22,6 +22,13 @@ in the Overview with a "time since idle" readout.
   `CodingToolSince`). Worktrees with no open session are **not** agents and stay out of the dimension.
 - Keep the existing crash safety-net: a Working/WaitingForUser session whose heartbeat has lapsed
   decays so a dead session never shows as actively running.
+- **Card footer persists whenever we have data.** The last user prompt, last assistant message, and
+  running skill stay on the card footer for a worktree whenever that data exists — going Idle (or
+  losing the open session) must NOT blank the footer. This is a bug in the current push build: the
+  status collapse (`pickActive`) drops Idle sessions, so an idle worktree returns the blank
+  `idlePushResult` and the footer/event-log disappears. Footer data must be sourced from the
+  most-recent session (most-recent-*any*, like resume), decoupled from the status-dot's open-session
+  collapse.
 
 ## Expected Behavior
 
@@ -89,6 +96,17 @@ signal. (Optional, decided below: also emit an explicit close on SIGTERM/SIGINT 
   advancing, and reading it live would reset the chip to ~0 every poll (time-since-*last-write*, not
   time-*in-category*). Capture once at the transition and hold it (per-worktree server state or a
   persisted transition timestamp); a new `Working` turn clears/moves it.
+- **Footer data persists (bug fix)**: today `fromPushSessions` reads *all* card fields — status **and**
+  the last user/assistant messages + skill — from the single `pickActive` winner, and `pickActive`
+  drops Idle sessions, so an idle-only worktree returns the blank `idlePushResult` and the card
+  footer/event-log vanishes. **Decouple** the two: the status dot comes from the open-session collapse
+  (above), but `LastUserMessage` / last-assistant / `CurrentSkill` are sourced from the **most-recent
+  session that has them** (most-recent-*any*, the same pick `getLastSessionId` uses for resume), so the
+  footer stays populated while the session is idle and while any session for the worktree remains in
+  the store (retention/`idleWindow`). The client footer is already data-driven (`hasContent` in
+  `CardViews.fs` keys off `LastUserMessage`/`CurrentSkill`), so no client change is needed once the
+  server stops blanking the data — but confirm the footer renders for Idle and NoSession worktrees that
+  have retained messages.
 
 ### 4. Client: dots + Overview Idle group
 - Card dot (`CardViews.fs` `ctClassName`/`ctTooltip`, `index.html` `.ct-dot.*`): `Idle -> blue`
