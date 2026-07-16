@@ -415,7 +415,7 @@ let private f2 =
 // F3 (4-6s): Auth — Copilot starts working (dot changes, event updates)
 let private f3 =
     f2
-    |> withAuth (fun wt -> { wt with CodingTool = Working })
+    |> withAuth (fun wt -> { wt with CodingTool = Working; CodingToolSince = Some baseTimestamp })
     |> withCardEvt authKey
         (evt "copilot" "Reading authorization middleware" 1 None None)
     |> withCpu 45.0 14800
@@ -458,7 +458,7 @@ let private f7 =
 // F8 (14-16s): Auth — Copilot finishes, back to Done (matches base)
 let private f8 =
     f7
-    |> withAuth (fun wt -> { wt with CodingTool = Done })
+    |> withAuth (fun wt -> { wt with CodingTool = Done; CodingToolSince = Some baseTimestamp })
     |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800
@@ -521,6 +521,7 @@ let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) 
     let shift = now - baseTimestamp
     { wt with
         LastCommitTime = wt.LastCommitTime + shift
+        CodingToolSince = wt.CodingToolSince |> Option.map (fun ts -> ts + shift)
         LastUserMessage =
             wt.LastUserMessage
             |> Option.map (fun (msg, ts) -> msg, ts + shift) }
