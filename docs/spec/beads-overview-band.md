@@ -66,7 +66,7 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 | **In progress** | Tasks with status `in_progress` (`Beads.InProgress`) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
 | **Blocked** | Tasks with status `blocked` (`Beads.Blocked`). |
 | **Done** | Σ closed **issues** (any type) across **non-archived** worktrees (`Beads.Closed` where `not IsArchived`). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed issues drop out when the worktree is merged/deleted. Only filter is `not IsArchived`. |
-| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Done` or `Idle`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
+| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Idle` or `NoSession`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
 
 The **Planned/Queued/Loose** split derives from the **parent-child dependency graph + feature
 status**: for each open task, find its parent feature (parent-child edge) and read that feature's
@@ -209,7 +209,7 @@ the solution compiling (no compat shims, per house rules).
   `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
   Blocked, Done = Σ Closed) + agent groups (`CodingTool = Working` grouped by
   `Activity.classify` of `CurrentSkill`, absent skill ⇒ Working; `CodingTool = WaitingForUser` ⇒
-  Waiting; `CodingTool = Done` ⇒ Stopped; `Idle` excluded) + `Scale` (the largest bucket count — the
+  Waiting; `CodingTool = Idle` ⇒ Idle; `NoSession` excluded) + `Scale` (the largest bucket count — the
   one true shared linear denominator). **Archived
   worktrees are excluded from the entire roll-up** (every task bucket and every agent group), so
   archiving a worktree drops all of its contributions at once. Empty buckets/groups are omitted
