@@ -2,7 +2,6 @@ module Tests.ServerParsingTests
 
 open NUnit.Framework
 open Server.PrStatus
-open Server.ClaudeDetector
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -63,52 +62,6 @@ type ParseAzureDevOpsUrlTests() =
     member _.``Empty string returns None``() =
         let result = parseAzureDevOpsUrl ""
         Assert.That(result, Is.EqualTo(None))
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type EncodeWorktreePathTests() =
-
-    [<Test>]
-    member _.``Colon is replaced with hyphen``() =
-        let result = encodeWorktreePath "Q:"
-        Assert.That(result, Is.EqualTo("Q-"))
-
-    [<Test>]
-    member _.``Backslash is replaced with hyphen``() =
-        let result = encodeWorktreePath @"code\foo"
-        Assert.That(result, Is.EqualTo("code-foo"))
-
-    [<Test>]
-    member _.``Forward slash is replaced with hyphen``() =
-        let result = encodeWorktreePath "code/foo"
-        Assert.That(result, Is.EqualTo("code-foo"))
-
-    [<Test>]
-    member _.``Full Windows path encodes all separators``() =
-        let result = encodeWorktreePath @"Q:\code\AITestAgent"
-        Assert.That(result, Is.EqualTo("Q--code-AITestAgent"))
-
-    [<Test>]
-    member _.``Dot is replaced with hyphen``() =
-        let result = encodeWorktreePath @"C:\Users\user\.claude"
-        Assert.That(result, Is.EqualTo("C--Users-user--claude"))
-
-    [<Test>]
-    member _.``Space is replaced with hyphen``() =
-        let result = encodeWorktreePath @"C:\Users\user\OneDrive - Microsoft"
-        Assert.That(result, Is.EqualTo("C--Users-user-OneDrive---Microsoft"))
-
-    [<Test>]
-    member _.``Path without special characters is unchanged``() =
-        let result = encodeWorktreePath "simple"
-        Assert.That(result, Is.EqualTo("simple"))
-
-    [<Test>]
-    member _.``Empty string returns empty``() =
-        let result = encodeWorktreePath ""
-        Assert.That(result, Is.EqualTo(""))
 
 
 [<TestFixture>]

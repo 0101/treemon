@@ -29,12 +29,13 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 - **Aggregate-only**: no per-worktree cards or rows inside the band (the grid below already does
   that). All figures are cross-worktree roll-ups.
 - Two stacked sections are separated by a **1px dashed** rule and headed by small uppercase muted
-  labels: `ACTIVE AGENTS · N WORKING` (extended with waiting when present, with `N` = red-dot
-  working agents) and `TASKS · ACROSS ALL WORKTREES`.
+  labels: `AGENTS` and `TASKS`. The per-group/per-bucket counts live in the columns below, so the
+  headers stay bare (no count suffix, no "across all worktrees" caption).
 - Each category is a column with its **count-first label above the visual**: the count uses the
   category accent, the label stays neutral, and both share the same font size/weight.
-  1. **Active agents** — **circles** (~15px), one per working/waiting agent, grouped by the running
-     skill or waiting state (no per-agent status dot on the circle).
+  1. **Agents** — **circles** (~15px), one per agent, grouped by the running skill (working agents),
+     the waiting-for-user state, or the **idle** state (blue-dot idle agents that finished a
+     turn with the CLI still open) — no per-agent status dot on the circle. Idle is a second track sharing the Agents row.
   2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
@@ -45,9 +46,10 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 - **Palette (Catppuccin Mocha, exact):**
   - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7` · Unattended `#7f849c`.
   - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · Fixing `#fab387` · Working `#ff0000`.
-  - Waiting — `#f9e2af`, matching the card's `WaitingForUser` dot. No two co-occurring agent
+  - Waiting — `#f9e2af`, matching the card's `WaitingForUser` dot.
+  - Idle — `#89b4fa`, matching the card's `Idle` dot. No two co-occurring agent
     groups share a hue: Investigating teal, Planning mauve, Executing green, Reviewing pink, Fixing
-    peach, Working red, Waiting yellow.
+    peach, Working red, Waiting yellow, Idle blue.
 - **Empty categories are omitted** — a status or activity with zero items renders no label and no
   bar/circle group (never a `0`).
 - An all-empty band renders nothing.
@@ -64,7 +66,7 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 | **In progress** | Tasks with status `in_progress` (`Beads.InProgress`) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
 | **Blocked** | Tasks with status `blocked` (`Beads.Blocked`). |
 | **Done** | Σ closed **issues** (any type) across **non-archived** worktrees (`Beads.Closed` where `not IsArchived`). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed issues drop out when the worktree is merged/deleted. Only filter is `not IsArchived`. |
-| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Done` or `Idle`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
+| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Idle` or `NoSession`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
 
 The **Planned/Queued/Loose** split derives from the **parent-child dependency graph + feature
 status**: for each open task, find its parent feature (parent-child edge) and read that feature's
@@ -205,15 +207,16 @@ the solution compiling (no compat shims, per house rules).
   (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
   task buckets (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has
   `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
-  Blocked, Done = Σ Closed) + activity groups (`CodingTool = Working` grouped by
+  Blocked, Done = Σ Closed) + agent groups (`CodingTool = Working` grouped by
   `Activity.classify` of `CurrentSkill`, absent skill ⇒ Working; `CodingTool = WaitingForUser` ⇒
-  Waiting) + `Scale` (the largest bucket count — the one true shared linear denominator). **Archived
+  Waiting; `CodingTool = Idle` ⇒ Idle; `NoSession` excluded) + `Scale` (the largest bucket count — the
+  one true shared linear denominator). **Archived
   worktrees are excluded from the entire roll-up** (every task bucket and every agent group), so
   archiving a worktree drops all of its contributions at once. Empty buckets/groups are omitted
   (never a `0`); both lists come back in canonical order, with Unattended trailing Done. The result
   `Overview` carries `Tasks: TaskBucket list` / `Agents: AgentGroup list` / `Scale: int`
-  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to avoid the `Done`/`Working` collisions with
-  `CodingToolStatus`). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
+  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to keep its case names — `Done`, `Blocked`,
+  `InProgress` — from colliding with `BeadsSummary` field labels and other DU cases). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
   — not the client `RepoModel`.
 - The band is native **Feliz with CSS classes**, with the documented exception that each task bar
   uses a computed inline width or CSS variable for its proportional scale. Toggle mirrors Canvas:
@@ -227,14 +230,14 @@ the solution compiling (no compat shims, per house rules).
   is computed from `Overview.Scale`, with the largest bucket filling the fixed max width and all
   others at `count / Scale` of that width. The computed inline width / CSS variable is the accepted
   exception to static CSS classes because proportional width is inherently data-driven. Agent groups
-  render one `.overview-circle` per working/waiting agent with a normal gap.
+  render one `.overview-circle` per working/waiting/idle agent with a normal gap.
 - **Accent colour drives both mark and count via `currentColor`.** One class per category
   (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the
   count — so count and label differ only by colour, per spec.
-- **Section chrome.** The band renders `ACTIVE AGENTS · N WORKING` and `TASKS · ACROSS ALL
-  WORKTREES` headings, separated by a 1px dashed rule, and has no top/bottom border hairlines or task
-  footer caption.
+- **Section chrome.** The band renders bare `AGENTS` and `TASKS` headings (no count suffix, no
+  "across all worktrees" caption — the columns carry the counts), separated by a 1px dashed rule,
+  and has no top/bottom border hairlines or task footer caption.
 - **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
   `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
 - **Empty-state collapse.** `view` drops an all-empty lens by pattern-matching (each section is built
@@ -293,7 +296,7 @@ parked.
 - The visual contract is the count-first, label-above-mark layout with section headers, dashed
   separator, exact Catppuccin palette, no hairline borders, and no footer caption.
 - Working agents are red-dot worktrees (`CodingTool = Working`); `WaitingForUser` is a separate
-  Waiting group; idle/done sessions do not inflate activity counts.
+  Waiting group; idle sessions form a distinct blue Idle group and do not inflate activity counts.
 - Copilot CLI skill freshness is bounded to the current request; Claude Code and VS Code Copilot may
   report `None`.
 - `review` and `focused-review:review` both classify as Reviewing.

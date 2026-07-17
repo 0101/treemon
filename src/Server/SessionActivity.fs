@@ -1,0 +1,150 @@
+module Server.SessionActivity
+
+open System
+open Shared
+
+// The push-model status domain. The server owns this domain; the Copilot CLI extension is a thin
+// forwarder that maps SDK events onto the wire contract, and the handler maps that onto SessionEvent.
+// Everything here is pure — no IO, no mutation — so it can be unit-tested in isolation and folded
+// incrementally (a later batch onto an earlier result == the whole stream at once).
+//
+// This is the SAME state machine as the old CopilotDetector.foldForwardEvent, MINUS the sub-agent
+// depth gating and the <skill-context> injection handling. Those two sources of complexity are
+// eliminated at the SOURCE (the extension drops any event carrying an agentId and any skill-context
+// injection), so the server never sees them and the fold has no branch for them.
+
+// --- Value types ------------------------------------------------------------------------------
+
+type SessionId = SessionId of string
+
+module SessionId =
+    let value (SessionId id) = id
+
+type EventId = EventId of string
+
+module EventId =
+    let value (EventId id) = id
+
+/// The push source of a report. Extensible — the Copilot CLI extension is the only producer today.
+type PushProvider =
+    | CopilotCli
+
+/// A message's text plus the time it occurred. Raw (untruncated) text, exactly as pushed.
+type Message = { Text: string; At: DateTimeOffset }
+
+// --- Events -----------------------------------------------------------------------------------
+
+/// The only events that bear on status. Anything else the extension never sends, so the server has
+/// no "irrelevant event" branch to carry. These map 1:1 onto the wire `kind` values (see the handler).
+type SessionEvent =
+    | TurnStarted
+    /// A genuine user prompt (never a skill-context injection — those are dropped at the source).
+    | UserPrompt of Message
+    | AssistantMessage of Message
+    | SkillInvoked of name: string
+    /// ask_user — carries the question text to surface as the last assistant message.
+    | AwaitingUserInput of question: Message option
+    | TurnEnded
+    | WentIdle
+
+/// One pushed report: a single event for one session in one worktree.
+type SessionActivityReport =
+    { SessionId: SessionId
+      WorktreePath: WorktreePath
+      Provider: PushProvider
+      EventId: EventId
+      OccurredAt: DateTimeOffset
+      Event: SessionEvent }
+
+// --- Per-session fold -------------------------------------------------------------------------
+
+/// The running per-session state produced by folding events oldest→newest. Deliberately smaller than
+/// the old SessionScanCache: no SubagentDepth, no LastAssistantWasAskUser, no separate raw-status
+/// type — the fold sets Status directly (incl. Idle from WentIdle).
+type SessionStatus =
+    { Status: CodingToolStatus
+      Skill: string option
+      LastUserMessage: Message option
+      LastAssistantMessage: Message option }
+
+/// The starting state for a session with no events yet.
+let emptyStatus =
+    { Status = Idle
+      Skill = None
+      LastUserMessage = None
+      LastAssistantMessage = None }
+
+/// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
+/// stream, which is what the durable-mirror + live-Map ingestion relies on.
+let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
+    match e with
+    | TurnStarted -> { s with Status = Working }
+    | AssistantMessage m -> { s with Status = Working; LastAssistantMessage = Some m }
+    | SkillInvoked name -> { s with Skill = Some name }
+    | AwaitingUserInput q ->
+        // The ask_user question is surfaced as the last assistant message; keep the prior one if the
+        // question carries no text.
+        { s with
+            Status = WaitingForUser
+            LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage) }
+    | TurnEnded -> { s with Status = Idle }
+    | WentIdle -> { s with Status = Idle }
+    | UserPrompt m ->
+        // A reply to an ask_user keeps the running skill; any other prompt is a new request that ends
+        // the prior skill's run.
+        let keepSkill = s.Status = WaitingForUser
+        { s with
+            Status = Working
+            Skill = (if keepSkill then s.Skill else None)
+            LastUserMessage = Some m }
+
+/// Fold a batch of events (oldest→newest) onto an existing state.
+let foldMany (initial: SessionStatus) (events: SessionEvent seq) : SessionStatus =
+    Seq.fold fold initial events
+
+// --- Freshness (crash safety-net) -------------------------------------------------------------
+
+/// A session that dies without emitting `session.idle` (crash, closed laptop) is treated as Idle once
+/// its `last_seen` is older than this. The extension heartbeats every ~30–120s, so this is a few
+/// missed heartbeats — much faster than the old 30-min mtime staleness.
+let stalenessTimeout = TimeSpan.FromMinutes 5.0
+
+/// The idle window for `pickActive` display collapse and restart `loadLiveStatuses` (reuses the
+/// existing idle cutoff): sessions quiet longer than this are not considered live.
+let idleWindow = TimeSpan.FromHours 2.0
+
+/// The OPENNESS window — how recently a session must have been seen to count as an "open" (live) CLI
+/// for the worktree's status dot. The extension heartbeats every ~60s (HEARTBEAT_INTERVAL_MS),
+/// re-asserting even an idle session, so an open CLI keeps `last_seen` fresh while a closed/crashed
+/// one goes stale within a few missed beats. Deliberately a SMALL multiple of the heartbeat (~3
+/// beats) — DISTINCT from the 2 h `idleWindow` (memory eviction / resume) and, per Decision 2,
+/// SMALLER than `stalenessTimeout` (5 min): openness filters a dead Working session out (→ grey /
+/// NoSession) before the crash-net would rewrite it to Idle, so a dead agent goes straight to grey
+/// rather than lingering blue.
+let openWindow = TimeSpan.FromMinutes 3.0
+
+/// Crash net ONLY: a Working/WaitingForUser status whose `last_seen` is older than the staleness
+/// timeout reads as Idle. `session.idle` (WentIdle) already sets Idle directly, so an explicitly-idle
+/// session is unaffected. `last_seen` is the direct analogue of the old file mtime.
+let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: SessionStatus) : SessionStatus =
+    if s.Status <> Idle && now - lastSeen > stalenessTimeout then
+        { s with Status = Idle }
+    else
+        s
+
+// --- Multi-session collapse -------------------------------------------------------------------
+
+/// Collapse a worktree's live sessions to one winning record: drop Idle, then the most-recent (by
+/// `last_seen`) active session wins; all Idle → None. NOT raw latest-update — a session that just went
+/// Idle must not hide an actively-Working sibling. Every displayed field (status, skill, last user,
+/// last assistant) is read from that one record, so per-field cherry-picking is unrepresentable.
+///
+/// This is `CodingToolStatus.mostRecentActive` reused across a worktree's sessions rather than across
+/// three detector surfaces. Callers freshness-adjust each session first (so stale ones read as Idle
+/// and drop out here).
+let pickActive (sessions: (SessionStatus * DateTimeOffset) list) : SessionStatus option =
+    sessions
+    |> List.filter (fun (s, _) -> s.Status <> Idle)
+    |> List.sortByDescending snd
+    |> List.tryHead
+    |> Option.map fst

@@ -4,6 +4,8 @@ open System
 open System.IO
 open System.Text.Json
 open Shared
+open Server.SessionActivity
+open Server.SessionActivityStore
 
 
 let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider option =
@@ -35,146 +37,11 @@ type CodingToolResult =
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
-      LastMessageProvider: CodingToolProvider option }
-
-type internal ProviderResult =
-    { Provider: CodingToolProvider
-      Status: CodingToolStatus
-      Mtime: DateTimeOffset option }
-
-// Shared "active surface wins" rule: drop Idle sources, then the most recent (by mtime) wins.
-// Both provider-status resolution and running-skill selection go through this so they can never
-// disagree about which surface is active.
-let private mostRecentActive
-    (statusOf: 'a -> CodingToolStatus)
-    (mtimeOf: 'a -> DateTimeOffset option)
-    (items: 'a list)
-    : 'a option =
-    items
-    |> List.filter (fun x -> statusOf x <> Idle)
-    |> List.sortByDescending (fun x -> mtimeOf x |> Option.defaultValue DateTimeOffset.MinValue)
-    |> List.tryHead
-
-let internal pickActiveProvider (results: ProviderResult list) : ProviderResult option =
-    results |> mostRecentActive _.Status _.Mtime
-
-// The running skill must come from the SAME surface that wins the status resolution, not from
-// whichever session file merely has the newest mtime. Mirrors pickActiveProvider (drop Idle, most
-// recent wins), then scans only the winning surface for its skill via a lazy getter, so idle/losing
-// surfaces are never read. All surfaces Idle -> None (-> Working via Activity.classify downstream).
-let internal pickActiveSkill (surfaces: (ProviderResult * (unit -> string option)) list) : string option =
-    surfaces
-    |> mostRecentActive (fun (r, _) -> r.Status) (fun (r, _) -> r.Mtime)
-    |> Option.bind (fun (_, getSkill) -> getSkill ())
-
-// Uses pickActiveProvider (filter non-Idle, pick most recent) instead of tryFind
-// so that when multiple providers report status, the most recently active wins.
-let internal resolveStatus
-    (configuredProvider: CodingToolProvider option)
-    (providerResults: ProviderResult list)
-    : CodingToolStatus * CodingToolProvider option =
-
-    match configuredProvider with
-    | Some provider ->
-        let matching = providerResults |> List.filter (fun r -> r.Provider = provider)
-
-        match pickActiveProvider matching with
-        | Some r -> r.Status, Some provider
-        | None -> Idle, Some provider
-    | None ->
-        match pickActiveProvider providerResults with
-        | Some r -> r.Status, Some r.Provider
-        | None -> Idle, None
-
-// The three session surfaces scanned per refresh: Claude, Copilot CLI, and VS Code Copilot. Kept as
-// named results so status resolution and running-skill selection reuse the SAME status/mtime reads.
-type internal SessionResults =
-    { Claude: ProviderResult
-      CopilotCli: ProviderResult
-      VsCodeCopilot: ProviderResult }
-
-let private getClaudeResult (files: (FileInfo * ClaudeDetector.SessionFileKind) list) =
-    { Provider = Claude
-      Status = ClaudeDetector.getStatusFromEnumeratedFiles files
-      Mtime = ClaudeDetector.getSessionMtimeFromFiles files }
-
-let private gatherResultsFromFiles (worktreePath: string) (claudeFiles: (FileInfo * ClaudeDetector.SessionFileKind) list) (copilot: CopilotDetector.CopilotRefreshData) : SessionResults =
-    { Claude = getClaudeResult claudeFiles
-      CopilotCli =
-        { Provider = Copilot
-          Status = copilot.Status
-          Mtime = copilot.Mtime }
-      VsCodeCopilot =
-        { Provider = Copilot
-          Status = VsCodeCopilotDetector.getStatus worktreePath
-          Mtime = VsCodeCopilotDetector.getSessionMtime worktreePath } }
-
-let getRefreshData (worktreePath: string) : CodingToolResult =
-    let configured = readConfiguredProvider worktreePath
-    let claudeFiles = ClaudeDetector.enumerateFiles worktreePath
-    // ONE incremental Copilot CLI session scan per refresh; every Copilot field below is derived from
-    // it, instead of the four separate ~1 MB backward scans (status / skill / last user / last message).
-    let copilot = CopilotDetector.getRefreshData worktreePath
-    let results = gatherResultsFromFiles worktreePath claudeFiles copilot
-
-    let status, provider =
-        resolveStatus configured [ results.Claude; results.CopilotCli; results.VsCodeCopilot ]
-
-    let target = configured |> Option.orElse provider
-
-    let lastUserMsg, lastMsgProvider =
-        match target with
-        | Some Claude ->
-            let msg = ClaudeDetector.getLastUserMessageFromFiles claudeFiles
-            msg, msg |> Option.map (fun _ -> Claude)
-        | Some Copilot ->
-            let cliMsg = copilot.LastUserMessage
-            let vsCodeMsg = VsCodeCopilotDetector.getLastUserMessage worktreePath
-
-            let msg =
-                [ cliMsg; vsCodeMsg ]
-                |> List.choose id
-                |> List.sortByDescending snd
-                |> List.tryHead
-            msg, msg |> Option.map (fun _ -> Copilot)
-        | None ->
-            let winner =
-                [ ClaudeDetector.getLastUserMessageFromFiles claudeFiles |> Option.map (fun m -> Claude, m)
-                  copilot.LastUserMessage |> Option.map (fun m -> Copilot, m)
-                  VsCodeCopilotDetector.getLastUserMessage worktreePath |> Option.map (fun m -> Copilot, m) ]
-                |> List.choose id
-                |> List.sortByDescending (fun (_, (_, ts)) -> ts)
-                |> List.tryHead
-            winner |> Option.map snd, winner |> Option.map fst
-
-    let lastAssistantMsg =
-        match target with
-        | Some Claude ->
-            ClaudeDetector.getLastMessageFromFiles claudeFiles
-        | Some Copilot ->
-            [ copilot.LastMessage
-              VsCodeCopilotDetector.getLastMessage worktreePath ]
-            |> List.choose id
-            |> List.sortByDescending _.Timestamp
-            |> List.tryHead
-        | None ->
-            [ ClaudeDetector.getLastMessageFromFiles claudeFiles
-              copilot.LastMessage
-              VsCodeCopilotDetector.getLastMessage worktreePath ]
-            |> List.choose id
-            |> List.sortByDescending _.Timestamp
-            |> List.tryHead
-
-    let currentSkill =
-        match target with
-        | Some Claude -> ClaudeDetector.getCurrentSkillFromFiles claudeFiles
-        | Some Copilot ->
-            pickActiveSkill
-                [ results.CopilotCli, (fun () -> copilot.CurrentSkill)
-                  results.VsCodeCopilot, (fun () -> VsCodeCopilotDetector.getCurrentSkill worktreePath) ]
-        | None -> None
-
-    { Status = status; Provider = provider; CurrentSkill = currentSkill; LastUserMessage = lastUserMsg; LastAssistantMessage = lastAssistantMsg; LastMessageProvider = lastMsgProvider }
+      LastMessageProvider: CodingToolProvider option
+      /// Mtime of the active session surface that won status resolution (its last write) — the best
+      /// available "the agent last did something" time, and the value the scheduler freezes as the
+      /// state-transition timestamp. None when every surface is Idle.
+      LastActivity: DateTimeOffset option }
 
 let configureTestsPrompt (repoRoot: string) =
     "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "
@@ -201,9 +68,132 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | CreatePr -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
     | CanvasSession prompt -> prompt
 
-let getLastSessionId (provider: CodingToolProvider option) (worktreePath: string) =
-    match provider |> Option.defaultValue CodingToolProvider.Default with
-    | CodingToolProvider.Claude ->
-        ClaudeDetector.enumerateFiles worktreePath
-        |> ClaudeDetector.getLastSessionIdFromFiles
-    | CodingToolProvider.Copilot -> CopilotDetector.getLastSessionId worktreePath
+// Push-model live-state sourcing.
+//
+// The card's coding-tool fields come from the push model's live per-session state, not the
+// log-parsing detectors. A worktree's live sessions are collapsed via `fromPushSessions`, which now
+// makes TWO decoupled picks:
+//   * the STATUS dot is driven by OPENNESS (only sessions still heartbeating count): open-active →
+//     Working/WaitingForUser, open-but-idle → Idle (blue), no open session → NoSession (grey);
+//   * the FOOTER (skill / last-user / last-assistant) comes from the active winner when one runs,
+//     else the most-recent session of ANY status, so it survives Idle / NoSession.
+// Resume is a THIRD, distinct pick (getLastSessionId): the most-recent session regardless of
+// active/idle (the session the user last touched).
+
+/// The blank grey card a worktree shows when it has NO push session at all (never reported, or its
+/// rows pruned). The `fromPushSessions` collapse below reproduces this exact value for an empty
+/// session list, and `WorktreeApi` falls back to it for a worktree absent from the collapse map.
+/// A worktree with an OPEN-but-idle session collapses to blue `Idle` (not here), and one whose
+/// sessions have all gone stale collapses to `NoSession` but KEEPS its retained footer.
+let noSessionPushResult: CodingToolResult =
+    { Status = NoSession
+      Provider = None
+      CurrentSkill = None
+      LastUserMessage = None
+      LastAssistantMessage = None
+      LastMessageProvider = None
+      LastActivity = None }
+
+/// The push model has a single provider today (Copilot CLI); `pickActive` collapses to a bare
+/// `SessionStatus` (provider-free), so an active push session always reads as Copilot on the card.
+let private pushCardProvider (p: PushProvider) : CodingToolProvider =
+    match p with
+    | CopilotCli -> Copilot
+
+/// The last assistant message as the card's `CardEvent` (the exact shape the detectors produced): a
+/// single line truncated to 80 chars, tagged with the push provider's source string.
+let private toLastAssistantEvent (m: Message) : CardEvent =
+    { Source = "copilot"
+      Message = FileUtils.truncateMessage 80 m.Text
+      Timestamp = m.At
+      Status = None
+      Duration = None }
+
+/// Collapse a worktree's live push sessions into the card's coding-tool fields. Two DECOUPLED picks:
+///
+/// * **Status dot** — driven by OPENNESS. Only sessions seen within `openWindow` (a live CLI keeps
+///   heartbeating, even while idle) count: among the open sessions `pickActive` picks the most-recent
+///   ACTIVE winner (Working/WaitingForUser); open-but-all-idle collapses to `Idle` (blue); NO open
+///   session collapses to `NoSession` (grey). `openWindow` (~3 min) is smaller than
+///   `stalenessTimeout`, so a dead Working session drops out of openness (→ grey) before the crash-net
+///   would rewrite it to Idle — it never lingers blue.
+/// * **Footer** (skill / last user / last assistant) — DECOUPLED from the dot: the active winner when
+///   one is running, otherwise the MOST-RECENT session of ANY status (the same pick
+///   `getLastSessionId` uses for resume). Going Idle or losing the open session therefore does NOT
+///   blank the footer: it stays populated while any session for the worktree remains in the store
+///   (retention / `idleWindow`). This is the fix for the idle-only worktree whose footer/event-log
+///   used to vanish because the old `pickActive`-only collapse dropped every Idle session.
+let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
+    // OPENNESS: only sessions seen within openWindow drive the status dot. A closed/crashed session's
+    // last_seen goes stale and drops out here.
+    let openSessions =
+        sessions |> List.filter (fun s -> now - s.LastSeen < SessionActivity.openWindow)
+
+    // Freshness crash-net (defensive): with openness applied first it rarely fires, but a
+    // Working/WaitingForUser open session past the staleness timeout still reads as Idle.
+    let adjustedOpen =
+        openSessions
+        |> List.map (fun s -> SessionActivity.freshnessAdjusted now s.LastSeen s.Status, s.LastSeen)
+
+    let activeWinner = SessionActivity.pickActive adjustedOpen
+
+    let status =
+        match openSessions with
+        | [] -> NoSession
+        | _ -> activeWinner |> Option.map _.Status |> Option.defaultValue Idle
+
+    // Footer source: the active winner if running, else the most-recent session of ANY status so the
+    // footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain their last
+    // messages + skill), NOT a freshness-adjusted one — freshness only rewrites the status dot.
+    let footer =
+        activeWinner
+        |> Option.orElse (
+            sessions
+            |> List.sortByDescending _.LastSeen
+            |> List.tryHead
+            |> Option.map _.Status)
+
+    // "Last did something" time: the newest active open last_seen when an active session is displayed,
+    // else None (an idle/no-session worktree has no active surface).
+    let lastActivity =
+        if activeWinner.IsSome then
+            adjustedOpen
+            |> List.filter (fun (st, _) -> st.Status <> Idle)
+            |> List.map snd
+            |> List.max
+            |> Some
+        else
+            None
+
+    { Status = status
+      Provider = footer |> Option.map (fun _ -> pushCardProvider CopilotCli)
+      CurrentSkill = footer |> Option.bind _.Skill
+      LastUserMessage =
+        footer
+        |> Option.bind _.LastUserMessage
+        |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+      LastAssistantMessage = footer |> Option.bind _.LastAssistantMessage |> Option.map toLastAssistantEvent
+      LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> pushCardProvider CopilotCli)
+      LastActivity = lastActivity }
+
+/// Group a flat set of live push session-statuses by worktree path and collapse each group into the
+/// card's coding-tool fields (the openness-driven status dot + the decoupled footer). Keyed by the
+/// normalised worktree path stored on each session, so callers look it up by the (already-normalised)
+/// `WorktreeInfo.Path`. The single place the push live state becomes card fields — both the worktree
+/// assembly and the recent-messages endpoint read from the result.
+let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<string, CodingToolResult> =
+    sessions
+    |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
+    |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
+    |> Map.ofSeq
+
+/// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recent session for the
+/// worktree regardless of active/idle (the session the user last touched). Reads the id from the
+/// push live state (the store's in-memory reflection) instead of scanning log directories. `None`
+/// when the worktree has never reported (→ the CLI `--continue` fallback in CodingToolCli).
+let getLastSessionId (sessions: StoredStatus list) : string option =
+    sessions
+    |> List.sortByDescending _.LastSeen
+    |> List.tryHead
+    |> Option.map (_.SessionId >> SessionId.value)
+

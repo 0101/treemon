@@ -224,18 +224,18 @@ type DemoModeTests() =
             // Capture initial state of coding tool dots
             let workingDots = this.Page.Locator(".ct-dot.working")
             let waitingDots = this.Page.Locator(".ct-dot.waiting")
-            let doneDots = this.Page.Locator(".ct-dot.done")
+            let idleDots = this.Page.Locator(".ct-dot.idle")
 
             let! initialWorking = workingDots.CountAsync()
             let! initialWaiting = waitingDots.CountAsync()
-            let! initialDone = doneDots.CountAsync()
-            let initialState = (initialWorking, initialWaiting, initialDone)
+            let! initialIdle = idleDots.CountAsync()
+            let initialState = (initialWorking, initialWaiting, initialIdle)
 
             TestContext.Out.WriteLine(
-                $"Initial state - working: {initialWorking}, waiting: {initialWaiting}, done: {initialDone}")
+                $"Initial state - working: {initialWorking}, waiting: {initialWaiting}, idle: {initialIdle}")
 
             // The demo loops every 24s (12 frames x 2s); the only coding-tool dot that toggles is
-            // the auth card (Done <-> Working), which stays in one state for up to 14s across the
+            // the auth card (Idle <-> Working), which stays in one state for up to 14s across the
             // cycle wrap. Wait a full cycle plus buffer so the opposite state is observed no matter
             // which phase the page loaded in.
             let deadline = DateTime.UtcNow.AddSeconds(26.0)
@@ -245,11 +245,11 @@ type DemoModeTests() =
                 do! System.Threading.Tasks.Task.Delay(1000)
                 let! currentWorking = workingDots.CountAsync()
                 let! currentWaiting = waitingDots.CountAsync()
-                let! currentDone = doneDots.CountAsync()
-                let currentState = (currentWorking, currentWaiting, currentDone)
+                let! currentIdle = idleDots.CountAsync()
+                let currentState = (currentWorking, currentWaiting, currentIdle)
 
                 TestContext.Out.WriteLine(
-                    $"Current state - working: {currentWorking}, waiting: {currentWaiting}, done: {currentDone}")
+                    $"Current state - working: {currentWorking}, waiting: {currentWaiting}, idle: {currentIdle}")
 
                 if currentState <> initialState then
                     transitioned <- true

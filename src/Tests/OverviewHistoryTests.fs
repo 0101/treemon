@@ -25,6 +25,7 @@ type OverviewHistoryTests() =
           Branch = "b"
           RepoId = RepoId "r"
           RepoName = "root"
+          Since = None
           Contribution = contribution }
 
     /// Build a full Overview from (kind, count, member-keys) task specs and (kind, count, keys) agent

@@ -64,8 +64,8 @@ let sanitizeForTerminal (s: string) =
 let formatCodingTool = function
     | Working -> "🔧 Working"
     | WaitingForUser -> "⏳ Waiting"
-    | Done -> "✅ Done"
     | Idle -> "💤 Idle"
+    | NoSession -> "⚫ No session"
 
 let formatPr = function
     | NoPr -> "No PR"
@@ -169,7 +169,8 @@ let newCmd =
                     { RepoId = repo
                       BranchName = BranchName.create branch
                       BaseBranch = BranchName.create baseBranch
-                      Prompt = None }
+                      Prompt = None
+                      Skill = None }
 
                 match api.createWorktree request |> Async.RunSynchronously with
                 | Ok warnings ->

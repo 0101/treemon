@@ -14,6 +14,7 @@ open Tests.TestUtils
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
+let private reclaimMarker = "reclaim-focus"               // unique to reclaimFocusScript (Escape bridge)
 
 // ── Item 1: dark-theme base reset markers ─────────────────────────────────────
 let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wrapped (zero specificity)
@@ -90,6 +91,14 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Contain(baseStyleMarker), "Both kinds keep the scrollbar base style")
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
+
+    [<Test>]
+    member _.``both doc kinds inject the Escape focus-reclaim bridge``() =
+        [ SystemView; AgentDoc ]
+        |> List.iter (fun kind ->
+            let injection = buildInjection kind "status.html"
+            Assert.That(injection, Does.Contain(reclaimMarker),
+                        $"{kind}: Escape inside a cross-origin canvas doc must post a reclaim-focus message so the pane can refocus the dashboard"))
 
     // ── Item 1: dark-theme base reset, injected for BOTH kinds, zero specificity ──
 

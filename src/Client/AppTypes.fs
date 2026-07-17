@@ -38,6 +38,7 @@ type Model =
       SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
+      WorktreeSkills: string list
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal

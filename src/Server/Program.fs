@@ -261,6 +261,20 @@ let main args =
 
     let cts = new CancellationTokenSource()
 
+    // The push-model durable store, created up front (real monitoring path only — not demo/fixture)
+    // so it can back BOTH the resume-identity lookup in the worktree API (getLastSessionId reads the
+    // durable store, not the idle-window live cache — see F10/C-02) AND the activity ingestion
+    // service below. Instance-specific SQLite path keyed by the server's port so a side-by-side
+    // validation instance never collides on the DB file. The service (below) owns disposal on
+    // shutdown; when no service is started (demo/fixture) there is no store to dispose.
+    let sessionActivityStore =
+        if not config.Demo && config.TestFixtures.IsNone then
+            let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
+            Log.log "Startup" $"Session activity store db: {dbPath}"
+            Some(new SessionActivityStore.SessionActivityStore(dbPath))
+        else
+            None
+
     let remotingApi, schedulerAgent =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
@@ -297,13 +311,28 @@ let main args =
                 RefreshScheduler.start agent assembleOverview worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
+            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
+
+    // Push-model status ingestion. Reuses the durable store created above (shared with the worktree
+    // API's resume-identity lookup). The service owns that store: it rebuilds live status from SQLite
+    // on Start and arms the retention timer, and disposes the store on shutdown. Started only in the
+    // real monitoring path — demo mode has no scheduler agent (and no store), and fixture mode serves
+    // synthetic data and receives no activity posts (mirrors skipping the scheduler background loop).
+    let sessionActivityService =
+        match schedulerAgent, sessionActivityStore with
+        | Some agent, Some store when config.TestFixtures.IsNone ->
+            let svc = new SessionActivityService.SessionActivityService(store, agent)
+            svc.Start()
+            Log.log "Startup" "Session activity ingestion started"
+            Some svc
+        | _ -> None
 
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"
         cts.Cancel()
-        cts.Dispose())
+        cts.Dispose()
+        sessionActivityService |> Option.iter (fun svc -> (svc :> System.IDisposable).Dispose()))
 
     match schedulerAgent, config.CanvasPort with
     | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
@@ -326,9 +355,19 @@ let main args =
               route "/api/canvas/attribute" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 
+    // POST /api/session/activity: the push-model status ingestion endpoint. Same cross-origin
+    // vector as the canvas POSTs, so it carries the same HttpSecurity.csrfGuard (a non-loopback
+    // Origin/Referer is rejected 403; a MISSING one — the non-browser reporting extension's Node
+    // fetch — is allowed). POST filters first so the guard only evaluates the request it protects.
+    let sessionActivityRoutes =
+        match sessionActivityService with
+        | Some svc -> [ route "/api/session/activity" >=> POST >=> HttpSecurity.csrfGuard >=> svc.Handler ]
+        | None -> []
+
     let combinedRouter =
         choose (
             canvasAgentRoutes
+            @ sessionActivityRoutes
             @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
                 // CSRF hardening: the Fable.Remoting surface has no auth/CSRF token and does not
                 // enforce a content type, so a cross-origin page could POST to state-changing

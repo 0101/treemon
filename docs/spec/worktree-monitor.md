@@ -47,7 +47,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
-- Coding tool status dot (Working / WaitingForUser / Done / Idle) with tooltip showing provider name
+- Coding tool status dot (Working / WaitingForUser / Idle / NoSession) with tooltip showing provider name
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
@@ -68,9 +68,19 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Coding Tool Detection
 
+> **Legacy — superseded by the push model.** The per-provider **log-parsing detectors** described in
+> this section (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`, and the pure-logic
+> `getStatusFromFiles`) were **removed**: Treemon no longer polls session files to infer status. The
+> Copilot CLI extension now **pushes** session-activity events and the server collapses live
+> per-session state in `CodingToolStatus.fs` (`fromPushSessions`). See
+> `docs/spec/session-status-push.md` and `docs/spec/idle-only-status.md`. The current status
+> vocabulary is `CodingToolStatus = Working | WaitingForUser | Idle | NoSession` — the transient
+> `Done` was **retired** (a finished turn now reads **Idle**; a worktree with no open session collapses
+> to **NoSession**). The subsections below are retained for historical context only.
+
 - Supports multiple providers: Claude Code, Copilot CLI, VS Code Copilot. Adding a new provider = one detector module + registration in orchestrator. Both CLI and VS Code Copilot report as `Provider = Copilot`; `pickActiveProvider` selects the most recently active one.
 - Every 15s refresh cycle checks all registered providers for each worktree
-- Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Done/Idle)
+- Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Idle — a per-session status is never `NoSession`, which is only ever a worktree-level collapse result)
 - Orchestrator picks the most recently active non-Idle provider (by session file mtime)
 - `.treemon.json` optional `"codingTool": "claude"|"copilot"` overrides auto-detect
 - Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
@@ -84,7 +94,7 @@ Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.
 
 **Temporal adjustments** (applied after raw status is determined from events):
 
-- **Grace period (15s):** `Done → Working` when the events file was modified within 15 seconds. Copilot CLI emits `turn_end` between every turn in a multi-turn interaction, and LLM thinking gaps of 27-35 seconds are common between `turn_start` and the next `assistant.message`. Without the grace window, the dashboard flickers to Done during these gaps. The 15s value (vs Claude's 10s) accounts for Copilot's longer inter-turn gaps and background agent startup time.
+- **Grace period (15s):** a just-finished turn was held as `Working` when the events file was modified within 15 seconds. Copilot CLI emits `turn_end` between every turn in a multi-turn interaction, and LLM thinking gaps of 27-35 seconds are common between `turn_start` and the next `assistant.message`. Without the grace window, the dashboard flickered to the finished (Idle) state during these gaps. The 15s value (vs Claude's 10s) accounts for Copilot's longer inter-turn gaps and background agent startup time. (In the push model this heuristic is unnecessary — the next `turn_start` re-asserts `Working` within ≤0.1 s.)
 - **Staleness (30min):** `Working → Idle` when the events file hasn't been modified for 30 minutes. Catches abandoned sessions where the CLI exited without writing a final `turn_end`.
 - **Age cutoff (2h):** Any file older than 2 hours returns `Idle` regardless of last event.
 
@@ -102,15 +112,14 @@ Claude Code spawns subagent sessions (via the Task tool) that write to nested JS
 
 `SessionFileKind` (Parent | Subagent) is determined by path: any `.jsonl` inside a `subagents/` subdirectory is a subagent; top-level `.jsonl` files are parent sessions.
 
-**Status resolution rules:**
+**Status resolution rules** (historical — this override logic lived in the removed `getStatusFromFiles`; the transient `Done` has since folded into `Idle`):
 
-1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
-2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
+1. Compute per-file status (staleness, a finished-turn grace period within 10s, 2-hour age cutoff) for all files
+2. Take the highest-priority parent status (Working > WaitingForUser > Idle)
 3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
-4. If parent status is `Done` -- return `Done` (parent Done is authoritative; all subagents have completed before parent reaches end_turn)
-5. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle`
+4. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle` (a finished parent turn, historically the transient `Done`, now settles on `Idle` here)
 
-Parent `Done` and `WaitingForUser` are never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
+Parent `WaitingForUser` is never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
 
 **Scoping rules:**
 - `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
@@ -135,9 +144,10 @@ A "+" button on each repo header opens a modal to create new worktrees without l
 - Warnings returned by `createWorktree` (`Result<string list, string>`) now carry **only the legacy-fork-script advisory** and are surfaced in the modal (UI) or console (CLI); post-fork success/failure is reported on the card, not through this return value. Internally, `forkWorktree` performs the fork (returning a `ForkResult`) and `runPostFork` runs the hook.
 - Modal shows creating animation, then auto-closes on clean success, or shows warnings / error
 - Server expedites worktree list refresh for the repo so the new card appears quickly
-- **Optional prompt** — a multi-line textarea below the source-branch dropdown. A non-blank value auto-launches an *investigate* session in the new worktree; **Enter inserts a newline** (it does not submit — the Create button submits, Escape closes), and a blank/whitespace prompt is a no-op (identical to the no-prompt flow). The prompt rides the create request as a `string option`.
-- On a non-blank prompt the server, after a successful create, **fire-and-forget** spawns a tracked coding-agent window in the new worktree, seeded with a provider-aware skill invocation (`use {skill} skill with {prompt}` for Copilot, `/{skill} {prompt}` for Claude). It reuses `SessionManager.launchAction` — the same path the contextual-action buttons use (see `docs/spec/contextual-actions.md`) — so there is no bespoke spawn logic; the modal still returns/closes on the create result and does not wait for the window. The launch runs even when create returned a post-fork warning (the first skill is research, low harm).
-- The launch skill is config-driven: `.treemon.json` `defaultSkill` (default `investigate`, read as-is with no validation).
+- **Optional prompt** — a multi-line textarea below the source-branch dropdown. A non-blank value auto-launches a coding-agent session in the new worktree; **Enter inserts a newline** (it does not submit — the Create button submits, Escape closes), and a blank/whitespace prompt is a no-op (identical to the no-prompt flow). The prompt rides the create request as a `string option`.
+- **Skill selection** — a radio group between the source-branch dropdown and the prompt textarea chooses which skill wraps the prompt on launch. A built-in **None** option (always present) sends the prompt **verbatim**; each configured skill wraps it. The chosen skill rides the create request as a `string option` (`None` ⇒ verbatim). The offered skills are the machine-level `worktreeSkills` list (see below); the first entry is the default selection. When no skills are configured the only option is None, and a subtle hint next to it points at `~/.treemon/config.json` (`worktreeSkills`).
+- On a non-blank prompt the server, after a successful create, **fire-and-forget** spawns a tracked coding-agent window in the new worktree. When a skill was chosen it seeds a provider-aware skill invocation (`use {skill} skill with {prompt}` for Copilot, `/{skill} {prompt}` for Claude); for **None** it seeds the prompt verbatim. It reuses `SessionManager.launchAction` — the same path the contextual-action buttons use (see `docs/spec/contextual-actions.md`) — so there is no bespoke spawn logic; the modal still returns/closes on the create result and does not wait for the window. The launch runs even when create returned a post-fork warning.
+- The offered skills are config-driven: the machine-level `~/.treemon/config.json` `worktreeSkills` (a string array, blank entries dropped, **empty by default**), surfaced to the client via `DashboardResponse.WorktreeSkills` (like `EditorName`).
 
 ### Native Session Management
 
@@ -265,7 +275,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Repo ID = folder name: simple, human-readable, no config needed
 - `CommentSummary` DU over nullable fields: cleanly models provider capability differences
 - Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
-- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
+- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Idle to Working, never downgrade WaitingForUser
 - Claude subagent detection is path-based only (directory structure), no content parsing needed
 - Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
@@ -275,8 +285,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 - Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
 - `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the per-worktree `.treemon.json` (`testCommand`, `baseBranch`, `upstreamRemote`) are deliberately separate stores in separate modules, named so the machine-vs-worktree scope is obvious and the two never collide.
-- Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, skill config, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider/skill are read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
-- The create-prompt skill is **config-driven with a single forced value for now** (`defaultSkill`, default `investigate`, unvalidated) — a radio-group of skills is a later increment. The prompt is single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
+- Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider is read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
+- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
 
 ## Related Specs
 

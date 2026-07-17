@@ -52,8 +52,8 @@ module BeadsPlanning =
 type CodingToolStatus =
     | Working
     | WaitingForUser
-    | Done
     | Idle
+    | NoSession
 
 type CodingToolProvider =
     | Claude
@@ -230,7 +230,10 @@ type CreateWorktreeRequest =
     { RepoId: string
       BranchName: BranchName
       BaseBranch: BranchName
-      Prompt: string option }
+      Prompt: string option
+      /// Which skill wraps the prompt on launch. `None` sends the prompt verbatim
+      /// (no skill); `Some name` wraps it via a provider-aware skill invocation.
+      Skill: string option }
 
 /// Non-fatal advisories surfaced after a worktree is created (e.g. a legacy fork
 /// script is present, or the post-fork setup hook failed). Empty means a clean create.
@@ -245,6 +248,10 @@ type WorktreeStatus =
       Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      /// When the agent entered its current Overview category — its classified activity while Working
+      /// (Investigating/Executing/…), else its status (WaitingForUser/Idle). Recorded at the transition
+      /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
+      CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
@@ -307,6 +314,9 @@ type DashboardResponse =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       EditorName: string
+      /// Skills offered in the create-worktree modal (machine-level `worktreeSkills`
+      /// config). Empty means only the built-in "None" option is available.
+      WorktreeSkills: string list
       CollapsedRepos: Set<RepoId>
       CanvasPaneOpen: bool
       OverviewPanelOpen: bool

@@ -19,7 +19,46 @@ let private writePostForkArgsScript (repoDir: string) =
         File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), script)
 
 
-// ─── resolveWorktreeCommand: pure command construction ───
+// ─── listWorktrees: git-failure signal against real git repos ───
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ListWorktreesTests() =
+    /// NUnit lifecycle field — reassigned per test by [<SetUp>]/[<TearDown>].
+    let mutable tempDir = ""
+
+    [<SetUp>]
+    member _.Setup() =
+        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-listwt-{Guid.NewGuid():N}")
+        Directory.CreateDirectory(tempDir) |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        if Directory.Exists(tempDir) then
+            try Directory.Delete(tempDir, recursive = true)
+            with _ -> ()
+
+    [<Test>]
+    member _.``returns Some with the main worktree for a real repo``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        match listWorktrees repoDir |> Async.RunSynchronously with
+        | None -> Assert.Fail("Expected Some worktree list for a real repo but got None")
+        | Some worktrees ->
+            Assert.That(worktrees.Length, Is.EqualTo(1), "a fresh repo has exactly its main worktree")
+            Assert.That(worktrees[0].Branch, Is.EqualTo(Some "main"))
+            Assert.That(Path.GetFileName(worktrees[0].Path), Is.EqualTo("repo"))
+
+    [<Test>]
+    member _.``returns None when the path is not a git repository``() =
+        let notARepo = Path.Combine(tempDir, "not-a-repo")
+        Directory.CreateDirectory(notARepo) |> ignore
+
+        let result = listWorktrees notARepo |> Async.RunSynchronously
+        Assert.That(result, Is.EqualTo(None), "a git failure must surface as None, not an empty list")
+
 
 [<TestFixture>]
 [<Category("Unit")>]

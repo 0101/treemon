@@ -558,13 +558,17 @@ function Install-Skill {
     }
 }
 
+function Install-CopilotExtension([string]$SrcDir, [string]$DestName, [string]$FriendlyName) {
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Copy-Item (Join-Path $SrcDir "extension.mjs") $dest -Force
+    Copy-Item (Join-Path $SrcDir "package.json") $dest -Force
+    Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
+}
+
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "canvas-bridge"
-    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
-    Copy-Item (Join-Path $src "package.json") $dest -Force
-    Write-Host "Canvas bridge extension installed to $dest" -ForegroundColor Green
+    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension"
 
     # Install canvas authoring skill
     $skillSource = Join-Path $src "skill" "SKILL.md"
@@ -589,6 +593,16 @@ function Install-Extension {
             $installed | ForEach-Object { Write-Host "  Canvas skill installed for $_" -ForegroundColor Green }
         }
     }
+}
+
+function Install-ReportingExtension {
+    # Phase 1 of the push status model: the passive, reporting-only extension. Installed ALONGSIDE
+    # canvas-bridge (a separate extension dir), never replacing it — reporting registers no canvas
+    # and no tools, so both load per session with no canvas_take_ownership collision. It forwards
+    # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
+    # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
+    $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
+    Install-CopilotExtension $src "treemon-reporting" "Reporting extension"
 }
 
 function Test-WorktreeRootPaths([string[]]$Roots) {
@@ -633,6 +647,7 @@ function Deploy-Frontend {
     try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
     try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
+    try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
 
     Restart-ServerIfRunning -Message "Restarting production server..." -NotRunningMessage "Production server is not running, skipping restart"
 }

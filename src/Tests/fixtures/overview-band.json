@@ -115,6 +115,32 @@
             "Pr": "NoPr",
             "MainBehindCount": 0,
             "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/idle-a"},
+            "Branch": "idle-a",
+            "LastCommitMessage": "Finished the refactor",
+            "LastCommitTime": "2026-02-16T22:22:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Idle",
+            "CodingToolProvider": "Copilot",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/idle-b"},
+            "Branch": "idle-b",
+            "LastCommitMessage": "Turn ended, awaiting next step",
+            "LastCommitTime": "2026-02-16T22:21:00+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Idle",
+            "CodingToolProvider": "Copilot",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
           }
         ],
         "IsReady": true,

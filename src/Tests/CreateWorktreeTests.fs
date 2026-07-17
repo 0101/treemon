@@ -31,6 +31,7 @@ let private defaultModel : Model =
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
+      WorktreeSkills = []
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
@@ -54,8 +55,8 @@ let private tryUpdateModel msg model =
     with
     | :? TypeInitializationException | :? ArgumentException ->
         match msg with
-        | ModalMsg (Modal.OpenCreateWorktree repoId) ->
-            { model with CreateModal = Modal.LoadingBranches repoId }
+        | ModalMsg (Modal.OpenCreateWorktree (repoId, skills)) ->
+            { model with CreateModal = Modal.LoadingBranches (repoId, skills) }
         | ModalMsg Modal.SubmitCreateWorktree ->
             match model.CreateModal with
             | Modal.Open form when form.Name.Trim().Length > 0 ->
@@ -74,17 +75,17 @@ type OpenCreateWorktreeTests() =
 
     [<Test>]
     member _.``OpenCreateWorktree transitions to LoadingBranches``() =
-        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
+        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
 
         match model.CreateModal with
-        | Modal.LoadingBranches repoId ->
+        | Modal.LoadingBranches (repoId, _) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
         | other ->
             Assert.Fail($"Expected LoadingBranches but got {other}")
 
     [<Test>]
     member _.``OpenCreateWorktree does not change other model fields``() =
-        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
+        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
 
         Assert.That(model.IsLoading, Is.EqualTo(defaultModel.IsLoading))
         Assert.That(model.HasError, Is.EqualTo(defaultModel.HasError))
@@ -97,7 +98,7 @@ type OpenCreateWorktreeTests() =
 type BranchesLoadedTests() =
 
     let loadingModel =
-        { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
+        { defaultModel with CreateModal = Modal.LoadingBranches (testRepoId, []) }
 
     [<Test>]
     member _.``BranchesLoaded Ok transitions to Open with branches``() =
@@ -145,6 +146,29 @@ type BranchesLoadedTests() =
             Assert.Fail($"Expected Open but got {other}")
 
     [<Test>]
+    member _.``BranchesLoaded Ok seeds AvailableSkills and pre-selects the first skill``() =
+        let loadingWithSkills = { defaultModel with CreateModal = Modal.LoadingBranches (testRepoId, [ "investigate"; "review" ]) }
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) loadingWithSkills
+
+        match model.CreateModal with
+        | Modal.Open form ->
+            Assert.That(form.AvailableSkills, Is.EqualTo([ "investigate"; "review" ]))
+            Assert.That(form.Skill, Is.EqualTo(Some "investigate"))
+        | other ->
+            Assert.Fail($"Expected Open but got {other}")
+
+    [<Test>]
+    member _.``BranchesLoaded Ok with no configured skills pre-selects None``() =
+        let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) loadingModel
+
+        match model.CreateModal with
+        | Modal.Open form ->
+            Assert.That(form.AvailableSkills, Is.Empty)
+            Assert.That(form.Skill, Is.EqualTo(None))
+        | other ->
+            Assert.Fail($"Expected Open but got {other}")
+
+    [<Test>]
     member _.``BranchesLoaded Ok produces no command``() =
         let _, cmd = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) loadingModel
 
@@ -183,7 +207,7 @@ type BranchesLoadedTests() =
 
     [<Test>]
     member _.``BranchesLoaded Ok ignored when modal is Open``() =
-        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old"; Prompt = "" }
+        let openForm = Modal.Open { RepoId = testRepoId; Branches = [ "old" ]; Name = "x"; BaseBranch = "old"; Prompt = ""; AvailableSkills = []; Skill = None }
         let model, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "new-branch" ]))) { defaultModel with CreateModal = openForm }
 
         match model.CreateModal with
@@ -199,7 +223,7 @@ type BranchesLoadedTests() =
 type FormStateTests() =
 
     let openForm =
-        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main"; Prompt = "" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = ""; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
@@ -285,6 +309,23 @@ type FormStateTests() =
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Creating testRepoId))
 
     [<Test>]
+    member _.``SetSkill updates Skill in Open form``() =
+        let model, _ = update (ModalMsg (Modal.SetSkill (Some "review"))) openModel
+
+        match model.CreateModal with
+        | Modal.Open form -> Assert.That(form.Skill, Is.EqualTo(Some "review"))
+        | other -> Assert.Fail($"Expected Open but got {other}")
+
+    [<Test>]
+    member _.``SetSkill None selects the verbatim (no-skill) option``() =
+        let withSkill, _ = update (ModalMsg (Modal.SetSkill (Some "review"))) openModel
+        let model, _ = update (ModalMsg (Modal.SetSkill None)) withSkill
+
+        match model.CreateModal with
+        | Modal.Open form -> Assert.That(form.Skill, Is.EqualTo(None))
+        | other -> Assert.Fail($"Expected Open but got {other}")
+
+    [<Test>]
     member _.``Multiple SetNewWorktreeName calls update correctly``() =
         let m1, _ = update (ModalMsg (Modal.SetNewWorktreeName "first")) openModel
         let m2, _ = update (ModalMsg (Modal.SetNewWorktreeName "second")) m1
@@ -300,7 +341,7 @@ type FormStateTests() =
 type SubmitCreateWorktreeTests() =
 
     let openForm =
-        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main"; Prompt = "" }
+        Modal.Open { RepoId = testRepoId; Branches = [ "main"; "develop" ]; Name = "my-feature"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
 
     let openModel = { defaultModel with CreateModal = openForm }
 
@@ -317,7 +358,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with empty name is ignored``() =
         let emptyName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = ""; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = emptyName }
 
         match model.CreateModal with
@@ -328,7 +369,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree with whitespace-only name is ignored``() =
         let wsName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "   "; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = wsName }
 
         match model.CreateModal with
@@ -346,7 +387,7 @@ type SubmitCreateWorktreeTests() =
     [<Test>]
     member _.``SubmitCreateWorktree trims name with leading and trailing spaces``() =
         let spacedName =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = spacedName }
 
         match model.CreateModal with
@@ -355,9 +396,9 @@ type SubmitCreateWorktreeTests() =
 
     [<Test>]
     member _.``SubmitCreateWorktree when modal is LoadingBranches is ignored``() =
-        let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
+        let model, cmd = update (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = Modal.LoadingBranches (testRepoId, []) }
 
-        Assert.That(model.CreateModal, Is.EqualTo(Modal.LoadingBranches testRepoId))
+        Assert.That(model.CreateModal, Is.EqualTo(Modal.LoadingBranches (testRepoId, [])))
         Assert.That(cmd, Is.Empty)
 
 
@@ -408,7 +449,7 @@ type SubmitCreateWorktreeRequestMappingTests() =
           Branches = [ "main"; "develop" ]
           Name = "my-feature"
           BaseBranch = "develop"
-          Prompt = prompt }
+          Prompt = prompt; AvailableSkills = []; Skill = None }
 
     /// Submits the modal against a capturing fake api and returns the request handed to
     /// createWorktree. Elmish runs the Cmd's async via Async.Start on .NET, so the fake
@@ -441,6 +482,18 @@ type SubmitCreateWorktreeRequestMappingTests() =
         let req = submitAndCapture (baseForm "   \t  ")
 
         Assert.That(req.Prompt.IsNone, Is.True)
+
+    [<Test>]
+    member _.``SubmitCreateWorktree carries the chosen skill``() =
+        let req = submitAndCapture { baseForm "do research" with Skill = Some "investigate" }
+
+        Assert.That(req.Skill, Is.EqualTo(Some "investigate"))
+
+    [<Test>]
+    member _.``SubmitCreateWorktree carries a None skill for a verbatim launch``() =
+        let req = submitAndCapture { baseForm "do research" with Skill = None }
+
+        Assert.That(req.Skill.IsNone, Is.True)
 
     [<Test>]
     member _.``SubmitCreateWorktree trims the branch name and carries base branch and repo id``() =
@@ -519,7 +572,7 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal resets to Closed from Open``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let model, _ = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -533,7 +586,7 @@ type CloseCreateModalTests() =
 
     [<Test>]
     member _.``CloseCreateModal from LoadingBranches resets to Closed``() =
-        let loading = { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
+        let loading = { defaultModel with CreateModal = Modal.LoadingBranches (testRepoId, []) }
         let model, _ = update (ModalMsg Modal.CloseCreateModal) loading
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -547,7 +600,7 @@ type CloseCreateModalTests() =
     [<Test>]
     member _.``CloseCreateModal refocuses the dashboard``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let _, cmd = update (ModalMsg Modal.CloseCreateModal) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Not.Empty)
@@ -567,7 +620,7 @@ type EscapeKeyClosesModalTests() =
     [<Test>]
     member _.``Escape key closes modal from Open state``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
@@ -587,14 +640,14 @@ type EscapeKeyClosesModalTests() =
 
     [<Test>]
     member _.``Escape key closes modal from LoadingBranches state``() =
-        let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = Modal.LoadingBranches testRepoId }
+        let model, _ = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = Modal.LoadingBranches (testRepoId, []) }
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Escape refocuses the dashboard when modal is open``() =
         let openForm =
-            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
+            Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
         let _, cmd = update (KeyPressed ("Escape", false)) { defaultModel with CreateModal = openForm }
 
         Assert.That(cmd, Is.Not.Empty)
@@ -609,7 +662,7 @@ type FullStateMachineRoundtripTests() =
     member _.``Full happy path: Open, load branches, fill form, submit, complete``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) m0
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
         Assert.That((match m1.CreateModal with Modal.LoadingBranches _ -> true | _ -> false), Is.True)
 
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main"; "develop" ]))) m1
@@ -635,7 +688,7 @@ type FullStateMachineRoundtripTests() =
     member _.``Error path: Open, load branches, submit, error, close``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) m0
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) m1
         let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "bad-name")) m2
         let m4 = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) m3
@@ -654,7 +707,7 @@ type FullStateMachineRoundtripTests() =
     member _.``Branch load failure path: Open, load error, close``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) m0
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Error (exn "timeout")))) m1
 
         match m2.CreateModal with
@@ -668,7 +721,7 @@ type FullStateMachineRoundtripTests() =
 
     [<Test>]
     member _.``Cancel via Escape during any state returns to Closed``() =
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree testRepoId)) defaultModel
+        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) m1
         let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "test")) m2
 
@@ -694,7 +747,7 @@ type EnterKeySuppressedWhileModalOpenTests() =
           BaseBranch = "main" }
 
     let openForm =
-        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
 
     let modelWithRepoAndModal =
         { defaultModel with
@@ -748,7 +801,7 @@ type EnterKeySuppressedWhileModalOpenTests() =
 
     [<Test>]
     member _.``Enter key suppressed even from LoadingBranches state``() =
-        let loading = { modelWithRepoAndModal with CreateModal = Modal.LoadingBranches repoId }
+        let loading = { modelWithRepoAndModal with CreateModal = Modal.LoadingBranches (repoId, []) }
         let model, _ = update (KeyPressed ("Enter", false)) loading
 
         Assert.That(model.Repos.Head.IsCollapsed, Is.False,
@@ -771,7 +824,7 @@ type FocusRestorationTests() =
     let repoId = testRepoId
 
     let openForm =
-        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = "" }
+        Modal.Open { RepoId = repoId; Branches = [ "main" ]; Name = "test"; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
 
     let modelWithFocusAndModal =
         { defaultModel with
@@ -787,7 +840,7 @@ type FocusRestorationTests() =
 
     [<Test>]
     member _.``Escape restores focus from LoadingBranches state``() =
-        let loading = { modelWithFocusAndModal with CreateModal = Modal.LoadingBranches repoId }
+        let loading = { modelWithFocusAndModal with CreateModal = Modal.LoadingBranches (repoId, []) }
         let model, _ = update (KeyPressed ("Escape", false)) loading
 
         Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
