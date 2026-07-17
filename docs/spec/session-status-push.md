@@ -1,463 +1,304 @@
 # Session Status via Push Model
 
+## Overview
+
+Treemon derives each worktree's coding-tool status from a **push model**: the Copilot CLI extension
+observes the SDK session event stream and POSTs status events to the server, which folds them into
+live per-session state. This replaced the old log-file-parsing detectors entirely. The status dot is
+a pure function of that live state: **Working** (red), **WaitingForUser** (yellow), **Idle** (blue —
+an open CLI session between turns), or **NoSession** (grey — no live session).
+
 ## Goals
 
-- Replace **all** coding-tool log parsing with a **push model**: the Copilot CLI extension
-  observes the SDK session event stream and reports status to Treemon over HTTP.
-- Status must be **immediate and exact** (driven by explicit lifecycle events), not inferred
-  from log-file mtime heuristics.
-- The agent must be **completely unaware** — reporting is passive (never injects context,
-  never calls `session.send`), with negligible per-event cost.
-- **Durable**: live status survives a server restart; the raw event stream is persisted so
-  the historical Overview aggregation can be computed from it.
-- **Simple by design**: model events as a closed union and push all ambiguity-resolving
-  filtering to the source, so the server-side logic is a tiny pure fold with no branching
-  for sub-agents, injections, or bracket depth.
-- Delete the three log-parsing detectors (`CopilotDetector`, `ClaudeDetector`,
-  `VsCodeCopilotDetector`) — the end state is push-only (the user is CLI-only). The build is
-  push-only from the start; there is **no in-process parser and no source flag**. The
-  big-bang refactor is de-risked by running this whole build as a **second Treemon instance
-  side-by-side with the current `main` instance** (see Technical Approach) and comparing the
-  two dashboards before switching over.
+- **Push, not parse.** Status comes from explicit lifecycle events — immediate and exact, never
+  inferred from log-file mtime heuristics. The three log-parsing detectors (`CopilotDetector`,
+  `ClaudeDetector`, `VsCodeCopilotDetector`) are deleted; the build is push-only.
+- **Agent-unaware.** Reporting is passive: the extension only subscribes, never calls `session.send`
+  or injects context. The transcript is identical with reporting on or off.
+- **Durable.** Live status survives a server restart (rebuilt from SQLite); the raw event stream is
+  persisted so the historical Overview can be aggregated from it.
+- **Simple.** Events are a closed union; the server logic is a tiny pure fold with no branching for
+  sub-agents, injections, or bracket depth — all ambiguity is filtered at the source.
+- **Four-way status dot** driven purely by push state (below).
 
 ## Expected Behavior
 
-### Status reporting
+### Status dot
 
-- Each Copilot CLI session, via the Treemon extension, reports session-activity events to
-  `POST /api/session/activity` as they occur. The card reflects the new status on the
-  client's next poll (existing polling; no SSE).
-- The status shown per worktree is exactly what the fold derives:
-  - `assistant.turn_start` / a genuine user prompt / an assistant message → **Working**
-  - `elicitation.requested` / `user_input.requested` (i.e. `ask_user`) → **WaitingForUser**
-  - `assistant.turn_end` → **Done**
-  - `session.idle` → **Idle**
-- **Current skill**, **last user message**, and **last assistant message** are surfaced from
-  the same session that owns the shown status (never a mix across sessions).
-- A session that dies without emitting `session.idle` (crash, closed laptop) is treated as
-  **Idle** once its `last_seen` is older than the **staleness timeout (~5 min**, a few missed
-  heartbeats — faster than the old 30-min mtime staleness, since the extension heartbeats
-  every ~30–120s). `last_seen` is the direct analogue of the old file mtime.
-- The **idle window** for `pickActive` and restart `loadLiveStatuses` is **2h** (reuses the
-  existing idle cutoff): sessions quiet longer than this are not considered live.
+The single source of truth is the worktree's collapsed coding-tool status:
+
+| Situation | Status | Dot |
+|---|---|---|
+| Agent mid-turn (open session, Working) | Working | red `#ff0000` |
+| Agent parked on `ask_user` (open session) | WaitingForUser | yellow `#f9e2af` |
+| Agent finished / between prompts, **CLI still open** | Idle | blue `#89b4fa` |
+| No live session (never reported, or the CLI exited/crashed) | NoSession | grey `#585b70` |
+
+The fold derives a session's status from events:
+- `assistant.turn_start` / a genuine user prompt / an assistant message → **Working**
+- `elicitation.requested` / `user_input.requested` (`ask_user`) → **WaitingForUser**
+- `assistant.turn_end` / `session.idle` → **Idle**
+
+There is **no durable `Done`** — a finished turn reads as Idle. During active work the next
+`turn_start` re-asserts Working within ≤0.1 s, so the mid-loop Idle window is invisible to polling;
+only a genuinely-finished turn settles on Idle. `NoSession` is never a per-session status; it is only
+ever the collapse result for a worktree with no open session.
+
+### Openness (blue vs grey) and the crash net
+
+A session is **open** iff `now − last_seen < openWindow` (~3 min — a few missed heartbeats). An open
+CLI heartbeats even while idle, so its `last_seen` stays fresh; a closed/crashed one goes stale and
+drops out. Only open sessions drive the status dot; with none open the worktree is **NoSession**.
+
+`openWindow` (3 min) is deliberately smaller than the `stalenessTimeout` crash-net (5 min): a dead
+Working session drops out of openness (→ grey) before the crash-net would rewrite it to Idle, so it
+never lingers blue. The crash-net (a quiet Working/WaitingForUser → Idle) remains as a defensive net
+but rarely fires. A longer **idle window** (2 h) bounds the in-memory live map and the resume pick.
+
+### Footer persists (decoupled from the dot)
+
+The card footer — running skill, last user message, last assistant message — is sourced from the
+**most-recent session that has them** (most-recent-*any*), NOT from the status-dot collapse. Going
+Idle or losing the open session therefore does **not** blank the footer; it stays populated while any
+session for the worktree remains in the store (retention / idle window).
 
 ### Multiple sessions in one worktree
 
-The card collapses all live sessions for a worktree to one status:
-- **Drop Idle, then the most-recent *active* session wins; all Idle → Idle.** (Not raw
-  latest-update — a session that just went Idle must not hide an actively-Working sibling.)
-- Every displayed field (status, skill, last user, last assistant) is read from that one
-  winning session, by construction.
-- Only sessions whose `last_seen` is within the idle window are considered.
+A worktree's live sessions collapse to one card via two decoupled picks:
+- **Status dot** — among *open* sessions, drop Idle and the most-recent *active* session wins; all
+  Idle → Idle; no open session → NoSession. (Not raw latest-update — a session that just went Idle
+  must not hide an actively-Working sibling.)
+- **Footer** — the active winner if one runs, else the most-recent session of any status.
+
+### Overview "Agents" dimension
+
+- **Working** agents grouped by classified activity (Investigating/Executing/…) — red.
+- **WaitingForUser** agents — yellow.
+- **Idle (open)** agents — a blue group, each chip showing **time since it entered Idle**
+  (`CodingToolSince`, frozen at the transition into Idle).
+- **NoSession** worktrees are excluded (they are not agents); their card just shows the grey dot.
 
 ### Resume
 
-`Resume last session` picks the most-recent session **regardless of active/idle** (the
-session the user last touched), distinct from the display pick. It reads the session id from
-the store instead of scanning log directories.
+`Resume last session` picks the most-recent session **regardless of active/idle** (the session the
+user last touched) — distinct from both the display and footer picks. It reads the session id from
+the durable store (so it survives a restart even for a session last active > 2 h ago) and issues
+`copilot --resume <id>`, or `--continue` when the worktree never reported.
 
 ### Restart
 
-On server start, live per-session status is rebuilt from SQLite before serving, so cards are
-correct immediately without waiting for new events.
-
-### Agent-unaware
-
-The extension only *subscribes*; it never sends the session a message or injects context for
-status reporting. The agent transcript is identical with reporting on or off.
+On server start, live per-session status is rebuilt from SQLite before serving, so cards are correct
+immediately without waiting for new events.
 
 ## Technical Approach
 
 ### Domain model (make illegal states unrepresentable)
 
-The server owns the domain; the extension is a thin forwarder. A pushed report:
+The server owns the domain; the extension is a thin forwarder. `SessionActivity.fs`:
 
 ```fsharp
-type SessionId   = SessionId of string
-type EventId     = EventId of string
-type PushProvider = CopilotCli            // extensible: | CopilotApp | ...
-
-type Message = { Text: string; At: DateTimeOffset }
-
-/// The only events that bear on status. Anything else the extension never sends,
-/// so the server has no "irrelevant event" branch to carry.
 type SessionEvent =
     | TurnStarted
-    | UserPrompt of Message               // a genuine user prompt (never a skill-context injection)
+    | UserPrompt of Message                 // a genuine user prompt (never a skill-context injection)
     | AssistantMessage of Message
     | SkillInvoked of name: string
-    | AwaitingUserInput of question: Message option  // ask_user; carries the question text to surface
+    | AwaitingUserInput of question: Message option   // ask_user; carries the question to surface
     | TurnEnded
     | WentIdle
+    | Heartbeat                              // liveness only; bumps last_seen, no status fold
 
 type SessionActivityReport =
-    { SessionId: SessionId
-      WorktreePath: WorktreePath
-      Provider: PushProvider
-      EventId: EventId
-      OccurredAt: DateTimeOffset
-      Event: SessionEvent }
+    { SessionId; WorktreePath; Provider; EventId; OccurredAt; Event }
 ```
 
-The per-session fold state — deliberately smaller than today's `SessionScanCache`
-(no `SubagentDepth`, no `LastAssistantWasAskUser`, no separate raw-status type):
+A per-session status is `SessionLevelStatus = Working | WaitingForUser | Idle` (no `NoSession` — that
+is a worktree-level collapse result, made unrepresentable per session). The fold state is small (no
+`SubagentDepth`, no `LastAssistantWasAskUser`):
 
 ```fsharp
 type SessionStatus =
-    { Status: CodingToolStatus            // fold sets this directly, incl. Idle from WentIdle
-      Skill: string option
-      LastUserMessage: Message option
-      LastAssistantMessage: Message option }
-
-let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
-    match e with
-    | TurnStarted            -> { s with Status = Working }
-    | AssistantMessage m     -> { s with Status = Working; LastAssistantMessage = Some m }
-    | SkillInvoked name      -> { s with Skill = Some name }
-    | AwaitingUserInput q    -> { s with Status = WaitingForUser; LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage) }
-    | TurnEnded              -> { s with Status = Done }
-    | WentIdle               -> { s with Status = Idle }
-    | UserPrompt m ->
-        // A reply to an ask_user keeps the running skill; any other prompt is a new request.
-        let keepSkill = s.Status = WaitingForUser
-        { s with
-            Status = Working
-            Skill = (if keepSkill then s.Skill else None)
-            LastUserMessage = Some m }
+    { Status: SessionLevelStatus; Skill: string option
+      LastUserMessage: Message option; LastAssistantMessage: Message option }
 ```
 
-This fold is **the same state machine** as `CopilotDetector.foldForwardEvent`, minus the
-sub-agent and injection handling — those are eliminated at the source (see below), not
-branched on here. It is pure and append-friendly, so folding a later batch onto an earlier
-result equals folding the whole stream.
+`fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
+`AwaitingUserInput` → WaitingForUser (question folded into `LastAssistantMessage`), `TurnEnded` /
+`WentIdle` → Idle, `Heartbeat` → no-op. A `UserPrompt` replying to an `ask_user` keeps the running
+skill; any other prompt starts fresh. The fold is pure and append-friendly — folding a later batch
+onto an earlier result equals folding the whole stream.
 
-The `WentIdle` case sets `Idle` from the explicit `session.idle` event. A staleness wrapper
-is only a **crash safety-net**: a `Working`/`WaitingForUser`/`Done` status whose `last_seen`
-is older than the timeout reads as `Idle`.
+`freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
+older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
 
 ### Source-side filtering (why the server stays simple)
 
-The extension forwards **only** what the fold needs, so three sources of complexity never
-reach the server:
-1. **Sub-agent events** — every SDK event carries `agentId` (absent for the root agent). The
-   extension drops any event with an `agentId`. → the server has no depth tracking.
-2. **Skill-context injections** — a skill's own `<skill-context>` injection arrives as a
-   `user.message`; the extension drops it (same `source`+content markers the parser used). →
-   the server has no injection branch; every `UserPrompt` it sees is genuine.
-3. **Irrelevant events** — the extension maps only the ~7 relevant SDK event types; all
-   others are ignored. → the server's `SessionEvent` union has no catch-all.
+The extension forwards **only** what the fold needs, so three sources of complexity never reach the
+server:
+1. **Sub-agent events** — every SDK event carries `agentId` (absent for the root); the extension
+   drops any event that has one. → no depth tracking on the server.
+2. **Skill-context injections** — a skill's `<skill-context>` injection arrives as a `user.message`;
+   the extension drops it (source starts `skill-` AND content starts `<skill-context`). → every
+   `UserPrompt` the server sees is genuine.
+3. **Irrelevant events** — only the ~7 relevant SDK types are mapped; all others are ignored. → the
+   `SessionEvent` union has no catch-all.
 
-### Ingestion: single-writer mailbox + endpoint
+### Ingestion: endpoint + single-writer mailbox
 
-- `POST /api/session/activity` handler mirrors `canvasRegisterHandler`: JSON DTO →
-  domain `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
-- **Wire contract — the single coupling point between `extension.mjs` (producer) and the
-  handler (consumer); both tasks MUST implement this exact set.** The POST body is one report:
-  `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }`,
-  where `kind` is exactly one of the seven the fold consumes and maps 1:1 onto `SessionEvent`
-  (no catch-all):
-  `turn_started`→`TurnStarted`, `user_prompt`→`UserPrompt`, `assistant_message`→
-  `AssistantMessage`, `skill_invoked`→`SkillInvoked`, `awaiting_user_input`→`AwaitingUserInput`,
-  `turn_ended`→`TurnEnded`, `went_idle`→`WentIdle`. `message` (`{ text; at }`) is present for
-  `user_prompt`, `assistant_message`, and `awaiting_user_input` (the ask_user question, folded
-  into `LastAssistantMessage`); `skillName` only for `skill_invoked`; `turn_started` /
-  `turn_ended` / `went_idle` carry neither. An unknown `kind` is a validation error (rejected),
-  never silently dropped.
+- `POST /api/session/activity` mirrors `canvasRegisterHandler`: JSON DTO → domain
+  `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
+- **Wire contract** — the one coupling point between `extension.mjs` (producer) and the handler
+  (consumer). The body is one report:
+  `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }`. `kind` is
+  one of `turn_started`, `user_prompt`, `assistant_message`, `skill_invoked`, `awaiting_user_input`,
+  `turn_ended`, `went_idle`, `heartbeat`, mapping 1:1 onto `SessionEvent`. `message` (`{ text; at }`)
+  accompanies the two message kinds and the ask_user question; `skillName` only `skill_invoked`. An
+  unknown `kind` is a validation error, never silently dropped.
 - A dedicated `SessionActivity` `MailboxProcessor` is the **single writer** (the only mutable
-  boundary). Per report: `fold` the event onto that session's state → update the in-memory
+  boundary). Per report: `fold` onto that session's state → update the in-memory
   `Map<SessionId, SessionStatus>` → persist (upsert + append) → feed `RefreshScheduler`
-  (`UpdateSessionStatus`). Live reads are served from the `Map`; SQLite is the durable mirror.
-- Idempotency/ordering: upsert only when `OccurredAt >= updated_at`; `activity_events` dedupes
-  on `EventId`. Serialised writes mean no lock contention.
+  (`UpdateSessionStatus`). Live reads come from the map; SQLite is the durable mirror.
+- **Ordering guard** (both map and store): upsert only when `OccurredAt >= updated_at`; an
+  out-of-order (older) event is still appended to `activity_events` (history substrate) but does not
+  regress the live fold or the shown card. `activity_events` dedupes on `EventId`.
+- **Future timestamps are clamped, not trusted.** `last_seen` comes from `occurredAt`; a future value
+  would make the freshness net never decay. `parseReport` clamps any `occurredAt` beyond `now + 5 min`
+  down to `now`.
+- **Free text is length-capped server-side** (8 KB) before persistence — defence in depth above the
+  extension's 2000-char POST-body cap; truncated (not rejected) so an over-long field never drops the
+  whole event and regresses the live fold. (Display truncation to 80/120 chars stays downstream in
+  `CodingToolStatus`.)
 
 ### Persistence (SQLite, WAL)
+
+`SessionActivityStore(dbPath)` (IDisposable, creates the schema on construction) at
+`data/session-activity-{port}.db` — keyed by the server's `--port`, so a side-by-side instance never
+collides:
 
 ```sql
 session_status(session_id PK, worktree_path, provider, status, current_skill,
   last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen);
-CREATE INDEX ix_status_worktree ON session_status(worktree_path);
-
 activity_events(event_id PK, session_id, worktree_path, provider, kind, status, skill, ts);
-CREATE INDEX ix_events_ts ON activity_events(ts);
 ```
 
-PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; driver
-`Microsoft.Data.Sqlite`. Functions: `upsertStatus`, `appendEvent`, `loadLiveStatuses`
-(restart rebuild, `last_seen` within the idle window), `pruneOld` (retention timer),
-`queryWindow` (history substrate — see Decisions). WAL lets `queryWindow` read concurrently
-with the mailbox writer.
+PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; each op runs on its own
+short-lived connection (thread-safe against the single-writer mailbox and concurrent WAL readers).
+All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
+order — the `ts` / `last_seen` range filters depend on it. `upsertStatus` is last-write-wins;
+`appendEvent` is `INSERT OR IGNORE`; `pruneOld(now − 14d)` runs hourly and trims both tables.
+`loadLiveStatuses` rebuilds the live map on restart (rows within the idle window). The service is
+started only in the real monitoring path — demo/fixture mode serves synthetic data and takes no posts.
 
-**Store contract (as built in `SessionActivityStore.fs`).** The store is a class
-`SessionActivityStore(dbPath)` (IDisposable; creates the schema on construction) whose ops each
-run on their own short-lived `Pooling=false` connection — thread-safe against the single-writer
-mailbox and concurrent WAL readers; a keep-alive connection holds the file/WAL open for the
-store's lifetime. Row shapes: `StoredStatus` (`SessionId`/`WorktreePath`/`Provider`/`SessionStatus`
-+ `UpdatedAt`/`LastSeen`) and `ActivityEventRow` (event fields + post-fold `Status`/`Skill`). All
-timestamps persist as **UTC round-trip ("O") strings**, so lexical string comparison equals
-chronological order — the `ts`/`last_seen` range filters depend on this. `upsertStatus` is
-last-write-wins via `ON CONFLICT(session_id) … WHERE excluded.updated_at >= session_status.updated_at`
-(a stale report is a full no-op, not even bumping `last_seen`); `appendEvent` is `INSERT OR IGNORE`
-and returns whether it inserted (false = duplicate `event_id`); `pruneOld(cutoff)` trims **both**
-tables past the cutoff (`activity_events.ts` and `session_status.last_seen`) and returns the total
-rows deleted.
+### Collapse to card fields (`CodingToolStatus.fs`)
 
-### Multi-session collapse
+`collapseByWorktree` groups the live session-statuses by worktree path; `fromPushSessions` collapses
+each group with the two decoupled picks (openness-driven status dot + most-recent-any footer, above).
+The push provider is Copilot-only today, so an active card always reads `Copilot`.
 
-One function returns the whole winning record, so per-field cherry-picking is
-unrepresentable:
+`CodingToolSince` (time-since-idle) is stamped the moment a worktree's collapsed status **enters**
+Idle and frozen until it changes — **not** recomputed from `last_seen` (which an open idle session
+keeps advancing via heartbeat, which would reset the chip to ~0 each poll). `WorktreeApi` reads the
+frozen stamp for Idle worktrees; a new Working turn clears it.
 
-```fsharp
-/// Drop Idle, most-recent (by last_seen) active wins; all Idle → None.
-let pickActive : (SessionStatus * DateTimeOffset) list -> SessionStatus option
-```
-
-This is `CodingToolStatus.mostRecentActive` reused across a worktree's sessions instead of
-across three detector surfaces.
-
-### Push-only repoint + delete
-
-- `CodingToolStatus` / `WorktreeApi` source the card's coding-tool fields (status, skill,
-  last user, last assistant) from the `SessionActivity` live state via `pickActive`;
-  `getLastSessionId` reads the store.
-- `RefreshScheduler` stops scheduling `RefreshCodingTool`.
-- **Delete** `CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs`, the
-  three-surface resolution scaffolding in `CodingToolStatus.fs`, and their tests — keeping
-  only the pure fold in `SessionActivity.fs`. No source flag, no in-process parser: the build
-  is push-only.
-
-### Side-by-side validation (a second instance)
-
-The big-bang refactor is de-risked at the **instance** level, not in-process: run this
-push-only build as a **second Treemon instance** next to the current `main` instance and
-compare the two dashboards. Dev mode already uses separate ports (5001 API / 5002 canvas /
-5174 Vite vs prod 5000). Two things make it clean:
-- **Reporting-only extension, fanned out.** During validation a new *reporting-only*
-  extension is installed **alongside** the untouched `canvas-bridge`; it POSTs status to a
-  **configurable list** of Treemon ports, fanning out to both instances so the *same* sessions
-  feed both dashboards (`main` 404s the status route — harmless). It does no canvas, so
-  `canvas-bridge` and the canvas path stay completely unchanged during validation.
-- **Instance-specific SQLite path.** The DB file is keyed to the instance's port/data dir so
-  the validation instance can't collide with anything. All other shared data (worktree scan,
-  session logs, canvas files) is read-only.
-
-Once the new dashboard matches, switch over by making it the primary instance.
+`getLastSessionId` is the distinct resume pick — most-recent-any by `last_seen` from the **durable
+store** (not the idle-window live cache, so a session last active > 2 h ago still resolves after a
+restart), returning the stored session id. Provider for command-building comes from a per-worktree
+`.treemon.json` read (`CodingToolStatus.readConfiguredProvider`), not the retired detectors.
 
 ### Overview-history unification (Agents dimension)
 
-Prerequisite: rebased on `activity-history`. Refactor `OverviewHistory.fs` so the **Agents**
-counts in each historical bucket are aggregated on read from `activity_events` (for each
-bucket, each session's status as of that time → active/idle, skill → `Activity.classify`),
-instead of being logged as pre-aggregated snapshots every scheduler cycle. **Tasks** counts
-(beads) stay snapshot-based. The read path merges Tasks (snapshot) + Agents (event-derived)
-into the unchanged `OverviewSnapshot` shape; `getOverviewHistory` and `OverviewChart.fs` are
-untouched. Remove the agent half of the per-cycle snapshot logging in `RefreshScheduler.loop`.
+The **Agents** counts in each historical bucket are aggregated on read from `activity_events` (each
+session's status as of that time → active/idle, skill → `Activity.classify`), rather than logged as
+pre-aggregated snapshots every scheduler cycle. **Tasks** counts (beads) stay snapshot-based. The
+read path merges the two into the unchanged `OverviewSnapshot` shape, so `OverviewChart.fs` and
+`getOverviewHistory` are untouched.
 
-### Extension (two phases: additive, then consolidated)
+### Reporting extension (`src/Extension/reporting/`)
 
-**Phase 1 — reporting-only, additive.** A new `treemon-reporting` extension contains only
-`extension.mjs`: subscribe → filter (drop `agentId` sub-agent events + `<skill-context>`
-injections) → POST `/api/session/activity` to a **configurable list of Treemon ports**
-(fan-out; default one) → `getEvents()` replay on join → status-ping heartbeat carrying
-`last_seen`; on `awaiting_user_input` it carries the ask_user question text (surfaced as
-`LastAssistantMessage`). It is **passive** and registers **no canvas and no tools** and never
-calls `/api/canvas/register`, so it is fully orthogonal to the existing `canvas-bridge` —
-canvas is untouched during validation. Both extensions load per session (a harmless double
-`joinSession`), but since the reporting one doesn't touch canvas there is **no
-`canvas_take_ownership` tool collision and no double canvas-write handling**. Installed
-**alongside** `canvas-bridge`, which is left in place.
+A passive reporting-only extension (`extension.mjs` + `@treemon/reporting` `package.json`), installed
+to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas-bridge` by
+`Install-ReportingExtension` in `treemon.ps1`. It joins with no tools/canvas and never calls
+`session.send`.
 
-**Phase 2 — consolidate (post-validation).** Fold canvas + reporting into one `treemon-bridge`
-(`extension.mjs` bootstrap + `canvas.mjs` + `reporting.mjs`); `Install-Extension` installs it
-and **deletes both `canvas-bridge` and the interim `treemon-reporting` dir** (else double
-`joinSession` / duplicate tools). End state: one extension doing canvas + status.
+- **Fan-out ports** from `TREEMON_PORTS` (comma-separated) → `TREEMON_PORT` → `5000`; each report is a
+  fire-and-forget POST to every port (a non-owning instance 404s — swallowed). This lets a validation
+  instance run side-by-side with prod, both fed by the same sessions.
+- **SDK → wire mapping:** `assistant.turn_start`→`turn_started`, `assistant.message` (non-blank)→
+  `assistant_message`, genuine `user.message` (non-blank)→`user_prompt`, `skill.invoked`→
+  `skill_invoked`, `elicitation.requested` / `user_input.requested`→`awaiting_user_input`,
+  `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`. (`ask_user` emits
+  `elicitation.requested` / `.completed` in Copilot CLI 1.0.71+ with the prompt in `data.message`;
+  older builds used `user_input.*` with `data.question` — both are handled, question reads
+  `data.message ?? data.question`.) Blank-text messages are dropped.
+- **ask_user exactness:** a live-only `pendingAskUser` flag (set on the request, cleared on the
+  completion or a genuine `user_prompt`) suppresses `went_idle` while a prompt is unanswered, so the
+  card stays WaitingForUser even though `session.idle` is ephemeral. Because the flag is not rebuilt on
+  a rejoin, the suppression also fires when the last reported status was `waiting`.
+- **Heartbeat (60 s)** re-asserts liveness for **any** established session — working, waiting, or idle
+  — via the dedicated liveness-only `heartbeat` kind, which bumps `last_seen` without re-folding
+  status, moving the last-write-wins clock, or appending to history. An open idle session thus keeps
+  refreshing `last_seen` and stays blue; a closed session stops heartbeating, its `last_seen` goes
+  stale, and the worktree collapses to grey NoSession (matching the old mtime freeze). Kept distinct
+  from real events so it can never overtake a slightly-earlier real event and drop it via the ordering
+  guard.
 
 ## Decisions
 
-- **Push-only, clean cutover.** All parsing deleted in this effort; the push model is the
-  sole status source. Rationale: user is CLI-only; explicit events are strictly better than
-  mtime inference; three detectors collapse to one pure fold.
-- **Side-by-side validation is instance-level, not in-process.** The build is push-only with
-  no parser and no source flag; validation is done by running it as a **second Treemon
-  instance** next to `main` and comparing dashboards (enabled by extension port fan-out + an
-  instance-specific SQLite path). This keeps the code simple — no dual-source/Compare
-  machinery — while still de-risking the cutover.
-- **Filter at the source, fold on the server.** Sub-agent (`agentId`) and injection filtering
-  live in the extension so the server fold has no branching for them — the single biggest
-  simplification vs the current parser.
-- **Reuse the F# fold; don't rewrite in JS.** The risky logic is the fold; it stays server-F#
-  (compiler assistance + ported tests). The extension is a thin forwarder — no Fable/TS.
-- **`session.idle` sets Idle directly; freshness is only a crash net.** Unlike the parser,
-  which derived Idle purely from age.
-- **Future `occurredAt` is clamped, not trusted.** `last_seen` comes from `occurredAt`, and the
-  freshness net decays a session once `now - last_seen` exceeds the staleness timeout — a future
-  `last_seen` makes that negative, so the session reads perpetually fresh and never decays (stuck
-  non-Idle). `parseReport` clamps any `occurredAt` beyond `now + 5 min` skew down to `now`;
-  minor skew passes through. (See `SessionActivityService.clampFutureTimestamp`.)
-- **Free text is length-capped server-side, not trusted from the client.** `extension.mjs` caps
-  message/skill text at 2000 chars, but the loopback ingest endpoint must not trust the producer's
-  bound. `parseReport`/`parseEvent` truncate `message.text`, the ask_user question, and `skillName`
-  to `maxTextLength` (8 KB) before they are persisted to SQLite or held in memory — well above the
-  client cap so legitimate traffic is untouched, purely a defence-in-depth storage/memory bound.
-  Truncated (not rejected) so an over-long field never drops the whole event and regresses the live
-  fold. (See `SessionActivityService.capText`; display truncation to 80/120 chars is still
-  downstream in `CodingToolStatus`.)
-- **Display pick ≠ resume pick.** Display = most-recent-active; resume = most-recent-any.
-- **Overview-history unification (rebased onto `activity-history`).** This feature is based
-  on top of the `activity-history` branch (landed first), so `OverviewHistory.fs`,
-  `OverviewData.fs`, `OverviewChart.fs`, and the `getOverviewHistory` remoting contract
-  exist. An `OverviewSnapshot` is `{ Tasks; Agents }`; only the **Agents** dimension is
-  derivable from `activity_events` (session status + skill → `Activity.classify`). The
-  **Tasks** dimension is beads planning counts, *not* event-sourced here. So the refactor:
-  compute the **Agents** history by aggregating `activity_events` over the window on read
-  (retiring agent-activity snapshotting), and **keep Tasks snapshot-based**. The read side
-  merges the two into the existing `OverviewSnapshot` shape, so `OverviewChart.fs` and
-  `getOverviewHistory` are unchanged.
-- **One extension in the end state; two during validation.** The end state is a single
-  `treemon-bridge` (canvas + reporting) to avoid a permanent double `joinSession`. During
-  validation the new reporting lives in a *separate reporting-only* extension installed
-  alongside the untouched `canvas-bridge` — keeping the canvas path byte-for-byte unchanged
-  and avoiding a `canvas_take_ownership` collision between two canvas-capable extensions.
-  Consolidation to one is the final post-validation step.
-- **Ingestion concretions (as built in `SessionActivityService.fs`).** The DB path is
-  `data/session-activity-{port}.db` (keyed by the server's `--port`, so a side-by-side
-  validation instance never collides). The service is started only in the **real monitoring
-  path** — demo mode has no scheduler agent, and fixture mode serves synthetic data and takes
-  no activity posts (mirrors skipping the scheduler background loop). `LastSeen` and
-  `UpdatedAt` are both set to the report's `OccurredAt` on every ingested event (an event is
-  also the heartbeat). The in-memory live map applies the **same last-write-wins ordering
-  guard** as the store: an out-of-order (older) event is still appended to `activity_events`
-  (history substrate) but does not regress the live fold state, the shown card, or the
-  `session_status` row. Retention timer: `pruneOld(now − 14d)` every 1h, on the store's own
-  connection (WAL + `busy_timeout` handle the concurrent delete); the service owns the store's
-  lifetime and disposes it on shutdown.
-- **Repoint concretions (as built in `CodingToolStatus.fs` + `WorktreeApi.fs`).** The card's
-  coding-tool fields now come from the push live state, not the detectors:
-  `CodingToolStatus.collapseByWorktree` groups `DashboardState.SessionStatuses` (the store's
-  in-memory reflection) by worktree path and `fromPushSessions` collapses each group —
-  freshness-adjust each session (the 5-min staleness net rewrites a quiet Working/Waiting/Done
-  to Idle), then `SessionActivity.pickActive` (drop Idle, most-recent active wins) with **all**
-  fields (status/skill/last-user/last-assistant/provider) taken from the one winner. The push
-  provider is Copilot-only, so an active card always reads `Copilot`; last-user/last-assistant
-  keep the detectors' 80/120-char single-line truncation and `"copilot"` source. The 5-min
-  freshness **subsumes** the 2h idle window for the *display* pick (anything quiet >5 min is
-  already Idle and dropped), so `fromPushSessions` needs no separate window filter. The collapse
-  map is built once per `getWorktrees` / `getSyncStatus` call (SessionStatuses is global, keyed by
-  the same normalised path as `WorktreeInfo.Path`) and feeds both the worktree cards and the
-  recent-messages endpoint. `getLastSessionId` is the **distinct resume pick** — most-recent-any
-  by `last_seen` (no drop-Idle, no freshness), returning the stored session id (→ `copilot --resume
-  <id>`, or `--continue` when the worktree never reported). The resume path feeds it from the
-  **durable store** (`SessionActivityStore.StatusesForWorktree`), NOT the idle-window live cache
-  (`SessionStatuses`): after a restart a session last active >2h ago is absent from the live cache,
-  so a live-cache-only pick returned None and resume wrongly fell back to `--continue` instead of
-  `--resume <id>` (F10/C-02). `session_status` keeps the row until the 14d retention prune, so the
-  resume identity survives a restart. `WorktreeApi.worktreeApi` takes the store as an option
-  (`Some` in the real monitoring path, `None` in demo/fixture where resume is unavailable), shared
-  with the ingestion service; `resumeSession` no longer fetches scheduler state.
-  Provider for command-building comes from a direct `CodingToolStatus.readConfiguredProvider`
-  per-worktree `.treemon.json` read (task cc4) — no longer routed through the retired
-  detector-fed `CodingToolData` map.
-- **Delete concretions (task 9k8, as built).** Detectors `CopilotDetector.fs`/`ClaudeDetector.fs`/
-  `VsCodeCopilotDetector.fs` and their tests are deleted; the three-surface resolution scaffolding
-  (`ProviderResult`, `mostRecentActive`, `pickActiveProvider`, `pickActiveSkill`, `resolveStatus`,
-  `SessionResults`, `getClaudeResult`, `gatherResultsFromFiles`, `getRefreshData`) is removed from
-  `CodingToolStatus.fs` — kept: `readConfiguredProvider`, `CodingToolResult`, the prompt builders
-  (`configureTestsPrompt`/`skillInvocation`/`actionPrompt`), and the push funcs. `RefreshScheduler`
-  drops the `RefreshCodingTool` task entirely (union case + task-list wiring + `executeTask` branch);
-  the now-unfed `UpdateCodingTool` message and `CodingToolData` map are **retained** (out of this
-  task's scope) — `effectiveActivity` and `WorktreeApi.resolveProvider` read the now-always-empty
-  map and harmlessly degrade (no coding-tool activity signal; `Copilot` provider default). Tests:
-  the detector test files + `ClaudeSessionReplayTests.fs` are deleted, `CodingToolOrchestratorTests`
-  keeps only `ReadConfiguredProviderTests` (the scaffolding fixtures go), `ServerParsingTests` drops
-  `EncodeWorktreePathTests` (its `encodeWorktreePath` lived in the deleted `ClaudeDetector`), and
-  `SchedulerTests` per-worktree task counts go 3→2 (Git+Beads). Build is push-only. Removing the
-  residual inert plumbing and repointing the launch sites to `readConfiguredProvider` is done in
-  the follow-up task cc4 (below).
-- **Cleanup concretions (task cc4, as built).** The inert pull-model coding-tool plumbing is
-  deleted: `WorktreeApi.resolveProvider` is removed and the 5 launch sites (`startSync`,
-  `launchSession`, `launchAction`, `resumeSession`, `sendCanvasMessage`) now call
-  `CodingToolStatus.readConfiguredProvider path` directly (per-worktree `.treemon.json`, matching
-  the post-fork site) so per-worktree provider config is honored instead of always defaulting to
-  `Copilot`; `launchSession`/`sendCanvasMessage` drop their now-unused `GetState` fetch.
-  `RefreshScheduler` loses the `CodingToolData` field (from `PerRepoState`, `PerRepoState.empty`,
-  and `removeWorktreeData`), the `UpdateCodingTool` `StateMsg` case (union + `processMessage`
-  branch), and the always-false `effectiveActivity.hasCodingToolActivity` branch (plus its unused
-  `codingToolActivityThreshold`) — `effectiveActivity` is now purely client-activity decay.
-  `IdleDetectionTests` drops the six coding-tool-override tests + `dashboardWithCodingTool` helper,
-  keeping the client-activity decay + `computeActivityLevel` tests. `CodingToolStatus.CodingToolResult`
-  is retained (still used by the push `collapseByWorktree`/`fromPushSessions` path). Build 0 warn/0 err;
-  non-E2E suite 1078 pass / 0 fail / 10 skip.
-- **Reporting extension concretions (Phase 1, as built in `src/Extension/reporting/`).** The
-  reporting-only extension is its own installable dir `src/Extension/reporting/`
-  (`extension.mjs` + a `@treemon/reporting` `package.json`, `main: extension.mjs`), installed to
-  `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas-bridge` by a new
-  `Install-ReportingExtension` step in `treemon.ps1` (called from `Deploy-Frontend` next to the
-  existing `Install-Extension`). It **passive-joins** (`joinSession()` with no tools/canvas, never
-  `session.send`). Fan-out ports come from `TREEMON_PORTS` (comma-separated) → `TREEMON_PORT` →
-  `5000`; each report is a fire-and-forget `POST /api/session/activity` to every port (a non-owning
-  instance 404s — swallowed). **Source-side filtering:** drop any event with `agentId` (sub-agent);
-  drop a `user.message` skill-context injection (**both** `source` starting `skill-` AND trimmed
-  `content` starting `<skill-context` required). **SDK→wire mapping:** `assistant.turn_start`→
-  `turn_started`, `assistant.message`(non-blank content)→`assistant_message`, genuine `user.message`
-  (non-blank)→`user_prompt`, `skill.invoked`(`data.name`)→`skill_invoked`,
-  `elicitation.requested`/`user_input.requested`→
-  `awaiting_user_input` (question optional, carried as the message → surfaced as
-  `LastAssistantMessage`), `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`.
-  (`ask_user` in Copilot CLI 1.0.71+ emits `elicitation.requested`/`elicitation.completed` with the
-  prompt in `data.message`; older builds emitted `user_input.requested`/`user_input.completed` with
-  it in `data.question` — both shapes are subscribed and the question reads `data.message ?? data.question`.) Blank-text
-  messages are dropped (a content-less `user.message` boundary is already covered by the paired
-  `assistant.turn_start`; an empty `assistant.message` is a pure tool-call). Raw message text is
-  forwarded (server owns display truncation), capped at 2000 chars only to bound the POST body.
-  `provider` is always `copilot_cli`; `eventId`/`occurredAt` are the SDK event's `id`/`timestamp`.
-  **ask_user exactness:** a live-only `pendingAskUser` flag (set on `elicitation.requested`/
-  `user_input.requested`, cleared on `elicitation.completed`/`user_input.completed` or a genuine
-  `user_prompt`) suppresses `went_idle` while a prompt is
-  unanswered, so the card stays `WaitingForUser` even if the SDK reports the session idle
-  (`session.idle` is ephemeral, never replayed). Because `pendingAskUser` is not rebuilt on a rejoin
-  (crash / editor reload / restart), the suppression **also** fires when `currentStatus === "waiting"`
-  (which a replayed `awaiting_user_input` DOES rebuild), matching the heartbeat's source of truth so a
-  post-rejoin `session.idle` can't downgrade a genuinely-waiting session. **Heartbeat** (60s) re-asserts only the two
-  long-lived active states — `working`→synthetic `turn_started`, `waiting`→synthetic
-  `awaiting_user_input` (no message) — with a fresh `eventId` + now `occurredAt`, so the server bumps
-  `last_seen` while re-folding a status-preserving no-op; `done`/`idle` carry no heartbeat and decay
-  via the staleness net (matching the old mtime freeze). A local newest-wins status guard
-  (`lastStatusMs`) means the **subscribe-live-first, then `getEvents()` replay** ordering can't rewind
-  live status; server `eventId` dedupe + the ingestion ordering guard make the replay/live overlap
-  harmless.
-- **In-memory live map is idle-window bounded (F5/C-07, as built in `RefreshScheduler.fs`).**
-  `DashboardState.SessionStatuses` was append-only — `UpdateSessionStatus` only ever `Map.add`ed, so
-  dead sessions accumulated in memory forever and drifted from the store's live cache. `UpdateSessionStatus`
-  now runs `evictStaleStatuses` after the add: drop any entry whose `LastSeen` is older than `idleWindow`
-  (2h). The window is measured against the **newest `LastSeen` in the map** (the freshest heartbeat
-  observed), *not* wall-clock `DateTimeOffset.UtcNow`. Rationale: the map is fed by ingested reports whose
-  `LastSeen` is the event's `OccurredAt`, which can be historical (replay, fixtures, tests); anchoring the
-  cutoff to wall-clock would wrongly evict a legitimately-fresh-but-timestamp-old report the instant it
-  lands (and can never drop the entry just added). This mirrors the store's `LoadLiveStatuses` idle-window
-  policy while staying deterministic and replay-safe. The display path is unaffected — it already
-  freshness-adjusts against real `now` at read time (5-min staleness net subsumes the 2h window for the
-  *display* pick).
+- **Push-only, clean cutover.** All parsing deleted; the push model is the sole status source. The
+  user is CLI-only, explicit events beat mtime inference, and three detectors collapse to one pure
+  fold.
+- **Filter at the source, fold on the server.** Sub-agent (`agentId`) and injection filtering live in
+  the extension so the server fold has no branch for them — the single biggest simplification vs the
+  old parser.
+- **Reuse the F# fold; don't rewrite in JS.** The risky logic stays server-side F# (compiler help +
+  ported tests); the extension is a thin forwarder (no Fable/TS).
+- **`session.idle` sets Idle directly; freshness is only a crash net** — unlike the old parser, which
+  derived Idle purely from file age.
+- **No durable `Done`.** A finished turn (`turn_ended`) reads as Idle; the next `turn_start` re-asserts
+  Working within ≤0.1 s, so the mid-loop Idle window is invisible to polling. This matches what the CLI
+  actually models (Working / WaitingForUser / Idle).
+- **`NoSession` is a 4th `CodingToolStatus` case**, not a `HasOpenSession` flag on `WorktreeStatus` —
+  so the dot is a pure function of one status (illegal states unrepresentable).
+- **`openWindow` (3 min) < `stalenessTimeout` (5 min).** A dead/crashed agent stops being open and
+  shows grey after ~3 min rather than lingering blue; the crash-net stays as a defensive backstop.
+- **Time-since-idle is stamped at the transition, not read live.** An open idle session heartbeats, so
+  its `last_seen` advances; reading it live would reset the chip every poll. Capture once when the
+  collapsed status enters Idle and hold it.
+- **Footer decoupled from the dot.** Card messages/skill come from the most-recent-any session, so an
+  idle or session-less worktree keeps its footer — fixing the earlier bug where the `pickActive`-only
+  collapse blanked idle worktrees.
+- **Display pick ≠ footer pick ≠ resume pick.** Display = most-recent *open active*; footer =
+  most-recent-any (live); resume = most-recent-any (durable store, survives restart).
+- **Future `occurredAt` is clamped, not trusted; free text is length-capped server-side** (see
+  Technical Approach) — the loopback ingest endpoint does not trust the producer's bounds.
+- **`HasActiveSession` (tmux/window) stays distinct from push openness** — the coding-tool dot uses
+  push openness only; no merge.
+- **Explicit session-closed event deferred.** None of the wire kinds signals "closed"; an instant-grey
+  close-ping would need a new server kind. The openness window covers clean exit and hard crash alike,
+  so it is not required for correctness.
+- **Two extensions today, one in the end state.** Reporting lives in its own `treemon-reporting`
+  extension alongside the untouched `canvas-bridge`, keeping the canvas path unchanged and avoiding a
+  `canvas_take_ownership` collision. Folding canvas + reporting into a single `treemon-bridge` is a
+  future consolidation step.
 
 ## Key Files
 
-| File | Changes |
-|------|---------|
-| `src/Server/SessionActivity.fs` | **New.** Domain (`SessionEvent`, `SessionActivityReport`, value types), `SessionStatus`, pure `fold`, freshness wrapper, `pickActive`. |
-| `src/Server/SessionActivityStore.fs` | **New.** SQLite (WAL) schema + `upsertStatus`/`appendEvent`/`loadLiveStatuses`/`pruneOld`/`queryWindow`. |
-| `src/Server/SessionActivityService.fs` | **New.** `SessionActivity` mailbox (single writer) + `POST /api/session/activity` handler + startup rebuild. |
-| `src/Server/CodingToolStatus.fs` | Source status/skill/messages/`getLastSessionId` from push live state; drop the three-surface resolution scaffolding (incl. `mostRecentActive`/`ProviderResult`) — the collapse logic lives in `SessionActivity.pickActive`. |
-| `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus` message; stop scheduling `RefreshCodingTool`. |
-| `src/Server/WorktreeApi.fs` | Build `WorktreeStatus` coding-tool fields from push state. |
-| `src/Server/Program.fs` | Route `/api/session/activity`; start the SessionActivity service + rebuild. |
-| `src/Server/Server.fsproj` | Add `Microsoft.Data.Sqlite`; add/remove `<Compile>` entries. |
-| `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs` | **Deleted.** |
-| `src/Extension/` (`extension.mjs`; later `+canvas.mjs`) | Phase 1: reporting-only extension (as built: `src/Extension/reporting/` — `extension.mjs` + its own `package.json`). Phase 2: consolidate canvas + reporting into one `treemon-bridge`. |
-| `treemon.ps1` | Phase 1: install `treemon-reporting` alongside `canvas-bridge` (as built: `Install-ReportingExtension`, called from `Deploy-Frontend`). Phase 2: install unified `treemon-bridge`, delete `canvas-bridge` + `treemon-reporting`. |
-| `src/Tests/` | Port fold tests to `SessionActivity`; store tests; remove detector tests. |
+| File | Role |
+|------|------|
+| `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
+| `src/Server/SessionActivityStore.fs` | SQLite (WAL) schema + `upsertStatus` / `appendEvent` / `loadLiveStatuses` / `pruneOld` / `queryWindow`. |
+| `src/Server/SessionActivityService.fs` | `SessionActivity` mailbox (single writer) + `POST /api/session/activity` handler + startup rebuild + retention timer. |
+| `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `getLastSessionId` (resume), `readConfiguredProvider`. |
+| `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |
+| `src/Server/WorktreeApi.fs` | Builds the card's coding-tool fields + `CodingToolSince` from push state. |
+| `src/Server/Program.fs` | Routes `/api/session/activity`; starts the service + rebuild. |
+| `src/Client/CardViews.fs`, `src/Client/index.html` | `ct-dot` classes/colours (idle blue, nosession grey); Overview Idle group. |
+| `src/Extension/reporting/` | Passive reporting-only extension (`extension.mjs` + `package.json`). |
+| `treemon.ps1` | `Install-ReportingExtension` — installs `treemon-reporting` alongside `canvas-bridge`. |
 
 ## Related Specs
 
 - `docs/spec/worktree-monitor.md` — architecture, domain types, refresh model.
-- `docs/spec/resume-last-session.md` — consumes `getLastSessionId`; must keep working.
-- `docs/spec/canvas-pane.md` / `canvas-browser-fallback.md` — the extension being extended.
-- `docs/spec/remoting-csrf-hardening.md` — the `csrfGuard` the new endpoint reuses.
-- `docs/spec/native-session-management.md` — `HasActiveSession` (window-based; unchanged).
+- `docs/spec/beads-overview-band.md` / `docs/spec/overview-drilldown.md` — the Overview Agents band (Idle group).
+- `docs/spec/resume-last-session.md` — consumes `getLastSessionId`.
+- `docs/spec/remoting-csrf-hardening.md` — the `csrfGuard` the endpoint reuses.
+- `docs/spec/native-session-management.md` — `HasActiveSession` (window-based; distinct from push openness).
