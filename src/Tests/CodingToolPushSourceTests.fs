@@ -218,6 +218,39 @@ type CollapseByWorktreeTests() =
         let byWt = collapseByWorktree now sessions
         Assert.That(byWt["wt-a"].Status, Is.EqualTo Idle)
 
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type WithRetainedFallbackTests() =
+
+    let retainedRow sid wt lastUser seen : string * StoredStatus =
+        WorktreePath.value (WorktreePath wt), stored sid wt SessionLevelStatus.Idle None lastUser None seen
+
+    [<Test>]
+    member _.``A worktree absent from the live map gets a NoSession card carrying the retained footer``() =
+        // wt-old has no live session (aged out of the idle window), only a durable row with a message.
+        let retained = Map.ofList [ retainedRow "old" "wt-old" (Some(msg "resume me" "2026-03-01T08:00:00Z")) "2026-03-01T08:00:00Z" ]
+
+        let merged = Map.empty |> withRetainedFallback retained
+
+        Assert.That(merged["wt-old"].Status, Is.EqualTo NoSession, "the dot stays grey — no OPEN session")
+        Assert.That(
+            merged["wt-old"].LastUserMessage |> Option.map fst,
+            Is.EqualTo(Some "resume me"),
+            "the retained footer/resume message is surfaced so the resume button is reachable"
+        )
+
+    [<Test>]
+    member _.``A live worktree keeps its live card (retained fallback only fills gaps)``() =
+        let live = collapseByWorktree now [ stored "a" "wt-a" SessionLevelStatus.Working (Some "review") None None "2026-03-01T11:59:00Z" ]
+        let retained = Map.ofList [ retainedRow "stale" "wt-a" (Some(msg "old" "2026-03-01T08:00:00Z")) "2026-03-01T08:00:00Z" ]
+
+        let merged = withRetainedFallback retained live
+
+        Assert.That(merged["wt-a"].Status, Is.EqualTo Working, "the live result wins over the retained fallback")
+        Assert.That(merged["wt-a"].CurrentSkill, Is.EqualTo(Some "review"))
+
     [<Test>]
     member _.``A worktree with only a STALE idle session collapses to grey NoSession``() =
         let sessions = [ stored "a" "wt-a" SessionLevelStatus.Idle None None None "2026-03-01T11:00:00Z" ]

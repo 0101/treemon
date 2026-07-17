@@ -218,6 +218,7 @@ let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     (deployBranch: string option)
@@ -233,8 +234,15 @@ let getWorktrees
         // result per worktree once, up front: each worktree's sessions → openness-driven status +
         // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
         // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
+        // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
+        // live idle window (after a restart), so their footer + resume button survive (keeping the dot
+        // NoSession).
+        let retainedByWorktree =
+            activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
         let pushByWorktree =
             CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+            |> CodingToolStatus.withRetainedFallback retainedByWorktree
 
         let codingToolSince = state.CodingToolSinceByWorktree
 
@@ -418,7 +426,7 @@ let worktreeApi
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
             createWorktree = fun _ -> async { return Ok [] } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun wtPath ->
@@ -489,8 +497,14 @@ let worktreeApi
                   // The card's last-assistant message per worktree now comes from the push live state
                   // (collapsed via pickActive), not the log-parsing detectors — same repoint as the
                   // worktree cards. Merged with sync events below to build each card's recent-message pair.
+                  // Retained fallback keeps the last-assistant message for worktrees aged out of the live
+                  // idle window (restart), matching the worktree-card assembly.
+                  let retainedByWorktree =
+                      activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
                   let pushByWorktree =
                       CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+                      |> CodingToolStatus.withRetainedFallback retainedByWorktree
 
                   let cachedLastMessages =
                       pushByWorktree

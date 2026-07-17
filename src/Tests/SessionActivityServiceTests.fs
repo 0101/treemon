@@ -360,6 +360,23 @@ type IngestTests() =
             Assert.That(events.Length, Is.EqualTo 0))
 
     [<Test>]
+    member _.``a real event never regresses last_seen below a fresher heartbeat``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            // Establish the session, then a heartbeat advances openness to 10:02.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:02:00Z" Heartbeat)
+            svc.LiveSnapshot() |> ignore
+            // A real, IN-ORDER event (updated_at advances past e1) whose OccurredAt predates the
+            // heartbeat: it must fold, but must NOT pull last_seen back before the heartbeat.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:01:00Z" (UserPrompt(msg "go" "2026-03-01T10:01:00Z")))
+            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "last_seen stays monotonic (kept at the heartbeat)")
+            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "the real event still advances the write clock")
+            Assert.That(s.Status.LastUserMessage, Is.EqualTo(Some(msg "go" "2026-03-01T10:01:00Z")), "the real event still folds")
+            let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun r -> r.SessionId = SessionId "s1")
+            Assert.That(stored.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "durable last_seen is monotonic too"))
+
+    [<Test>]
     member _.``an out-of-order event's history row records its own status, not the newest live status``() =
         withService "C:/wt/a" (fun (svc, _, store) ->
             // Newest applied: turn_ended -> Idle.

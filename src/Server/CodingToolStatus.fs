@@ -183,6 +183,36 @@ let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<
     |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
     |> Map.ofSeq
 
+/// A durable-store fallback card for a worktree whose sessions have ALL aged out of the live idle
+/// window (e.g. after a restart, last active >2h ago). The status dot stays `NoSession` (grey) — no
+/// OPEN session exists — but the retained footer/resume metadata (skill, last user/assistant message,
+/// provider) is surfaced from its most-recent stored session, so the footer still renders and the
+/// resume button stays reachable (`CardViews.canResumeSession` requires a `LastUserMessage`). Without
+/// this the durable `--resume <id>` path is UI-unreachable for exactly the sessions it was built for.
+let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
+    let s = stored.Status
+    let hasFooter = s.Skill.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
+
+    { Status = NoSession
+      Provider = if hasFooter then Some CopilotCli else None
+      CurrentSkill = s.Skill
+      LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+      LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
+      LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
+      LastActivity = None }
+
+/// Fill gaps in the live collapse with the durable retained fallback: a worktree present in `live`
+/// keeps its live result (openness dot + footer); one absent from it (all its sessions aged out of the
+/// idle window) takes the retained `NoSession`-with-footer card, so its footer and resume button
+/// survive a restart. `retained` is keyed by worktree path (from `RetainedByWorktree`).
+let withRetainedFallback (retained: Map<string, StoredStatus>) (live: Map<string, CodingToolResult>) : Map<string, CodingToolResult> =
+    retained
+    |> Map.fold
+        (fun acc path stored ->
+            if Map.containsKey path acc then acc
+            else Map.add path (retainedFooterResult stored) acc)
+        live
+
 /// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recent session for the
 /// worktree regardless of active/idle (the session the user last touched). Reads the id from the
 /// push live state (the store's in-memory reflection) instead of scanning log directories. `None`

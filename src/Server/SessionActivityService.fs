@@ -255,27 +255,35 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
             // Idempotency: a duplicate POST (same event_id) is a full no-op — nothing appended, no
             // upsert, no scheduler feed, live map unchanged.
-            if not (store.AppendEvent eventRow) then
+            //
+            // LastSeen must never regress: a heartbeat may already have advanced it past this event's
+            // OccurredAt (a delayed real event landing after a fresher heartbeat), and resetting it
+            // backwards could drop the session out of the openness window and grey an open card early.
+            let lastSeen =
+                match prior with
+                | Some p -> max p.LastSeen report.OccurredAt
+                | None -> report.OccurredAt
+
+            let stored =
+                { SessionId = report.SessionId
+                  WorktreePath = report.WorktreePath
+                  Provider = report.Provider
+                  Status = newStatus
+                  UpdatedAt = report.OccurredAt
+                  LastSeen = lastSeen }
+
+            // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
+            // status can never diverge on a mid-pair failure. Returns false for a duplicate event_id
+            // (nothing appended or upserted) → live map unchanged.
+            if not (store.AppendAndUpsert(eventRow, stored)) then
+                live
+            elif isOutOfOrder then
+                // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
+                // history substrate but must not regress the live fold state or the shown card.
                 live
             else
-                let stored =
-                    { SessionId = report.SessionId
-                      WorktreePath = report.WorktreePath
-                      Provider = report.Provider
-                      Status = newStatus
-                      UpdatedAt = report.OccurredAt
-                      LastSeen = report.OccurredAt }
-
-                // Durable mirror is last-write-wins (a stale/out-of-order report is a no-op in the store).
-                store.UpsertStatus stored
-
-                // Mirror the same ordering guard in memory: an out-of-order (older) event is recorded in
-                // the history substrate but must not regress the live fold state or the shown card.
-                if isOutOfOrder then
-                    live
-                else
-                    scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
-                    live |> Map.add report.SessionId stored
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
+                live |> Map.add report.SessionId stored
 
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->
@@ -283,7 +291,16 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 let! msg = inbox.Receive()
 
                 match msg with
-                | Ingest report -> return! loop (apply live report)
+                | Ingest report ->
+                    // A store failure must never kill the single writer: catch, log, and keep the loop
+                    // alive with the unchanged live map (the report is dropped, best-effort like the wire).
+                    let next =
+                        try
+                            apply live report
+                        with ex ->
+                            Log.log "Activity" $"Ingest failed (report dropped, mailbox kept alive): {ex.Message}"
+                            live
+                    return! loop next
                 | Seed loaded ->
                     let seeded = loaded |> List.fold (fun m s -> Map.add s.SessionId s m) live
                     return! loop seeded
@@ -294,17 +311,18 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
             loop Map.empty)
 
-    // Retention Timer lifecycle field: created lazily in Start() (after construction, once the store
-    // is seeded) and released in Dispose(); the handle must survive between those two calls, so it
-    // cannot be an immutable let.
-    let mutable pruneTimer: Timer option = None
-
     let prune _ =
         try
             let deleted = store.PruneOld(DateTimeOffset.UtcNow - retentionPeriod)
             if deleted > 0 then Log.log "Activity" $"Retention: pruned {deleted} old activity row(s)"
         with ex ->
             Log.log "Activity" $"Retention prune failed: {ex.Message}"
+
+    // Retention timer, created DISABLED (infinite due/period) at construction so the handle is a fixed
+    // immutable binding; Start() arms it with Change once the store is seeded, Dispose() releases this
+    // same handle.
+    let pruneTimer =
+        new Timer(TimerCallback(prune), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan)
 
     /// POST /api/session/activity. Mirrors canvasRegisterHandler: bind the JSON DTO, validate + map
     /// to the domain report, apply the known-worktree guard, then hand the report to the single
@@ -346,13 +364,13 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         scheduler.Post(RefreshScheduler.SeedSessionStatuses loaded)
         mailbox.Post(Seed loaded)
         Log.log "Activity" $"Rebuilt {List.length loaded} live session status(es) from store"
-        pruneTimer <- Some(new Timer(TimerCallback(prune), null, pruneInterval, pruneInterval))
+        pruneTimer.Change(pruneInterval, pruneInterval) |> ignore
 
     /// The current in-memory live map (test seam; live reads for cards go via the scheduler).
     member _.LiveSnapshot() : Map<SessionId, StoredStatus> = mailbox.PostAndReply Snapshot
 
     interface IDisposable with
         member _.Dispose() =
-            pruneTimer |> Option.iter _.Dispose()
+            pruneTimer.Dispose()
             (mailbox :> IDisposable).Dispose()
             (store :> IDisposable).Dispose()

@@ -191,6 +191,51 @@ type AppendEventTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type AppendAndUpsertTests() =
+
+    [<Test>]
+    member _.``A new event is appended and the live status upserted in one call``() =
+        withStore (fun store ->
+            let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "review" }
+            let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
+            let stored = storedOf "s1" "C:/wt/a" status "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+
+            Assert.That(store.AppendAndUpsert(e, stored), Is.True, "a new event reports inserted")
+
+            let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "the event was appended")
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
+            Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Working, "the status was upserted in the same call"))
+
+    [<Test>]
+    member _.``A duplicate event_id skips BOTH the append and the upsert (coupled idempotency)``() =
+        withStore (fun store ->
+            let first = { emptyStatus with Status = SessionLevelStatus.Working }
+            let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
+            Assert.That(
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"),
+                Is.True
+            )
+
+            // Same event_id but a would-be-newer status: the dedupe must skip the upsert together with
+            // the append, so the status can never advance off a deduped event.
+            let laterStatus = { emptyStatus with Status = SessionLevelStatus.WaitingForUser }
+            Assert.That(
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z"),
+                Is.False,
+                "a duplicate event_id reports ignored"
+            )
+
+            let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "no second event row")
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> find "s1"
+            Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Working, "the upsert was skipped with the append")
+            Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z")))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type LoadLiveStatusesTests() =
 
     [<Test>]
@@ -260,6 +305,30 @@ type StatusesForWorktreeTests() =
     member _.``A worktree that never reported yields an empty list``() =
         withStore (fun store ->
             Assert.That(store.StatusesForWorktree(WorktreePath "C:/wt/never"), Is.Empty))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type RetainedByWorktreeTests() =
+
+    [<Test>]
+    member _.``Returns the newest session per worktree, ignoring the idle window``() =
+        withStore (fun store ->
+            // wt/a has two sessions well outside any idle window (last active 07:00 / 09:00); wt/b one.
+            store.UpsertStatus(storedOf "a-old" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T07:00:00Z")
+            store.UpsertStatus(storedOf "a-new" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z")
+
+            let retained = store.RetainedByWorktree()
+            Assert.That(retained.Count, Is.EqualTo 2, "one row per worktree")
+            Assert.That(retained["C:/wt/a"].SessionId, Is.EqualTo(SessionId "a-new"), "the most-recent session for the worktree")
+            Assert.That(retained["C:/wt/b"].SessionId, Is.EqualTo(SessionId "b1")))
+
+    [<Test>]
+    member _.``An empty store yields no retained rows``() =
+        withStore (fun store ->
+            Assert.That(store.RetainedByWorktree() |> Map.isEmpty, Is.True))
 
 
 [<TestFixture>]
