@@ -33,13 +33,16 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   headers stay bare (no count suffix, no "across all worktrees" caption).
 - Each category is a column with its **count-first label above the visual**: the count uses the
   category accent, the label stays neutral, and both share the same font size/weight.
-  1. **Agents** — **circles** (~15px), one per agent, grouped by the running skill (working agents),
+  1. **Agents** — **circles** (~15px), grouped by the running skill (working agents),
      the waiting-for-user state, or the **idle** state (blue-dot idle agents that finished a
-     turn with the CLI still open) — no per-agent status dot on the circle. Each circle is a
-     **context-usage donut**: a ring filled to the agent's context-window occupancy
-     (`currentTokens / tokenLimit`, from the SDK `session.usage_info` event). An agent that has not
-     reported usage yet (or after a restart — the value is not persisted) falls back to the solid
-     circle. Idle is a second track sharing the Agents row.
+     turn with the CLI still open). One circle **per live session**, clustered per agent (a worktree
+     with several open sessions shows several adjacent circles), so all of an agent's sessions are
+     visible rather than a single collapsed mark. Each circle is a **context-usage donut**: a ring
+     filled to the fraction of context-window still **remaining** (`1 − currentTokens / tokenLimit`,
+     from the SDK `session.usage_info` event) — a healthy low-usage session is a nearly full ring and
+     one near its limit thins to a sliver. A session that has not reported usage yet (or after a
+     restart — the value is not persisted) falls back to the solid circle. Idle is a second track
+     sharing the Agents row.
   2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
@@ -234,11 +237,13 @@ the solution compiling (no compat shims, per house rules).
   is computed from `Overview.Scale`, with the largest bucket filling the fixed max width and all
   others at `count / Scale` of that width. The computed inline width / CSS variable is the accepted
   exception to static CSS classes because proportional width is inherently data-driven. Agent groups
-  render one `.overview-circle` per working/waiting/idle agent with a normal gap. An agent with a
-  known context-window occupancy also gets `.overview-donut` and an inline `--ctx-fill` (0–1); the
-  donut's conic-gradient fills that fraction over a muted track and a radial mask cuts the centre
-  hole — the same accepted inline-custom-property exception the task bars use with `--bar-fill`. No
-  usage reported ⇒ the plain solid circle (class not applied).
+  render one `.overview-circle` **per live session** (clustered per agent inside an `.overview-member`
+  wrapper). A session with a known context-window occupancy also gets `.overview-donut` and an inline
+  `--ctx-remaining` (0–1); the donut's conic-gradient fills that fraction of *remaining* context over
+  a muted track and a radial mask cuts the centre hole — the same accepted inline-custom-property
+  exception the task bars use with `--bar-fill`. No usage reported ⇒ the plain solid circle (donut
+  class not applied). The drill-down agent chips reuse the same per-session donuts next to the branch
+  name; collapsed repo headers show per-session **plain dots** (no donut — too dense for arcs).
 - **Accent colour drives both mark and count via `currentColor`.** One class per category
   (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the

@@ -54,11 +54,11 @@ type GroupMember =
       /// members; always None for task-bucket members (passed explicitly, so the contract holds by
       /// construction rather than convention).
       Since: System.DateTimeOffset option
-      /// The agent's context-window occupancy, used to render its Agents-row circle as a fill donut.
-      /// Set (from the worktree's ContextUsage) only for agent-group members; always None for
-      /// task-bucket members. None also for an agent whose session has not reported usage yet — the
-      /// band then draws the plain solid circle.
-      ContextUsage: ContextUsage option
+      /// The live sessions for this agent's worktree, each carrying its own status + context usage —
+      /// the source of the per-session donuts drawn in the Agents row and the drill-down chip. Set
+      /// (from the worktree's Sessions) only for agent-group members; always [] for task-bucket
+      /// members. Empty also for an agent whose worktree reports no live session.
+      Sessions: SessionDot list
       Contribution: int }
 
 /// One non-empty task bucket: its kind, cross-worktree count, and the member worktrees that make it
@@ -144,13 +144,13 @@ let aggregate (repos: RepoWorktrees list) : Overview =
             |> List.filter (fun w -> not w.IsArchived)
             |> List.map (fun w -> r.RepoId, r.RootFolderName, w))
 
-    let memberOf repoId repoName since contextUsage (w: WorktreeStatus) contribution =
+    let memberOf repoId repoName since sessions (w: WorktreeStatus) contribution =
         { ScopedKey = WorktreePath.value w.Path
           Branch = w.Branch
           RepoId = repoId
           RepoName = repoName
           Since = since
-          ContextUsage = contextUsage
+          Sessions = sessions
           Contribution = contribution }
 
     // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
@@ -178,7 +178,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
             match contributionFor kind w with
-            | c when c > 0 -> Some(memberOf repoId repoName None None w c)
+            | c when c > 0 -> Some(memberOf repoId repoName None [] w c)
             | _ -> None)
 
     // Build members once per bucket, in canonical order; the count is Σ contribution over them.
@@ -213,7 +213,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
                     w.CodingTool = CodingToolStatus.Working && activityOf w = activity
                 | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
                 | AgentGroupKind.Idle -> w.CodingTool = CodingToolStatus.Idle
-            if isMember then Some(memberOf repoId repoName w.CodingToolSince w.ContextUsage w 1) else None)
+            if isMember then Some(memberOf repoId repoName w.CodingToolSince w.Sessions w 1) else None)
 
     let agents =
         agentGroupOrder

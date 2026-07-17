@@ -555,19 +555,19 @@ type OverviewDataTests() =
         Assert.That(members |> List.forall (fun m -> m.Since = None))
 
     [<Test>]
-    member _.``Agent members carry the worktree's ContextUsage (for the fill donut)``() =
-        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
-        let wt = { workingWt None with ContextUsage = Some usage }
+    member _.``Agent members carry the worktree's sessions (for the per-session donuts)``() =
+        let sessions = [ { Status = CodingToolStatus.Working; ContextUsage = Some { CurrentTokens = 120000; TokenLimit = 200000 } } ]
+        let wt = { workingWt None with Sessions = sessions }
         let result = aggregate [ repo [ at "/wt/s1" "w1" wt ] ]
         let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Working) result
-        Assert.That(members |> List.map _.ContextUsage, Is.EqualTo([ Some usage ]))
+        Assert.That(members |> List.map _.Sessions, Is.EqualTo([ sessions ]))
 
     [<Test>]
-    member _.``Task-bucket members always have ContextUsage = None, even when the worktree carries one``() =
-        let wt = { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with ContextUsage = Some { CurrentTokens = 1; TokenLimit = 2 } }
+    member _.``Task-bucket members always have Sessions = [], even when the worktree carries some``() =
+        let wt = { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with Sessions = [ { Status = CodingToolStatus.Working; ContextUsage = Some { CurrentTokens = 1; TokenLimit = 2 } } ] }
         let result = aggregate [ repo [ at "/wt/1" "b1" wt ] ]
         let members = taskMembers TaskBucketKind.InProgress result
-        Assert.That(members |> List.forall (fun m -> m.ContextUsage = None))
+        Assert.That(members |> List.forall (fun m -> m.Sessions = []))
 
     [<Test>]
     member _.``Task bucket Count equals the sum of its member Contributions``() =

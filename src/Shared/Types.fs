@@ -75,9 +75,16 @@ module ContextUsage =
         else max 0.0 (min 1.0 (float u.CurrentTokens / float u.TokenLimit))
 
     /// The fraction of the context window still free, clamped to [0, 1] — the complement of `fraction`.
-    /// The Overview donut fills its accent arc to this, so a healthy low-usage agent reads as a nearly
-    /// full ring and one near its limit thins to a sliver.
+    /// The donut fills its accent arc to this, so a healthy low-usage agent reads as a nearly full
+    /// ring and one near its limit thins to a sliver.
     let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
+
+/// One live (open) session's own status plus its context-window occupancy — the unit behind the
+/// per-session donuts. `ContextUsage` is None until the session reports usage (or after a restart, as
+/// it is not persisted), in which case the session renders as a plain status dot rather than a donut.
+type SessionDot =
+    { Status: CodingToolStatus
+      ContextUsage: ContextUsage option }
 
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
@@ -272,10 +279,11 @@ type WorktreeStatus =
       /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
-      /// The agent's current context-window occupancy (currentTokens / tokenLimit), from the SDK
-      /// `session.usage_info` event. None when unknown (never reported yet, or after a restart —
-      /// it is not persisted); the Overview band then falls back to a solid dot.
-      ContextUsage: ContextUsage option
+      /// One entry per live (open) session for this worktree, each carrying that session's own status
+      /// and context-window occupancy — the source of the per-session status donuts. Empty ⇔
+      /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
+      /// CodingTool above still drives the card's overall accent/border.
+      Sessions: SessionDot list
       LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int

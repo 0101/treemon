@@ -107,14 +107,26 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
     let target = OverviewSelection.Agents group.Kind
     let isSelected = selection = Some target
 
-    let circle (i: int) (m: GroupMember) =
-        match m.ContextUsage with
+    // One circle per SESSION, tinted to the group accent and — when the session has reported context
+    // usage — rendered as a donut filled to its remaining context. Circles are clustered per member
+    // (worktree), so a worktree with several live sessions shows several adjacent donuts.
+    let sessionCircle (key: string) (s: SessionDot) =
+        match s.ContextUsage with
         | Some usage ->
             Html.span
-                [ prop.key i
+                [ prop.key key
                   prop.className [ "overview-circle"; "overview-donut"; accent ]
                   prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
-        | None -> Html.span [ prop.key i; prop.className ("overview-circle " + accent) ]
+        | None -> Html.span [ prop.key key; prop.className ("overview-circle " + accent) ]
+
+    let memberCluster (i: int) (m: GroupMember) =
+        Html.span
+            [ prop.key m.ScopedKey
+              prop.className "overview-member"
+              prop.children (
+                  match m.Sessions with
+                  | [] -> [ sessionCircle $"{i}-0" { Status = NoSession; ContextUsage = None } ]
+                  | sessions -> sessions |> List.mapi (fun j s -> sessionCircle $"{i}-{j}" s)) ]
 
     Html.div
         [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]
@@ -124,7 +136,7 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
               [ metaLine accent (agentLabel group.Kind) group.Count
                 Html.div
                     [ prop.className "overview-circles"
-                      prop.children (group.Members |> List.mapi circle) ] ] ]
+                      prop.children (group.Members |> List.mapi memberCluster) ] ] ]
 
 /// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
 /// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by
@@ -189,9 +201,29 @@ let private breakdownPanel
 let private repoNameLabel (name: string) =
     Html.div [ prop.className "overview-bd-repo-name"; prop.text name ]
 
-/// Agent breakdown for one selected agent group: per repo, borderless [● branch] chips (one per
-/// member worktree, dot in the group's activity colour). Clicking a chip focuses that worktree with
-/// arrow-nav parity (onSelectWorktree). The ✕ re-selects the group to close the panel.
+/// Per-session dots for a drill-down agent chip: one dot per live session, drawn as a donut (arc =
+/// remaining context) when the session has reported usage, else a plain dot. Colour inherits the
+/// chip's accent (currentColor). Falls back to a single plain dot when the member has no sessions.
+let private chipSessionDots (sessions: SessionDot list) =
+    let dot (key: string) (s: SessionDot) =
+        match s.ContextUsage with
+        | Some usage ->
+            Html.span
+                [ prop.key key
+                  prop.className [ "overview-chip-dot"; "overview-donut" ]
+                  prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
+        | None -> Html.span [ prop.key key; prop.className "overview-chip-dot" ]
+
+    Html.span
+        [ prop.className "overview-chip-dots"
+          prop.children (
+              match sessions with
+              | [] -> [ Html.span [ prop.key "0"; prop.className "overview-chip-dot" ] ]
+              | ss -> ss |> List.mapi (fun i s -> dot (string i) s)) ]
+
+/// Agent breakdown for one selected agent group: per repo, borderless [●● branch] chips (per-session
+/// donuts in the group's activity colour). Clicking a chip focuses that worktree with arrow-nav
+/// parity (onSelectWorktree). The ✕ re-selects the group to close the panel.
 let private agentBreakdown
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
@@ -216,7 +248,7 @@ let private agentBreakdown
                                             prop.key m.ScopedKey
                                             prop.onClick (fun _ -> onSelectWorktree m.ScopedKey)
                                             prop.children
-                                                [ Html.span [ prop.className "overview-chip-dot" ]
+                                                [ chipSessionDots m.Sessions
                                                   Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ]
                                                   match m.Since with
                                                   | Some since ->

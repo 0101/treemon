@@ -32,14 +32,15 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
 
 type CodingToolResult =
     { Status: CodingToolStatus
+      /// One SessionDot per open (live) session, ordered Working→Waiting→Idle then most-recently-seen
+      /// first — the per-session status donuts, each carrying its own context usage. Empty ⇔
+      /// Status = NoSession.
+      SessionStatuses: SessionDot list
       Provider: CodingToolProvider option
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
       LastMessageProvider: CodingToolProvider option
-      /// The displayed session's latest context-window occupancy (from its UsageInfo events), or None
-      /// when unknown. Read from the same footer session as the skill/messages.
-      ContextUsage: ContextUsage option
       /// Mtime of the active session surface that won status resolution (its last write) — the best
       /// available "the agent last did something" time, and the value the scheduler freezes as the
       /// state-transition timestamp. None when every surface is Idle.
@@ -88,12 +89,12 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 /// sessions have all gone stale collapses to `NoSession` but KEEPS its retained footer.
 let noSessionPushResult: CodingToolResult =
     { Status = NoSession
+      SessionStatuses = []
       Provider = None
       CurrentSkill = None
       LastUserMessage = None
       LastAssistantMessage = None
       LastMessageProvider = None
-      ContextUsage = None
       LastActivity = None }
 
 /// The last assistant message as the card's `CardEvent` (the exact shape the detectors produced): a
@@ -119,6 +120,15 @@ let private toLastAssistantEvent (m: Message) : CardEvent =
 ///   blank the footer: it stays populated while any session for the worktree remains in the store
 ///   (retention / `idleWindow`). This is the fix for the idle-only worktree whose footer/event-log
 ///   used to vanish because the old `pickActive`-only collapse dropped every Idle session.
+/// Render order for the per-session dots: Working first, then WaitingForUser, then Idle. NoSession is
+/// never a per-session status (it is the worktree-level collapse of an empty session set).
+let private sessionStatusOrder =
+    function
+    | Working -> 0
+    | WaitingForUser -> 1
+    | Idle -> 2
+    | NoSession -> 3
+
 let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
     // OPENNESS: only sessions seen within openWindow drive the status dot. A closed/crashed session's
     // last_seen goes stale and drops out here.
@@ -140,6 +150,23 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
             activeWinner
             |> Option.map (fun w -> SessionActivity.toCodingToolStatus w.Status)
             |> Option.defaultValue Idle
+
+    // Per-session dots: every open session's freshness-adjusted status paired with its own context
+    // usage, ordered Working→Waiting→Idle then most-recently-seen first for a stable, flicker-free
+    // render. Each session keeps its OWN ContextUsage — no footer collapse — so a session that has
+    // reported usage renders a donut regardless of which session currently wins status. Empty ⇔
+    // status = NoSession, so the client reproduces the single grey dot from an empty list.
+    let sessionStatuses =
+        adjustedOpen
+        |> List.map (fun (s, seen) ->
+            { Status = SessionActivity.toCodingToolStatus s.Status
+              ContextUsage = s.ContextUsage },
+            seen)
+        |> List.sortWith (fun (a, aSeen) (b, bSeen) ->
+            match compare (sessionStatusOrder a.Status) (sessionStatusOrder b.Status) with
+            | 0 -> compare bSeen aSeen
+            | c -> c)
+        |> List.map fst
 
     // Footer source: the active winner if running, else the most-recent session of ANY status so the
     // footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain their last
@@ -165,6 +192,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
             None
 
     { Status = status
+      SessionStatuses = sessionStatuses
       // Single push provider today (Copilot CLI); a future provider threads its own value here.
       Provider = footer |> Option.map (fun _ -> CopilotCli)
       CurrentSkill = footer |> Option.bind _.Skill
@@ -174,7 +202,6 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
         |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastAssistantMessage = footer |> Option.bind _.LastAssistantMessage |> Option.map toLastAssistantEvent
       LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
-      ContextUsage = footer |> Option.bind _.ContextUsage
       LastActivity = lastActivity }
 
 /// Group a flat set of live push session-statuses by worktree path and collapse each group into the
@@ -199,12 +226,12 @@ let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
     let hasFooter = s.Skill.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
 
     { Status = NoSession
+      SessionStatuses = []
       Provider = if hasFooter then Some CopilotCli else None
       CurrentSkill = s.Skill
       LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
       LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
-      ContextUsage = None
       LastActivity = None }
 
 /// Fill gaps in the live collapse with the durable retained fallback: a worktree present in `live`

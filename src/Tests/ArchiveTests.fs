@@ -250,7 +250,7 @@ type NavigationArchiveTests() =
           CodingToolProvider = None
           CodingToolSince = None
           CurrentSkill = None
-          ContextUsage = None
+          Sessions = []
           LastUserMessage = None
           Pr = NoPr
           MainBehindCount = 0
@@ -359,7 +359,7 @@ type ArchiveE2ETests() =
             "Planning":{{"Planned":0,"Queued":0,"Loose":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
-            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[]
+            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[],"Sessions":[]
         }}"""
 
     let makeDashboardJson (worktrees: string list) =
