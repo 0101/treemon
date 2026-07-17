@@ -161,7 +161,7 @@ let internal stampIdleSince
     | WaitingForUser
     | NoSession -> idleSince |> Map.remove worktreePath
 
-/// The status-overview "Agent \u21BB" row (category `CodingToolRefresh`). Under the push model there is
+/// The status-overview "Agent \u2191" row (category `CodingToolRefresh`). Under the push model there is
 /// no poll to log, so the row would sit permanently `pending`; instead we mark the latest extension
 /// push here — which worktree last reported and when — as a green success, so a growing "X ago"
 /// signals that pushes have stopped. `LastSeen` is the push instant; duration is meaningless for a

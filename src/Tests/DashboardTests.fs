@@ -1542,7 +1542,7 @@ type DashboardTests() =
             let! categoryTexts =
                 overview.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "Agent \u21BB"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
+            let expected = [ "Agent \u2191"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
             Assert.That(
                 categoryTexts |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1627,7 +1627,7 @@ type DashboardTests() =
             let! nonPendingCategories =
                 nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "Agent \u21BB"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
+            let expected = [ "Agent \u2191"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
             Assert.That(
                 nonPendingCategories |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1662,7 +1662,7 @@ type DashboardTests() =
                     "els => els.map(el => el.textContent.trim())")
             Assert.That(
                 categoryOrder |> Array.toList,
-                Is.EqualTo([ "Worktree \u2630"; "Git \u21BB"; "Beads \u21BB"; "Agent \u21BB"; "PR \u2913"; "Git \u2913" ]),
+                Is.EqualTo([ "Worktree \u2630"; "Git \u21BB"; "Beads \u21BB"; "Agent \u2191"; "PR \u2913"; "Git \u2913" ]),
                 "Categories should render in known order")
 
             do! page.CloseAsync()
