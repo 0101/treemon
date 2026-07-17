@@ -88,12 +88,13 @@ let sessionId = null;
 let currentStatus = null; // "working" | "waiting" | "done" | "idle" | null
 let lastStatusMs = -Infinity;
 
-// True between a `user_input.requested` (ask_user) and its `user_input.completed`. While pending, a
-// `session.idle` must not be forwarded — the SDK may report the session idle while it blocks on the
-// user, and the fold would otherwise flip the card off WaitingForUser to Idle. This flag is live-only
-// (not rebuilt on rejoin); the went_idle suppression also falls back to `currentStatus === "waiting"`
-// (which replay DOES rebuild) so a rejoin can't downgrade a genuinely-waiting session.
-let pendingAskUser = false;
+// True between an ask_user open (`elicitation.requested`/`user_input.requested`) and its matching
+// `*.completed`. While open, a `session.idle` must not be forwarded — the SDK may report the session
+// idle while it blocks on the user, and the fold would otherwise flip the card off WaitingForUser to
+// Idle. Maintained in BOTH the live and replay paths (the *.completed events are subscribed AND
+// returned by getEvents()), so a rejoin rebuilds the true open/closed state and a completed ask_user
+// stops suppressing idle.
+let askUserOpen = false;
 
 function statusForKind(kind) {
   switch (kind) {
@@ -228,36 +229,29 @@ function mapEvent(event) {
   }
 }
 
-// Handle one event. `isLive` distinguishes the live stream from the join-time getEvents() replay.
-// `session.idle` (the only source of `went_idle`) is ephemeral and only ever arrives live, so both the
-// pendingAskUser bookkeeping and the went_idle suppression sit in the `isLive` block. The live-only
-// `pendingAskUser` flag is NOT rebuilt on a rejoin (crash / editor reload / manual restart), so the
-// suppression also consults `currentStatus`: a replayed `awaiting_user_input` rebuilds `currentStatus`
-// to "waiting", so guarding on it keeps a genuinely-waiting session from being downgraded to Idle by a
-// live `session.idle` after a rejoin — and matches the heartbeat, which likewise treats
-// `currentStatus === "waiting"` as the source of truth. Replayed events still reconstruct status/skill/messages.
-function handle(event, isLive) {
+// Handle one event (from either the live stream or the join-time getEvents() replay). The ask_user
+// latch (`askUserOpen`) and the `went_idle` suppression are maintained in BOTH paths: the ask_user
+// *.completed events are subscribed AND returned by getEvents(), so a rejoin rebuilds from replay
+// whether an ask_user is still open. Suppressing `went_idle` while (and only while) the latch is open
+// keeps a genuinely-waiting session on WaitingForUser, yet lets a real idle settle to Idle the moment
+// the ask_user is completed. Replayed events also reconstruct status/skill/messages.
+function handle(event) {
   if (event.agentId) return; // sub-agent event — never the user's top-level status
 
-  if (isLive) {
-    // ask_user opens the window via elicitation.requested (CLI 1.0.71+) or user_input.requested
-    // (older builds), and closes it via the matching *.completed event.
-    if (event.type === "elicitation.requested" || event.type === "user_input.requested") pendingAskUser = true;
-    else if (event.type === "elicitation.completed" || event.type === "user_input.completed") pendingAskUser = false;
-  }
+  // ask_user opens the window via elicitation.requested (CLI 1.0.71+) or user_input.requested (older
+  // builds), and closes it via the matching *.completed event.
+  if (event.type === "elicitation.requested" || event.type === "user_input.requested") askUserOpen = true;
+  else if (event.type === "elicitation.completed" || event.type === "user_input.completed") askUserOpen = false;
 
   const report = mapEvent(event);
   if (!report) return;
 
-  if (isLive) {
-    // A genuine user prompt implies the pending ask_user was answered (belt-and-suspenders clear).
-    if (report.kind === "user_prompt") pendingAskUser = false;
-    // Keep WaitingForUser visible while a prompt is unanswered. `pendingAskUser` catches the live
-    // ask_user window; `currentStatus === "waiting"` additionally covers a rejoin, where the waiting
-    // status is rebuilt from replay but the live-only flag starts false — so a live `session.idle`
-    // never rewinds a genuinely-waiting session to Idle.
-    if (report.kind === "went_idle" && (pendingAskUser || currentStatus === "waiting")) return;
-  }
+  // A genuine user prompt implies the ask_user was answered (belt-and-suspenders clear).
+  if (report.kind === "user_prompt") askUserOpen = false;
+  // Keep WaitingForUser visible while an ask_user is genuinely open: the SDK may report the session
+  // idle while it blocks on the user, so suppress that idle. Once the ask_user is completed the latch
+  // releases and a real session.idle correctly settles the card on Idle.
+  if (report.kind === "went_idle" && askUserOpen) return;
 
   updateStatus(report.kind, event.timestamp);
   postReport(report);
@@ -278,8 +272,8 @@ function handle(event, isLive) {
 // We refresh on BOTH "done" and "idle": "done" (turn_ended) is normally transient with session.idle
 // following, but a finished-but-open turn that has not yet emitted session.idle must still stay fresh.
 // A genuinely-waiting session is never refreshed as idle — it collapses to "waiting" above (mapping to
-// awaiting_user_input), so the went_idle suppression / pendingAskUser invariant stays intact (while
-// pendingAskUser is set, currentStatus is "waiting"). The synthetic event uses a status-preserving kind
+// awaiting_user_input), so the went_idle suppression / askUserOpen invariant stays intact (while
+// askUserOpen is set, currentStatus is "waiting"). The synthetic event uses a status-preserving kind
 // (re-folding it is a no-op on skill/messages) with a fresh eventId + now timestamp, so the server bumps
 // last_seen without altering anything else. Cadence (60s) stays comfortably under the server openWindow.
 function heartbeatTick() {
@@ -329,7 +323,7 @@ if (!sessionId) {
 // Subscribe to the live stream first so no event is missed, then replay history. Overlap between the
 // two is harmless: the server dedupes on eventId, and the newest-wins status guard keeps live status
 // from being rewound by older replayed events.
-const unsubscribes = SUBSCRIBED_TYPES.map((type) => session.on(type, (event) => handle(event, true)));
+const unsubscribes = SUBSCRIBED_TYPES.map((type) => session.on(type, (event) => handle(event)));
 
 try {
   const history = await session.getEvents();
@@ -350,7 +344,7 @@ try {
       const tb = replayMs(b);
       return ta < tb ? -1 : ta > tb ? 1 : 0;
     })
-    .forEach((event) => handle(event, false));
+    .forEach((event) => handle(event));
   log(
     `joined ${sessionId} — replayed ${history.length} historical event(s), reporting to ${activityUrls.join(", ")}`,
   );
