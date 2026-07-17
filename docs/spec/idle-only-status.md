@@ -78,10 +78,14 @@ open-but-idle session (blue); `NoSession` = no open session for the worktree (gr
 
 ### 2. Extension: heartbeat idle sessions (openness signal)
 Today the heartbeat fires only for `working`/`waiting`, so an idle session's `last_seen` freezes —
-indistinguishable from a closed one. Extend `heartbeatTick` to also re-assert **idle** (re-send
-`went_idle`, a status-preserving no-op fold) every `HEARTBEAT_INTERVAL_MS`. Then an *open* idle session
-keeps refreshing `last_seen`, while a *closed* session's `last_seen` goes stale — the server's openness
-signal. (Optional, decided below: also emit an explicit close on SIGTERM/SIGINT for an instant grey.)
+indistinguishable from a closed one. `heartbeatTick` re-asserts liveness for any established session
+via a dedicated **liveness-only report** (`kind = "heartbeat"`): the server bumps `last_seen` (openness)
+without re-folding status, moving the last-write-wins clock, or appending to the event history. Then an
+*open* session (idle or active) keeps refreshing `last_seen`, while a *closed* session's `last_seen`
+goes stale — the server's openness signal. Keeping the heartbeat distinct from real events (rather than
+re-sending a synthetic `turn_started`/`went_idle`) means it can never overtake a slightly-earlier real
+event and drop it via the ordering guard, and never inflates the history with synthetic rows. (Optional,
+decided below: also emit an explicit close on SIGTERM/SIGINT for an instant grey.)
 
 ### 3. Server: openness → blue-vs-grey + time-since-idle
 - **Openness window**: a session is "open" iff `now - last_seen < openWindow` (a few missed heartbeats,

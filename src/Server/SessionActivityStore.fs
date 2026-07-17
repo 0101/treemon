@@ -197,6 +197,15 @@ INSERT OR IGNORE INTO activity_events
 VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 """
 
+// Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
+// or any message/skill field, and only ever forward. Heartbeats take this path instead of
+// upsert+append, so they refresh openness without moving the last-write-wins clock or polluting the
+// event history.
+let private touchSql =
+    """
+UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
+"""
+
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
@@ -312,6 +321,16 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$skill", optToDb row.Skill) |> ignore
         cmd.Parameters.AddWithValue("$ts", isoUtc row.Ts) |> ignore
         cmd.ExecuteNonQuery() = 1
+
+    /// Advance a session's `last_seen` (openness heartbeat) without touching status/updated_at or the
+    /// message fields. Only moves it forward; a no-op if the row is absent or already fresher.
+    member _.TouchLastSeen(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- touchSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.

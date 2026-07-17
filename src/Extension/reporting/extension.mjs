@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
 //   assistant.turn_end     -> turn_ended
 //   session.idle           -> went_idle
+//   (timer, no SDK event)  -> heartbeat            (liveness only; bumps last_seen, never folded/stored)
 // `message` is { text, at }; the server truncates for display, so raw text is forwarded (bounded by
 // MAX_MESSAGE_CHARS only to keep the POST body sane). An unknown kind is rejected server-side, so
 // this file is the authoritative producer of the contract.
@@ -259,29 +260,18 @@ function handle(event) {
 
 // --- Heartbeat ---------------------------------------------------------------------------------
 
-// Re-assert the current status so `last_seen` stays fresh — the server's OPENNESS signal that
-// separates an idle-but-OPEN session (blue) from a closed one that has decayed (grey). EVERY live
-// status is refreshed:
-//   * working -> synthetic turn_started         (a quiet Working, e.g. a long tool run, must not
-//                                                 wrongly decay to Idle via the staleness net);
-//   * waiting -> synthetic awaiting_user_input   (a pending ask_user must not decay to Idle);
-//   * done / idle -> synthetic went_idle         (a status-preserving no-op fold — the server folds
-//                                                 BOTH turn_ended and went_idle -> Idle — so an OPEN
-//                                                 resting session keeps refreshing last_seen and stays
-//                                                 blue instead of decaying to grey).
-// We refresh on BOTH "done" and "idle": "done" (turn_ended) is normally transient with session.idle
-// following, but a finished-but-open turn that has not yet emitted session.idle must still stay fresh.
-// A genuinely-waiting session is never refreshed as idle — it collapses to "waiting" above (mapping to
-// awaiting_user_input), so the went_idle suppression / askUserOpen invariant stays intact (while
-// askUserOpen is set, currentStatus is "waiting"). The synthetic event uses a status-preserving kind
-// (re-folding it is a no-op on skill/messages) with a fresh eventId + now timestamp, so the server bumps
-// last_seen without altering anything else. Cadence (60s) stays comfortably under the server openWindow.
+// Re-assert liveness so `last_seen` stays fresh — the server's OPENNESS signal that separates an
+// idle-but-OPEN session (blue) from a closed one that has decayed (grey). A heartbeat is a dedicated
+// liveness-only report (kind "heartbeat"): the server bumps `last_seen` WITHOUT re-folding status,
+// moving the last-write-wins clock, or appending to the event history. Keeping it distinct from real
+// events (rather than re-sending a synthetic turn_started / awaiting_user_input / went_idle) means a
+// heartbeat can never overtake a slightly-earlier real event and drop it via the server's ordering
+// guard, and never inflates the activity_events history with synthetic rows. We only heartbeat once a
+// real event has established a status — before that there is nothing open to keep alive; a
+// genuinely-waiting session simply stays "waiting" (the server holds its last real status). Cadence
+// (60s) stays comfortably under the server openWindow.
 function heartbeatTick() {
-  let kind = null;
-  if (currentStatus === "working") kind = "turn_started";
-  else if (currentStatus === "waiting") kind = "awaiting_user_input";
-  else if (currentStatus === "done" || currentStatus === "idle") kind = "went_idle";
-  if (!kind) return;
+  if (!currentStatus) return;
 
   postReport({
     sessionId,
@@ -289,7 +279,7 @@ function heartbeatTick() {
     provider: PROVIDER,
     eventId: randomUUID(),
     occurredAt: new Date().toISOString(),
-    kind,
+    kind: "heartbeat",
   });
 }
 

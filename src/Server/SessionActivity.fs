@@ -34,8 +34,9 @@ type Message = { Text: string; At: DateTimeOffset }
 
 // --- Events -----------------------------------------------------------------------------------
 
-/// The only events that bear on status. Anything else the extension never sends, so the server has
-/// no "irrelevant event" branch to carry. These map 1:1 onto the wire `kind` values (see the handler).
+/// The events that bear on status (plus the liveness-only `Heartbeat`). Anything else the extension
+/// never sends, so the server has no "irrelevant event" branch to carry. These map 1:1 onto the wire
+/// `kind` values (see the handler).
 type SessionEvent =
     | TurnStarted
     /// A genuine user prompt (never a skill-context injection — those are dropped at the source).
@@ -46,6 +47,10 @@ type SessionEvent =
     | AwaitingUserInput of question: Message option
     | TurnEnded
     | WentIdle
+    /// A liveness-only heartbeat: re-asserts the CLI is still open WITHOUT bearing on status. Handled
+    /// specially by the ingestion service — it only bumps the session's `last_seen` (openness), never
+    /// folds into status and never appends to the event history. Timer-generated (no SDK event source).
+    | Heartbeat
 
 /// One pushed report: a single event for one session in one worktree.
 type SessionActivityReport =
@@ -107,6 +112,7 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
             LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage) }
     | TurnEnded -> { s with Status = SessionLevelStatus.Idle }
     | WentIdle -> { s with Status = SessionLevelStatus.Idle }
+    | Heartbeat -> s
     | UserPrompt m ->
         // A reply to an ask_user keeps the running skill; any other prompt is a new request that ends
         // the prior skill's run.

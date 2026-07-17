@@ -330,6 +330,49 @@ type IngestTests() =
             let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
             Assert.That(stored.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z")))
 
+    [<Test>]
+    member _.``a heartbeat bumps last_seen for openness without appending, moving updated_at, or changing status``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
+            svc.LiveSnapshot() |> ignore
+            // A later liveness heartbeat: newer timestamp, but pure openness — not a status event.
+            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:01:00Z" Heartbeat)
+            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "heartbeat advances last_seen")
+            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"), "heartbeat must not move the last-write-wins clock")
+            Assert.That(s.Status.Status, Is.EqualTo SessionLevelStatus.Working, "heartbeat preserves status")
+            Assert.That(s.Status.LastAssistantMessage, Is.EqualTo(Some(msg "hi" "2026-03-01T10:00:00Z")), "heartbeat preserves content")
+            // No synthetic row appended to the history stream (only the one real event is there).
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "a heartbeat must not append to activity_events")
+            // The durable row's last_seen was bumped, its updated_at left intact.
+            let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun r -> r.SessionId = SessionId "s1")
+            Assert.That(stored.LastSeen, Is.EqualTo(ts "2026-03-01T10:01:00Z"))
+            Assert.That(stored.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z")))
+
+    [<Test>]
+    member _.``a heartbeat for a session with no prior event is ignored``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:00:00Z" Heartbeat)
+            let live = svc.LiveSnapshot()
+            Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a heartbeat never creates a session")
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 0))
+
+    [<Test>]
+    member _.``an out-of-order event's history row records its own status, not the newest live status``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            // Newest applied: turn_ended -> Idle.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
+            svc.LiveSnapshot() |> ignore
+            // An older assistant_message arrives late; its OWN effect is Working, not the newest Idle.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
+            svc.LiveSnapshot() |> ignore
+            let older =
+                store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+                |> List.find (fun r -> r.EventId = EventId "e1")
+            Assert.That(older.Status, Is.EqualTo SessionLevelStatus.Working, "out-of-order row reflects the event's own effect, not the newest Idle"))
+
 
 // ── restart rebuild ───────────────────────────────────────────────────────────
 [<TestFixture>]
