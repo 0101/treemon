@@ -65,3 +65,38 @@ type CardIntentLineTests() =
         match cardIntentLine wt with
         | CardIntentLine.Line (Some (text, _), None) -> Assert.That(text, Is.EqualTo(intent))
         | other -> Assert.Fail($"Expected an intent-only line, got {other}")
+
+/// isVisibleCardEvent decides which events reach a card. Post-fork setup is routine noise while it
+/// runs or when it succeeds, so only its failures (a genuine failure or a timeout, both `Failed`)
+/// stay on the card; events from every other source always show.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type VisibleCardEventTests() =
+
+    let event source status : CardEvent =
+        { Source = source
+          Message = "setup"
+          Timestamp = DateTimeOffset(2026, 7, 9, 12, 0, 0, TimeSpan.Zero)
+          Status = status
+          Duration = None }
+
+    [<Test>]
+    member _.``A running post-fork event is hidden``() =
+        Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some StepStatus.Running)), Is.False)
+
+    [<Test>]
+    member _.``A succeeded post-fork event is hidden``() =
+        Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some StepStatus.Succeeded)), Is.False)
+
+    [<Test>]
+    member _.``A failed post-fork event is kept``() =
+        Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some(StepStatus.Failed "boom"))), Is.True)
+
+    [<Test>]
+    member _.``A timed-out post-fork event is kept (timeout surfaces as a failure)``() =
+        Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some(StepStatus.Failed "Timed out after 300000ms"))), Is.True)
+
+    [<Test>]
+    member _.``A succeeded sync event is always kept``() =
+        Assert.That(isVisibleCardEvent (event EventSource.Sync (Some StepStatus.Succeeded)), Is.True)
