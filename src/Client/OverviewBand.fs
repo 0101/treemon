@@ -56,7 +56,7 @@ let private activityLabel =
     | CurrentActivity.Planning -> "Planning"
     | CurrentActivity.Executing -> "Executing"
     | CurrentActivity.Reviewing -> "Reviewing"
-    | CurrentActivity.Fixing -> "Fixing"
+    | CurrentActivity.PR -> "PR"
     | CurrentActivity.Working -> "Working"
 
 // Accent-color modifier class per activity bucket (same currentColor scheme as taskClass).
@@ -66,7 +66,7 @@ let private activityClass =
     | CurrentActivity.Planning -> "activity-planning"
     | CurrentActivity.Executing -> "activity-executing"
     | CurrentActivity.Reviewing -> "activity-reviewing"
-    | CurrentActivity.Fixing -> "activity-fixing"
+    | CurrentActivity.PR -> "activity-pr"
     | CurrentActivity.Working -> "activity-working"
 
 // Display label per agent group: the skill-derived activity, the distinct Waiting group, or the
