@@ -113,12 +113,15 @@ let private bandProbeJs =
           taskPlanned: bg(itemByLabel(tasksSec, 'Planned') && itemByLabel(tasksSec, 'Planned').querySelector('.overview-bar')),
           agentPlanning: bg(itemByLabel(agentsSec, 'Planning') && itemByLabel(agentsSec, 'Planning').querySelector('.overview-circle')),
           agentReviewing: bg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
+          agentPr: bg(itemByLabel(agentsSec, 'PR') && itemByLabel(agentsSec, 'PR').querySelector('.overview-circle')),
           agentWaiting: bg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle')),
           agentIdle: bg(itemByLabel(agentsSec, 'Idle') && itemByLabel(agentsSec, 'Idle').querySelector('.overview-circle'))
         },
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
         queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
         prPresent: !!itemByLabel(agentsSec, 'PR'),
+        prHasActivityClass: (() => { const it = itemByLabel(agentsSec, 'PR'); return !!it && it.classList.contains('activity-pr'); })(),
+        executingPresent: !!itemByLabel(agentsSec, 'Executing'),
         genericWorkingPresent: !!itemByLabel(agentsSec, 'Working'),
         idlePresent: !!itemByLabel(agentsSec, 'Idle'),
         zeroTextCount: qa('.overview-band .overview-count').filter(c => c.textContent.trim() === '0').length
@@ -278,13 +281,23 @@ type OverviewBandE2ETests() =
         Assert.That(probe.Value<bool>("idlePresent"), Is.True, "Idle group (blue-dot idle agents) renders in the Agents row")
         Assert.That(colors.Value<string>("agentIdle"), Is.EqualTo(rgb "#89b4fa"), "Idle = blue")
 
+    // The renamed PR activity's positive render path: a PR-skill working agent (fixture: pr-a) must
+    // surface a PR group labelled "PR", carrying the activity-pr accent class and its peach circle.
+    [<Test>]
+    member _.``PR activity renders with its label, activity-pr class and peach accent``() =
+        let probe = requireProbe ()
+        let colors = probe["colors"] :?> JObject
+        Assert.That(probe.Value<bool>("prPresent"), Is.True, "the PR-skill agent renders a PR activity group")
+        Assert.That(probe.Value<bool>("prHasActivityClass"), Is.True, "the PR group carries the activity-pr accent class")
+        Assert.That(colors.Value<string>("agentPr"), Is.EqualTo(rgb "#fab387"), "agent PR = peach")
+
     // Step 6: zero-count buckets are omitted, never rendered as 0.
     [<Test>]
     member _.``Step 6 - zero-count status and activity are omitted``() =
         let probe = requireProbe ()
         Assert.That(probe.Value<bool>("blockedPresent"), Is.False, "zero-count Blocked bucket must not render")
         Assert.That(probe.Value<bool>("queuedPresent"), Is.False, "zero-count Queued bucket must not render")
-        Assert.That(probe.Value<bool>("prPresent"), Is.False, "zero-count PR activity must not render")
+        Assert.That(probe.Value<bool>("executingPresent"), Is.False, "zero-count Executing activity must not render")
         Assert.That(probe.Value<bool>("genericWorkingPresent"), Is.False, "zero-count generic Working activity must not render")
         Assert.That(probe.Value<int>("zeroTextCount"), Is.EqualTo(0), "no count element ever renders the text '0'")
 
