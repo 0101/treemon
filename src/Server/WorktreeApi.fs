@@ -126,7 +126,7 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
               Title = Server.CanvasExport.resolveTitle html request.Filename }
     }
 
-let private assembleFromState
+let internal assembleFromState
     (now: DateTimeOffset)
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
