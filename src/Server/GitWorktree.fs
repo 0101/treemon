@@ -400,9 +400,11 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
     else
         None
 
-/// Generous timeout for the post-fork setup hook — it runs `npm install` and
-/// `bd init`, which can far exceed the short default used for quick git probes.
-let private postForkTimeoutMs = 10 * 60 * 1000
+/// Timeout for the post-fork setup hook — it runs `npm install` and `bd init`,
+/// which exceed the short default used for quick git probes, but a run dragging
+/// past this cap is treated as a failure (surfaced on the card) rather than
+/// blocking the auto-launch indefinitely.
+let private postForkTimeoutMs = 5 * 60 * 1000
 
 /// Card label for the post-fork setup hook. Single source of truth for the
 /// OS-specific script name so file resolution always tracks the hook.
