@@ -34,7 +34,9 @@ let private baseReq kind : SessionActivityRequest =
       occurredAt = "2026-03-01T10:00:00Z"
       kind = kind
       message = noMsg
-      skillName = null }
+      skillName = null
+      currentTokens = 0
+      tokenLimit = 0 }
 
 let private parseOk req =
     match parseReport refNow req with
@@ -157,6 +159,20 @@ type ParseReportTests() =
     [<Test>]
     member _.``skill_invoked without a skillName is rejected``() =
         Assert.That(parseErr (baseReq "skill_invoked"), Does.Contain "skillName")
+
+    [<Test>]
+    member _.``usage_info with tokens maps to UsageInfo``() =
+        let req = { baseReq "usage_info" with currentTokens = 120000; tokenLimit = 200000 }
+        Assert.That((parseOk req).Event, Is.EqualTo(UsageInfo(120000, 200000)))
+
+    [<Test>]
+    member _.``usage_info clamps a negative currentTokens to zero``() =
+        let req = { baseReq "usage_info" with currentTokens = -5; tokenLimit = 200000 }
+        Assert.That((parseOk req).Event, Is.EqualTo(UsageInfo(0, 200000)))
+
+    [<Test>]
+    member _.``usage_info with a non-positive tokenLimit is rejected``() =
+        Assert.That(parseErr { baseReq "usage_info" with currentTokens = 100; tokenLimit = 0 }, Does.Contain "tokenLimit")
 
     [<Test>]
     member _.``an unknown provider is rejected``() =

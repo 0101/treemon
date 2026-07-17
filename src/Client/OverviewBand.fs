@@ -95,13 +95,24 @@ let private metaLine (accentClass: string) (label: string) (count: int) =
                 Html.span [ prop.className "overview-label"; prop.text label ] ] ]
 
 /// One agent group column: the meta line above a row of ~15px circles, one per agent, tinted to the
-/// group's accent (circle fill = currentColor, driven by the accent class). Clicking the column
-/// raises onSelectGroup (App toggles the drill-down selection); when this group is the selected one
-/// it renders as the black "tab" (overview-item-selected) sitting flush above its breakdown panel.
+/// group's accent (circle fill = currentColor, driven by the accent class). Each agent with a known
+/// context-window occupancy renders as a donut whose arc = fraction used (inline `--ctx-fill`); an
+/// agent that hasn't reported usage falls back to the plain solid circle. Clicking the column raises
+/// onSelectGroup (App toggles the drill-down selection); when this group is the selected one it
+/// renders as the black "tab" (overview-item-selected) sitting flush above its breakdown panel.
 let private agentColumn (selection: OverviewSelection option) (onSelectGroup: OverviewSelection -> unit) (group: AgentGroup) =
     let accent = agentClass group.Kind
     let target = OverviewSelection.Agents group.Kind
     let isSelected = selection = Some target
+
+    let circle (i: int) (m: GroupMember) =
+        match m.ContextUsage with
+        | Some usage ->
+            Html.span
+                [ prop.key i
+                  prop.className [ "overview-circle"; "overview-donut"; accent ]
+                  prop.style [ style.custom ("--ctx-fill", string (ContextUsage.fraction usage)) ] ]
+        | None -> Html.span [ prop.key i; prop.className ("overview-circle " + accent) ]
 
     Html.div
         [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]
@@ -111,9 +122,7 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
               [ metaLine accent (agentLabel group.Kind) group.Count
                 Html.div
                     [ prop.className "overview-circles"
-                      prop.children (
-                          List.init group.Count (fun i ->
-                              Html.span [ prop.key i; prop.className ("overview-circle " + accent) ]) ) ] ] ]
+                      prop.children (group.Members |> List.mapi circle) ] ] ]
 
 /// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
 /// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by

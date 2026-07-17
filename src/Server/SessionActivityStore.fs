@@ -109,7 +109,10 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
         { Status = parseStatus (r.GetString 3)
           Skill = readOptStr r 4
           LastUserMessage = readOptMsg r 5 6
-          LastAssistantMessage = readOptMsg r 7 8 }
+          LastAssistantMessage = readOptMsg r 7 8
+          // ContextUsage is not persisted (ephemeral upstream) — it rehydrates as None and the next
+          // live usage_info event repopulates it.
+          ContextUsage = None }
       UpdatedAt = parseIso (r.GetString 9)
       LastSeen = parseIso (r.GetString 10) }
 

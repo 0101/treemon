@@ -175,6 +175,15 @@
         .overview-label { font-weight: 400; }
         .overview-circles { display: flex; gap: 5px; }
         .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
+        /* Context-usage donut: the filled arc (currentColor accent) spans `--ctx-fill` (0–1, set
+           inline per agent) of the ring over a muted track; a radial mask punches the centre hole.
+           An agent with no reported usage keeps the plain solid `.overview-circle` above (the
+           `.overview-donut` class is simply not applied). */
+        .overview-donut {
+          background: conic-gradient(currentColor calc(var(--ctx-fill, 0) * 360deg), #45475a 0);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 55%, #000 57%);
+                  mask: radial-gradient(circle closest-side, transparent 0 55%, #000 57%);
+        }
         /* Bar width = its share of the shared scale (`--bar-fill`, set inline per bar) times a
            RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
            single bar never overflows a narrow pane, while every bar scales together (shared scale

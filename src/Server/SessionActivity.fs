@@ -47,6 +47,9 @@ type SessionEvent =
     /// specially by the ingestion service — it only bumps the session's `last_seen` (openness), never
     /// folds into status and never appends to the event history. Timer-generated (no SDK event source).
     | Heartbeat
+    /// A context-window usage snapshot (currentTokens, tokenLimit) from the SDK `session.usage_info`
+    /// event. A pure gauge — it updates ContextUsage and never changes Status.
+    | UsageInfo of currentTokens: int * tokenLimit: int
 
 /// One pushed report: a single event for one session in one worktree.
 type SessionActivityReport =
@@ -84,14 +87,18 @@ type SessionStatus =
     { Status: SessionLevelStatus
       Skill: string option
       LastUserMessage: Message option
-      LastAssistantMessage: Message option }
+      LastAssistantMessage: Message option
+      /// Latest context-window occupancy from a UsageInfo event; None until one arrives. A gauge,
+      /// decoupled from Status.
+      ContextUsage: ContextUsage option }
 
 /// The starting state for a session with no events yet.
 let emptyStatus =
     { Status = SessionLevelStatus.Idle
       Skill = None
       LastUserMessage = None
-      LastAssistantMessage = None }
+      LastAssistantMessage = None
+      ContextUsage = None }
 
 /// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
@@ -109,6 +116,9 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     | TurnEnded -> { s with Status = SessionLevelStatus.Idle }
     | WentIdle -> { s with Status = SessionLevelStatus.Idle }
     | Heartbeat -> s
+    // A pure gauge: record the latest occupancy, never touch Status (or any other field).
+    | UsageInfo(currentTokens, tokenLimit) ->
+        { s with ContextUsage = Some { CurrentTokens = currentTokens; TokenLimit = tokenLimit } }
     | UserPrompt m ->
         // A reply to an ask_user keeps the running skill; any other prompt is a new request that ends
         // the prior skill's run.

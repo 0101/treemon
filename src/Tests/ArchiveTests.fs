@@ -250,6 +250,7 @@ type NavigationArchiveTests() =
           CodingToolProvider = None
           CodingToolSince = None
           CurrentSkill = None
+          ContextUsage = None
           LastUserMessage = None
           Pr = NoPr
           MainBehindCount = 0

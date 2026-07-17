@@ -62,6 +62,18 @@ type CodingToolProvider =
     | CopilotCli
     static member Default = CopilotCli
 
+/// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
+/// model's limit. Sourced from the SDK `session.usage_info` event, which is ephemeral upstream —
+/// so this is live-only (absent until the first event arrives, and not restored after a restart).
+type ContextUsage = { CurrentTokens: int; TokenLimit: int }
+
+module ContextUsage =
+    /// The fraction of the context window in use, clamped to [0, 1]. A non-positive limit (degenerate)
+    /// reads as 0 rather than dividing by zero.
+    let fraction (u: ContextUsage) : float =
+        if u.TokenLimit <= 0 then 0.0
+        else max 0.0 (min 1.0 (float u.CurrentTokens / float u.TokenLimit))
+
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
 /// an active session with no recognized skill. Activity is always *derived* from CurrentSkill
@@ -255,6 +267,10 @@ type WorktreeStatus =
       /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
+      /// The agent's current context-window occupancy (currentTokens / tokenLimit), from the SDK
+      /// `session.usage_info` event. None when unknown (never reported yet, or after a restart —
+      /// it is not persisted); the Overview band then falls back to a solid dot.
+      ContextUsage: ContextUsage option
       LastUserMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int

@@ -177,6 +177,7 @@ let internal assembleFromState
         | WaitingForUser
         | NoSession -> None
       CurrentSkill = codingToolData.CurrentSkill
+      ContextUsage = codingToolData.ContextUsage
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0

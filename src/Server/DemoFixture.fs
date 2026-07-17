@@ -152,6 +152,7 @@ let private wtAzDoMain: WorktreeStatus =
     { Path = azDoPath "main"
       Branch = "main"
       LastCommitMessage = "Merge PR #4198: Update dependencies to latest stable"
+      ContextUsage = None
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
       Planning = BeadsPlanning.zero
@@ -174,6 +175,7 @@ let private wtRetryLogic: WorktreeStatus =
     { Path = azDoPath "feature-retry"
       Branch = "feature/retry-logic"
       LastCommitMessage = "Add exponential backoff to blob storage retries"
+      ContextUsage = Some { CurrentTokens = 142000; TokenLimit = 200000 }
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
@@ -196,6 +198,7 @@ let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
       Branch = "refactor/config-loading"
       LastCommitMessage = "Extract config validation into separate module"
+      ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 }
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
       Planning = BeadsPlanning.zero
@@ -218,6 +221,7 @@ let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
       Branch = "feature/auth-middleware"
       LastCommitMessage = "Add JWT validation and claims extraction"
+      ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 }
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
@@ -240,6 +244,7 @@ let private wtArchived: WorktreeStatus =
     { Path = azDoPath "old-migration"
       Branch = "feature/db-migration"
       LastCommitMessage = "Complete database migration script v2"
+      ContextUsage = None
       LastCommitTime = baseTimestamp.AddHours(-48.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
       Planning = BeadsPlanning.zero
@@ -262,6 +267,7 @@ let private wtGithubMain: WorktreeStatus =
     { Path = githubPath "main"
       Branch = "main"
       LastCommitMessage = "Merge pull request #308: Fix CSV parser edge case"
+      ContextUsage = None
       LastCommitTime = baseTimestamp.AddMinutes(-15.0)
       Beads = BeadsSummary.zero
       Planning = BeadsPlanning.zero
@@ -284,6 +290,7 @@ let private wtStreaming: WorktreeStatus =
     { Path = githubPath "streaming"
       Branch = "feature/streaming-agg"
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
+      ContextUsage = Some { CurrentTokens = 92000; TokenLimit = 200000 }
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
       Planning = BeadsPlanning.zero
@@ -306,6 +313,7 @@ let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
       Branch = "fix/csv-parser"
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
+      ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 }
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       Planning = BeadsPlanning.zero

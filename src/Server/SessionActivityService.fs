@@ -22,10 +22,11 @@ open Server.SessionActivityStore
 // --- Wire contract DTO ------------------------------------------------------------------------
 
 // The single coupling point with extension.mjs (producer). The POST body is one report; `kind` is one
-// of the seven status kinds the fold consumes (mapping 1:1 onto SessionEvent) or the liveness-only
+// of the eight kinds the fold consumes (mapping 1:1 onto SessionEvent) or the liveness-only
 // `heartbeat`. An unknown `kind` is a validation error (rejected), never silently dropped. `message`
 // is present for user_prompt / assistant_message / awaiting_user_input (the ask_user question);
-// `skillName` only for skill_invoked; turn_started / turn_ended / went_idle / heartbeat carry neither.
+// `skillName` only for skill_invoked; `currentTokens`/`tokenLimit` only for usage_info (a
+// status-preserving context gauge); turn_started / turn_ended / went_idle / heartbeat carry none of these.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -39,7 +40,9 @@ type SessionActivityRequest =
       occurredAt: string
       kind: string
       message: MessageDto
-      skillName: string }
+      skillName: string
+      currentTokens: int
+      tokenLimit: int }
 
 // --- DTO → domain (pure, HTTP-free so it is unit-testable) -------------------------------------
 
@@ -87,11 +90,11 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
-/// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The seven status
-/// kinds plus the liveness-only `heartbeat` are the whole contract; anything else is rejected. message
-/// is mandatory for user_prompt / assistant_message, optional for awaiting_user_input (the ask_user
-/// question), absent otherwise.
-let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) : Result<SessionEvent, string> =
+/// Map the wire `kind` (+ its optional message / skillName / usage counters) onto a SessionEvent. The
+/// seven status kinds plus the usage_info gauge and the liveness-only `heartbeat` are the whole
+/// contract; anything else is rejected. message is mandatory for user_prompt / assistant_message,
+/// optional for awaiting_user_input (the ask_user question), absent otherwise.
+let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) (currentTokens: int) (tokenLimit: int) : Result<SessionEvent, string> =
     match kind with
     | "turn_started" -> Ok TurnStarted
     | "turn_ended" -> Ok TurnEnded
@@ -109,6 +112,11 @@ let internal parseEvent (kind: string) (message: MessageDto) (skillName: string)
         else
             tryParseTimestamp message.at
             |> Result.map (fun at -> AwaitingUserInput(Some { Text = capText message.text; At = at }))
+    | "usage_info" ->
+        // A pure gauge. A non-positive limit is degenerate (no meaningful fraction), so reject it
+        // rather than store a divide-by-zero snapshot; a negative current is clamped to 0.
+        if tokenLimit <= 0 then Error "usage_info requires tokenLimit > 0"
+        else Ok(UsageInfo(max 0 currentTokens, tokenLimit))
     | other -> Error $"unknown kind '{other}'"
 
 /// The inverse of parseEvent for persistence: the wire `kind` string stored on the raw event row.
@@ -122,6 +130,7 @@ let internal kindText =
     | TurnEnded -> "turn_ended"
     | WentIdle -> "went_idle"
     | Heartbeat -> "heartbeat"
+    | UsageInfo _ -> "usage_info"
 
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
@@ -140,7 +149,7 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
         |> Result.bind (fun provider ->
             tryParseTimestamp req.occurredAt
             |> Result.bind (fun occurredAt ->
-                parseEvent req.kind req.message req.skillName
+                parseEvent req.kind req.message req.skillName req.currentTokens req.tokenLimit
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)

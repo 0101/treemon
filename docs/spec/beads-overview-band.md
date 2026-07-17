@@ -35,7 +35,11 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   category accent, the label stays neutral, and both share the same font size/weight.
   1. **Agents** — **circles** (~15px), one per agent, grouped by the running skill (working agents),
      the waiting-for-user state, or the **idle** state (blue-dot idle agents that finished a
-     turn with the CLI still open) — no per-agent status dot on the circle. Idle is a second track sharing the Agents row.
+     turn with the CLI still open) — no per-agent status dot on the circle. Each circle is a
+     **context-usage donut**: a ring filled to the agent's context-window occupancy
+     (`currentTokens / tokenLimit`, from the SDK `session.usage_info` event). An agent that has not
+     reported usage yet (or after a restart — the value is not persisted) falls back to the solid
+     circle. Idle is a second track sharing the Agents row.
   2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
@@ -230,7 +234,11 @@ the solution compiling (no compat shims, per house rules).
   is computed from `Overview.Scale`, with the largest bucket filling the fixed max width and all
   others at `count / Scale` of that width. The computed inline width / CSS variable is the accepted
   exception to static CSS classes because proportional width is inherently data-driven. Agent groups
-  render one `.overview-circle` per working/waiting/idle agent with a normal gap.
+  render one `.overview-circle` per working/waiting/idle agent with a normal gap. An agent with a
+  known context-window occupancy also gets `.overview-donut` and an inline `--ctx-fill` (0–1); the
+  donut's conic-gradient fills that fraction over a muted track and a radial mask cuts the centre
+  hole — the same accepted inline-custom-property exception the task bars use with `--bar-fill`. No
+  usage reported ⇒ the plain solid circle (class not applied).
 - **Accent colour drives both mark and count via `currentColor`.** One class per category
   (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the

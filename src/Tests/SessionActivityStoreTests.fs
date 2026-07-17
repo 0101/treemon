@@ -138,7 +138,8 @@ type UpsertStatusTests() =
                 { Status = SessionLevelStatus.WaitingForUser
                   Skill = Some "review"
                   LastUserMessage = Some(msg "the auth module" "2026-03-01T10:01:00Z")
-                  LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z") }
+                  LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z")
+                  ContextUsage = None }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
 
