@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 //   assistant.message      -> assistant_message   (message required)
 //   skill.invoked          -> skill_invoked        (skillName required)
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
+//   assistant.intent       -> intent_reported     (message = the intent text, required)
 //   assistant.turn_end     -> turn_ended
 //   session.idle           -> went_idle
 //   (timer, no SDK event)  -> heartbeat            (liveness only; bumps last_seen, never folded/stored)
@@ -67,6 +68,7 @@ const MAX_MESSAGE_CHARS = 2000;
 const SUBSCRIBED_TYPES = [
   "assistant.turn_start",
   "assistant.turn_end",
+  "assistant.intent",
   "session.idle",
   "skill.invoked",
   "assistant.message",
@@ -110,7 +112,7 @@ function statusForKind(kind) {
     case "went_idle":
       return "idle";
     default:
-      return null; // skill_invoked sets the skill, not the status
+      return null; // skill_invoked / intent_reported set skill/intent, not the status
   }
 }
 
@@ -209,6 +211,12 @@ function mapEvent(event) {
     case "assistant.message": {
       const text = String(data.content ?? "");
       return text.trim() ? { ...base(event, "assistant_message"), message: message(text, event.timestamp) } : null;
+    }
+    case "assistant.intent": {
+      // The agent's short description of what it's currently doing/planning. Blank is dropped so a
+      // "cleared" intent never regresses the card — the last non-empty intent is retained.
+      const text = String(data.intent ?? "");
+      return text.trim() ? { ...base(event, "intent_reported"), message: message(text, event.timestamp) } : null;
     }
     case "user.message": {
       if (isSkillContextInjection(data)) return null;
