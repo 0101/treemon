@@ -196,7 +196,7 @@ let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<
 /// this the durable `--resume <id>` path is UI-unreachable for exactly the sessions it was built for.
 let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
     let s = stored.Status
-    let hasFooter = s.Skill.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
+    let hasFooter = s.Skill.IsSome || s.Intent.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
 
     { Status = NoSession
       Provider = if hasFooter then Some CopilotCli else None

@@ -243,6 +243,23 @@ type WithRetainedFallbackTests() =
         )
 
     [<Test>]
+    member _.``An intent-only retained session still carries the provider indicator``() =
+        // Regression: hasFooter must count Intent. A session folded from IntentReported alone still has
+        // footer content (its intent line renders), so its retained card must carry the provider.
+        let intentOnly: StoredStatus =
+            { SessionId = SessionId "i"
+              WorktreePath = WorktreePath "wt-i"
+              Provider = CopilotCli
+              Status = { emptyStatus with Intent = Some(msg "investigating the fold" "2026-03-01T08:00:00Z") }
+              UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LastSeen = ts "2026-03-01T08:00:00Z" }
+
+        let result = retainedFooterResult intentOnly
+
+        Assert.That(result.AgentIntent |> Option.map fst, Is.EqualTo(Some "investigating the fold"))
+        Assert.That(result.Provider, Is.EqualTo(Some CopilotCli), "an intent-only footer must still carry the provider")
+
+    [<Test>]
     member _.``A live worktree keeps its live card (retained fallback only fills gaps)``() =
         let live = collapseByWorktree now [ stored "a" "wt-a" SessionLevelStatus.Working (Some "review") None None "2026-03-01T11:59:00Z" ]
         let retained = Map.ofList [ retainedRow "stale" "wt-a" (Some(msg "old" "2026-03-01T08:00:00Z")) "2026-03-01T08:00:00Z" ]
