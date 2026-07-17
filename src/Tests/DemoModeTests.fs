@@ -186,9 +186,9 @@ type DemoModeTests() =
         }
 
     [<Test>]
-    member this.``Demo mode shows both Claude and Copilot providers``() =
+    member this.``Demo mode shows the Copilot provider``() =
         task {
-            // Verify via API that both providers are present across worktrees
+            // Verify via API that the Copilot provider is present across worktrees
             use client = new HttpClient()
             let content = new StringContent("[]", Encoding.UTF8, "application/json")
             let! response = client.PostAsync($"{demoServerUrl}/IWorktreeApi/getWorktrees", content)
@@ -201,21 +201,20 @@ type DemoModeTests() =
                 |> List.choose _.CodingToolProvider
                 |> List.distinct
 
-            Assert.That(allProviders, Does.Contain(Claude), "Claude provider should appear on at least one worktree")
-            Assert.That(allProviders, Does.Contain(Copilot), "Copilot provider should appear on at least one worktree")
+            Assert.That(allProviders, Does.Contain(CopilotCli), "Copilot provider should appear on at least one worktree")
 
-            // Also verify Claude appears in UI sync button titles (Claude has non-dirty Working cards behind main)
-            let claudeIndicators = this.Page.Locator("[title*='Claude is active']")
+            // Also verify the provider appears in UI sync button titles (a non-dirty Working card behind main)
+            let copilotIndicators = this.Page.Locator("[title*='Copilot is active']")
             let deadline = DateTime.UtcNow.AddSeconds(12.0)
-            let mutable claudeFound = false
+            let mutable copilotFound = false
 
-            while DateTime.UtcNow < deadline && not claudeFound do
-                let! claudeCount = claudeIndicators.CountAsync()
-                if claudeCount > 0 then claudeFound <- true
-                if not claudeFound then
+            while DateTime.UtcNow < deadline && not copilotFound do
+                let! copilotCount = copilotIndicators.CountAsync()
+                if copilotCount > 0 then copilotFound <- true
+                if not copilotFound then
                     do! System.Threading.Tasks.Task.Delay(500)
 
-            Assert.That(claudeFound, Is.True, "Claude provider indicator should appear in sync button title")
+            Assert.That(copilotFound, Is.True, "Copilot provider indicator should appear in sync button title")
         }
 
     [<Test>]

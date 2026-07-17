@@ -308,7 +308,7 @@ let main args =
                     async {
                         let! activeSessions = SessionManager.getActiveSessions sessionAgent
                         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-                        let repos = WorktreeApi.assembleRepos rootPaths activeSessionPaths state
+                        let repos = WorktreeApi.assembleRepos sessionActivityStore rootPaths activeSessionPaths state
                         return (OverviewData.aggregate repos |> OverviewData.toCounts).Tasks
                     }
 

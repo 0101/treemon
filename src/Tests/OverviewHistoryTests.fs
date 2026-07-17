@@ -22,7 +22,7 @@ type OverviewHistoryTests() =
 
     /// One activity_events row for session `sid` in worktree `wt`, `minsBefore` minutes before baseTime.
     /// Only Status/Skill/Ts/SessionId/WorktreePath bear on the agent reconstruction.
-    let evt sid wt (status: CodingToolStatus) skill (minsBefore: float) : ActivityEventRow =
+    let evt sid wt (status: SessionLevelStatus) skill (minsBefore: float) : ActivityEventRow =
         { EventId = EventId(Guid.NewGuid().ToString())
           SessionId = SessionId sid
           WorktreePath = WorktreePath wt
@@ -58,8 +58,8 @@ type OverviewHistoryTests() =
         // s1: Working (bd-execute) at -60m, goes Idle at -30m, then stops emitting → drops out of the
         // counts one openWindow after its last event (openness decay), matching the live band.
         let events =
-            [ evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 60.0
-              evt "s1" "C:/wt/a" CodingToolStatus.Idle None 30.0 ]
+            [ evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 60.0
+              evt "s1" "C:/wt/a" SessionLevelStatus.Idle None 30.0 ]
 
         let derived = OverviewHistory.deriveAgents baseTime window events
 
@@ -77,9 +77,9 @@ type OverviewHistoryTests() =
         // Three events, all Working/bd-execute (a status-preserving heartbeat cadence): the agent
         // count never moves, so only the appearance transition is emitted (no per-heartbeat churn).
         let events =
-            [ evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 40.0
-              evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 39.0
-              evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 38.0 ]
+            [ evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 40.0
+              evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 39.0
+              evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 38.0 ]
 
         let derived = OverviewHistory.deriveAgents baseTime window events
 
@@ -96,8 +96,8 @@ type OverviewHistoryTests() =
         // Same worktree: one Working session, one Idle session, both fresh at -20m. The worktree
         // collapses (pickActive) to the active winner → one Working agent, not two.
         let events =
-            [ evt "s1" "C:/wt/a" CodingToolStatus.Idle None 20.0
-              evt "s2" "C:/wt/a" CodingToolStatus.Working (Some "pr") 20.0 ]
+            [ evt "s1" "C:/wt/a" SessionLevelStatus.Idle None 20.0
+              evt "s2" "C:/wt/a" SessionLevelStatus.Working (Some "pr") 20.0 ]
 
         let derived = OverviewHistory.deriveAgents baseTime window events
         let atAppearance = derived |> List.find (fun (t, _) -> t = baseTime.AddMinutes(-20.0)) |> snd

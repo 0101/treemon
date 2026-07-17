@@ -679,52 +679,52 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync button disabled when Claude is Working``() =
+    member this.``Sync button disabled when Copilot is Working``() =
         task {
             let workingCards = this.Page.Locator(".wt-card.ct-working:not(.compact)")
             do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! workingCount = workingCards.CountAsync()
-            Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Claude worktrees")
+            Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Copilot worktrees")
 
             let behindRow = workingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture Working Claude worktree is behind main")
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture Working Copilot worktree is behind main")
 
             let syncBtn = behindRow.Locator(".sync-btn")
             let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Working Claude card behind main")
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Working Copilot card behind main")
 
             let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Working")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Copilot is Working")
 
             let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Working")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Copilot is Working")
 
             let! title = syncBtn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Claude is active"), "Disabled sync button should show 'Claude is active' tooltip")
+            Assert.That(title, Is.EqualTo("Copilot is active"), "Disabled sync button should show 'Copilot is active' tooltip")
         }
 
     [<Test>]
-    member this.``Sync button disabled when Claude is WaitingForUser``() =
+    member this.``Sync button disabled when Copilot is WaitingForUser``() =
         task {
             let waitingCards = this.Page.Locator(".wt-card.ct-waiting:not(.compact)")
             do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! waitingCount = waitingCards.CountAsync()
-            Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Claude worktrees")
+            Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Copilot worktrees")
 
             let behindRow = waitingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture WaitingForUser Claude worktree is behind main")
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture WaitingForUser Copilot worktree is behind main")
 
             let syncBtn = behindRow.Locator(".sync-btn")
             let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on WaitingForUser Claude card behind main")
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on WaitingForUser Copilot card behind main")
 
             let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is WaitingForUser")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Copilot is WaitingForUser")
 
             let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is WaitingForUser")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Copilot is WaitingForUser")
         }
 
     [<Test>]

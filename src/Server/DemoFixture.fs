@@ -178,7 +178,7 @@ let private wtRetryLogic: WorktreeStatus =
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
       CurrentSkill = None
       LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
@@ -200,7 +200,7 @@ let private wtConfigLoading: WorktreeStatus =
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
       Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
       CurrentSkill = None
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
@@ -222,7 +222,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
       CodingTool = Idle
-      CodingToolProvider = Some Copilot
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
       CurrentSkill = None
       LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
@@ -244,7 +244,7 @@ let private wtArchived: WorktreeStatus =
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
       Planning = BeadsPlanning.zero
       CodingTool = Idle
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
       CurrentSkill = None
       LastUserMessage = None
@@ -288,7 +288,7 @@ let private wtStreaming: WorktreeStatus =
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
       Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Copilot
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
       CurrentSkill = None
       LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
@@ -310,7 +310,7 @@ let private wtCsvFix: WorktreeStatus =
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       Planning = BeadsPlanning.zero
       CodingTool = Idle
-      CodingToolProvider = Some Copilot
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
       CurrentSkill = None
       LastUserMessage = None

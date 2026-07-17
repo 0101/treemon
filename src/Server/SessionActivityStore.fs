@@ -28,7 +28,7 @@ open Server.SessionActivity
 type StoredStatus =
     { SessionId: SessionId
       WorktreePath: WorktreePath
-      Provider: PushProvider
+      Provider: CodingToolProvider
       Status: SessionStatus
       UpdatedAt: DateTimeOffset
       LastSeen: DateTimeOffset }
@@ -40,9 +40,9 @@ type ActivityEventRow =
     { EventId: EventId
       SessionId: SessionId
       WorktreePath: WorktreePath
-      Provider: PushProvider
+      Provider: CodingToolProvider
       Kind: string
-      Status: CodingToolStatus
+      Status: SessionLevelStatus
       Skill: string option
       Ts: DateTimeOffset }
 
@@ -70,16 +70,15 @@ let private parseTasks (s: string) : OverviewData.TaskCount list =
 
 let private statusText =
     function
-    | Working -> "working"
-    | WaitingForUser -> "waiting_for_user"
-    | Idle -> "idle"
-    | NoSession -> failwith "SessionActivityStore: NoSession is a worktree-level collapse result, never a stored per-session status"
+    | SessionLevelStatus.Working -> "working"
+    | SessionLevelStatus.WaitingForUser -> "waiting_for_user"
+    | SessionLevelStatus.Idle -> "idle"
 
 let private parseStatus =
     function
-    | "working" -> Working
-    | "waiting_for_user" -> WaitingForUser
-    | "idle" -> Idle
+    | "working" -> SessionLevelStatus.Working
+    | "waiting_for_user" -> SessionLevelStatus.WaitingForUser
+    | "idle" -> SessionLevelStatus.Idle
     | other -> failwithf "SessionActivityStore: unknown status text %A" other
 
 let private providerText =
@@ -216,6 +215,15 @@ INSERT OR IGNORE INTO activity_events
 VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 """
 
+// Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
+// or any message/skill field, and only ever forward. Heartbeats take this path instead of
+// upsert+append, so they refresh openness without moving the last-write-wins clock or polluting the
+// event history.
+let private touchSql =
+    """
+UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
+"""
+
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
@@ -268,6 +276,54 @@ DELETE FROM task_snapshots WHERE ts < $cutoff;
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
 
+// Every stored session across all worktrees, oldest `last_seen` first (so a fold keyed by
+// worktree_path keeps the newest per worktree). NO idle-window filter — the durable footer/resume
+// substrate for cards whose sessions have aged out of the live map after a restart.
+let private allStatusesSql =
+    """
+SELECT session_id, worktree_path, provider, status, current_skill,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen
+FROM session_status
+ORDER BY last_seen;
+"""
+
+// --- Reader / binder helpers ------------------------------------------------------------------
+
+// Drain the reader through an immutable recursive accumulator instead of a mutable list-building
+// loop, then restore source order.
+let rec private readRows (reader: SqliteDataReader) (map: SqliteDataReader -> 'T) (acc: 'T list) : 'T list =
+    if reader.Read() then readRows reader map (map reader :: acc) else List.rev acc
+
+// Bind an activity_events row's parameters onto a prepared command — shared by AppendEvent and the
+// transactional AppendAndUpsert so the two paths can never drift.
+let private bindAppend (cmd: SqliteCommand) (row: ActivityEventRow) =
+    cmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
+    cmd.Parameters.AddWithValue("$sid", SessionId.value row.SessionId) |> ignore
+    cmd.Parameters.AddWithValue("$wt", WorktreePath.value row.WorktreePath) |> ignore
+    cmd.Parameters.AddWithValue("$prov", providerText row.Provider) |> ignore
+    cmd.Parameters.AddWithValue("$kind", row.Kind) |> ignore
+    cmd.Parameters.AddWithValue("$status", statusText row.Status) |> ignore
+    cmd.Parameters.AddWithValue("$skill", optToDb row.Skill) |> ignore
+    cmd.Parameters.AddWithValue("$ts", isoUtc row.Ts) |> ignore
+
+// Bind a session_status row's parameters onto a prepared command — shared by UpsertStatus and the
+// transactional AppendAndUpsert.
+let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
+    let s = stored.Status
+    let umText, umTs = msgToDb s.LastUserMessage
+    let amText, amTs = msgToDb s.LastAssistantMessage
+    cmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
+    cmd.Parameters.AddWithValue("$wt", WorktreePath.value stored.WorktreePath) |> ignore
+    cmd.Parameters.AddWithValue("$prov", providerText stored.Provider) |> ignore
+    cmd.Parameters.AddWithValue("$status", statusText s.Status) |> ignore
+    cmd.Parameters.AddWithValue("$skill", optToDb s.Skill) |> ignore
+    cmd.Parameters.AddWithValue("$um", umText) |> ignore
+    cmd.Parameters.AddWithValue("$uts", umTs) |> ignore
+    cmd.Parameters.AddWithValue("$am", amText) |> ignore
+    cmd.Parameters.AddWithValue("$ats", amTs) |> ignore
+    cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
+    cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
+
 // --- Store ------------------------------------------------------------------------------------
 
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
@@ -314,20 +370,7 @@ type SessionActivityStore(dbPath: string) =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- upsertSql
-        let s = stored.Status
-        let umText, umTs = msgToDb s.LastUserMessage
-        let amText, amTs = msgToDb s.LastAssistantMessage
-        cmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
-        cmd.Parameters.AddWithValue("$wt", WorktreePath.value stored.WorktreePath) |> ignore
-        cmd.Parameters.AddWithValue("$prov", providerText stored.Provider) |> ignore
-        cmd.Parameters.AddWithValue("$status", statusText s.Status) |> ignore
-        cmd.Parameters.AddWithValue("$skill", optToDb s.Skill) |> ignore
-        cmd.Parameters.AddWithValue("$um", umText) |> ignore
-        cmd.Parameters.AddWithValue("$uts", umTs) |> ignore
-        cmd.Parameters.AddWithValue("$am", amText) |> ignore
-        cmd.Parameters.AddWithValue("$ats", amTs) |> ignore
-        cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
-        cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
+        bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
 
     /// Append a raw event. Returns true if inserted, false if the event_id already existed
@@ -336,15 +379,43 @@ type SessionActivityStore(dbPath: string) =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- appendSql
-        cmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
-        cmd.Parameters.AddWithValue("$sid", SessionId.value row.SessionId) |> ignore
-        cmd.Parameters.AddWithValue("$wt", WorktreePath.value row.WorktreePath) |> ignore
-        cmd.Parameters.AddWithValue("$prov", providerText row.Provider) |> ignore
-        cmd.Parameters.AddWithValue("$kind", row.Kind) |> ignore
-        cmd.Parameters.AddWithValue("$status", statusText row.Status) |> ignore
-        cmd.Parameters.AddWithValue("$skill", optToDb row.Skill) |> ignore
-        cmd.Parameters.AddWithValue("$ts", isoUtc row.Ts) |> ignore
+        bindAppend cmd row
         cmd.ExecuteNonQuery() = 1
+
+    /// Atomically append the raw event AND upsert the session's live row in ONE transaction on ONE
+    /// connection, so the durable status can never diverge from the appended history. With the two on
+    /// separate connections a failed upsert AFTER a committed append left the event_id permanently
+    /// deduped on replay while the status never recovered; here a mid-pair failure rolls both back.
+    /// Returns true when the event was newly inserted (upsert applied), false when the event_id
+    /// already existed (a full idempotent no-op — nothing appended, nothing upserted).
+    member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : bool =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction()
+        use appendCmd = conn.CreateCommand()
+        appendCmd.Transaction <- tx
+        appendCmd.CommandText <- appendSql
+        bindAppend appendCmd row
+        let inserted = appendCmd.ExecuteNonQuery() = 1
+
+        if inserted then
+            use upsertCmd = conn.CreateCommand()
+            upsertCmd.Transaction <- tx
+            upsertCmd.CommandText <- upsertSql
+            bindUpsert upsertCmd stored
+            upsertCmd.ExecuteNonQuery() |> ignore
+
+        tx.Commit()
+        inserted
+
+    /// Advance a session's `last_seen` (openness heartbeat) without touching status/updated_at or the
+    /// message fields. Only moves it forward; a no-op if the row is absent or already fresher.
+    member _.TouchLastSeen(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- touchSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.
@@ -356,8 +427,22 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
         use reader = cmd.ExecuteReader()
 
-        [ while reader.Read() do
-              yield readStored reader ]
+        readRows reader readStored []
+
+    /// The newest stored session per worktree across ALL rows, IGNORING the idle window (unlike
+    /// LoadLiveStatuses). The durable footer/resume substrate for cards: after a restart a worktree
+    /// whose sessions last ran outside the idle window is absent from the live map, so its card would
+    /// collapse to a blank NoSession and the resume button (which needs a retained LastUserMessage)
+    /// would be UI-unreachable. Keyed by worktree_path; each value is that worktree's most-recent
+    /// session (allStatusesSql is oldest-first, so the fold keeps the newest per key).
+    member _.RetainedByWorktree() : Map<string, StoredStatus> =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- allStatusesSql
+        use reader = cmd.ExecuteReader()
+
+        readRows reader readStored []
+        |> List.fold (fun acc s -> Map.add (WorktreePath.value s.WorktreePath) s acc) Map.empty
 
     /// Every stored session for a worktree, newest `last_seen` first, INDEPENDENT of the idle window
     /// (unlike LoadLiveStatuses). The RESUME substrate: after a restart a session last active >2h ago
@@ -372,8 +457,7 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
         use reader = cmd.ExecuteReader()
 
-        [ while reader.Read() do
-              yield readStored reader ]
+        readRows reader readStored []
 
     /// Retention: drop events older than `cutoff` and session rows last seen before it. Returns the
     /// total number of rows deleted across both tables.
@@ -394,8 +478,7 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
         use reader = cmd.ExecuteReader()
 
-        [ while reader.Read() do
-              yield readEventRow reader ]
+        readRows reader readEventRow []
 
     /// Append one Tasks (beads) history snapshot — the count-only projection, logged only on change by
     /// the scheduler. The Agents dimension is NOT stored here: it is derived on read from

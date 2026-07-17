@@ -77,19 +77,19 @@ type UpsertStatusTests() =
         withStore (fun store ->
             let older =
                 { emptyStatus with
-                    Status = Working
+                    Status = SessionLevelStatus.Working
                     Skill = Some "review" }
 
             let newer =
                 { emptyStatus with
-                    Status = WaitingForUser
+                    Status = SessionLevelStatus.WaitingForUser
                     Skill = Some "investigate" }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" older "2026-03-01T10:00:00Z" "2026-03-01T12:00:00Z")
             store.UpsertStatus(storedOf "s1" "C:/wt/a" newer "2026-03-01T10:05:00Z" "2026-03-01T12:00:00Z")
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
-            Assert.That(row.Status.Status, Is.EqualTo(WaitingForUser))
+            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
             Assert.That(row.Status.Skill, Is.EqualTo(Some "investigate"))
             Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:05:00Z")))
 
@@ -98,12 +98,12 @@ type UpsertStatusTests() =
         withStore (fun store ->
             let newer =
                 { emptyStatus with
-                    Status = WaitingForUser
+                    Status = SessionLevelStatus.WaitingForUser
                     Skill = Some "investigate" }
 
             let stale =
                 { emptyStatus with
-                    Status = Idle
+                    Status = SessionLevelStatus.Idle
                     Skill = None }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" newer "2026-03-01T10:05:00Z" "2026-03-01T12:00:00Z")
@@ -111,7 +111,7 @@ type UpsertStatusTests() =
             store.UpsertStatus(storedOf "s1" "C:/wt/a" stale "2026-03-01T10:02:00Z" "2026-03-01T12:30:00Z")
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T12:30:00Z") |> find "s1"
-            Assert.That(row.Status.Status, Is.EqualTo(WaitingForUser))
+            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
             Assert.That(row.Status.Skill, Is.EqualTo(Some "investigate"))
             Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:05:00Z"))
             Assert.That(row.LastSeen, Is.EqualTo(ts "2026-03-01T12:00:00Z"), "stale upsert must not bump last_seen"))
@@ -121,7 +121,7 @@ type UpsertStatusTests() =
         withStore (fun store ->
             let a =
                 { emptyStatus with
-                    Status = Working
+                    Status = SessionLevelStatus.Working
                     Skill = Some "review" }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" a "2026-03-01T10:00:00Z" "2026-03-01T12:00:00Z")
@@ -129,13 +129,13 @@ type UpsertStatusTests() =
 
             let rows = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
             Assert.That(rows.Length, Is.EqualTo(1))
-            Assert.That((find "s1" rows).Status.Status, Is.EqualTo(Working)))
+            Assert.That((find "s1" rows).Status.Status, Is.EqualTo(SessionLevelStatus.Working)))
 
     [<Test>]
     member _.``Skill and both messages round-trip through the store``() =
         withStore (fun store ->
             let rich =
-                { Status = WaitingForUser
+                { Status = SessionLevelStatus.WaitingForUser
                   Skill = Some "review"
                   LastUserMessage = Some(msg "the auth module" "2026-03-01T10:01:00Z")
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z") }
@@ -156,7 +156,7 @@ type AppendEventTests() =
     [<Test>]
     member _.``A duplicate event_id is ignored (dedupe) and the row count is unchanged``() =
         withStore (fun store ->
-            let e = eventOf "e1" "s1" "turn_started" Working None "2026-03-01T10:00:00Z"
+            let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
 
             Assert.That(store.AppendEvent e, Is.True, "first insert should report inserted")
             Assert.That(store.AppendEvent e, Is.False, "duplicate event_id should report ignored")
@@ -167,9 +167,9 @@ type AppendEventTests() =
     [<Test>]
     member _.``Distinct event_ids are all appended``() =
         withStore (fun store ->
-            Assert.That(store.AppendEvent(eventOf "e1" "s1" "turn_started" Working None "2026-03-01T10:00:00Z"), Is.True)
+            Assert.That(store.AppendEvent(eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"), Is.True)
             Assert.That(
-                store.AppendEvent(eventOf "e2" "s1" "skill_invoked" Working (Some "review") "2026-03-01T10:00:01Z"),
+                store.AppendEvent(eventOf "e2" "s1" "skill_invoked" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:01Z"),
                 Is.True
             )
 
@@ -179,13 +179,58 @@ type AppendEventTests() =
     [<Test>]
     member _.``An appended event round-trips its fields``() =
         withStore (fun store ->
-            let e = eventOf "e1" "s1" "skill_invoked" Working (Some "review") "2026-03-01T10:00:00Z"
+            let e = eventOf "e1" "s1" "skill_invoked" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
             store.AppendEvent e |> ignore
 
             let row =
                 store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z") |> List.exactlyOne
 
             Assert.That(row, Is.EqualTo(e)))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AppendAndUpsertTests() =
+
+    [<Test>]
+    member _.``A new event is appended and the live status upserted in one call``() =
+        withStore (fun store ->
+            let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "review" }
+            let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
+            let stored = storedOf "s1" "C:/wt/a" status "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+
+            Assert.That(store.AppendAndUpsert(e, stored), Is.True, "a new event reports inserted")
+
+            let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "the event was appended")
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
+            Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Working, "the status was upserted in the same call"))
+
+    [<Test>]
+    member _.``A duplicate event_id skips BOTH the append and the upsert (coupled idempotency)``() =
+        withStore (fun store ->
+            let first = { emptyStatus with Status = SessionLevelStatus.Working }
+            let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
+            Assert.That(
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"),
+                Is.True
+            )
+
+            // Same event_id but a would-be-newer status: the dedupe must skip the upsert together with
+            // the append, so the status can never advance off a deduped event.
+            let laterStatus = { emptyStatus with Status = SessionLevelStatus.WaitingForUser }
+            Assert.That(
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z"),
+                Is.False,
+                "a duplicate event_id reports ignored"
+            )
+
+            let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "no second event row")
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> find "s1"
+            Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Working, "the upsert was skipped with the append")
+            Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z")))
 
 
 [<TestFixture>]
@@ -209,7 +254,7 @@ type LoadLiveStatusesTests() =
         withDbPath (fun dbPath ->
             let working =
                 { emptyStatus with
-                    Status = Working
+                    Status = SessionLevelStatus.Working
                     Skill = Some "bd-execute" }
 
             // First instance writes, then is disposed (checkpoints WAL, releases the file).
@@ -219,7 +264,7 @@ type LoadLiveStatusesTests() =
             // A fresh instance over the same path rebuilds the live status with no new events.
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
-            Assert.That(row.Status.Status, Is.EqualTo(Working))
+            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
             Assert.That(row.Status.Skill, Is.EqualTo(Some "bd-execute")))
 
     [<Test>]
@@ -265,6 +310,30 @@ type StatusesForWorktreeTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type RetainedByWorktreeTests() =
+
+    [<Test>]
+    member _.``Returns the newest session per worktree, ignoring the idle window``() =
+        withStore (fun store ->
+            // wt/a has two sessions well outside any idle window (last active 07:00 / 09:00); wt/b one.
+            store.UpsertStatus(storedOf "a-old" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T07:00:00Z")
+            store.UpsertStatus(storedOf "a-new" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z")
+
+            let retained = store.RetainedByWorktree()
+            Assert.That(retained.Count, Is.EqualTo 2, "one row per worktree")
+            Assert.That(retained["C:/wt/a"].SessionId, Is.EqualTo(SessionId "a-new"), "the most-recent session for the worktree")
+            Assert.That(retained["C:/wt/b"].SessionId, Is.EqualTo(SessionId "b1")))
+
+    [<Test>]
+    member _.``An empty store yields no retained rows``() =
+        withStore (fun store ->
+            Assert.That(store.RetainedByWorktree() |> Map.isEmpty, Is.True))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type QueryWindowTests() =
 
     let seed (store: SessionActivityStore) =
@@ -272,7 +341,7 @@ type QueryWindowTests() =
           "e1", "2026-03-01T10:00:00Z"
           "e2", "2026-03-01T11:00:00Z"
           "e3", "2026-03-01T12:00:00Z" ]
-        |> List.iter (fun (eid, t) -> store.AppendEvent(eventOf eid "s1" "turn_started" Working None t) |> ignore)
+        |> List.iter (fun (eid, t) -> store.AppendEvent(eventOf eid "s1" "turn_started" SessionLevelStatus.Working None t) |> ignore)
 
     [<Test>]
     member _.``Only events inside the window are returned, oldest first``() =
@@ -308,9 +377,9 @@ type PruneOldTests() =
     [<Test>]
     member _.``pruneOld drops events and session rows older than the cutoff and returns the count``() =
         withStore (fun store ->
-            store.AppendEvent(eventOf "e1" "s1" "turn_started" Working None "2026-03-01T01:00:00Z") |> ignore
-            store.AppendEvent(eventOf "e2" "s1" "turn_started" Working None "2026-03-01T02:00:00Z") |> ignore
-            store.AppendEvent(eventOf "e3" "s1" "turn_started" Working None "2026-03-01T03:00:00Z") |> ignore
+            store.AppendEvent(eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z") |> ignore
+            store.AppendEvent(eventOf "e2" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T02:00:00Z") |> ignore
+            store.AppendEvent(eventOf "e3" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T03:00:00Z") |> ignore
 
             store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
             store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
@@ -383,7 +452,7 @@ type LegacyDoneStatusTests() =
             // Fresh instance = a server restart: LoadLiveStatuses is the unguarded startup read.
             use reopened = new SessionActivityStore(dbPath)
             let rows = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
-            Assert.That(rows |> List.map _.Status.Status, Is.EqualTo([ Idle ])))
+            Assert.That(rows |> List.map _.Status.Status, Is.EqualTo([ SessionLevelStatus.Idle ])))
 
     [<Test>]
     member _.``Construction migrates legacy 'done' status rows to 'idle' in place``() =

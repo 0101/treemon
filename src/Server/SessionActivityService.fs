@@ -21,11 +21,11 @@ open Server.SessionActivityStore
 
 // --- Wire contract DTO ------------------------------------------------------------------------
 
-// The single coupling point with extension.mjs (producer). The POST body is one report; `kind` is
-// exactly one of the seven the fold consumes and maps 1:1 onto SessionEvent (no catch-all). An
-// unknown `kind` is a validation error (rejected), never silently dropped. `message` is present for
-// user_prompt / assistant_message / awaiting_user_input (the ask_user question); `skillName` only
-// for skill_invoked; turn_started / turn_ended / went_idle carry neither.
+// The single coupling point with extension.mjs (producer). The POST body is one report; `kind` is one
+// of the seven status kinds the fold consumes (mapping 1:1 onto SessionEvent) or the liveness-only
+// `heartbeat`. An unknown `kind` is a validation error (rejected), never silently dropped. `message`
+// is present for user_prompt / assistant_message / awaiting_user_input (the ask_user question);
+// `skillName` only for skill_invoked; turn_started / turn_ended / went_idle / heartbeat carry neither.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -43,7 +43,7 @@ type SessionActivityRequest =
 
 // --- DTO → domain (pure, HTTP-free so it is unit-testable) -------------------------------------
 
-let private parseProvider (s: string) : Result<PushProvider, string> =
+let private parseProvider (s: string) : Result<CodingToolProvider, string> =
     match s with
     | "copilot_cli" -> Ok CopilotCli
     | other -> Error $"unknown provider '{other}'"
@@ -87,14 +87,16 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
-/// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The seven cases are
-/// the whole contract; anything else is rejected. message is mandatory for user_prompt /
-/// assistant_message, optional for awaiting_user_input (the ask_user question), absent otherwise.
+/// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The seven status
+/// kinds plus the liveness-only `heartbeat` are the whole contract; anything else is rejected. message
+/// is mandatory for user_prompt / assistant_message, optional for awaiting_user_input (the ask_user
+/// question), absent otherwise.
 let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) : Result<SessionEvent, string> =
     match kind with
     | "turn_started" -> Ok TurnStarted
     | "turn_ended" -> Ok TurnEnded
     | "went_idle" -> Ok WentIdle
+    | "heartbeat" -> Ok Heartbeat
     | "user_prompt" -> parseMessage message |> Result.map UserPrompt
     | "assistant_message" -> parseMessage message |> Result.map AssistantMessage
     | "skill_invoked" ->
@@ -119,6 +121,7 @@ let internal kindText =
     | AwaitingUserInput _ -> "awaiting_user_input"
     | TurnEnded -> "turn_ended"
     | WentIdle -> "went_idle"
+    | Heartbeat -> "heartbeat"
 
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
@@ -205,44 +208,80 @@ type private ServiceMsg =
 /// shutdown. Owns the store's lifetime — Dispose disposes it.
 type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
 
-    // Apply one report on the single writer: fold → append (dedupe on event_id) → upsert
-    // (last-write-wins) → feed the scheduler. Returns the new in-memory live map.
+    // Apply one report on the single writer. A liveness heartbeat only bumps last_seen (openness); a
+    // real event folds → appends (dedupe on event_id) → upserts (last-write-wins) → feeds the
+    // scheduler. Returns the new in-memory live map.
     let apply (live: Map<SessionId, StoredStatus>) (report: SessionActivityReport) : Map<SessionId, StoredStatus> =
-        let prior = live |> Map.tryFind report.SessionId
-        let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
-        let newStatus = SessionActivity.fold priorStatus report.Event
+        match report.Event with
+        | Heartbeat ->
+            // Liveness-only: bump the session's last_seen (the openness signal that keeps an idle-but-open
+            // CLI blue) WITHOUT moving updated_at, re-folding status, or appending a history row. Keeping
+            // it off the ordering/append path is what stops a heartbeat from overtaking a slightly-earlier
+            // real event and dropping it (F20), and from inflating activity_events with synthetic rows
+            // (F14). A heartbeat for a session with no prior event is ignored — there is nothing live to
+            // keep alive (the extension never heartbeats before its first status-bearing event).
+            match live |> Map.tryFind report.SessionId with
+            | None -> live
+            | Some prior ->
+                let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }
+                store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
+                live |> Map.add report.SessionId bumped
+        | _ ->
+            let prior = live |> Map.tryFind report.SessionId
+            let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
+            let newStatus = SessionActivity.fold priorStatus report.Event
 
-        let eventRow =
-            { EventId = report.EventId
-              SessionId = report.SessionId
-              WorktreePath = report.WorktreePath
-              Provider = report.Provider
-              Kind = kindText report.Event
-              Status = newStatus.Status
-              Skill = newStatus.Skill
-              Ts = report.OccurredAt }
+            let isOutOfOrder =
+                match prior with
+                | Some p -> report.OccurredAt < p.UpdatedAt
+                | None -> false
 
-        // Idempotency: a duplicate POST (same event_id) is a full no-op — nothing appended, no
-        // upsert, no scheduler feed, live map unchanged.
-        if not (store.AppendEvent eventRow) then
-            live
-        else
+            // The history row records the fold state AFTER this event. For an out-of-order (older) event
+            // that must be the event's OWN direct effect (fold onto empty), never the current newest live
+            // status — which never held at this event's point in history (F19). In-order events fold onto
+            // the running state as usual.
+            let rowState = if isOutOfOrder then SessionActivity.fold emptyStatus report.Event else newStatus
+
+            let eventRow =
+                { EventId = report.EventId
+                  SessionId = report.SessionId
+                  WorktreePath = report.WorktreePath
+                  Provider = report.Provider
+                  Kind = kindText report.Event
+                  Status = rowState.Status
+                  Skill = rowState.Skill
+                  Ts = report.OccurredAt }
+
+            // Idempotency: a duplicate POST (same event_id) is a full no-op — nothing appended, no
+            // upsert, no scheduler feed, live map unchanged.
+            //
+            // LastSeen must never regress: a heartbeat may already have advanced it past this event's
+            // OccurredAt (a delayed real event landing after a fresher heartbeat), and resetting it
+            // backwards could drop the session out of the openness window and grey an open card early.
+            let lastSeen =
+                match prior with
+                | Some p -> max p.LastSeen report.OccurredAt
+                | None -> report.OccurredAt
+
             let stored =
                 { SessionId = report.SessionId
                   WorktreePath = report.WorktreePath
                   Provider = report.Provider
                   Status = newStatus
                   UpdatedAt = report.OccurredAt
-                  LastSeen = report.OccurredAt }
+                  LastSeen = lastSeen }
 
-            // Durable mirror is last-write-wins (a stale/out-of-order report is a no-op in the store).
-            store.UpsertStatus stored
-
-            // Mirror the same ordering guard in memory: an out-of-order (older) event is recorded in
-            // the history substrate but must not regress the live fold state or the shown card.
-            match prior with
-            | Some p when report.OccurredAt < p.UpdatedAt -> live
-            | _ ->
+            // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
+            // status can never diverge on a mid-pair failure. Returns false for a duplicate event_id
+            // (nothing appended or upserted) → live map unchanged.
+            if not (store.AppendAndUpsert(eventRow, stored)) then
+                live
+            elif isOutOfOrder then
+                // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
+                // history substrate but must not regress the live fold state or the shown card.
+                live
+            else
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
                 live |> Map.add report.SessionId stored
 
@@ -252,7 +291,16 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 let! msg = inbox.Receive()
 
                 match msg with
-                | Ingest report -> return! loop (apply live report)
+                | Ingest report ->
+                    // A store failure must never kill the single writer: catch, log, and keep the loop
+                    // alive with the unchanged live map (the report is dropped, best-effort like the wire).
+                    let next =
+                        try
+                            apply live report
+                        with ex ->
+                            Log.log "Activity" $"Ingest failed (report dropped, mailbox kept alive): {ex.Message}"
+                            live
+                    return! loop next
                 | Seed loaded ->
                     let seeded = loaded |> List.fold (fun m s -> Map.add s.SessionId s m) live
                     return! loop seeded
@@ -263,17 +311,18 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
             loop Map.empty)
 
-    // Retention Timer lifecycle field: created lazily in Start() (after construction, once the store
-    // is seeded) and released in Dispose(); the handle must survive between those two calls, so it
-    // cannot be an immutable let.
-    let mutable pruneTimer: Timer option = None
-
     let prune _ =
         try
             let deleted = store.PruneOld(DateTimeOffset.UtcNow - retentionPeriod)
             if deleted > 0 then Log.log "Activity" $"Retention: pruned {deleted} old activity row(s)"
         with ex ->
             Log.log "Activity" $"Retention prune failed: {ex.Message}"
+
+    // Retention timer, created DISABLED (infinite due/period) at construction so the handle is a fixed
+    // immutable binding; Start() arms it with Change once the store is seeded, Dispose() releases this
+    // same handle.
+    let pruneTimer =
+        new Timer(TimerCallback(prune), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan)
 
     /// POST /api/session/activity. Mirrors canvasRegisterHandler: bind the JSON DTO, validate + map
     /// to the domain report, apply the known-worktree guard, then hand the report to the single
@@ -315,13 +364,13 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         scheduler.Post(RefreshScheduler.SeedSessionStatuses loaded)
         mailbox.Post(Seed loaded)
         Log.log "Activity" $"Rebuilt {List.length loaded} live session status(es) from store"
-        pruneTimer <- Some(new Timer(TimerCallback(prune), null, pruneInterval, pruneInterval))
+        pruneTimer.Change(pruneInterval, pruneInterval) |> ignore
 
     /// The current in-memory live map (test seam; live reads for cards go via the scheduler).
     member _.LiveSnapshot() : Map<SessionId, StoredStatus> = mailbox.PostAndReply Snapshot
 
     interface IDisposable with
         member _.Dispose() =
-            pruneTimer |> Option.iter _.Dispose()
+            pruneTimer.Dispose()
             (mailbox :> IDisposable).Dispose()
             (store :> IDisposable).Dispose()

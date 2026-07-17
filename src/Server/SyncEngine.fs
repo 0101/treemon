@@ -295,8 +295,7 @@ module private PipelineSteps =
     let resolveConflicts (ctx: StepContext) (provider: Shared.CodingToolProvider option) =
         let conflictPrompt =
             match provider |> Option.defaultValue Shared.CodingToolProvider.Default with
-            | Shared.CodingToolProvider.Claude -> "/conflict"
-            | Shared.CodingToolProvider.Copilot -> "use conflict skill to resolve conflicts"
+            | Shared.CodingToolProvider.CopilotCli -> "use conflict skill to resolve conflicts"
         let inv = CodingToolCli.build provider (CodingToolCli.NonInteractive conflictPrompt)
         runStep ctx SyncStep.ResolveConflicts inv.Executable inv.Args checkExitCode
 

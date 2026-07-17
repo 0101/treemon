@@ -93,26 +93,26 @@ type FoldStatusTests() =
     [<Test>]
     member _.``TurnStarted yields Working``() =
         let s = fold emptyStatus TurnStarted
-        Assert.That(s.Status, Is.EqualTo(Working))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
 
     [<Test>]
     member _.``AssistantMessage yields Working and records the last assistant message``() =
         let m = msg "on it" "2026-03-01T10:00:00Z"
         let s = fold emptyStatus (AssistantMessage m)
-        Assert.That(s.Status, Is.EqualTo(Working))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
         Assert.That(s.LastAssistantMessage, Is.EqualTo(Some m))
 
     [<Test>]
     member _.``UserPrompt yields Working and records the last user message``() =
         let m = msg "please fix the build" "2026-03-01T10:00:00Z"
         let s = fold emptyStatus (UserPrompt m)
-        Assert.That(s.Status, Is.EqualTo(Working))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
         Assert.That(s.LastUserMessage, Is.EqualTo(Some m))
 
     [<Test>]
     member _.``AwaitingUserInput yields WaitingForUser``() =
         let s = fold emptyStatus (AwaitingUserInput None)
-        Assert.That(s.Status, Is.EqualTo(WaitingForUser))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
 
     [<Test>]
     member _.``AwaitingUserInput surfaces the question as the last assistant message``() =
@@ -124,24 +124,24 @@ type FoldStatusTests() =
     member _.``AwaitingUserInput with no question keeps the prior assistant message``() =
         let prior = msg "let me look" "2026-03-01T10:00:00Z"
         let s = foldMany emptyStatus [ AssistantMessage prior; AwaitingUserInput None ]
-        Assert.That(s.Status, Is.EqualTo(WaitingForUser))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
         Assert.That(s.LastAssistantMessage, Is.EqualTo(Some prior))
 
     [<Test>]
     member _.``TurnEnded yields Idle``() =
         let s = foldMany emptyStatus [ TurnStarted; TurnEnded ]
-        Assert.That(s.Status, Is.EqualTo(Idle))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``WentIdle yields Idle``() =
         let s = foldMany emptyStatus [ TurnStarted; WentIdle ]
-        Assert.That(s.Status, Is.EqualTo(Idle))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``SkillInvoked does not change status``() =
         // skill.invoked sets the running skill only; the status is whatever the surrounding events say.
         let s = foldMany emptyStatus [ TurnStarted; SkillInvoked "fix-build" ]
-        Assert.That(s.Status, Is.EqualTo(Working))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
         Assert.That(s.Skill, Is.EqualTo(Some "fix-build"))
 
 
@@ -224,7 +224,7 @@ type FoldAppendTests() =
     member _.``The empty stream yields the empty status``() =
         let s = foldMany emptyStatus []
         Assert.That(s, Is.EqualTo(emptyStatus))
-        Assert.That(s.Status, Is.EqualTo(Idle))
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
         Assert.That(s.Skill, Is.EqualTo(None))
         Assert.That(s.LastUserMessage, Is.EqualTo(None))
         Assert.That(s.LastAssistantMessage, Is.EqualTo(None))
@@ -236,13 +236,13 @@ type FoldAppendTests() =
 type FreshnessTests() =
 
     let now = ts "2026-03-01T12:00:00Z"
-    let working = { emptyStatus with Status = Working }
+    let working = { emptyStatus with Status = SessionLevelStatus.Working }
 
     [<Test>]
     member _.``A non-Idle status older than the staleness timeout reads as Idle``() =
         let lastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
         let adjusted = freshnessAdjusted now lastSeen working
-        Assert.That(adjusted.Status, Is.EqualTo(Idle))
+        Assert.That(adjusted.Status, Is.EqualTo(SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``A non-Idle status within the staleness timeout is unchanged``() =
@@ -253,20 +253,20 @@ type FreshnessTests() =
     [<Test>]
     member _.``An already-Idle status is never resurrected by freshness``() =
         // WentIdle set Idle explicitly; freshness must leave it (and its other fields) untouched.
-        let idle = { emptyStatus with Status = Idle; Skill = Some "review" }
+        let idle = { emptyStatus with Status = SessionLevelStatus.Idle; Skill = Some "review" }
         let lastSeen = now - TimeSpan.FromSeconds 1.0
         Assert.That(freshnessAdjusted now lastSeen idle, Is.EqualTo(idle))
 
     [<Test>]
     member _.``Freshness only rewrites Status, preserving skill and messages``() =
         let rich =
-            { Status = WaitingForUser
+            { Status = SessionLevelStatus.WaitingForUser
               Skill = Some "review"
               LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z") }
         let lastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
         let adjusted = freshnessAdjusted now lastSeen rich
-        Assert.That(adjusted.Status, Is.EqualTo(Idle))
+        Assert.That(adjusted.Status, Is.EqualTo(SessionLevelStatus.Idle))
         Assert.That(adjusted.Skill, Is.EqualTo(rich.Skill))
         Assert.That(adjusted.LastUserMessage, Is.EqualTo(rich.LastUserMessage))
         Assert.That(adjusted.LastAssistantMessage, Is.EqualTo(rich.LastAssistantMessage))
@@ -277,7 +277,7 @@ type FreshnessTests() =
 [<Category("Fast")>]
 type PickActiveTests() =
 
-    let statusAt (status: CodingToolStatus) (skill: string option) =
+    let statusAt (status: SessionLevelStatus) (skill: string option) =
         { emptyStatus with Status = status; Skill = skill }
 
     [<Test>]
@@ -287,14 +287,14 @@ type PickActiveTests() =
     [<Test>]
     member _.``All Idle yields None``() =
         let sessions =
-            [ statusAt Idle None, ts "2026-03-01T10:00:00Z"
-              statusAt Idle None, ts "2026-03-01T11:00:00Z" ]
+            [ statusAt SessionLevelStatus.Idle None, ts "2026-03-01T10:00:00Z"
+              statusAt SessionLevelStatus.Idle None, ts "2026-03-01T11:00:00Z" ]
         Assert.That(pickActive sessions, Is.EqualTo(None))
 
     [<Test>]
     member _.``The most-recent active session wins``() =
-        let older = statusAt Working (Some "old")
-        let newer = statusAt WaitingForUser (Some "new")
+        let older = statusAt SessionLevelStatus.Working (Some "old")
+        let newer = statusAt SessionLevelStatus.WaitingForUser (Some "new")
         let sessions =
             [ older, ts "2026-03-01T10:00:00Z"
               newer, ts "2026-03-01T11:00:00Z" ]
@@ -304,8 +304,8 @@ type PickActiveTests() =
     member _.``A more-recently-idled session does not hide an actively-working sibling``() =
         // The key rule: NOT raw latest-update. The Idle session has the newer last_seen but must be
         // dropped, so the older-but-active sibling wins.
-        let active = statusAt Working (Some "review")
-        let justIdled = statusAt Idle None
+        let active = statusAt SessionLevelStatus.Working (Some "review")
+        let justIdled = statusAt SessionLevelStatus.Idle None
         let sessions =
             [ active, ts "2026-03-01T10:00:00Z"
               justIdled, ts "2026-03-01T11:59:00Z" ]
@@ -314,11 +314,11 @@ type PickActiveTests() =
     [<Test>]
     member _.``The whole winning record is returned, not cherry-picked fields``() =
         let winner =
-            { Status = Working
+            { Status = SessionLevelStatus.Working
               Skill = Some "bd-execute"
               LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z") }
         let sessions =
-            [ statusAt Idle (Some "stale-skill"), ts "2026-03-01T11:00:00Z"
+            [ statusAt SessionLevelStatus.Idle (Some "stale-skill"), ts "2026-03-01T11:00:00Z"
               winner, ts "2026-03-01T10:30:00Z" ]
         Assert.That(pickActive sessions, Is.EqualTo(Some winner))

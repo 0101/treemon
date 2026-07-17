@@ -224,6 +224,7 @@ let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 /// reads config (ignore patterns, archived branches) and the filesystem (test-failure
 /// log presence) — the same side effects the poll path had.
 let assembleRepos
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (activeSessionPaths: Set<string>)
     (state: RefreshScheduler.DashboardState)
@@ -234,8 +235,15 @@ let assembleRepos
     // result per worktree once, up front: each worktree's sessions → openness-driven status +
     // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
     // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
+    // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
+    // live idle window (after a restart), so their footer + resume button survive (keeping the dot
+    // NoSession).
+    let retainedByWorktree =
+        activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
     let pushByWorktree =
         CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+        |> CodingToolStatus.withRetainedFallback retainedByWorktree
 
     let codingToolSince = state.CodingToolSinceByWorktree
 
@@ -266,6 +274,7 @@ let assembleRepos
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     (deployBranch: string option)
@@ -275,7 +284,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let repos = assembleRepos rootPaths activeSessionPaths state
+        let repos = assembleRepos activityStore rootPaths activeSessionPaths state
 
 
         return
@@ -433,7 +442,7 @@ let worktreeApi
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
             createWorktree = fun _ -> async { return Ok [] } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun wtPath ->
@@ -504,8 +513,14 @@ let worktreeApi
                   // The card's last-assistant message per worktree now comes from the push live state
                   // (collapsed via pickActive), not the log-parsing detectors — same repoint as the
                   // worktree cards. Merged with sync events below to build each card's recent-message pair.
+                  // Retained fallback keeps the last-assistant message for worktrees aged out of the live
+                  // idle window (restart), matching the worktree-card assembly.
+                  let retainedByWorktree =
+                      activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
                   let pushByWorktree =
                       CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+                      |> CodingToolStatus.withRetainedFallback retainedByWorktree
 
                   let cachedLastMessages =
                       pushByWorktree
@@ -697,12 +712,12 @@ let worktreeApi
                           |> Option.map _.StatusesForWorktree(PathUtils.toWorktreePath path)
                           |> Option.defaultValue []
                       // Only resume by stored ID when it belongs to the configured provider. Push
-                      // ingestion is Copilot-only, so a Claude-configured worktree must NOT reuse a
-                      // Copilot session ID (it would resume the wrong context) — fall back to --continue.
+                      // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
+                      // future provider that resumes differently (or can't) gets its own arm — the
+                      // compiler flags this match when a new provider case is added.
                       let sessionId =
                           match provider |> Option.defaultValue CodingToolProvider.Default with
-                          | CodingToolProvider.Copilot -> CodingToolStatus.getLastSessionId sessions
-                          | CodingToolProvider.Claude -> None
+                          | CodingToolProvider.CopilotCli -> CodingToolStatus.getLastSessionId sessions
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })

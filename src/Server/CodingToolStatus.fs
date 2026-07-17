@@ -21,10 +21,9 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
             match doc.RootElement.TryGetProperty("codingTool") with
             | true, elem ->
                 match elem.GetString().ToLowerInvariant() with
-                | "claude" -> Some Claude
-                | "copilot" -> Some Copilot
+                | "copilot" -> Some CopilotCli
                 | other ->
-                    Log.log "CodingTool" $"Unknown codingTool value '{other}' in {configPath}"
+                    Log.log "CodingTool" $"Unknown/unsupported codingTool value '{other}' in {configPath} — using the default"
                     None
             | false, _ -> None
         with ex ->
@@ -49,14 +48,13 @@ let configureTestsPrompt (repoRoot: string) =
     + $"IMPORTANT: The config file MUST be at '{repoRoot}\\.treemon.json', not in the current directory. "
     + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
 
-/// Wraps an arbitrary argument in a provider-aware skill invocation.
-/// Copilot uses the natural-language "use {skill} skill with {arg}" form;
-/// Claude uses the "/{skill} {arg}" slash-command form. Shared by actionPrompt
-/// (FixPr/FixBuild) and the worktree-create auto-launch flow so both stay byte-identical.
+/// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
+/// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
+/// the worktree-create auto-launch flow so both stay byte-identical. Provider-matched so a future
+/// provider must supply its own form.
 let skillInvocation (provider: CodingToolProvider option) (skill: string) (arg: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with
-    | Copilot -> $"use {skill} skill with {arg}"
-    | Claude -> $"/{skill} {arg}"
+    | CopilotCli -> $"use {skill} skill with {arg}"
 
 let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     match action with
@@ -93,12 +91,6 @@ let noSessionPushResult: CodingToolResult =
       LastAssistantMessage = None
       LastMessageProvider = None
       LastActivity = None }
-
-/// The push model has a single provider today (Copilot CLI); `pickActive` collapses to a bare
-/// `SessionStatus` (provider-free), so an active push session always reads as Copilot on the card.
-let private pushCardProvider (p: PushProvider) : CodingToolProvider =
-    match p with
-    | CopilotCli -> Copilot
 
 /// The last assistant message as the card's `CardEvent` (the exact shape the detectors produced): a
 /// single line truncated to 80 chars, tagged with the push provider's source string.
@@ -140,7 +132,10 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     let status =
         match openSessions with
         | [] -> NoSession
-        | _ -> activeWinner |> Option.map _.Status |> Option.defaultValue Idle
+        | _ ->
+            activeWinner
+            |> Option.map (fun w -> SessionActivity.toCodingToolStatus w.Status)
+            |> Option.defaultValue Idle
 
     // Footer source: the active winner if running, else the most-recent session of ANY status so the
     // footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain their last
@@ -158,7 +153,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     let lastActivity =
         if activeWinner.IsSome then
             adjustedOpen
-            |> List.filter (fun (st, _) -> st.Status <> Idle)
+            |> List.filter (fun (st, _) -> st.Status <> SessionLevelStatus.Idle)
             |> List.map snd
             |> List.max
             |> Some
@@ -166,14 +161,15 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
             None
 
     { Status = status
-      Provider = footer |> Option.map (fun _ -> pushCardProvider CopilotCli)
+      // Single push provider today (Copilot CLI); a future provider threads its own value here.
+      Provider = footer |> Option.map (fun _ -> CopilotCli)
       CurrentSkill = footer |> Option.bind _.Skill
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
         |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastAssistantMessage = footer |> Option.bind _.LastAssistantMessage |> Option.map toLastAssistantEvent
-      LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> pushCardProvider CopilotCli)
+      LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
       LastActivity = lastActivity }
 
 /// Group a flat set of live push session-statuses by worktree path and collapse each group into the
@@ -186,6 +182,36 @@ let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<
     |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
     |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
     |> Map.ofSeq
+
+/// A durable-store fallback card for a worktree whose sessions have ALL aged out of the live idle
+/// window (e.g. after a restart, last active >2h ago). The status dot stays `NoSession` (grey) — no
+/// OPEN session exists — but the retained footer/resume metadata (skill, last user/assistant message,
+/// provider) is surfaced from its most-recent stored session, so the footer still renders and the
+/// resume button stays reachable (`CardViews.canResumeSession` requires a `LastUserMessage`). Without
+/// this the durable `--resume <id>` path is UI-unreachable for exactly the sessions it was built for.
+let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
+    let s = stored.Status
+    let hasFooter = s.Skill.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
+
+    { Status = NoSession
+      Provider = if hasFooter then Some CopilotCli else None
+      CurrentSkill = s.Skill
+      LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+      LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
+      LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
+      LastActivity = None }
+
+/// Fill gaps in the live collapse with the durable retained fallback: a worktree present in `live`
+/// keeps its live result (openness dot + footer); one absent from it (all its sessions aged out of the
+/// idle window) takes the retained `NoSession`-with-footer card, so its footer and resume button
+/// survive a restart. `retained` is keyed by worktree path (from `RetainedByWorktree`).
+let withRetainedFallback (retained: Map<string, StoredStatus>) (live: Map<string, CodingToolResult>) : Map<string, CodingToolResult> =
+    retained
+    |> Map.fold
+        (fun acc path stored ->
+            if Map.containsKey path acc then acc
+            else Map.add path (retainedFooterResult stored) acc)
+        live
 
 /// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recent session for the
 /// worktree regardless of active/idle (the session the user last touched). Reads the id from the

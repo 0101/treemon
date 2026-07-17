@@ -269,7 +269,7 @@ type IngestTests() =
         withService "C:/wt/a" (fun (svc, _, _) ->
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
-            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo Working))
+            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Working))
 
     [<Test>]
     member _.``an ingested status is fed to the scheduler``() =
@@ -277,7 +277,7 @@ type IngestTests() =
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             svc.LiveSnapshot() |> ignore // barrier: the mailbox has posted UpdateSessionStatus by now
             match schedulerStatus agent "s1" with
-            | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo Working)
+            | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             | None -> Assert.Fail "scheduler never received the session status")
 
     [<Test>]
@@ -287,7 +287,7 @@ type IngestTests() =
             svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" (UserPrompt(msg "do it" "2026-03-01T10:00:01Z")))
             svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" (AssistantMessage(msg "on it" "2026-03-01T10:00:02Z")))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo Working)
+            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastUserMessage, Is.EqualTo(Some(msg "do it" "2026-03-01T10:00:01Z")))
             Assert.That(s.LastAssistantMessage, Is.EqualTo(Some(msg "on it" "2026-03-01T10:00:02Z"))))
 
@@ -310,7 +310,7 @@ type IngestTests() =
             // Replay the first event verbatim.
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
-            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo Idle, "replay must not resurrect Working")
+            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Idle, "replay must not resurrect Working")
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 2, "the duplicate event_id must be deduped"))
 
@@ -322,13 +322,73 @@ type IngestTests() =
             // An older, distinct event arrives late.
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo Working)
+            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastAssistantMessage, Is.EqualTo None, "the stale message must not overwrite live state")
             // But the older event IS in the history substrate, and the store row keeps the newer updated_at.
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 2)
             let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
             Assert.That(stored.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z")))
+
+    [<Test>]
+    member _.``a heartbeat bumps last_seen for openness without appending, moving updated_at, or changing status``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
+            svc.LiveSnapshot() |> ignore
+            // A later liveness heartbeat: newer timestamp, but pure openness — not a status event.
+            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:01:00Z" Heartbeat)
+            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "heartbeat advances last_seen")
+            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"), "heartbeat must not move the last-write-wins clock")
+            Assert.That(s.Status.Status, Is.EqualTo SessionLevelStatus.Working, "heartbeat preserves status")
+            Assert.That(s.Status.LastAssistantMessage, Is.EqualTo(Some(msg "hi" "2026-03-01T10:00:00Z")), "heartbeat preserves content")
+            // No synthetic row appended to the history stream (only the one real event is there).
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "a heartbeat must not append to activity_events")
+            // The durable row's last_seen was bumped, its updated_at left intact.
+            let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun r -> r.SessionId = SessionId "s1")
+            Assert.That(stored.LastSeen, Is.EqualTo(ts "2026-03-01T10:01:00Z"))
+            Assert.That(stored.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z")))
+
+    [<Test>]
+    member _.``a heartbeat for a session with no prior event is ignored``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:00:00Z" Heartbeat)
+            let live = svc.LiveSnapshot()
+            Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a heartbeat never creates a session")
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 0))
+
+    [<Test>]
+    member _.``a real event never regresses last_seen below a fresher heartbeat``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            // Establish the session, then a heartbeat advances openness to 10:02.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "hi" "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" "C:/wt/a" "hb1" "2026-03-01T10:02:00Z" Heartbeat)
+            svc.LiveSnapshot() |> ignore
+            // A real, IN-ORDER event (updated_at advances past e1) whose OccurredAt predates the
+            // heartbeat: it must fold, but must NOT pull last_seen back before the heartbeat.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:01:00Z" (UserPrompt(msg "go" "2026-03-01T10:01:00Z")))
+            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "last_seen stays monotonic (kept at the heartbeat)")
+            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:01:00Z"), "the real event still advances the write clock")
+            Assert.That(s.Status.LastUserMessage, Is.EqualTo(Some(msg "go" "2026-03-01T10:01:00Z")), "the real event still folds")
+            let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun r -> r.SessionId = SessionId "s1")
+            Assert.That(stored.LastSeen, Is.EqualTo(ts "2026-03-01T10:02:00Z"), "durable last_seen is monotonic too"))
+
+    [<Test>]
+    member _.``an out-of-order event's history row records its own status, not the newest live status``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            // Newest applied: turn_ended -> Idle.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
+            svc.LiveSnapshot() |> ignore
+            // An older assistant_message arrives late; its OWN effect is Working, not the newest Idle.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
+            svc.LiveSnapshot() |> ignore
+            let older =
+                store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+                |> List.find (fun r -> r.EventId = EventId "e1")
+            Assert.That(older.Status, Is.EqualTo SessionLevelStatus.Working, "out-of-order row reflects the event's own effect, not the newest Idle"))
 
 
 // ── restart rebuild ───────────────────────────────────────────────────────────
@@ -346,7 +406,7 @@ type RestartRebuildTests() =
                 { SessionId = SessionId "s1"
                   WorktreePath = WorktreePath "C:/wt/a"
                   Provider = CopilotCli
-                  Status = { emptyStatus with Status = Working; Skill = Some "investigate" }
+                  Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
                   UpdatedAt = now.AddMinutes(-1.0)
                   LastSeen = now.AddMinutes(-1.0) }
 
@@ -355,7 +415,7 @@ type RestartRebuildTests() =
             // The in-memory fold map is primed, so a subsequent event folds onto the rebuilt state.
             let live = svc.LiveSnapshot()
             let restored = live |> Map.find (SessionId "s1")
-            Assert.That(restored.Status.Status, Is.EqualTo Working)
+            Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(restored.Status.Skill, Is.EqualTo(Some "investigate"))
             // And the card path (scheduler) sees it immediately, before any new event.
             match schedulerStatus agent "s1" with
@@ -371,7 +431,7 @@ type RestartRebuildTests() =
                 { SessionId = SessionId "stale"
                   WorktreePath = WorktreePath "C:/wt/a"
                   Provider = CopilotCli
-                  Status = { emptyStatus with Status = Working }
+                  Status = { emptyStatus with Status = SessionLevelStatus.Working }
                   UpdatedAt = now - idleWindow - TimeSpan.FromMinutes 5.0
                   LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0 }
 

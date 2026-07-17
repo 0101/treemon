@@ -1310,7 +1310,7 @@ let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
     { SessionId = SessionId sid
       WorktreePath = WorktreePath "C:/wt/a"
       Provider = CopilotCli
-      Status = { emptyStatus with Status = Working }
+      Status = { emptyStatus with Status = SessionLevelStatus.Working }
       UpdatedAt = seen
       LastSeen = seen }
 

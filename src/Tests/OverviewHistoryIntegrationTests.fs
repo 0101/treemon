@@ -79,8 +79,8 @@ type OverviewHistoryIntegrationTests() =
             store.AppendTaskSnapshot(baseTime.AddMinutes(-50.0), [ tc TaskBucketKind.Planned 2 ])
             store.AppendTaskSnapshot(baseTime.AddMinutes(-20.0), [ tc TaskBucketKind.Planned 5 ])
             // Raw push events (Agents derived from these on read).
-            store.AppendEvent(evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 40.0) |> ignore
-            store.AppendEvent(evt "s1" "C:/wt/a" CodingToolStatus.Idle None 10.0) |> ignore
+            store.AppendEvent(evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 40.0) |> ignore
+            store.AppendEvent(evt "s1" "C:/wt/a" SessionLevelStatus.Idle None 10.0) |> ignore
 
             let history = readHistory store (TimeSpan.FromHours 72.0)
 
