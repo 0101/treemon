@@ -74,6 +74,11 @@ module ContextUsage =
         if u.TokenLimit <= 0 then 0.0
         else max 0.0 (min 1.0 (float u.CurrentTokens / float u.TokenLimit))
 
+    /// The fraction of the context window still free, clamped to [0, 1] — the complement of `fraction`.
+    /// The Overview donut fills its accent arc to this, so a healthy low-usage agent reads as a nearly
+    /// full ring and one near its limit thins to a sliver.
+    let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
+
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
 /// an active session with no recognized skill. Activity is always *derived* from CurrentSkill

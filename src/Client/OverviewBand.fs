@@ -96,10 +96,12 @@ let private metaLine (accentClass: string) (label: string) (count: int) =
 
 /// One agent group column: the meta line above a row of ~15px circles, one per agent, tinted to the
 /// group's accent (circle fill = currentColor, driven by the accent class). Each agent with a known
-/// context-window occupancy renders as a donut whose arc = fraction used (inline `--ctx-fill`); an
-/// agent that hasn't reported usage falls back to the plain solid circle. Clicking the column raises
-/// onSelectGroup (App toggles the drill-down selection); when this group is the selected one it
-/// renders as the black "tab" (overview-item-selected) sitting flush above its breakdown panel.
+/// context-window occupancy renders as a donut whose arc = fraction of context *remaining* (inline
+/// `--ctx-remaining`), so a healthy low-usage agent reads as a nearly full ring and one near its limit
+/// thins to a sliver; an agent that hasn't reported usage falls back to the plain solid circle.
+/// Clicking the column raises onSelectGroup (App toggles the drill-down selection); when this group is
+/// the selected one it renders as the black "tab" (overview-item-selected) sitting flush above its
+/// breakdown panel.
 let private agentColumn (selection: OverviewSelection option) (onSelectGroup: OverviewSelection -> unit) (group: AgentGroup) =
     let accent = agentClass group.Kind
     let target = OverviewSelection.Agents group.Kind
@@ -111,7 +113,7 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
             Html.span
                 [ prop.key i
                   prop.className [ "overview-circle"; "overview-donut"; accent ]
-                  prop.style [ style.custom ("--ctx-fill", string (ContextUsage.fraction usage)) ] ]
+                  prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
         | None -> Html.span [ prop.key i; prop.className ("overview-circle " + accent) ]
 
     Html.div
