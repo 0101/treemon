@@ -420,10 +420,11 @@ let postForkScriptPath (repoRoot: string) : string option =
 
 /// Runs the optional `post-fork` setup script inside a freshly created worktree,
 /// passing the worktree path, the source repo root, the base ref and the branch
-/// name. Returns Ok when the script succeeds or is absent, and Error with the
-/// process failure when it exits non-zero — the worktree already exists, so a
-/// failure is never fatal, only surfaced on the card.
-let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
+/// name, capped at `timeoutMs` (a run that exceeds it is killed and returns a
+/// timeout Error). Returns Ok when the script succeeds or is absent, and Error
+/// with the process failure when it exits non-zero — the worktree already
+/// exists, so a failure is never fatal, only surfaced on the card.
+let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
     async {
         match postForkScriptPath repoRoot with
         | None -> return Ok ()
@@ -434,9 +435,14 @@ let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (bra
                 else
                     "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
 
-            let! result = ProcessRunner.runResultWithTimeout postForkTimeoutMs "PostFork" fileName arguments (Some worktreePath)
+            let! result = ProcessRunner.runResultWithTimeout timeoutMs "PostFork" fileName arguments (Some worktreePath)
             return result |> Result.map ignore
     }
+
+/// Runs the post-fork hook with the production 5-minute cap (see
+/// `runPostForkWithTimeout`).
+let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
+    runPostForkWithTimeout postForkTimeoutMs repoRoot worktreePath baseRef branchName
 
 type ForkResult =
     { WorktreePath: string
