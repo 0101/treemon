@@ -341,13 +341,15 @@
         .card-footer .user-prompt > span:last-child {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
         }
-        .card-footer .user-prompt.skill-line { color: #89dceb; font-style: normal; }
-        .card-footer .user-prompt.skill-line .skill-indicator {
-            color: #89dceb; flex-shrink: 0; font-style: normal;
-        }
-        .card-footer .user-prompt.skill-line .skill-name {
+        .card-footer .user-prompt.intent-line { color: #cdd6f4; font-style: normal; }
+        .card-footer .user-prompt.intent-line .intent-text {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
-            font-weight: 600;
+        }
+        .card-footer .user-prompt.intent-line .skill-pill {
+            flex: 0 0 auto; margin-left: auto;
+            color: #89dceb; background: #181825; border: 1px solid #313244;
+            border-radius: 8px; padding: 0 7px; font-weight: 600; font-style: normal;
+            white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis;
         }
 
         .event-log {

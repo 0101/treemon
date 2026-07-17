@@ -6,67 +6,62 @@ open Shared
 open CardViews
 open Tests.WorktreeFixtures
 
-/// The card's "user line" chooses between the running skill and the last user message.
-/// These tests exercise CardViews.cardUserLine — the pure render decision behind userLineView — so
-/// the skill-vs-message choice is verified without having to render React. A running skill surfaces
-/// a `▶ <skill>` label; otherwise the genuine last user message shows. The server now yields a real
-/// LastUserMessage (never a `<skill-context>` injection), so there is no injection path to filter on
-/// the client.
+/// The card's intent line (footer line 1) combines the agent's current intent (SDK `assistant.intent`)
+/// with the running skill as a pill. These tests exercise CardViews.cardIntentLine — the pure decision
+/// behind intentLineView — so the intent/skill presence logic is verified without rendering React.
+/// `Line` carries at least one of intent/skill (a blank/whitespace skill counts as none); `Empty` when
+/// neither is present. The last user/assistant message lines are trivial Option renders (not decisions),
+/// so they are not unit-tested here.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type CardUserLineTests() =
+type CardIntentLineTests() =
 
     let ts = DateTimeOffset(2026, 7, 9, 12, 0, 0, TimeSpan.Zero)
 
-    // ----- CurrentSkill = Some => skill label is surfaced (takes precedence over any message) -----
+    [<Test>]
+    member _.``Intent and skill together surface both``() =
+        let wt = { baseWt with AgentIntent = Some("investigating the fold", ts); CurrentSkill = Some "investigate" }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Line(Some("investigating the fold", ts), Some "investigate")))
 
     [<Test>]
-    member _.``A running skill surfaces the skill label``() =
-        let wt = { baseWt with CurrentSkill = Some "investigate" }
-        Assert.That(cardUserLine wt, Is.EqualTo(CardUserLine.Skill "investigate"))
+    member _.``Intent with no skill surfaces the intent alone``() =
+        let wt = { baseWt with AgentIntent = Some("running the tests", ts); CurrentSkill = None }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Line(Some("running the tests", ts), None)))
 
     [<Test>]
-    member _.``A running skill takes precedence over the last user message``() =
-        let wt = { baseWt with CurrentSkill = Some "bd-execute"; LastUserMessage = Some("do the thing", ts) }
-        Assert.That(cardUserLine wt, Is.EqualTo(CardUserLine.Skill "bd-execute"))
+    member _.``A skill with no intent surfaces the skill alone``() =
+        let wt = { baseWt with AgentIntent = None; CurrentSkill = Some "bd-execute" }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Line(None, Some "bd-execute")))
 
     [<Test>]
-    member _.``A skill name is trimmed``() =
-        let wt = { baseWt with CurrentSkill = Some "  refactor  " }
-        Assert.That(cardUserLine wt, Is.EqualTo(CardUserLine.Skill "refactor"))
-
-    // ----- CurrentSkill = None => the genuine last user message is surfaced -----
+    member _.``Neither intent nor skill surfaces nothing``() =
+        let wt = { baseWt with AgentIntent = None; CurrentSkill = None }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Empty))
 
     [<Test>]
-    member _.``No skill surfaces the last user message``() =
-        let wt = { baseWt with CurrentSkill = None; LastUserMessage = Some("please review the PR", ts) }
-        Assert.That(cardUserLine wt, Is.EqualTo(CardUserLine.Message("please review the PR", ts)))
+    member _.``The skill name is trimmed``() =
+        let wt = { baseWt with AgentIntent = None; CurrentSkill = Some "  refactor  " }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Line(None, Some "refactor")))
 
-    [<Test>]
-    member _.``No skill and no message surfaces nothing``() =
-        let wt = { baseWt with CurrentSkill = None; LastUserMessage = None }
-        Assert.That(cardUserLine wt, Is.EqualTo(CardUserLine.Empty))
-
-    // ----- An empty / whitespace skill is not a skill: fall through to the message -----
+    // ----- A blank / whitespace skill is not a skill -----
 
     [<TestCase("")>]
     [<TestCase("   ")>]
-    member _.``An empty or whitespace skill falls through to the last user message``(skill: string) =
-        let wt = { baseWt with CurrentSkill = Some skill; LastUserMessage = Some("real prompt", ts) }
-        Assert.That(cardUserLine wt, Is.EqualTo(CardUserLine.Message("real prompt", ts)))
+    member _.``A blank or whitespace skill counts as no skill``(skill: string) =
+        let wt = { baseWt with AgentIntent = Some("thinking", ts); CurrentSkill = Some skill }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Line(Some("thinking", ts), None)))
 
-    // ----- No <skill-context> text path: the message is surfaced verbatim (server strips injections) -----
+    [<TestCase("")>]
+    [<TestCase("   ")>]
+    member _.``A blank skill with no intent is Empty``(skill: string) =
+        let wt = { baseWt with AgentIntent = None; CurrentSkill = Some skill }
+        Assert.That(cardIntentLine wt, Is.EqualTo(CardIntentLine.Empty))
 
     [<Test>]
-    member _.``The last user message is surfaced verbatim with no skill-context filtering``() =
-        // The server guarantees LastUserMessage is a genuine prompt (never a <skill-context>
-        // injection), so the client passes it straight through — there is no injection-suppression
-        // branch, and thus no `<skill-context>` text path, on the display side.
-        let genuine = "explain the caching approach"
-        let wt = { baseWt with CurrentSkill = None; LastUserMessage = Some(genuine, ts) }
-        match cardUserLine wt with
-        | CardUserLine.Message (prompt, _) ->
-            Assert.That(prompt, Is.EqualTo(genuine))
-            Assert.That(prompt, Does.Not.Contain("skill-context"))
-        | other -> Assert.Fail($"Expected a message line, got {other}")
+    member _.``The intent text is surfaced verbatim``() =
+        let intent = "explain the caching approach"
+        let wt = { baseWt with AgentIntent = Some(intent, ts); CurrentSkill = None }
+        match cardIntentLine wt with
+        | CardIntentLine.Line (Some (text, _), None) -> Assert.That(text, Is.EqualTo(intent))
+        | other -> Assert.Fail($"Expected an intent-only line, got {other}")

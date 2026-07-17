@@ -87,10 +87,10 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
-/// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The seven status
+/// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The status/intent
 /// kinds plus the liveness-only `heartbeat` are the whole contract; anything else is rejected. message
-/// is mandatory for user_prompt / assistant_message, optional for awaiting_user_input (the ask_user
-/// question), absent otherwise.
+/// is mandatory for user_prompt / assistant_message / intent_reported, optional for awaiting_user_input
+/// (the ask_user question), absent otherwise.
 let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) : Result<SessionEvent, string> =
     match kind with
     | "turn_started" -> Ok TurnStarted
@@ -99,6 +99,7 @@ let internal parseEvent (kind: string) (message: MessageDto) (skillName: string)
     | "heartbeat" -> Ok Heartbeat
     | "user_prompt" -> parseMessage message |> Result.map UserPrompt
     | "assistant_message" -> parseMessage message |> Result.map AssistantMessage
+    | "intent_reported" -> parseMessage message |> Result.map IntentReported
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
         else Ok(SkillInvoked(capText skillName))
@@ -117,6 +118,7 @@ let internal kindText =
     | TurnStarted -> "turn_started"
     | UserPrompt _ -> "user_prompt"
     | AssistantMessage _ -> "assistant_message"
+    | IntentReported _ -> "intent_reported"
     | SkillInvoked _ -> "skill_invoked"
     | AwaitingUserInput _ -> "awaiting_user_input"
     | TurnEnded -> "turn_ended"

@@ -148,6 +148,41 @@ type FoldStatusTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type FoldIntentTests() =
+
+    [<Test>]
+    member _.``IntentReported records the intent without changing status``() =
+        let i = msg "investigating the fold" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ TurnStarted; IntentReported i ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.Intent, Is.EqualTo(Some i))
+
+    [<Test>]
+    member _.``A re-reported identical intent keeps the original change-time``() =
+        let first = msg "running the tests" "2026-03-01T10:00:00Z"
+        let again = msg "running the tests" "2026-03-01T10:05:00Z"
+        // Same text -> the timestamp must reflect when the intent last CHANGED (first), not the re-report.
+        let s = foldMany emptyStatus [ IntentReported first; IntentReported again ]
+        Assert.That(s.Intent, Is.EqualTo(Some first))
+
+    [<Test>]
+    member _.``A changed intent updates both text and change-time``() =
+        let first = msg "planning" "2026-03-01T10:00:00Z"
+        let second = msg "executing" "2026-03-01T10:05:00Z"
+        let s = foldMany emptyStatus [ IntentReported first; IntentReported second ]
+        Assert.That(s.Intent, Is.EqualTo(Some second))
+
+    [<Test>]
+    member _.``Intent is retained across going Idle``() =
+        let i = msg "wrapping up" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ IntentReported i; WentIdle ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
+        Assert.That(s.Intent, Is.EqualTo(Some i))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type FoldSkillTests() =
 
     [<Test>]
@@ -262,6 +297,7 @@ type FreshnessTests() =
         let rich =
             { Status = SessionLevelStatus.WaitingForUser
               Skill = Some "review"
+              Intent = None
               LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z") }
         let lastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
@@ -316,6 +352,7 @@ type PickActiveTests() =
         let winner =
             { Status = SessionLevelStatus.Working
               Skill = Some "bd-execute"
+              Intent = None
               LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z") }
         let sessions =

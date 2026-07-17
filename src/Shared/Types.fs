@@ -255,7 +255,13 @@ type WorktreeStatus =
       /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
+      /// The agent's current intent (SDK `assistant.intent`) + when it last changed — the card's live
+      /// "what it's doing" line. `None` when no session has reported an intent.
+      AgentIntent: (string * DateTimeOffset) option
       LastUserMessage: (string * DateTimeOffset) option
+      /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
+      /// footer line. `None` when the session has produced no assistant message yet.
+      LastAssistantMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool

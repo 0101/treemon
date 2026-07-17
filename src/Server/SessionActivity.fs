@@ -39,6 +39,10 @@ type SessionEvent =
     | UserPrompt of Message
     | AssistantMessage of Message
     | SkillInvoked of name: string
+    /// The agent's short description of its current activity or plan (SDK `assistant.intent`). Carries
+    /// non-empty text by construction (blank is dropped at the source / rejected by the handler), so
+    /// the fold can only advance intent between real values — it never regresses to blank.
+    | IntentReported of Message
     /// ask_user — carries the question text to surface as the last assistant message.
     | AwaitingUserInput of question: Message option
     | TurnEnded
@@ -83,6 +87,7 @@ let toCodingToolStatus =
 type SessionStatus =
     { Status: SessionLevelStatus
       Skill: string option
+      Intent: Message option
       LastUserMessage: Message option
       LastAssistantMessage: Message option }
 
@@ -90,6 +95,7 @@ type SessionStatus =
 let emptyStatus =
     { Status = SessionLevelStatus.Idle
       Skill = None
+      Intent = None
       LastUserMessage = None
       LastAssistantMessage = None }
 
@@ -100,6 +106,13 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     | TurnStarted -> { s with Status = SessionLevelStatus.Working }
     | AssistantMessage m -> { s with Status = SessionLevelStatus.Working; LastAssistantMessage = Some m }
     | SkillInvoked name -> { s with Skill = Some name }
+    | IntentReported m ->
+        // Intent is orthogonal to status. Keep the existing change-time when the text is unchanged so
+        // "time ago" reflects when the intent last CHANGED; `m` is non-empty by construction, so intent
+        // only ever advances between real values (never regresses to blank).
+        match s.Intent with
+        | Some prev when prev.Text = m.Text -> s
+        | _ -> { s with Intent = Some m }
     | AwaitingUserInput q ->
         // The ask_user question is surfaced as the last assistant message; keep the prior one if the
         // question carries no text.

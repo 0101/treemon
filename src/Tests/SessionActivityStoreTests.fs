@@ -132,11 +132,12 @@ type UpsertStatusTests() =
             Assert.That((find "s1" rows).Status.Status, Is.EqualTo(SessionLevelStatus.Working)))
 
     [<Test>]
-    member _.``Skill and both messages round-trip through the store``() =
+    member _.``Skill, intent, and both messages round-trip through the store``() =
         withStore (fun store ->
             let rich =
                 { Status = SessionLevelStatus.WaitingForUser
                   Skill = Some "review"
+                  Intent = Some(msg "reviewing the auth changes" "2026-03-01T10:00:50Z")
                   LastUserMessage = Some(msg "the auth module" "2026-03-01T10:01:00Z")
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z") }
 
@@ -463,3 +464,61 @@ type LegacyDoneStatusTests() =
 
             use reopened = new SessionActivityStore(dbPath)
             Assert.That(readRawStatus dbPath "legacy", Is.EqualTo("idle"), "stored row should be rewritten to 'idle'"))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type IntentColumnMigrationTests() =
+
+    // A DB created before the intent columns existed (schemaSql only adds them to a fresh table).
+    // Construction must ALTER-add intent_text/intent_ts idempotently: legacy rows then read Intent=None,
+    // and new upserts persist the intent through the migrated columns.
+
+    let connStr (dbPath: string) =
+        SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+
+    /// Create the pre-intent `session_status` schema (no intent columns) and insert one legacy row.
+    let seedLegacyDb (dbPath: string) =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+
+        cmd.CommandText <-
+            "CREATE TABLE session_status (
+                 session_id TEXT PRIMARY KEY, worktree_path TEXT NOT NULL, provider TEXT NOT NULL,
+                 status TEXT NOT NULL, current_skill TEXT, last_user_msg TEXT, last_user_ts TEXT,
+                 last_asst_msg TEXT, last_asst_ts TEXT, updated_at TEXT NOT NULL, last_seen TEXT NOT NULL);
+             INSERT INTO session_status (session_id, worktree_path, provider, status, updated_at, last_seen)
+             VALUES ('legacy', 'C:/wt/a', 'copilot_cli', 'working', $ts, $ts);"
+
+        cmd.Parameters.AddWithValue("$ts", (ts "2026-03-01T11:30:00Z").ToUniversalTime().ToString("O")) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
+
+    [<Test>]
+    member _.``Construction adds intent columns; legacy rows read None and new upserts persist intent``() =
+        withDbPath (fun dbPath ->
+            seedLegacyDb dbPath
+            // Constructing the store over the legacy DB runs the additive intent migration.
+            use store = new SessionActivityStore(dbPath)
+            let legacy = store.LoadLiveStatuses(ts "2026-03-01T11:00:00Z") |> find "legacy"
+            Assert.That(legacy.Status.Intent, Is.EqualTo(None), "a pre-migration row has no intent")
+
+            let withIntent =
+                { emptyStatus with
+                    Status = SessionLevelStatus.Working
+                    Intent = Some(msg "investigating the fold" "2026-03-01T11:45:00Z") }
+
+            store.UpsertStatus(storedOf "s2" "C:/wt/a" withIntent "2026-03-01T11:45:00Z" "2026-03-01T11:50:00Z")
+            let row = store.LoadLiveStatuses(ts "2026-03-01T11:00:00Z") |> find "s2"
+            Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z"))))
+
+    [<Test>]
+    member _.``The intent migration is idempotent across a reopen``() =
+        withDbPath (fun dbPath ->
+            seedLegacyDb dbPath
+            (new SessionActivityStore(dbPath) :> IDisposable).Dispose() // first construction adds the columns
+
+            // Reopening must not fail trying to add columns that already exist.
+            use reopened = new SessionActivityStore(dbPath)
+            Assert.That(reopened.LoadLiveStatuses(ts "2026-03-01T11:00:00Z") |> List.length, Is.EqualTo 1))

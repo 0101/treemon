@@ -33,6 +33,7 @@ let private stored
       Status =
         { Status = status
           Skill = skill
+          Intent = None
           LastUserMessage = lastUser
           LastAssistantMessage = lastAsst }
       UpdatedAt = ts seen

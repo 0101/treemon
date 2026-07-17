@@ -34,6 +34,9 @@ type CodingToolResult =
     { Status: CodingToolStatus
       Provider: CodingToolProvider option
       CurrentSkill: string option
+      /// The agent's current intent (SDK `assistant.intent`) with the time it last changed — the card's
+      /// live "what it's doing" line. Sourced from the same footer session as the other footer fields.
+      AgentIntent: (string * DateTimeOffset) option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: CardEvent option
       LastMessageProvider: CodingToolProvider option
@@ -87,6 +90,7 @@ let noSessionPushResult: CodingToolResult =
     { Status = NoSession
       Provider = None
       CurrentSkill = None
+      AgentIntent = None
       LastUserMessage = None
       LastAssistantMessage = None
       LastMessageProvider = None
@@ -164,6 +168,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       // Single push provider today (Copilot CLI); a future provider threads its own value here.
       Provider = footer |> Option.map (fun _ -> CopilotCli)
       CurrentSkill = footer |> Option.bind _.Skill
+      AgentIntent = footer |> Option.bind _.Intent |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
@@ -196,6 +201,7 @@ let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
     { Status = NoSession
       Provider = if hasFooter then Some CopilotCli else None
       CurrentSkill = s.Skill
+      AgentIntent = s.Intent |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
       LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)

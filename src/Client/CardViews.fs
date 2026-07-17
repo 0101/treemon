@@ -509,43 +509,65 @@ let canResumeSession (wt: WorktreeStatus) =
     && wt.CodingTool <> Working
     && wt.CodingTool <> WaitingForUser
 
-/// What the card's "user line" should surface. Kept as a pure decision (not a ReactElement) so the
-/// skill-vs-message choice is unit-testable without rendering React. When a skill is running we show
-/// the skill; otherwise the genuine last user message. The server now yields a real LastUserMessage
-/// (never a `<skill-context>` injection), so there is no injection text to filter out on the client.
+/// The card's intent line: the agent's current intent (SDK `assistant.intent`) plus, when a skill is
+/// running, that skill as a pill. Kept as a pure decision (not a ReactElement) so the presence logic
+/// is unit-testable without rendering React. `Line` carries at least one of intent/skill; `Empty`
+/// when neither is present. A blank/whitespace skill is treated as no skill.
 [<RequireQualifiedAccess>]
-type CardUserLine =
-    | Skill of name: string
-    | Message of prompt: string * ts: System.DateTimeOffset
+type CardIntentLine =
+    | Line of intent: (string * System.DateTimeOffset) option * skill: string option
     | Empty
 
-let cardUserLine (wt: WorktreeStatus) : CardUserLine =
-    match wt.CurrentSkill, wt.LastUserMessage with
-    | Some skill, _ when not (System.String.IsNullOrWhiteSpace skill) -> CardUserLine.Skill(skill.Trim())
-    | _, Some (prompt, ts) -> CardUserLine.Message(prompt, ts)
-    | _, None -> CardUserLine.Empty
+let cardIntentLine (wt: WorktreeStatus) : CardIntentLine =
+    let skill =
+        wt.CurrentSkill
+        |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
+        |> Option.map _.Trim()
+    match wt.AgentIntent, skill with
+    | None, None -> CardIntentLine.Empty
+    | intent, sk -> CardIntentLine.Line(intent, sk)
 
-/// Renders the card user line: a `▶ <skill>` label while a skill runs, otherwise the last user
-/// message. CSS-class based (no inline styles); the skill label reuses `.user-prompt` for layout.
-let userLineView (wt: WorktreeStatus) =
-    match cardUserLine wt with
-    | CardUserLine.Skill name ->
+/// Line 1 of the footer: the intent text (with the time it last changed) and the running skill as a
+/// right-aligned pill. Reuses `.user-prompt` for layout; the pill and intent text carry their own
+/// classes. Renders nothing when there is neither an intent nor a skill.
+let intentLineView (wt: WorktreeStatus) =
+    match cardIntentLine wt with
+    | CardIntentLine.Empty -> Html.none
+    | CardIntentLine.Line (intent, skill) ->
         Html.div [
-            prop.className "user-prompt skill-line"
+            prop.className "user-prompt intent-line"
             prop.children [
-                Html.span [ prop.className "skill-indicator"; prop.text "▶" ]
-                Html.span [ prop.className "skill-name"; prop.text name ]
+                match intent with
+                | Some (text, since) ->
+                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime since) ]
+                    Html.span [ prop.className "intent-text"; prop.text text ]
+                | None -> ()
+                match skill with
+                | Some name -> Html.span [ prop.className "skill-pill"; prop.text $"▶ {name}" ]
+                | None -> ()
             ]
         ]
-    | CardUserLine.Message (prompt, ts) ->
+
+/// A footer message line: `[time-ago] <source?> <text>`. Shared by the last-user-message and
+/// last-assistant-message lines; the assistant line tags its source ("copilot"), the user line does not.
+let private messageLineView (source: string option) (msg: (string * System.DateTimeOffset) option) =
+    match msg with
+    | None -> Html.none
+    | Some (text, ts) ->
         Html.div [
             prop.className "user-prompt"
             prop.children [
                 Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                Html.span [ prop.text prompt ]
+                match source with
+                | Some s -> Html.span [ prop.className "event-source"; prop.text s ]
+                | None -> ()
+                Html.span [ prop.text text ]
             ]
         ]
-    | CardUserLine.Empty -> Html.none
+
+/// Line 2 (last user message) and line 3 (last assistant message, tagged `copilot`) of the footer.
+let userMsgLineView (wt: WorktreeStatus) = messageLineView None wt.LastUserMessage
+let assistantMsgLineView (wt: WorktreeStatus) = messageLineView (Some "copilot") wt.LastAssistantMessage
 
 let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
@@ -589,8 +611,11 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
 let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
-    let hasUserLine = match cardUserLine wt with CardUserLine.Empty -> false | _ -> true
-    let hasContent = hasUserLine || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
+    let hasFooterLines =
+        (match cardIntentLine wt with CardIntentLine.Empty -> false | _ -> true)
+        || wt.LastUserMessage.IsSome
+        || wt.LastAssistantMessage.IsSome
+    let hasContent = hasFooterLines || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key (WorktreePath.value wt.Path)
@@ -638,7 +663,10 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
             Html.div [
                 prop.className footerClass
                 prop.children [
-                    if List.isEmpty canvasEvents then userLineView wt
+                    if List.isEmpty canvasEvents then
+                        intentLineView wt
+                        userMsgLineView wt
+                        assistantMsgLineView wt
 
                     eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
                     canvasEventLog callbacks scopedKey canvasEvents
