@@ -113,6 +113,71 @@ type CodingToolSinceByWorktreeTests() =
         |> Async.RunSynchronously
 
 
+// The display debounce (SessionActivity.debounceIdle, applied on the card read path) measures its
+// Working→Idle hold from the SAME CodingToolSinceByWorktree stamp the scheduler freezes above. The
+// DebounceIdleTests unit tests feed idleSince directly; these drive the real UpdateSessionStatus path
+// so a change to the scheduler's freeze/reset policy surfaces here instead of silently breaking the dot.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DebounceIdleSchedulerIntegrationTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+    let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
+    let displayAt (now: DateTimeOffset) (state: DashboardState) =
+        debounceIdle idleDebounceWindow now (sinceFor state) Idle
+
+    [<Test>]
+    member _.``The scheduler's frozen stamp drives debounceIdle: held Working within the window, Idle after, measured from the transition not the heartbeat``() =
+        async {
+            let agent = createAgent ()
+            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
+            let! entered = agent.PostAndAsyncReply(GetState)
+
+            // An idle heartbeat 60s later advances last_seen, but the stamp stays frozen at idledAt.
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 60.0)))
+            let! afterHeartbeat = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(
+                displayAt (idledAt + TimeSpan.FromSeconds 3.0) entered,
+                Is.EqualTo Working,
+                "held Working within the grace window")
+            Assert.That(
+                displayAt (idledAt + idleDebounceWindow + TimeSpan.FromSeconds 1.0) entered,
+                Is.EqualTo Idle,
+                "real Idle surfaces once the window elapses")
+            // Measured from the FROZEN transition, not the advancing heartbeat: a read just after the
+            // heartbeat but well past (transition + window) still shows Idle. If the stamp tracked
+            // last_seen, this would wrongly re-hold Working.
+            Assert.That(
+                displayAt (idledAt + TimeSpan.FromSeconds 65.0) afterHeartbeat,
+                Is.EqualTo Idle,
+                "hold is measured from the transition, not the idle heartbeat")
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``A new Working turn clears the stamp so debounceIdle stops holding``() =
+        async {
+            let agent = createAgent ()
+            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working (idledAt + TimeSpan.FromSeconds 5.0)))
+            let! resumed = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor resumed, Is.EqualTo None, "Working clears the stamp")
+            Assert.That(
+                displayAt (idledAt + TimeSpan.FromSeconds 6.0) resumed,
+                Is.EqualTo Idle,
+                "no stamp after Working → a later real Idle falls straight through")
+        }
+        |> Async.RunSynchronously
+
+
 // F10/C-13: CodingToolSinceByWorktree lives on DashboardState (GLOBAL), so — unlike SessionStatuses
 // (evicted) or the per-repo data (removeWorktreeData) — it must be pruned when a worktree leaves.
 // Otherwise a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince freezes
