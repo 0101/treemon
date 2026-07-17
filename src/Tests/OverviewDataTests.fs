@@ -354,7 +354,7 @@ type OverviewDataTests() =
     member _.``Activity classification goes through Activity.classify (slash command with args)``() =
         // A raw Claude slash command with an argument still classifies via the shared normalizer.
         let result = aggregate [ repo [ workingWt (Some "/pr https://example.com/pull/1") ] ]
-        Assert.That(activityCount CurrentActivity.Reviewing result, Is.EqualTo(Some 1))
+        Assert.That(activityCount CurrentActivity.PR result, Is.EqualTo(Some 1))
 
     [<Test>]
     member _.``Activities with no red-dot agents are omitted``() =
@@ -363,7 +363,7 @@ type OverviewDataTests() =
         Assert.That(activityCount CurrentActivity.Planning result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Executing result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Reviewing result, Is.EqualTo(None))
-        Assert.That(activityCount CurrentActivity.Fixing result, Is.EqualTo(None))
+        Assert.That(activityCount CurrentActivity.PR result, Is.EqualTo(None))
         Assert.That(activityCount CurrentActivity.Working result, Is.EqualTo(None))
         Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(None))
 
@@ -448,7 +448,7 @@ type OverviewDataTests() =
     [<Test>]
     member _.``Present activity groups keep canonical order``() =
         // Skills chosen so Investigating, Executing and Working are present but Planning/Reviewing/
-        // Fixing are absent — the survivors must still appear in canonical order.
+        // PR are absent — the survivors must still appear in canonical order.
         let result =
             aggregate
                 [ repo
@@ -470,7 +470,7 @@ type OverviewDataTests() =
                 [ repo [ workingWt (Some "investigate"); agentWt CodingToolStatus.WaitingForUser None ]
                   repo [ workingWt (Some "investigate"); workingWt (Some "fix-build") ] ]
         Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 2))
-        Assert.That(activityCount CurrentActivity.Fixing result, Is.EqualTo(Some 1))
+        Assert.That(activityCount CurrentActivity.PR result, Is.EqualTo(Some 1))
         Assert.That(agentCount AgentGroupKind.Waiting result, Is.EqualTo(Some 1))
 
     [<Test>]

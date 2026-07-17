@@ -118,7 +118,7 @@ let private bandProbeJs =
         },
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
         queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
-        fixingPresent: !!itemByLabel(agentsSec, 'Fixing'),
+        prPresent: !!itemByLabel(agentsSec, 'PR'),
         genericWorkingPresent: !!itemByLabel(agentsSec, 'Working'),
         idlePresent: !!itemByLabel(agentsSec, 'Idle'),
         zeroTextCount: qa('.overview-band .overview-count').filter(c => c.textContent.trim() === '0').length
@@ -284,7 +284,7 @@ type OverviewBandE2ETests() =
         let probe = requireProbe ()
         Assert.That(probe.Value<bool>("blockedPresent"), Is.False, "zero-count Blocked bucket must not render")
         Assert.That(probe.Value<bool>("queuedPresent"), Is.False, "zero-count Queued bucket must not render")
-        Assert.That(probe.Value<bool>("fixingPresent"), Is.False, "zero-count Fixing activity must not render")
+        Assert.That(probe.Value<bool>("prPresent"), Is.False, "zero-count PR activity must not render")
         Assert.That(probe.Value<bool>("genericWorkingPresent"), Is.False, "zero-count generic Working activity must not render")
         Assert.That(probe.Value<int>("zeroTextCount"), Is.EqualTo(0), "no count element ever renders the text '0'")
 

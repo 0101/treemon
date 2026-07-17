@@ -109,7 +109,7 @@ let private activityOrder =
       CurrentActivity.Planning
       CurrentActivity.Executing
       CurrentActivity.Reviewing
-      CurrentActivity.Fixing
+      CurrentActivity.PR
       CurrentActivity.Working ]
 
 // Canonical order of the agent groups: the activity groups (in the order above), then the Waiting
