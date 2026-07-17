@@ -388,10 +388,15 @@ let private worktreeDir (repoRoot: string) (branchName: string) =
 
 /// Builds the git command that forks `branchName` from `baseRef` into a
 /// `tm-`prefixed sibling of the repo root. Returns the command and the new
-/// worktree path.
+/// worktree path. `--no-track` stops git's default `autoSetupMerge` from making
+/// the new branch inherit `baseRef`'s upstream: when `baseRef` is a remote-tracking
+/// ref like `origin/feature`, a tracking branch would point `@{u}` at the base's
+/// remote branch, and Treemon — which keys PR detection off `@{u}` — would then
+/// show the base branch's PR on the new worktree until it is first pushed. A freshly
+/// forked branch has no remote of its own yet, so it correctly starts with no upstream.
 let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: string) =
     let worktreePath = worktreeDir repoRoot branchName
-    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" \"{baseRef}\""
+    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" --no-track \"{worktreePath}\" \"{baseRef}\""
     "git", arguments, worktreePath
 
 let private legacyForkScriptWarning (scriptName: string) (exists: bool) =

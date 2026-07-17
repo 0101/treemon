@@ -72,6 +72,12 @@ type ResolveWorktreeCommandTests() =
         Assert.That(args, Does.Contain("\"origin/main\""), "base ref must be passed as the fork point")
 
     [<Test>]
+    member _.``forks with --no-track so the new branch does not inherit the base upstream``() =
+        let _, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "origin/feature" "my-branch"
+        Assert.That(args, Does.Contain("--no-track"),
+            "a tracking branch would point @{u} at the base's remote branch and mis-detect its PR")
+
+    [<Test>]
     member _.``runs git against the repo root``() =
         let fileName, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "main" "my-branch"
         Assert.That(fileName, Is.EqualTo("git"))
