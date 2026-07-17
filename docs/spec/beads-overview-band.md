@@ -45,10 +45,10 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   CSS-classes-only rule.
 - **Palette (Catppuccin Mocha, exact):**
   - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7` · Unattended `#7f849c`.
-  - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · Fixing `#fab387` · Working `#ff0000`.
+  - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · PR `#fab387` · Working `#ff0000`.
   - Waiting — `#f9e2af`, matching the card's `WaitingForUser` dot.
   - Idle — `#89b4fa`, matching the card's `Idle` dot. No two co-occurring agent
-    groups share a hue: Investigating teal, Planning mauve, Executing green, Reviewing pink, Fixing
+    groups share a hue: Investigating teal, Planning mauve, Executing green, Reviewing pink, PR
     peach, Working red, Waiting yellow, Idle blue.
 - **Empty categories are omitted** — a status or activity with zero items renders no label and no
   bar/circle group (never a `0`).
@@ -84,11 +84,11 @@ distinct server-side bucket for fidelity but folds into **Planned** for display 
 
   | Activity | Skills / commands |
   |---|---|
-  | **Investigating** | `investigate` |
-  | **Planning** | `bd-plan`, `bd-improve`, `bd-autoimprove`, `spec-management` |
-  | **Executing** | `bd-execute`, `bd-phase`, `bd-autopilot`, `refactor` |
-  | **Reviewing** | `pr`, `review-branch`, `reviewing-tests`, `comprehensive-review`, `code-review`, `bd-review`, `contribution`, `review` (focused-review plugin — the actual `skill.invoked` `data.name`; `focused-review:review` also mapped) |
-  | **Fixing** | `fix-build`, `conflict` |
+  | **Investigating** | `investigate`, `research` |
+  | **Planning** | `bd-plan`, `bd-improve`, `bd-autoimprove` |
+  | **Executing** | `execute`, `bd-execute`, `bd-phase`, `bd-autopilot`, `refactor` |
+  | **Reviewing** | `review-branch`, `reviewing-tests`, `comprehensive-review`, `code-review`, `bd-review`, `contribution`, `review` (focused-review plugin — the actual `skill.invoked` `data.name`; `focused-review:review` also mapped) |
+  | **PR** | `babysit-pr`, `pr`, `github`, `fix-build` |
   | **Working** (fallback) | working agent, no recognized skill |
 
 - `Shared.Activity.classify : string -> CurrentActivity` implements the table and **normalizes its
@@ -189,7 +189,7 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
 
 - `BeadsPlanning { Planned; Queued; Loose }` (+ `zero`), new field
   `Planning: BeadsPlanning` on `WorktreeStatus`.
-- `CurrentActivity` DU (`Investigating | Planning | Executing | Reviewing | Fixing | Working`) +
+- `CurrentActivity` DU (`Investigating | Planning | Executing | Reviewing | PR | Working`) +
   `Activity.classify : string -> CurrentActivity`; Waiting is an overview activity group derived
   from `CodingToolStatus.WaitingForUser`, not from skill classification.
 - `CurrentSkill: string option` on `WorktreeStatus` (and `CodingToolResult`).

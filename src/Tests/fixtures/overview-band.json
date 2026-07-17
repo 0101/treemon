@@ -91,6 +91,20 @@
             "CanvasDocs": []
           },
           {
+            "Path": {"WorktreePath": "Q:/code/OverviewProj/pr-a"},
+            "Branch": "pr-a",
+            "LastCommitMessage": "Babysit the PR to merge",
+            "LastCommitTime": "2026-02-16T22:24:30+00:00",
+            "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
+            "CodingTool": "Working",
+            "CodingToolProvider": "CopilotCli",
+            "CurrentSkill": "pr",
+            "HasActiveSession": true,
+            "Pr": "NoPr",
+            "MainBehindCount": 0,
+            "CanvasDocs": []
+          },
+          {
             "Path": {"WorktreePath": "Q:/code/OverviewProj/wait-a"},
             "Branch": "wait-a",
             "LastCommitMessage": "Awaiting go-ahead on migration",
