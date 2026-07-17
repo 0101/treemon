@@ -134,6 +134,13 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
 let isBranchSyncing (events: CardEvent list) =
     events |> List.exists (fun e -> e.Status = Some StepStatus.Running && e.Source <> EventSource.PostFork)
 
+/// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
+/// card — only its failures (including timeouts) are worth surfacing. Events from every other
+/// source always show.
+let isVisibleCardEvent (evt: CardEvent) =
+    evt.Source <> EventSource.PostFork
+    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
     | Some CopilotCli -> "Copilot"
@@ -590,7 +597,8 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasUserLine = match cardUserLine wt with CardUserLine.Empty -> false | _ -> true
-    let hasContent = hasUserLine || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
+    let visibleBranchEvents = branchEvents |> List.filter isVisibleCardEvent
+    let hasContent = hasUserLine || (not (List.isEmpty visibleBranchEvents)) || (not (List.isEmpty canvasEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key (WorktreePath.value wt.Path)
@@ -640,7 +648,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                 prop.children [
                     if List.isEmpty canvasEvents then userLineView wt
 
-                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
+                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog visibleBranchEvents
                     canvasEventLog callbacks scopedKey canvasEvents
                 ]
             ]

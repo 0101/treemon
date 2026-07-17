@@ -72,6 +72,12 @@ type ResolveWorktreeCommandTests() =
         Assert.That(args, Does.Contain("\"origin/main\""), "base ref must be passed as the fork point")
 
     [<Test>]
+    member _.``forks with --no-track so the new branch does not inherit the base upstream``() =
+        let _, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "origin/feature" "my-branch"
+        Assert.That(args, Does.Contain("--no-track"),
+            "a tracking branch would point @{u} at the base's remote branch and mis-detect its PR")
+
+    [<Test>]
     member _.``runs git against the repo root``() =
         let fileName, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "main" "my-branch"
         Assert.That(fileName, Is.EqualTo("git"))
@@ -306,3 +312,29 @@ type CreateWorktreeIntegrationTests() =
             Assert.That(Directory.Exists(fork.WorktreePath), Is.True, "worktree should still be created")
             let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "postfork-fails" |> Async.RunSynchronously
             Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
+
+    [<Test>]
+    member _.``runPostForkWithTimeout kills a hung post-fork script and reports a timeout``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+            File.WriteAllText(Path.Combine(repoDir, "post-fork.ps1"), "Start-Sleep -Seconds 30")
+        else
+            File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), "#!/usr/bin/env bash\nsleep 30\n")
+
+        match forkWorktree repoDir "main" "postfork-hangs" |> Async.RunSynchronously with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok fork ->
+            let sw = System.Diagnostics.Stopwatch.StartNew()
+            let result = runPostForkWithTimeout 2000 repoDir fork.WorktreePath fork.BaseRef "postfork-hangs" |> Async.RunSynchronously
+            sw.Stop()
+
+            match result with
+            | Ok () -> Assert.Fail("Expected a timeout Error but the hung script returned Ok")
+            | Error msg -> Assert.That(msg, Does.Contain("Timed out"), $"Expected a timeout error but got: {msg}")
+
+            Assert.That(
+                sw.Elapsed.TotalSeconds,
+                Is.LessThan(15.0),
+                "the hung script should have been killed at the timeout, not run to completion")
