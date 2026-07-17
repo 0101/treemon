@@ -57,6 +57,17 @@ let private isoUtc (dto: DateTimeOffset) =
 let private parseIso (s: string) =
     DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
 
+// Task-snapshot rows persist the count-only `TaskCount list` as a JSON blob, using the SAME
+// Fable.Remoting converter the getOverviewHistory wire uses (matching the former JSONL history), so a
+// stored snapshot round-trips byte-identically to what the client later receives via OverviewSnapshot.
+let private taskConverter: Newtonsoft.Json.JsonConverter = Fable.Remoting.Json.FableJsonConverter()
+
+let private serializeTasks (tasks: OverviewData.TaskCount list) : string =
+    Newtonsoft.Json.JsonConvert.SerializeObject(tasks, Newtonsoft.Json.Formatting.None, [| taskConverter |])
+
+let private parseTasks (s: string) : OverviewData.TaskCount list =
+    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.TaskCount list>(s, [| taskConverter |])
+
 let private statusText =
     function
     | Working -> "working"
@@ -154,6 +165,13 @@ CREATE TABLE IF NOT EXISTS activity_events (
     ts            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
+
+CREATE TABLE IF NOT EXISTS task_snapshots (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts    TEXT NOT NULL,
+    tasks TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_task_snapshots_ts ON task_snapshots(ts);
 """
 
 // One-time normalisation of legacy rows: pre-idle-only builds persisted the retired "done" status, so
@@ -228,11 +246,25 @@ WHERE ts >= $start AND ts <= $end
 ORDER BY ts;
 """
 
-// pruneOld trims both tables past the retention cutoff: the append-only event stream (the unbounded
-// one) plus long-dead session rows well outside any live window.
+let private appendTaskSnapshotSql =
+    """
+INSERT INTO task_snapshots (ts, tasks) VALUES ($ts, $tasks);
+"""
+
+let private queryTaskSnapshotsSql =
+    """
+SELECT ts, tasks
+FROM task_snapshots
+WHERE ts >= $start AND ts <= $end
+ORDER BY ts;
+"""
+
+// pruneOld trims every table past the retention cutoff: the append-only event stream and task-snapshot
+// stream (the unbounded ones) plus long-dead session rows well outside any live window.
 let private pruneSql =
     """
 DELETE FROM activity_events WHERE ts < $cutoff;
+DELETE FROM task_snapshots WHERE ts < $cutoff;
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
 
@@ -364,6 +396,30 @@ type SessionActivityStore(dbPath: string) =
 
         [ while reader.Read() do
               yield readEventRow reader ]
+
+    /// Append one Tasks (beads) history snapshot — the count-only projection, logged only on change by
+    /// the scheduler. The Agents dimension is NOT stored here: it is derived on read from
+    /// `activity_events` (the push event stream), so only Tasks are snapshot-based.
+    member _.AppendTaskSnapshot(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : unit =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- appendTaskSnapshotSql
+        cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
+        cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
+
+    /// The Tasks history substrate: task snapshots with `ts` in [startTime, endTime], oldest first.
+    /// Merged with the event-derived Agents history into the OverviewSnapshot stream on read.
+    member _.QueryTaskSnapshots(startTime: DateTimeOffset, endTime: DateTimeOffset) : (DateTimeOffset * OverviewData.TaskCount list) list =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- queryTaskSnapshotsSql
+        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
+        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
+        use reader = cmd.ExecuteReader()
+
+        [ while reader.Read() do
+              yield parseIso (reader.GetString 0), parseTasks (reader.GetString 1) ]
 
     interface IDisposable with
         member _.Dispose() = keepAlive.Dispose()

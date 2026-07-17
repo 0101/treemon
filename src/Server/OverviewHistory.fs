@@ -1,117 +1,142 @@
 module Server.OverviewHistory
 
-// Append-only history of the Overview band's cross-worktree roll-up (spec:
-// docs/spec/overview-activity-history.md). Every change to the `{Tasks; Agents}` aggregate is
-// persisted as one JSON-Lines record in logs/overview-history.jsonl so the band can render a
-// past-24h/72h timeseries. Three responsibilities:
-//   - changed:    decide whether a freshly computed Overview differs from the last logged snapshot,
-//                 comparing ONLY the count-only projection (Members and timestamp excluded), so an
-//                 unchanged roll-up — even with churning per-worktree membership — appends nothing.
-//   - append:     write one snapshot as a single JSONL line, reusing Log.fs's FileStream + lock,
-//                 append-mode pattern (crash-safe, concurrent-reader-tolerant).
-//   - readWindow: parse the JSONL back into snapshots within a look-back window, tolerating a
-//                 partial trailing line left by a crash mid-write.
-// The wire/JSON shape is the same Fable.Remoting converter IWorktreeApi.getOverviewHistory uses, so
-// what is logged round-trips byte-identically to what the client later receives.
+// The Overview band's history, unified onto the push-model event store (spec:
+// docs/spec/overview-activity-history.md + docs/spec/session-status-push.md "Overview-history
+// unification"). An OverviewSnapshot is `{ Tasks; Agents }`, but the two dimensions come from
+// DIFFERENT sources and are reconciled only on read:
+//
+//   - Tasks  (beads planning counts) are NOT event-sourced — they are snapshot-based: the scheduler
+//            logs the count-only projection to SessionActivityStore.task_snapshots on change
+//            (`tasksChanged`), exactly as before, just persisted in SQLite instead of a JSONL file.
+//   - Agents are DERIVED ON READ from `activity_events` (the durable push event stream): `deriveAgents`
+//            replays each session's status/skill over the window and collapses it per worktree with the
+//            SAME `CodingToolStatus.collapseByWorktree` the live band uses — so the history and the live
+//            band bucket a status identically, with openness/staleness decay modelled (a closed/crashed
+//            session drops out of the counts after `openWindow`, matching what the band showed then).
+//
+// `mergeHistory` stitches the two independently-changing series into one stepped OverviewSnapshot
+// stream (carry each dimension forward at every change point), so getOverviewHistory and
+// OverviewChart.fs are untouched — they still consume a plain `OverviewSnapshot list`.
+//
+// Pure: no IO, no mutation. The store owns persistence; this module owns the change-detection, the
+// event→agent reconstruction, and the merge, so all three are unit-testable in isolation.
 
 open System
-open System.IO
-open Newtonsoft.Json
 open OverviewData
+open Server.SessionActivity
+open Server.SessionActivityStore
 
-// Same converter the Fable.Remoting wire uses (see WorktreeApi.loadFixtures + the
-// OverviewSnapshot serialization guards in Tests/SerializationTests.fs), so a logged line and the
-// value getOverviewHistory returns can never drift in shape.
-let private converter = Fable.Remoting.Json.FableJsonConverter()
-
-let private historyPath () =
-    Path.Combine(Directory.GetCurrentDirectory(), "logs", "overview-history.jsonl")
-
-// One lock guards both append (write) and readWindow (read); a shared lock plus FileShare.ReadWrite
-// keeps a mid-write reader from seeing a torn line (and readWindow tolerates it regardless).
-let private lockObj = obj ()
-
-/// Build the count-only snapshot that gets persisted per line: the capture time plus the Overview
-/// projected to counts (drill-down `Members` dropped — decision #10). Callers thread the returned
-/// snapshot as the scheduler's "last logged" accumulator.
-let snapshot (timestamp: DateTimeOffset) (overview: Overview) : OverviewSnapshot =
-    let counts = toCounts overview
-    { Timestamp = timestamp
-      Tasks = counts.Tasks
-      Agents = counts.Agents }
-
-/// True when the freshly computed Overview should be appended — i.e. its count-only projection
-/// differs from the last logged snapshot's `{Tasks; Agents}` (decision #3). The timestamp is
-/// excluded (the count lists are compared directly) and membership is excluded by construction
-/// (`toCounts` drops `Members`), so identical counts with churning membership append nothing. With
-/// no prior snapshot the first aggregate always counts as changed, so the baseline line is written.
-let changed (last: OverviewSnapshot option) (overview: Overview) : bool =
+/// True when a freshly computed Tasks projection differs from the last logged one — the scheduler's
+/// append-only change gate (identical counts append nothing; the first projection always counts as
+/// changed so a baseline row is written).
+let tasksChanged (last: TaskCount list option) (current: TaskCount list) : bool =
     match last with
     | None -> true
-    | Some prev ->
-        let counts = toCounts overview
-        counts.Tasks <> prev.Tasks || counts.Agents <> prev.Agents
+    | Some prev -> prev <> current
 
-/// Serialize one snapshot to a single JSON line via the Fable.Remoting converter. Formatting.None
-/// guarantees no embedded newlines, so exactly one snapshot maps to one JSONL line.
-let serialize (snap: OverviewSnapshot) : string =
-    JsonConvert.SerializeObject(snap, Formatting.None, converter)
+/// Reconstruct one session's fold state as of instant `t` — its most-recent event at or before `t`,
+/// projected to the StoredStatus shape `collapseByWorktree` consumes. Only Status/Skill/LastSeen bear
+/// on the agent grouping, so the message fields are left empty.
+let private sessionAsOf (t: DateTimeOffset) (rows: ActivityEventRow list) : StoredStatus option =
+    rows
+    |> List.filter (fun r -> r.Ts <= t)
+    |> List.tryLast
+    |> Option.map (fun r ->
+        { SessionId = r.SessionId
+          WorktreePath = r.WorktreePath
+          Provider = r.Provider
+          Status =
+            { Status = r.Status
+              Skill = r.Skill
+              LastUserMessage = None
+              LastAssistantMessage = None }
+          UpdatedAt = r.Ts
+          LastSeen = r.Ts })
 
-/// Parse one JSONL line back to a snapshot, returning None for a blank, null, or malformed line
-/// (e.g. the partial trailing line a crash mid-write leaves behind) so one bad row never aborts the
-/// whole read.
-let tryParse (line: string) : OverviewSnapshot option =
-    if String.IsNullOrWhiteSpace line then
-        None
-    else
-        try
-            let value = JsonConvert.DeserializeObject<OverviewSnapshot>(line, converter)
-            if obj.ReferenceEquals(value, null) then None else Some value
-        with _ ->
-            None
+/// Derive the Agents history over the window from the raw push event stream. For each candidate
+/// instant, reconstruct every session's state as of that instant, collapse per worktree exactly like
+/// the live band (`collapseByWorktree` → openness-driven status dot), classify into agent groups, and
+/// emit the count vector — dropping consecutive unchanged vectors so only real transitions appear.
+///
+/// Candidate instants are the window's left edge, each session's status/skill TRANSITIONS (heartbeats
+/// that merely re-assert the same status are skipped — they can't move the counts), and each session's
+/// openness-decay boundary (`lastEvent + openWindow`, when a quiet session stops counting). `events`
+/// must cover a little BEFORE `now - window` (the caller widens the query) so a session already running
+/// at the window's left edge is reconstructed there rather than materialising at its first in-window
+/// heartbeat.
+let deriveAgents (now: DateTimeOffset) (window: TimeSpan) (events: ActivityEventRow list) : (DateTimeOffset * AgentCount list) list =
+    let start = now - window
 
-/// Given a reference "now", a look-back window, and the raw JSONL lines, parse each line tolerantly
-/// and keep only the snapshots at or after `now - window` (older records are ignored, not pruned).
-/// Split out from readWindow so window filtering and partial-line tolerance are unit-testable
-/// without touching disk.
-let parseWindow (now: DateTimeOffset) (window: TimeSpan) (lines: string seq) : OverviewSnapshot list =
-    let cutoff = now - window
-    lines
-    |> Seq.choose tryParse
-    |> Seq.filter (fun s -> s.Timestamp >= cutoff)
-    |> List.ofSeq
+    let bySession =
+        events
+        |> List.groupBy _.SessionId
+        |> List.map (fun (_, rows) -> rows |> List.sortBy _.Ts)
 
-/// Append one snapshot as a JSONL line to logs/overview-history.jsonl, reusing Log.fs's append-mode
-/// FileStream + lock pattern (creating logs/ on first write). Append + FileShare.ReadWrite keep the
-/// file crash-safe and readable concurrently. Returns `true` when the line reached disk and `false`
-/// when a write error was caught (the failure is logged, not swallowed silently): the caller MUST
-/// only advance its "last logged" accumulator on `true`, so a transient failure (file locked,
-/// read-only, disk error) is retried on the next iteration instead of losing the changed snapshot.
-let append (snap: OverviewSnapshot) : bool =
-    let path = historyPath ()
-    path |> Path.GetDirectoryName |> Directory.CreateDirectory |> ignore
-    let line = serialize snap + "\n"
-    lock lockObj (fun () ->
-        try
-            use stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)
-            use writer = new StreamWriter(stream)
-            writer.Write(line)
-            true
-        with ex ->
-            Log.log "OverviewHistory" $"append failed, will retry next iteration: {ex.Message}"
-            false)
+    let agentsAt (t: DateTimeOffset) : AgentCount list =
+        bySession
+        |> List.choose (sessionAsOf t)
+        |> CodingToolStatus.collapseByWorktree t
+        |> Map.values
+        |> Seq.map (fun r -> r.Status, r.CurrentSkill)
+        |> agentCountsOf
 
-/// Read the append-only history file and return the snapshots logged within the last `window`
-/// (newest data included), tolerating a partial trailing line. A missing file yields an empty list.
-let readWindow (window: TimeSpan) : OverviewSnapshot list =
-    let path = historyPath ()
-    if not (File.Exists path) then
-        []
-    else
-        let text =
-            lock lockObj (fun () ->
-                use stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-                use reader = new StreamReader(stream)
-                reader.ReadToEnd())
+    // A session's status/skill transitions: its first event (establishes its state) plus every event
+    // whose (status, skill) differs from the immediately preceding event of the same session.
+    let transitionTimes =
+        bySession
+        |> List.collect (fun rows ->
+            let changes =
+                rows
+                |> List.pairwise
+                |> List.choose (fun (prev, cur) ->
+                    if (prev.Status, prev.Skill) <> (cur.Status, cur.Skill) then Some cur.Ts else None)
 
-        text.Split('\n') |> parseWindow DateTimeOffset.Now window
+            match rows with
+            | first :: _ -> first.Ts :: changes
+            | [] -> changes)
+
+    // Where a quiet session stops being "open" (drops out of the status dot). openWindow < staleness,
+    // so this openness boundary is the binding decay transition.
+    let decayBoundaries =
+        bySession
+        |> List.choose (fun rows -> rows |> List.tryLast |> Option.map (fun last -> last.Ts + openWindow))
+
+    let instants =
+        (start :: now :: (transitionTimes @ decayBoundaries))
+        |> List.filter (fun t -> t >= start && t <= now)
+        |> List.distinct
+        |> List.sort
+
+    (instants |> List.map (fun t -> t, agentsAt t), [])
+    ||> List.foldBack (fun (t, agents) acc ->
+        match acc with
+        | (_, nextAgents) :: _ when nextAgents = agents -> (t, agents) :: List.tail acc
+        | _ -> (t, agents) :: acc)
+
+/// Merge the two independently-changing history series into one stepped OverviewSnapshot stream: at
+/// every change point (in either dimension) emit a snapshot carrying the latest Tasks AND the latest
+/// Agents. Simultaneous changes at one instant collapse into a single snapshot. Before a dimension's
+/// first value it carries the empty list — nothing was known yet — which the chart renders as a bare
+/// baseline. The output feeds `getOverviewHistory` / `OverviewChart.fs` unchanged.
+let mergeHistory
+    (taskSnaps: (DateTimeOffset * TaskCount list) list)
+    (agentSnaps: (DateTimeOffset * AgentCount list) list)
+    : OverviewSnapshot list =
+    let events =
+        (taskSnaps |> List.map (fun (t, v) -> t, Choice1Of2 v))
+        @ (agentSnaps |> List.map (fun (t, v) -> t, Choice2Of2 v))
+        |> List.sortBy fst
+
+    (([], [], []), events)
+    ||> List.fold (fun (tasks, agents, acc) (t, ev) ->
+        let tasks, agents =
+            match ev with
+            | Choice1Of2 newTasks -> newTasks, agents
+            | Choice2Of2 newAgents -> tasks, newAgents
+
+        let snap = { Timestamp = t; Tasks = tasks; Agents = agents }
+
+        match acc with
+        | prev :: rest when prev.Timestamp = t -> tasks, agents, snap :: rest
+        | _ -> tasks, agents, snap :: acc)
+    |> fun (_, _, acc) -> List.rev acc

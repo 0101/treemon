@@ -802,7 +802,8 @@ module CanvasWatchers =
 
 let start
     (agent: MailboxProcessor<StateMsg>)
-    (assembleOverview: DashboardState -> Async<OverviewData.Overview>)
+    (assembleTasks: DashboardState -> Async<OverviewData.TaskCount list>)
+    (persistTasks: DateTimeOffset -> OverviewData.TaskCount list -> bool)
     (worktreeRoots: string list)
     (ct: CancellationToken)
     =
@@ -818,7 +819,7 @@ let start
 
     /// Mutable ref for the latest canvas file watchers, shared between the reconcile
     /// callback and the main scheduler loop so watcher updates are visible across iterations.
-    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) (lastLoggedSnapshot: OverviewData.OverviewSnapshot option) =
+    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) (lastLoggedTasks: OverviewData.TaskCount list option) =
         async {
             // Run the whole per-iteration body inside a try/with so a transient failure
             // (e.g. SessionManager.getActiveSessions raising TimeoutException when a slow
@@ -826,10 +827,10 @@ let start
             // gracefully instead of unwinding the loop. If the body escaped uncaught, the
             // exception would propagate out of `loop -> startup`, and Async.Start has no error
             // continuation — the scheduler (watcher reconciliation, periodic refresh, and 24/7
-            // overview-history logging) would stop permanently until process restart. On failure
+            // task-history logging) would stop permanently until process restart. On failure
             // we log and continue the recursion with the previous accumulators. The recursion
             // itself stays OUTSIDE the handler so handlers don't nest across iterations.
-            let! (nextRuns, nextWatchers, nextSnapshot) =
+            let! (nextRuns, nextWatchers, nextTasks) =
                 async {
                     try
                         let! state = agent.PostAndAsyncReply(GetState)
@@ -841,23 +842,24 @@ let start
                         let! watchers = CanvasWatchers.reconcile agent repos watchers
                         latestWatchers.Value <- watchers
 
-                        // 24/7 overview activity-history logging (spec: docs/spec/overview-activity-history.md,
-                        // decisions #1/#3). Assemble the SAME cross-worktree roll-up the client band shows and
-                        // append one JSONL record only when its count-only projection changed since the last
-                        // logged snapshot. The accumulator threads immutably through the recursion, exactly like
-                        // lastRuns/watchers — no `let mutable`. `assembleOverview` is injected by the caller
-                        // because assembleRepos lives in a later-compiled module (WorktreeApi/SyncEngine).
-                        let! overview = assembleOverview state
-                        let lastLoggedSnapshot =
-                            if OverviewHistory.changed lastLoggedSnapshot overview then
-                                let snap = OverviewHistory.snapshot DateTimeOffset.UtcNow overview
-                                // Only advance the accumulator when the write actually reached disk;
-                                // on a failed append keep the previous snapshot so the next iteration
-                                // retries and the changed transition is not lost (finding F4).
-                                if OverviewHistory.append snap then Some snap
-                                else lastLoggedSnapshot
+                        // 24/7 Tasks history logging (spec: docs/spec/overview-activity-history.md +
+                        // session-status-push.md "Overview-history unification"). Assemble the SAME
+                        // count-only Tasks projection the client band shows and persist one task_snapshots
+                        // row only when it changed since the last logged one. The Agents dimension is NOT
+                        // snapshotted here — it is derived on read from the push event stream. The
+                        // accumulator threads immutably through the recursion, exactly like lastRuns/watchers
+                        // — no `let mutable`. `assembleTasks`/`persistTasks` are injected by the caller
+                        // because assembleRepos and the activity store live in later-compiled modules.
+                        let! tasks = assembleTasks state
+                        let lastLoggedTasks =
+                            if OverviewHistory.tasksChanged lastLoggedTasks tasks then
+                                // Only advance the accumulator when the write actually reached the store;
+                                // on a failed append keep the previous projection so the next iteration
+                                // retries and the changed transition is not lost.
+                                if persistTasks DateTimeOffset.UtcNow tasks then Some tasks
+                                else lastLoggedTasks
                             else
-                                lastLoggedSnapshot
+                                lastLoggedTasks
 
                         let archivedBranchSets = readArchivedBranchSets rootPaths
                         let archivedPaths = resolveArchivedPaths archivedBranchSets repos
@@ -886,20 +888,20 @@ let start
                             | _ -> ()
 
                             let updatedRuns = lastRuns |> Map.add task now
-                            return (updatedRuns, watchers, lastLoggedSnapshot)
+                            return (updatedRuns, watchers, lastLoggedTasks)
                         | None ->
                             let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                             do! Async.Sleep sleepMs
-                            return (lastRuns, watchers, lastLoggedSnapshot)
+                            return (lastRuns, watchers, lastLoggedTasks)
                     with ex ->
                         // Transient failure — log and continue with the previous accumulators so the
                         // scheduler survives. Sleep briefly to avoid a hot spin if the fault persists.
                         Log.log "Scheduler" $"Refresh iteration failed, continuing with last snapshot: {ex.Message}"
                         do! Async.Sleep 5000
-                        return (lastRuns, watchers, lastLoggedSnapshot)
+                        return (lastRuns, watchers, lastLoggedTasks)
                 }
 
-            return! loop latestWatchers nextRuns nextWatchers nextSnapshot
+            return! loop latestWatchers nextRuns nextWatchers nextTasks
         }
 
     let startup =

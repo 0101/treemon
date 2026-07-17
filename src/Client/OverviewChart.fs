@@ -60,7 +60,8 @@ let private agentDefs : SeriesDef list =
       AgentGroupKind.Activity CurrentActivity.Reviewing
       AgentGroupKind.Activity CurrentActivity.Fixing
       AgentGroupKind.Activity CurrentActivity.Working
-      AgentGroupKind.Waiting ]
+      AgentGroupKind.Waiting
+      AgentGroupKind.Idle ]
     |> List.map (fun kind -> { Label = agentLabel kind; Accent = agentClass kind; ValueAt = agentCount kind })
 
 // Task series in canonical stacking order, mirroring OverviewData.taskOrder and the band's task-* palette.

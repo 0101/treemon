@@ -296,19 +296,34 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
             | None ->
-                // 24/7 overview activity-history logging: give the scheduler the SAME roll-up the
-                // client-poll path builds (assembleRepos + OverviewData.aggregate), including active
-                // agent sessions, so the logged history matches what the band shows. Injected here
-                // because assembleRepos/SessionManager live in modules compiled after RefreshScheduler.
+                // 24/7 Tasks history logging: give the scheduler the SAME count-only Tasks projection
+                // the client-poll path builds (assembleRepos + OverviewData.aggregate), including active
+                // agent sessions, so the logged history matches what the band shows. Persisted to the
+                // push-model store's task_snapshots table (the Agents dimension is derived on read from
+                // the event stream). Injected here because assembleRepos/SessionManager and the store
+                // live in modules compiled after RefreshScheduler.
                 let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
-                let assembleOverview (state: RefreshScheduler.DashboardState) =
+
+                let assembleTasks (state: RefreshScheduler.DashboardState) =
                     async {
                         let! activeSessions = SessionManager.getActiveSessions sessionAgent
                         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
                         let repos = WorktreeApi.assembleRepos rootPaths activeSessionPaths state
-                        return OverviewData.aggregate repos
+                        return (OverviewData.aggregate repos |> OverviewData.toCounts).Tasks
                     }
-                RefreshScheduler.start agent assembleOverview worktreeRoots cts.Token
+
+                let persistTasks (ts: System.DateTimeOffset) (tasks: OverviewData.TaskCount list) : bool =
+                    match sessionActivityStore with
+                    | Some store ->
+                        try
+                            store.AppendTaskSnapshot(ts, tasks)
+                            true
+                        with ex ->
+                            Log.log "OverviewHistory" $"task snapshot append failed, will retry next iteration: {ex.Message}"
+                            false
+                    | None -> true
+
+                RefreshScheduler.start agent assembleTasks persistTasks worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
             WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch

@@ -99,8 +99,8 @@ type OverviewChartTests() =
               Agents = [ { AgentCount.Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 3 } ] }
 
         let pts = OverviewChart.agentPoints now window [ agentSnap ]
-        // Agent order: Investigating, Planning, Executing, Reviewing, Fixing, Working, Waiting.
-        Assert.That(pts.Head.Counts.Length, Is.EqualTo 7)
+        // Agent order: Investigating, Planning, Executing, Reviewing, Fixing, Working, Waiting, Idle.
+        Assert.That(pts.Head.Counts.Length, Is.EqualTo 8)
         Assert.That(List.item 2 pts.Head.Counts, Is.EqualTo 3) // Executing is index 2
         Assert.That(pts.Head.Counts |> List.sum, Is.EqualTo 3) // every other series is empty
 

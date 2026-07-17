@@ -5,7 +5,34 @@ as timestamped records, and surface a past-**24h/72h** timeseries chart **inside
 
 Investigation: `.agents/overview-activity-history-investigation.md`.
 Prototype: `.agents/canvas/overview-chart-prototype.html`.
-Related: `docs/spec/beads-overview-band.md` (the live band this extends).
+Related: `docs/spec/beads-overview-band.md` (the live band this extends);
+`docs/spec/session-status-push.md` (the push event store this is now unified onto).
+
+## Update (v2) — unified onto the push event store
+
+The history is now sourced from the push-model store (`SessionActivityStore`, spec:
+`session-status-push.md`) instead of a standalone JSON-Lines logfile. An `OverviewSnapshot` is still
+`{ Timestamp; Tasks; Agents }` and `getOverviewHistory` / `OverviewChart.fs` are unchanged, but the two
+dimensions come from different sources and are reconciled only on read:
+
+- **Tasks** (beads planning counts) stay **snapshot-based**: the scheduler logs the count-only
+  projection to the store's `task_snapshots` table on change (`OverviewHistory.tasksChanged`) — the
+  same change-detection as before, just persisted in SQLite (WAL), retention-pruned with the rest of
+  the store (60 days). Beads counts are not pushed as events, so they cannot be event-derived.
+- **Agents** are **derived on read** from `activity_events` (the durable push event stream), NOT
+  snapshotted each scheduler cycle. `OverviewHistory.deriveAgents` replays each session's status/skill
+  over the window and collapses it per worktree with the SAME `CodingToolStatus.collapseByWorktree` the
+  live band uses (openness/staleness decay modelled — a closed/crashed session drops out of the counts
+  one `openWindow` after its last event, matching what the band showed then). Status→agent-group
+  bucketing is the single shared `OverviewData.agentGroupOf`/`agentCountsOf`, so history and live band
+  can never drift. The push model added a blue-dot **Idle** agent group, which the chart renders too.
+- `OverviewHistory.mergeHistory` stitches the two independently-changing series into one stepped
+  `OverviewSnapshot` stream (carry each dimension forward at every change point), so the read contract
+  and the client chart are untouched.
+
+The rest of this document describes the original (v1) JSON-Lines design; where it says "JSONL",
+"`logs/overview-history.jsonl`", or "log only the Agents on change", read the v2 model above. The v1
+change-detection, count-only projection, window semantics, and stepped chart all carry over verbatim.
 
 ## Goals
 

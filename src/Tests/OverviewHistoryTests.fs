@@ -5,165 +5,136 @@ open NUnit.Framework
 open Shared
 open OverviewData
 open Server
+open Server.SessionActivity
+open Server.SessionActivityStore
 
-// Unit tests for the Overview activity-history persistence module (spec:
-// docs/spec/overview-activity-history.md). Cover the three behaviours the log must guarantee:
-//   - change-detection: an unchanged count roll-up appends nothing, a changed one appends; a
-//     membership-only change (same counts, different per-worktree Members) must NOT append.
-//   - JSONL round-trip: serialize -> tryParse reproduces the snapshot byte-for-byte.
-//   - window filtering: readWindow/parseWindow drops records older than the look-back window.
-//   - partial-line tolerance: a torn trailing line (crash mid-write) is skipped, prior lines parse.
+// Unit tests for the repurposed OverviewHistory module (spec: docs/spec/overview-activity-history.md +
+// docs/spec/session-status-push.md "Overview-history unification"). The history is now unified onto the
+// push event store: Tasks are snapshot-based (change-detected by `tasksChanged`), Agents are DERIVED ON
+// READ from the activity_events stream (`deriveAgents`, modelling openness decay), and the two series
+// are stitched into one stepped OverviewSnapshot stream (`mergeHistory`). All three are pure.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type OverviewHistoryTests() =
 
-    // A drill-down member — its fields never affect the count-only projection, so they exist purely
-    // to prove membership churn is ignored by `changed`.
-    let mkMember key contribution : GroupMember =
-        { ScopedKey = key
-          Branch = "b"
-          RepoId = RepoId "r"
-          RepoName = "root"
-          Since = None
-          Contribution = contribution }
+    let baseTime = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
 
-    /// Build a full Overview from (kind, count, member-keys) task specs and (kind, count, keys) agent
-    /// specs. Members are synthesized from the keys so two Overviews can share counts yet differ in
-    /// membership. Scale is the largest task count (matching aggregate), irrelevant to these tests.
-    let mkOverview (taskSpecs: (TaskBucketKind * int * string list) list)
-                   (agentSpecs: (AgentGroupKind * int * string list) list) : Overview =
-        let tasks =
-            taskSpecs
-            |> List.map (fun (kind, count, keys) ->
-                { TaskBucket.Kind = kind
-                  Count = count
-                  Members = keys |> List.map (fun k -> mkMember k count) })
-        let agents =
-            agentSpecs
-            |> List.map (fun (kind, count, keys) ->
-                { AgentGroup.Kind = kind
-                  Count = count
-                  Members = keys |> List.map (fun k -> mkMember k 1) })
-        let scale = taskSpecs |> List.map (fun (_, c, _) -> c) |> (fun cs -> if cs.IsEmpty then 0 else List.max cs)
-        { Tasks = tasks; Agents = agents; Scale = scale }
+    /// One activity_events row for session `sid` in worktree `wt`, `minsBefore` minutes before baseTime.
+    /// Only Status/Skill/Ts/SessionId/WorktreePath bear on the agent reconstruction.
+    let evt sid wt (status: CodingToolStatus) skill (minsBefore: float) : ActivityEventRow =
+        { EventId = EventId(Guid.NewGuid().ToString())
+          SessionId = SessionId sid
+          WorktreePath = WorktreePath wt
+          Provider = CopilotCli
+          Kind = "x"
+          Status = status
+          Skill = skill
+          Ts = baseTime.AddMinutes(-minsBefore) }
 
-    let sampleSnapshot ts : OverviewSnapshot =
-        { Timestamp = ts
-          Tasks =
-            [ { Kind = TaskBucketKind.Planned; Count = 3 }
-              { Kind = TaskBucketKind.InProgress; Count = 2 } ]
-          Agents = [ { Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 4 } ] }
+    let tc kind count : TaskCount = { Kind = kind; Count = count }
+    let ac kind count : AgentCount = { Kind = kind; Count = count }
 
-    // --- change-detection ---------------------------------------------------------------------
+    // --- tasksChanged -------------------------------------------------------------------------
 
     [<Test>]
-    member _.``changed is false when the count projection is identical (no line appended)``() =
-        let overview = mkOverview [ TaskBucketKind.Planned, 3, [ "wt1" ] ] [ AgentGroupKind.Waiting, 1, [ "wt2" ] ]
-        let last = OverviewHistory.snapshot (DateTimeOffset(2026, 7, 14, 9, 0, 0, TimeSpan.Zero)) overview
-        Assert.That(OverviewHistory.changed (Some last) overview, Is.False)
+    member _.``tasksChanged is true with no prior projection (baseline)``() =
+        Assert.That(OverviewHistory.tasksChanged None [ tc TaskBucketKind.Planned 1 ], Is.True)
 
     [<Test>]
-    member _.``changed is true when a bucket count differs (one line appended)``() =
-        let previous = mkOverview [ TaskBucketKind.Planned, 3, [ "wt1" ] ] []
-        let last = OverviewHistory.snapshot (DateTimeOffset(2026, 7, 14, 9, 0, 0, TimeSpan.Zero)) previous
-        let next = mkOverview [ TaskBucketKind.Planned, 4, [ "wt1" ] ] []
-        Assert.That(OverviewHistory.changed (Some last) next, Is.True)
+    member _.``tasksChanged is false for an identical projection``() =
+        let p = [ tc TaskBucketKind.Planned 3; tc TaskBucketKind.InProgress 2 ]
+        Assert.That(OverviewHistory.tasksChanged (Some p) p, Is.False)
 
     [<Test>]
-    member _.``changed is true when an agent count differs``() =
-        let previous = mkOverview [] [ AgentGroupKind.Waiting, 1, [ "wt1" ] ]
-        let last = OverviewHistory.snapshot (DateTimeOffset(2026, 7, 14, 9, 0, 0, TimeSpan.Zero)) previous
-        let next = mkOverview [] [ AgentGroupKind.Waiting, 2, [ "wt1" ] ]
-        Assert.That(OverviewHistory.changed (Some last) next, Is.True)
+    member _.``tasksChanged is true when a count differs``() =
+        Assert.That(OverviewHistory.tasksChanged (Some [ tc TaskBucketKind.Planned 3 ]) [ tc TaskBucketKind.Planned 4 ], Is.True)
+
+    // --- deriveAgents -------------------------------------------------------------------------
 
     [<Test>]
-    member _.``changed is false for a membership-only change (same counts, different Members)``() =
-        // Same counts, different member worktrees — the projection drops Members, so no append.
-        let previous =
-            mkOverview
-                [ TaskBucketKind.Planned, 1, [ "wtA" ] ]
-                [ AgentGroupKind.Activity CurrentActivity.Executing, 1, [ "wtA" ] ]
-        let last = OverviewHistory.snapshot (DateTimeOffset(2026, 7, 14, 9, 0, 0, TimeSpan.Zero)) previous
-        let next =
-            mkOverview
-                [ TaskBucketKind.Planned, 1, [ "wtB" ] ]
-                [ AgentGroupKind.Activity CurrentActivity.Executing, 1, [ "wtB" ] ]
-        Assert.That(OverviewHistory.changed (Some last) next, Is.False)
+    member _.``deriveAgents surfaces a working agent, the idle transition, then openness decay``() =
+        let window = TimeSpan.FromHours 72.0
+        // s1: Working (bd-execute) at -60m, goes Idle at -30m, then stops emitting → drops out of the
+        // counts one openWindow after its last event (openness decay), matching the live band.
+        let events =
+            [ evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 60.0
+              evt "s1" "C:/wt/a" CodingToolStatus.Idle None 30.0 ]
+
+        let derived = OverviewHistory.deriveAgents baseTime window events
+
+        let expected =
+            [ baseTime - window, []
+              baseTime.AddMinutes(-60.0), [ ac (AgentGroupKind.Activity CurrentActivity.Executing) 1 ]
+              baseTime.AddMinutes(-30.0), [ ac AgentGroupKind.Idle 1 ]
+              baseTime.AddMinutes(-30.0) + SessionActivity.openWindow, [] ]
+
+        Assert.That(derived, Is.EqualTo expected)
 
     [<Test>]
-    member _.``changed is true when there is no prior snapshot (first baseline record)``() =
-        let overview = mkOverview [ TaskBucketKind.Planned, 1, [ "wt1" ] ] []
-        Assert.That(OverviewHistory.changed None overview, Is.True)
+    member _.``deriveAgents skips heartbeats that do not change status or skill``() =
+        let window = TimeSpan.FromHours 72.0
+        // Three events, all Working/bd-execute (a status-preserving heartbeat cadence): the agent
+        // count never moves, so only the appearance transition is emitted (no per-heartbeat churn).
+        let events =
+            [ evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 40.0
+              evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 39.0
+              evt "s1" "C:/wt/a" CodingToolStatus.Working (Some "bd-execute") 38.0 ]
 
-    // --- JSONL round-trip ---------------------------------------------------------------------
+        let derived = OverviewHistory.deriveAgents baseTime window events
 
-    [<Test>]
-    member _.``serialize then tryParse reproduces the snapshot``() =
-        let original = sampleSnapshot (DateTimeOffset(2026, 7, 14, 9, 30, 0, TimeSpan.Zero))
-        let parsed = OverviewHistory.serialize original |> OverviewHistory.tryParse
-        Assert.That(parsed, Is.EqualTo(Some original))
+        let expected =
+            [ baseTime - window, []
+              baseTime.AddMinutes(-40.0), [ ac (AgentGroupKind.Activity CurrentActivity.Executing) 1 ]
+              baseTime.AddMinutes(-38.0) + SessionActivity.openWindow, [] ]
 
-    [<Test>]
-    member _.``serialize emits a single line (no embedded newline)``() =
-        let line = OverviewHistory.serialize (sampleSnapshot DateTimeOffset.UtcNow)
-        Assert.That(line.Contains("\n"), Is.False)
-        Assert.That(line.Contains("\r"), Is.False)
-
-    // --- window filtering ---------------------------------------------------------------------
+        Assert.That(derived, Is.EqualTo expected)
 
     [<Test>]
-    member _.``parseWindow keeps records within the window and drops older ones``() =
-        let now = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
-        let recent = sampleSnapshot (now.AddHours(-1.0))
-        let old = sampleSnapshot (now.AddHours(-30.0))
-        let lines = [ OverviewHistory.serialize old; OverviewHistory.serialize recent ]
-        let kept = OverviewHistory.parseWindow now (TimeSpan.FromHours 24.0) lines
-        Assert.That(kept, Is.EqualTo([ recent ]))
+    member _.``deriveAgents collapses two sessions in one worktree to the active winner``() =
+        let window = TimeSpan.FromHours 72.0
+        // Same worktree: one Working session, one Idle session, both fresh at -20m. The worktree
+        // collapses (pickActive) to the active winner → one Working agent, not two.
+        let events =
+            [ evt "s1" "C:/wt/a" CodingToolStatus.Idle None 20.0
+              evt "s2" "C:/wt/a" CodingToolStatus.Working (Some "pr") 20.0 ]
+
+        let derived = OverviewHistory.deriveAgents baseTime window events
+        let atAppearance = derived |> List.find (fun (t, _) -> t = baseTime.AddMinutes(-20.0)) |> snd
+
+        Assert.That(atAppearance, Is.EqualTo [ ac (AgentGroupKind.Activity CurrentActivity.Reviewing) 1 ])
 
     [<Test>]
-    member _.``parseWindow keeps a record exactly on the cutoff boundary``() =
-        let now = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
-        let boundary = sampleSnapshot (now.AddHours(-24.0))
-        let kept = OverviewHistory.parseWindow now (TimeSpan.FromHours 24.0) [ OverviewHistory.serialize boundary ]
-        Assert.That(kept, Is.EqualTo([ boundary ]))
+    member _.``deriveAgents returns a single empty baseline when there are no events``() =
+        let derived = OverviewHistory.deriveAgents baseTime (TimeSpan.FromHours 72.0) []
+        Assert.That(derived, Is.EqualTo [ baseTime - TimeSpan.FromHours 72.0, ([]: AgentCount list) ])
 
-    // --- partial-line tolerance ---------------------------------------------------------------
+    // --- mergeHistory -------------------------------------------------------------------------
 
     [<Test>]
-    member _.``parseWindow tolerates a partial trailing line and blank lines``() =
-        let now = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
-        let good = sampleSnapshot (now.AddHours(-2.0))
-        let goodLine = OverviewHistory.serialize good
-        // A crash mid-write leaves a truncated JSON fragment as the last line.
-        let partial = goodLine.Substring(0, goodLine.Length / 2)
-        let lines = [ goodLine; ""; partial ]
-        let kept = OverviewHistory.parseWindow now (TimeSpan.FromHours 24.0) lines
-        Assert.That(kept, Is.EqualTo([ good ]))
+    member _.``mergeHistory carries each dimension forward at every change point``() =
+        let t1 = baseTime.AddMinutes(-30.0)
+        let t2 = baseTime.AddMinutes(-20.0)
+        let t3 = baseTime.AddMinutes(-10.0)
+        let tasksA = [ tc TaskBucketKind.Planned 2 ]
+        let tasksB = [ tc TaskBucketKind.Planned 5 ]
+        let agentsA = [ ac AgentGroupKind.Waiting 1 ]
+
+        let merged = OverviewHistory.mergeHistory [ t1, tasksA; t3, tasksB ] [ t2, agentsA ]
+
+        let expected =
+            [ { Timestamp = t1; Tasks = tasksA; Agents = [] }
+              { Timestamp = t2; Tasks = tasksA; Agents = agentsA }
+              { Timestamp = t3; Tasks = tasksB; Agents = agentsA } ]
+
+        Assert.That(merged, Is.EqualTo expected)
 
     [<Test>]
-    member _.``tryParse returns None for blank and malformed lines``() =
-        Assert.That(OverviewHistory.tryParse "", Is.EqualTo(None))
-        Assert.That(OverviewHistory.tryParse "   ", Is.EqualTo(None))
-        Assert.That(OverviewHistory.tryParse "{not valid json", Is.EqualTo(None))
+    member _.``mergeHistory collapses simultaneous task and agent changes into one snapshot``() =
+        let t = baseTime.AddMinutes(-15.0)
+        let tasks = [ tc TaskBucketKind.Blocked 1 ]
+        let agents = [ ac AgentGroupKind.Idle 2 ]
 
-    // --- end-to-end disk append + read (real FileStream path) ---------------------------------
+        let merged = OverviewHistory.mergeHistory [ t, tasks ] [ t, agents ]
 
-    [<Test>]
-    [<NonParallelizable>]
-    member _.``append then readWindow round-trips through logs/overview-history.jsonl``() =
-        TestUtils.withTempCwd (fun () ->
-            let a = sampleSnapshot (DateTimeOffset.UtcNow.AddHours(-1.0))
-            let b = sampleSnapshot (DateTimeOffset.UtcNow.AddMinutes(-5.0))
-            // append reports write success so the scheduler only advances its accumulator on a
-            // real write (finding F4); a successful append to a writable temp cwd returns true.
-            Assert.That(OverviewHistory.append a, Is.True)
-            Assert.That(OverviewHistory.append b, Is.True)
-            let read = OverviewHistory.readWindow (TimeSpan.FromHours 24.0)
-            Assert.That(read, Is.EqualTo([ a; b ])))
-
-    [<Test>]
-    [<NonParallelizable>]
-    member _.``readWindow returns empty when the history file is absent``() =
-        TestUtils.withTempCwd (fun () ->
-            Assert.That(OverviewHistory.readWindow (TimeSpan.FromHours 24.0), Is.Empty))
+        Assert.That(merged, Is.EqualTo [ { Timestamp = t; Tasks = tasks; Agents = agents } ])

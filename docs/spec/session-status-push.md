@@ -244,6 +244,17 @@ Once the new dashboard matches, switch over by making it the primary instance.
 
 ### Overview-history unification (Agents dimension)
 
+**As built (see `docs/spec/overview-activity-history.md` §"Update (v2)").** The integration ran the
+other way round — `extension-for-reporting` merged into `activity-history` — but the end state matches
+this section, and went one step further: BOTH dimensions now live in `SessionActivityStore` (no
+standalone JSONL). `OverviewHistory` is pure: `deriveAgents` aggregates the **Agents** counts on read
+from `activity_events` (each session's status/skill as of that time, collapsed per worktree by the same
+`CodingToolStatus.collapseByWorktree` the live band uses, with openness/staleness decay modelled),
+while **Tasks** counts (beads) stay snapshot-based in a new `task_snapshots` table. `mergeHistory`
+stitches the two into the unchanged `OverviewSnapshot` shape, so `getOverviewHistory` and
+`OverviewChart.fs` are untouched. The scheduler logs only Tasks on change (the agent half of the
+per-cycle snapshotting is gone); the store's retention prune covers `task_snapshots` too.
+
 Prerequisite: rebased on `activity-history`. Refactor `OverviewHistory.fs` so the **Agents**
 counts in each historical bucket are aggregated on read from `activity_events` (for each
 bucket, each session's status as of that time → active/idle, skill → `Activity.classify`),

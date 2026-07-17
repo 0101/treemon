@@ -96,9 +96,10 @@ type TaskCount = { Kind: TaskBucketKind; Count: int }
 /// for why this is distinct from the `Members`-carrying `AgentGroup`).
 type AgentCount = { Kind: AgentGroupKind; Count: int }
 
-/// One persisted point in the Overview band's history: the moment it was captured plus the count-only
-/// task-bucket and agent-group rolls (Members dropped, Scale re-derived by the view). This is the
-/// per-line shape of `logs/overview-history.jsonl` and what `IWorktreeApi.getOverviewHistory` returns.
+/// One point in the Overview band's history: the moment it was captured plus the count-only task-bucket
+/// and agent-group rolls (Members dropped, Scale re-derived by the view). The unit `IWorktreeApi.
+/// getOverviewHistory` returns — reconciled on read from the push event store (Tasks from
+/// `task_snapshots`, Agents derived from `activity_events`; see Server.OverviewHistory).
 type OverviewSnapshot =
     { Timestamp: DateTimeOffset
       Tasks: TaskCount list
@@ -197,18 +198,43 @@ let agentLabel =
     function
     | AgentGroupKind.Activity activity -> activityLabel activity
     | AgentGroupKind.Waiting -> "Waiting"
+    | AgentGroupKind.Idle -> "Idle"
 
 /// Accent-color modifier class per agent group (same currentColor scheme as activityClass).
 let agentClass =
     function
     | AgentGroupKind.Activity activity -> activityClass activity
     | AgentGroupKind.Waiting -> "activity-waiting"
+    | AgentGroupKind.Idle -> "activity-idle"
 
-/// The activity a WORKING worktree's current skill classifies to. An absent skill classifies to
-/// Working (classify normalizes "" -> Working), matching the spec's "red-dot agent, no recognized
-/// skill -> generic Working group".
-let private activityOf (wt: WorktreeStatus) =
-    Activity.classify (wt.CurrentSkill |> Option.defaultValue "")
+/// The agent group a worktree's collapsed coding-tool status + skill maps to, or None when it is not
+/// a live agent (NoSession — grey, no open session). The SINGLE source of truth for status → agent
+/// group, shared by the live band aggregate and the event-derived history reconstruction
+/// (Server.OverviewHistory.deriveAgents), so the live band and its history bucket a status identically:
+///   Working -> the skill-classified Activity group · WaitingForUser -> Waiting · Idle -> Idle.
+let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGroupKind option =
+    match codingTool with
+    | CodingToolStatus.Working -> Some(AgentGroupKind.Activity(Activity.classify (skill |> Option.defaultValue "")))
+    | CodingToolStatus.WaitingForUser -> Some AgentGroupKind.Waiting
+    | CodingToolStatus.Idle -> Some AgentGroupKind.Idle
+    | CodingToolStatus.NoSession -> None
+
+/// Count agents per group from a set of collapsed per-worktree (status, skill) pairs, in the canonical
+/// agent-group order with empty groups dropped — the count-only agent projection. Shared by the
+/// history reconstruction (Server.OverviewHistory.deriveAgents) so an event-derived Agents snapshot is
+/// bucketed and ordered exactly like `aggregate`'s live one, then reduced to counts by `toCounts`.
+let agentCountsOf (worktrees: (CodingToolStatus * string option) seq) : AgentCount list =
+    let counts =
+        worktrees
+        |> Seq.choose (fun (codingTool, skill) -> agentGroupOf codingTool skill)
+        |> Seq.countBy id
+        |> Map.ofSeq
+
+    agentGroupOrder
+    |> List.choose (fun kind ->
+        match Map.tryFind kind counts with
+        | Some c when c > 0 -> Some { AgentCount.Kind = kind; Count = c }
+        | _ -> None)
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
@@ -287,13 +313,10 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let agentMembersFor kind =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
-            let isMember =
-                match kind with
-                | AgentGroupKind.Activity activity ->
-                    w.CodingTool = CodingToolStatus.Working && activityOf w = activity
-                | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
-                | AgentGroupKind.Idle -> w.CodingTool = CodingToolStatus.Idle
-            if isMember then Some(memberOf repoId repoName w.CodingToolSince w 1) else None)
+            if agentGroupOf w.CodingTool w.CurrentSkill = Some kind then
+                Some(memberOf repoId repoName w.CodingToolSince w 1)
+            else
+                None)
 
     let agents =
         agentGroupOrder

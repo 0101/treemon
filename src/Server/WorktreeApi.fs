@@ -771,4 +771,21 @@ let worktreeApi
           removeRoot = fun path -> async { return removeRootFromConfig path }
           getRoots = fun () -> async { return readWorktreeRootsConfig () }
           // 72h is the widest window the in-band chart offers; the client narrows to 24h itself.
-          getOverviewHistory = fun () -> async { return OverviewHistory.readWindow (TimeSpan.FromHours 72.0) } }
+          // Tasks come from the store's snapshot table; Agents are derived on read from the push event
+          // stream (widen the event query a little before the window start so a session already running
+          // at the left edge is reconstructed there — see OverviewHistory.deriveAgents). Merged into one
+          // stepped OverviewSnapshot stream. No store (demo/fixture) → no history.
+          getOverviewHistory =
+            fun () ->
+                async {
+                    match activityStore with
+                    | None -> return []
+                    | Some store ->
+                        let now = DateTimeOffset.UtcNow
+                        let window = TimeSpan.FromHours 72.0
+                        let start = now - window
+                        let taskSnaps = store.QueryTaskSnapshots(start, now)
+                        let events = store.QueryWindow(start - SessionActivity.openWindow, now)
+                        let agentSnaps = OverviewHistory.deriveAgents now window events
+                        return OverviewHistory.mergeHistory taskSnaps agentSnaps
+                } }

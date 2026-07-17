@@ -39,6 +39,7 @@ type IWorktreeApi =
       addRoot: string -> Async<Result<unit, string>>
       removeRoot: string -> Async<Result<unit, string>>
       getRoots: unit -> Async<string list>
-      /// Records within the last 72h (the widest window the in-band chart offers), parsed from
-      /// logs/overview-history.jsonl. Newest data included; older records ignored on read.
+      /// Records within the last 72h (the widest window the in-band chart offers), reconciled on read
+      /// from the push event store: Tasks from the snapshot table, Agents derived from the event stream.
+      /// Newest data included; older records ignored on read.
       getOverviewHistory: unit -> Async<OverviewData.OverviewSnapshot list> }

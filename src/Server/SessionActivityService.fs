@@ -182,11 +182,11 @@ let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: S
 
 // --- Retention ---------------------------------------------------------------------------------
 
-/// How long the append-only event stream (and any long-dead session rows) is kept before the
-/// retention timer trims it. Well beyond the 2h idle window, so a live session is never pruned,
-/// while still bounding the unbounded activity_events table. The Overview history reads events
-/// within this window (see the overview-history unification task).
-let internal retentionPeriod = TimeSpan.FromDays 14.0
+/// How long the append-only streams (activity_events + task_snapshots) and any long-dead session rows
+/// are kept before the retention timer trims them. Well beyond the 2h idle window, so a live session is
+/// never pruned, while still bounding the unbounded tables. Comfortably covers the 72h Overview-history
+/// window that reads these streams; adjustable as we learn how fast the tables grow.
+let internal retentionPeriod = TimeSpan.FromDays 60.0
 
 /// How often the retention timer fires.
 let internal pruneInterval = TimeSpan.FromHours 1.0
