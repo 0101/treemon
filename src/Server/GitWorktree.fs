@@ -388,10 +388,15 @@ let private worktreeDir (repoRoot: string) (branchName: string) =
 
 /// Builds the git command that forks `branchName` from `baseRef` into a
 /// `tm-`prefixed sibling of the repo root. Returns the command and the new
-/// worktree path.
+/// worktree path. `--no-track` stops git's default `autoSetupMerge` from making
+/// the new branch inherit `baseRef`'s upstream: when `baseRef` is a remote-tracking
+/// ref like `origin/feature`, a tracking branch would point `@{u}` at the base's
+/// remote branch, and Treemon — which keys PR detection off `@{u}` — would then
+/// show the base branch's PR on the new worktree until it is first pushed. A freshly
+/// forked branch has no remote of its own yet, so it correctly starts with no upstream.
 let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: string) =
     let worktreePath = worktreeDir repoRoot branchName
-    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" \"{baseRef}\""
+    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" --no-track \"{worktreePath}\" \"{baseRef}\""
     "git", arguments, worktreePath
 
 let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
@@ -400,9 +405,11 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
     else
         None
 
-/// Generous timeout for the post-fork setup hook — it runs `npm install` and
-/// `bd init`, which can far exceed the short default used for quick git probes.
-let private postForkTimeoutMs = 10 * 60 * 1000
+/// Timeout for the post-fork setup hook — it runs `npm install` and `bd init`,
+/// which exceed the short default used for quick git probes, but a run dragging
+/// past this cap is treated as a failure (surfaced on the card) rather than
+/// blocking the auto-launch indefinitely.
+let private postForkTimeoutMs = 5 * 60 * 1000
 
 /// Card label for the post-fork setup hook. Single source of truth for the
 /// OS-specific script name so file resolution always tracks the hook.
@@ -418,10 +425,11 @@ let postForkScriptPath (repoRoot: string) : string option =
 
 /// Runs the optional `post-fork` setup script inside a freshly created worktree,
 /// passing the worktree path, the source repo root, the base ref and the branch
-/// name. Returns Ok when the script succeeds or is absent, and Error with the
-/// process failure when it exits non-zero — the worktree already exists, so a
-/// failure is never fatal, only surfaced on the card.
-let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
+/// name, capped at `timeoutMs` (a run that exceeds it is killed and returns a
+/// timeout Error). Returns Ok when the script succeeds or is absent, and Error
+/// with the process failure when it exits non-zero — the worktree already
+/// exists, so a failure is never fatal, only surfaced on the card.
+let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
     async {
         match postForkScriptPath repoRoot with
         | None -> return Ok ()
@@ -432,9 +440,14 @@ let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (bra
                 else
                     "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
 
-            let! result = ProcessRunner.runResultWithTimeout postForkTimeoutMs "PostFork" fileName arguments (Some worktreePath)
+            let! result = ProcessRunner.runResultWithTimeout timeoutMs "PostFork" fileName arguments (Some worktreePath)
             return result |> Result.map ignore
     }
+
+/// Runs the post-fork hook with the production 5-minute cap (see
+/// `runPostForkWithTimeout`).
+let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
+    runPostForkWithTimeout postForkTimeoutMs repoRoot worktreePath baseRef branchName
 
 type ForkResult =
     { WorktreePath: string
