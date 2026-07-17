@@ -322,3 +322,49 @@ type PickActiveTests() =
             [ statusAt SessionLevelStatus.Idle (Some "stale-skill"), ts "2026-03-01T11:00:00Z"
               winner, ts "2026-03-01T10:30:00Z" ]
         Assert.That(pickActive sessions, Is.EqualTo(Some winner))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DebounceIdleTests() =
+
+    let now = ts "2026-03-01T12:00:00Z"
+    let grace = idleDebounceWindow
+
+    [<Test>]
+    member _.``Idle within the grace window is held as Working``() =
+        // The inter-turn blink: just went Idle, so hold the dot red instead of flickering blue.
+        let idleSince = now - TimeSpan.FromSeconds 3.0
+        Assert.That(debounceIdle grace now (Some idleSince) Idle, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``Idle past the grace window surfaces as Idle``() =
+        let idleSince = now - grace - TimeSpan.FromSeconds 1.0
+        Assert.That(debounceIdle grace now (Some idleSince) Idle, Is.EqualTo(Idle))
+
+    [<Test>]
+    member _.``Idle exactly at the grace boundary surfaces as Idle``() =
+        // now - since = grace is NOT < grace, so the hold has already expired.
+        let idleSince = now - grace
+        Assert.That(debounceIdle grace now (Some idleSince) Idle, Is.EqualTo(Idle))
+
+    [<Test>]
+    member _.``Idle with no stamp falls through to the real Idle status``() =
+        Assert.That(debounceIdle grace now None Idle, Is.EqualTo(Idle))
+
+    [<Test>]
+    member _.``Working within the grace window passes through unheld``() =
+        // A live active session is never altered; the debounce only touches the Idle edge.
+        let recent = now - TimeSpan.FromSeconds 1.0
+        Assert.That(debounceIdle grace now (Some recent) Working, Is.EqualTo(Working))
+
+    [<Test>]
+    member _.``WaitingForUser passes through unchanged even with a fresh stamp``() =
+        let recent = now - TimeSpan.FromSeconds 1.0
+        Assert.That(debounceIdle grace now (Some recent) WaitingForUser, Is.EqualTo(WaitingForUser))
+
+    [<Test>]
+    member _.``NoSession passes through unchanged even with a fresh stamp``() =
+        let recent = now - TimeSpan.FromSeconds 1.0
+        Assert.That(debounceIdle grace now (Some recent) NoSession, Is.EqualTo(NoSession))

@@ -152,6 +152,34 @@ let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: Sessi
     else
         s
 
+// --- Idle-display debounce --------------------------------------------------------------------
+
+/// How long a worktree must stay Idle before the dot is allowed to turn blue. Between turns of one
+/// continuous task the agent emits `turn_ended` (→ Idle) then the next `turn_started` (→ Working)
+/// with a ~1–2s gap; because the dashboard polls ~every second, a poll lands in that gap and
+/// flickers the dot blue and back. Holding Working for this window swallows the inter-turn blink
+/// while still surfacing a genuine idle a moment after it settles.
+let idleDebounceWindow = TimeSpan.FromSeconds 10.0
+
+/// Display-smoothing for the Working→Idle edge, applied on the card read path. Hold the DISPLAYED
+/// status at Working until the worktree has been Idle for at least `graceWindow`, so a brief
+/// inter-turn idle never surfaces as a blue flicker. Only the Idle edge is debounced —
+/// Working / WaitingForUser / NoSession pass through unchanged (WaitingForUser can't flap to Idle:
+/// the extension suppresses `went_idle` while a prompt is pending). `idleSince` is the frozen
+/// "entered Idle" stamp (`CodingToolSinceByWorktree`), which the scheduler resets on every new
+/// Working turn — so each turn restarts the window. With no stamp there is no reference instant, so
+/// the real Idle status falls through. The classified activity (Reviewing/Investigating/…) is
+/// unaffected: it is derived from the retained skill, so a held-Working worktree keeps its group.
+let debounceIdle
+    (graceWindow: TimeSpan)
+    (now: DateTimeOffset)
+    (idleSince: DateTimeOffset option)
+    (status: CodingToolStatus)
+    : CodingToolStatus =
+    match status, idleSince with
+    | Idle, Some since when now - since < graceWindow -> Working
+    | _ -> status
+
 // --- Multi-session collapse -------------------------------------------------------------------
 
 /// Collapse a worktree's live sessions to one winning record: drop Idle, then the most-recent (by
