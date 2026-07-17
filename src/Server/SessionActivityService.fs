@@ -263,6 +263,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
             loop Map.empty)
 
+    // Retention Timer lifecycle field: created lazily in Start() (after construction, once the store
+    // is seeded) and released in Dispose(); the handle must survive between those two calls, so it
+    // cannot be an immutable let.
     let mutable pruneTimer: Timer option = None
 
     let prune _ =
@@ -319,6 +322,6 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
     interface IDisposable with
         member _.Dispose() =
-            pruneTimer |> Option.iter (fun t -> t.Dispose())
+            pruneTimer |> Option.iter _.Dispose()
             (mailbox :> IDisposable).Dispose()
             (store :> IDisposable).Dispose()

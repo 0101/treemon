@@ -558,13 +558,17 @@ function Install-Skill {
     }
 }
 
+function Install-CopilotExtension([string]$SrcDir, [string]$DestName, [string]$FriendlyName) {
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Copy-Item (Join-Path $SrcDir "extension.mjs") $dest -Force
+    Copy-Item (Join-Path $SrcDir "package.json") $dest -Force
+    Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
+}
+
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "canvas-bridge"
-    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
-    Copy-Item (Join-Path $src "package.json") $dest -Force
-    Write-Host "Canvas bridge extension installed to $dest" -ForegroundColor Green
+    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension"
 
     # Install canvas authoring skill
     $skillSource = Join-Path $src "skill" "SKILL.md"
@@ -598,11 +602,7 @@ function Install-ReportingExtension {
     # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
     # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
     $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "treemon-reporting"
-    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
-    Copy-Item (Join-Path $src "package.json") $dest -Force
-    Write-Host "Reporting extension installed to $dest" -ForegroundColor Green
+    Install-CopilotExtension $src "treemon-reporting" "Reporting extension"
 }
 
 function Test-WorktreeRootPaths([string[]]$Roots) {

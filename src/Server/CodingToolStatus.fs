@@ -68,7 +68,7 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     | CreatePr -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
     | CanvasSession prompt -> prompt
 
-// --- Push-model live-state sourcing -----------------------------------------------------------
+// Push-model live-state sourcing.
 //
 // The card's coding-tool fields come from the push model's live per-session state, not the
 // log-parsing detectors. A worktree's live sessions are collapsed via `fromPushSessions`, which now

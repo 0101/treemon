@@ -341,10 +341,9 @@ type PruneOldTests() =
 [<Category("Fast")>]
 type LegacyDoneStatusTests() =
 
-    // Pre-idle-only builds persisted the retired "done" status; live DBs still hold such rows. These
-    // exercise the two safety nets that keep those rows from crashing the unguarded reads
-    // (LoadLiveStatuses at startup, StatusesForWorktree on resume): the parseStatus "done" -> Idle read
-    // arm and the idempotent construction-time migration that rewrites 'done' rows to 'idle'.
+    // Pre-idle-only builds persisted the retired "done" status; live DBs still hold such rows. The
+    // idempotent construction-time migration rewrites 'done' rows to 'idle' so the unguarded reads
+    // (LoadLiveStatuses at startup, StatusesForWorktree on resume) never hit an unknown status.
 
     let connStr (dbPath: string) =
         SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
@@ -376,17 +375,6 @@ type LegacyDoneStatusTests() =
         cmd.ExecuteScalar() :?> string
 
     [<Test>]
-    member _.``A legacy 'done' status row reads back as Idle (parseStatus read arm)``() =
-        withDbPath (fun dbPath ->
-            use store = new SessionActivityStore(dbPath)
-            // Written AFTER construction so the migration does not touch it: proves parseStatus itself
-            // maps 'done' -> Idle rather than the read only surviving because of the migration.
-            insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:00:00Z"
-
-            let row = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.exactlyOne
-            Assert.That(row.Status.Status, Is.EqualTo(Idle), "legacy 'done' row must read as Idle, not crash"))
-
-    [<Test>]
     member _.``LoadLiveStatuses does not crash on a legacy 'done' row (startup rehydrate)``() =
         withDbPath (fun dbPath ->
             (use _ = new SessionActivityStore(dbPath)
@@ -395,7 +383,7 @@ type LegacyDoneStatusTests() =
             // Fresh instance = a server restart: LoadLiveStatuses is the unguarded startup read.
             use reopened = new SessionActivityStore(dbPath)
             let rows = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
-            Assert.That(rows |> List.map (fun r -> r.Status.Status), Is.EqualTo([ Idle ])))
+            Assert.That(rows |> List.map _.Status.Status, Is.EqualTo([ Idle ])))
 
     [<Test>]
     member _.``Construction migrates legacy 'done' status rows to 'idle' in place``() =

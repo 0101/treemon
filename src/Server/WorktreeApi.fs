@@ -679,9 +679,15 @@ let worktreeApi
                       // the resume identity survives a restart.
                       let sessions =
                           activityStore
-                          |> Option.map (fun s -> s.StatusesForWorktree(PathUtils.toWorktreePath path))
+                          |> Option.map _.StatusesForWorktree(PathUtils.toWorktreePath path)
                           |> Option.defaultValue []
-                      let sessionId = CodingToolStatus.getLastSessionId sessions
+                      // Only resume by stored ID when it belongs to the configured provider. Push
+                      // ingestion is Copilot-only, so a Claude-configured worktree must NOT reuse a
+                      // Copilot session ID (it would resume the wrong context) — fall back to --continue.
+                      let sessionId =
+                          match provider |> Option.defaultValue CodingToolProvider.Default with
+                          | CodingToolProvider.Copilot -> CodingToolStatus.getLastSessionId sessions
+                          | CodingToolProvider.Claude -> None
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })

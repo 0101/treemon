@@ -137,7 +137,7 @@ let internal evictStaleStatuses
     if Map.isEmpty statuses then
         statuses
     else
-        let newest = statuses |> Seq.map (fun kv -> kv.Value.LastSeen) |> Seq.max
+        let newest = statuses |> Seq.map _.Value.LastSeen |> Seq.max
         let cutoff = newest - SessionActivity.idleWindow
         statuses |> Map.filter (fun _ s -> s.LastSeen >= cutoff)
 
