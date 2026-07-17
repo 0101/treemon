@@ -161,6 +161,18 @@ let internal stampIdleSince
     | WaitingForUser
     | NoSession -> idleSince |> Map.remove worktreePath
 
+/// The status-overview "Agent \u21BB" row (category `CodingToolRefresh`). Under the push model there is
+/// no poll to log, so the row would sit permanently `pending`; instead we mark the latest extension
+/// push here — which worktree last reported and when — as a green success, so a growing "X ago"
+/// signals that pushes have stopped. `LastSeen` is the push instant; duration is meaningless for a
+/// push (no server-side work) so it stays blank.
+let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : CardEvent =
+    { Source = "CodingToolRefresh"
+      Message = WorktreePath.value stored.WorktreePath
+      Timestamp = stored.LastSeen
+      Status = Some StepStatus.Succeeded
+      Duration = None }
+
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList(repoId, worktrees) ->
@@ -278,6 +290,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
         { state with
             SessionStatuses = newStatuses
+            LatestByCategory = state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent stored)
             CodingToolSinceByWorktree =
                 stampIdleSince stored.LastSeen worktreePath collapsed.Status state.CodingToolSinceByWorktree }
 
@@ -307,8 +320,18 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                     stampIdleSince newestSeen worktreePath collapsed.Status acc)
                 state.CodingToolSinceByWorktree
 
+        // Prime the "Agent" push row from the newest seeded session so it reflects the last known push
+        // immediately after restart instead of reverting to `pending` until the first live heartbeat.
+        let latestByCategory =
+            match seeded |> Map.toList |> List.map snd with
+            | [] -> state.LatestByCategory
+            | sessions ->
+                let newest = sessions |> List.maxBy _.LastSeen
+                state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent newest)
+
         { state with
             SessionStatuses = seeded
+            LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
 
 let createAgent () =

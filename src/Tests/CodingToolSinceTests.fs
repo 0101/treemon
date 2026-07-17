@@ -239,3 +239,80 @@ type SeedSessionStatusesTests() =
             Assert.That(ids, Is.EqualTo(Set.ofList [ "stale"; "current" ]))
         }
         |> Async.RunSynchronously
+
+
+// The status-overview "Agent" row (category CodingToolRefresh) has no poll under the push model, so
+// without this it sits permanently `pending`. Every accepted extension push must mark the row with the
+// pushing worktree + push instant (green success), and a restart seed must prime it from the newest
+// known session so it isn't `pending` until the first live heartbeat.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CodingToolPushRowTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+    let pushRow (state: DashboardState) = state.LatestByCategory |> Map.tryFind "CodingToolRefresh"
+
+    [<Test>]
+    member _.``A push stamps the Agent row with the worktree and push time as a success``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Working t0))
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            match pushRow state with
+            | Some evt ->
+                Assert.That(evt.Message, Is.EqualTo wtA, "row names the pushing worktree")
+                Assert.That(evt.Timestamp, Is.EqualTo t0, "row timestamped at the push instant")
+                Assert.That(evt.Status, Is.EqualTo(Some StepStatus.Succeeded))
+                Assert.That(evt.Duration, Is.EqualTo None, "a push has no poll duration")
+            | None -> Assert.Fail "expected a CodingToolRefresh row after a push"
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``The Agent row advances to the most recent push (any worktree)``() =
+        async {
+            let agent = createAgent ()
+            let wtB = "C:/wt/b"
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA Idle t0))
+            agent.Post(UpdateSessionStatus(storedWt "s2" wtB Working (t0 + TimeSpan.FromSeconds 30.0)))
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            match pushRow state with
+            | Some evt ->
+                Assert.That(evt.Message, Is.EqualTo wtB)
+                Assert.That(evt.Timestamp, Is.EqualTo(t0 + TimeSpan.FromSeconds 30.0))
+            | None -> Assert.Fail "expected a CodingToolRefresh row"
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Restart seeding primes the Agent row from the newest known session``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(
+                SeedSessionStatuses
+                    [ storedWt "stale" wtA Idle t0
+                      storedWt "current" wtA Idle (t0 + TimeSpan.FromMinutes 90.0) ])
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            match pushRow state with
+            | Some evt ->
+                Assert.That(evt.Message, Is.EqualTo wtA)
+                Assert.That(evt.Timestamp, Is.EqualTo(t0 + TimeSpan.FromMinutes 90.0), "newest session, not oldest replayed")
+            | None -> Assert.Fail "expected the Agent row primed on restart seed"
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Seeding an empty set leaves the Agent row untouched (still pending)``() =
+        async {
+            let agent = createAgent ()
+            agent.Post(SeedSessionStatuses [])
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(pushRow state, Is.EqualTo None, "no sessions → no push row, row stays pending")
+        }
+        |> Async.RunSynchronously

@@ -330,7 +330,7 @@ let private baseLatestByCategory: Map<string, CardEvent> =
     [ "WorktreeList", evt "WorktreeList" $"{azDoEvt}" 18 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.3))
       "GitRefresh", evt "GitRefresh" $"{azDoEvt}/feature-retry (3 files)" 10 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.8))
       "BeadsRefresh", evt "BeadsRefresh" $"{azDoEvt}/feature-retry" 6 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.4))
-      "CodingToolRefresh", evt "CodingToolRefresh" "4 agents checked" 4 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.2))
+      "CodingToolRefresh", evt "CodingToolRefresh" $"{azDoEvt}/feature-retry" 4 (Some StepStatus.Succeeded) None
       "PrFetch", evt "PrFetch" $"{azDoEvt}" 8 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.8))
       "GitFetch", evt "GitFetch" $"{azDoEvt} (2 new commits)" 12 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 2.1)) ]
     |> Map.ofList
