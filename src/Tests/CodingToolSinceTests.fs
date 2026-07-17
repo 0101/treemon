@@ -113,6 +113,124 @@ type CodingToolSinceByWorktreeTests() =
         |> Async.RunSynchronously
 
 
+// The display debounce (SessionActivity.debounceIdle, applied on the card read path) measures its
+// Working→Idle hold from the SAME CodingToolSinceByWorktree stamp the scheduler freezes above. The
+// DebounceIdleTests unit tests feed idleSince directly; these drive the real UpdateSessionStatus path
+// so a change to the scheduler's freeze/reset policy surfaces here instead of silently breaking the dot.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DebounceIdleSchedulerIntegrationTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+    let sinceFor (state: DashboardState) = state.CodingToolSinceByWorktree |> Map.tryFind wtA
+    let displayAt (now: DateTimeOffset) (state: DashboardState) =
+        debounceIdle idleDebounceWindow now (sinceFor state) Idle
+
+    [<Test>]
+    member _.``The scheduler's frozen stamp drives debounceIdle: held Working within the window, Idle after, measured from the transition not the heartbeat``() =
+        async {
+            let agent = createAgent ()
+            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
+            let! entered = agent.PostAndAsyncReply(GetState)
+
+            // An idle heartbeat 60s later advances last_seen, but the stamp stays frozen at idledAt.
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle (idledAt + TimeSpan.FromSeconds 60.0)))
+            let! afterHeartbeat = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(
+                displayAt (idledAt + TimeSpan.FromSeconds 3.0) entered,
+                Is.EqualTo Working,
+                "held Working within the grace window")
+            Assert.That(
+                displayAt (idledAt + idleDebounceWindow + TimeSpan.FromSeconds 1.0) entered,
+                Is.EqualTo Idle,
+                "real Idle surfaces once the window elapses")
+            // Measured from the FROZEN transition, not the advancing heartbeat: a read just after the
+            // heartbeat but well past (transition + window) still shows Idle. If the stamp tracked
+            // last_seen, this would wrongly re-hold Working.
+            Assert.That(
+                displayAt (idledAt + TimeSpan.FromSeconds 65.0) afterHeartbeat,
+                Is.EqualTo Idle,
+                "hold is measured from the transition, not the idle heartbeat")
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``A new Working turn clears the stamp so debounceIdle stops holding``() =
+        async {
+            let agent = createAgent ()
+            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working (idledAt + TimeSpan.FromSeconds 5.0)))
+            let! resumed = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(sinceFor resumed, Is.EqualTo None, "Working clears the stamp")
+            Assert.That(
+                displayAt (idledAt + TimeSpan.FromSeconds 6.0) resumed,
+                Is.EqualTo Idle,
+                "no stamp after Working → a later real Idle falls straight through")
+        }
+        |> Async.RunSynchronously
+
+
+// WorktreeApi.assembleFromState is where the frozen stamp + debounceIdle are actually WIRED onto the
+// card (WorktreeStatus.CodingTool / .CodingToolSince). The DebounceIdleSchedulerIntegrationTests above
+// call debounceIdle directly with a hard-coded Idle, so they'd still pass if that block were deleted
+// or wired to the wrong status/stamp. This seeds the real scheduler state, collapses it exactly as the
+// endpoint does, and asserts on the returned WorktreeStatus — held Working (no chip) inside the window,
+// real Idle (with the frozen chip) after it — so a mis-wire of the assembly surfaces here.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AssembleFromStateDebounceTests() =
+
+    let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+
+    // Assemble the card for wtA at `displayNow`, deriving pushByWorktree from the scheduler state the
+    // same way the getWorktrees endpoint does (collapseByWorktree over the live session statuses).
+    let assembleAt (displayNow: DateTimeOffset) (state: DashboardState) =
+        let pushByWorktree =
+            Server.CodingToolStatus.collapseByWorktree displayNow (state.SessionStatuses |> Map.values)
+
+        Server.WorktreeApi.assembleFromState
+            displayNow
+            Set.empty
+            Set.empty
+            false
+            pushByWorktree
+            state.CodingToolSinceByWorktree
+            PerRepoState.empty
+            (makeWorktree wtA "feat")
+
+    [<Test>]
+    member _.``assembleFromState holds CodingTool Working (no chip) inside the window and surfaces Idle (with the frozen chip) after``() =
+        async {
+            let agent = createAgent ()
+            let idledAt = t0 + TimeSpan.FromSeconds 30.0
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Working t0))
+            agent.Post(UpdateSessionStatus(storedWt "s1" wtA SessionLevelStatus.Idle idledAt))
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            let held = assembleAt (idledAt + TimeSpan.FromSeconds 3.0) state
+            let settled = assembleAt (idledAt + idleDebounceWindow + TimeSpan.FromSeconds 1.0) state
+
+            Assert.That(held.CodingTool, Is.EqualTo Working, "card holds Working within the debounce window")
+            Assert.That(held.CodingToolSince, Is.EqualTo None, "no time-since-idle chip while the dot is held Working")
+            Assert.That(settled.CodingTool, Is.EqualTo Idle, "real Idle surfaces on the card once the window elapses")
+            Assert.That(
+                settled.CodingToolSince,
+                Is.EqualTo(Some idledAt),
+                "chip surfaces the frozen transition once Idle is displayed")
+        }
+        |> Async.RunSynchronously
+
+
 // F10/C-13: CodingToolSinceByWorktree lives on DashboardState (GLOBAL), so — unlike SessionStatuses
 // (evicted) or the per-repo data (removeWorktreeData) — it must be pruned when a worktree leaves.
 // Otherwise a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince freezes
