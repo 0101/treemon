@@ -136,8 +136,7 @@ let isBranchSyncing (events: CardEvent list) =
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
-    | Some Claude -> "Claude"
-    | Some Copilot -> "Copilot"
+    | Some CopilotCli -> "Copilot"
     | None -> "Coding tool"
 
 let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =

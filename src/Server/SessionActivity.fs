@@ -25,10 +25,6 @@ type EventId = EventId of string
 module EventId =
     let value (EventId id) = id
 
-/// The push source of a report. Extensible — the Copilot CLI extension is the only producer today.
-type PushProvider =
-    | CopilotCli
-
 /// A message's text plus the time it occurred. Raw (untruncated) text, exactly as pushed.
 type Message = { Text: string; At: DateTimeOffset }
 
@@ -56,7 +52,7 @@ type SessionEvent =
 type SessionActivityReport =
     { SessionId: SessionId
       WorktreePath: WorktreePath
-      Provider: PushProvider
+      Provider: CodingToolProvider
       EventId: EventId
       OccurredAt: DateTimeOffset
       Event: SessionEvent }

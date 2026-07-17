@@ -21,10 +21,9 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
             match doc.RootElement.TryGetProperty("codingTool") with
             | true, elem ->
                 match elem.GetString().ToLowerInvariant() with
-                | "claude" -> Some Claude
-                | "copilot" -> Some Copilot
+                | "copilot" -> Some CopilotCli
                 | other ->
-                    Log.log "CodingTool" $"Unknown codingTool value '{other}' in {configPath}"
+                    Log.log "CodingTool" $"Unknown/unsupported codingTool value '{other}' in {configPath} — using the default"
                     None
             | false, _ -> None
         with ex ->
@@ -49,14 +48,13 @@ let configureTestsPrompt (repoRoot: string) =
     + $"IMPORTANT: The config file MUST be at '{repoRoot}\\.treemon.json', not in the current directory. "
     + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
 
-/// Wraps an arbitrary argument in a provider-aware skill invocation.
-/// Copilot uses the natural-language "use {skill} skill with {arg}" form;
-/// Claude uses the "/{skill} {arg}" slash-command form. Shared by actionPrompt
-/// (FixPr/FixBuild) and the worktree-create auto-launch flow so both stay byte-identical.
+/// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
+/// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
+/// the worktree-create auto-launch flow so both stay byte-identical. Provider-matched so a future
+/// provider must supply its own form.
 let skillInvocation (provider: CodingToolProvider option) (skill: string) (arg: string) =
     match provider |> Option.defaultValue CodingToolProvider.Default with
-    | Copilot -> $"use {skill} skill with {arg}"
-    | Claude -> $"/{skill} {arg}"
+    | CopilotCli -> $"use {skill} skill with {arg}"
 
 let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     match action with
@@ -93,12 +91,6 @@ let noSessionPushResult: CodingToolResult =
       LastAssistantMessage = None
       LastMessageProvider = None
       LastActivity = None }
-
-/// The push model has a single provider today (Copilot CLI); `pickActive` collapses to a bare
-/// `SessionStatus` (provider-free), so an active push session always reads as Copilot on the card.
-let private pushCardProvider (p: PushProvider) : CodingToolProvider =
-    match p with
-    | CopilotCli -> Copilot
 
 /// The last assistant message as the card's `CardEvent` (the exact shape the detectors produced): a
 /// single line truncated to 80 chars, tagged with the push provider's source string.
@@ -169,14 +161,15 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
             None
 
     { Status = status
-      Provider = footer |> Option.map (fun _ -> pushCardProvider CopilotCli)
+      // Single push provider today (Copilot CLI); a future provider threads its own value here.
+      Provider = footer |> Option.map (fun _ -> CopilotCli)
       CurrentSkill = footer |> Option.bind _.Skill
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
         |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastAssistantMessage = footer |> Option.bind _.LastAssistantMessage |> Option.map toLastAssistantEvent
-      LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> pushCardProvider CopilotCli)
+      LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
       LastActivity = lastActivity }
 
 /// Group a flat set of live push session-statuses by worktree path and collapse each group into the

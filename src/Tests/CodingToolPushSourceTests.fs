@@ -125,7 +125,7 @@ type FromPushSessionsTests() =
         let result = fromPushSessions now [ older; newer ]
 
         Assert.That(result.Status, Is.EqualTo WaitingForUser)
-        Assert.That(result.Provider, Is.EqualTo(Some Copilot))
+        Assert.That(result.Provider, Is.EqualTo(Some CopilotCli))
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
         Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "the auth module"))
         Assert.That(result.LastAssistantMessage |> Option.map _.Message, Is.EqualTo(Some "which file?"))

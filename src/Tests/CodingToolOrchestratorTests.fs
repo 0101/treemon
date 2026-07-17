@@ -29,12 +29,12 @@ type ReadConfiguredProviderTests() =
         Assert.That(result, Is.EqualTo(None))
 
     [<Test>]
-    member _.``Returns Claude when codingTool is claude``() =
+    member _.``Returns None when codingTool is claude (no longer supported)``() =
         File.WriteAllText(Path.Combine(tempDir, ".treemon.json"), """{"codingTool": "claude"}""")
 
         let result = readConfiguredProvider tempDir
 
-        Assert.That(result, Is.EqualTo(Some Claude))
+        Assert.That(result, Is.EqualTo(None))
 
     [<Test>]
     member _.``Returns Copilot when codingTool is copilot``() =
@@ -42,7 +42,7 @@ type ReadConfiguredProviderTests() =
 
         let result = readConfiguredProvider tempDir
 
-        Assert.That(result, Is.EqualTo(Some Copilot))
+        Assert.That(result, Is.EqualTo(Some CopilotCli))
 
     [<Test>]
     member _.``Returns None for unknown codingTool value``() =
@@ -66,7 +66,7 @@ type ReadConfiguredProviderTests() =
 
         let result = readConfiguredProvider tempDir
 
-        Assert.That(result, Is.EqualTo(Some Copilot))
+        Assert.That(result, Is.EqualTo(Some CopilotCli))
 
     [<Test>]
     member _.``Returns None for invalid JSON``() =

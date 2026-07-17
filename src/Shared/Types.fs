@@ -55,10 +55,12 @@ type CodingToolStatus =
     | Idle
     | NoSession
 
+/// The coding tool driving a worktree — its launcher, prompt format, and push-status source. A DU of
+/// one today: only the Copilot CLI can push its live status. Adding a provider (e.g. a future GitHub
+/// App) is a new case; the compiler then flags every provider-specific branch that must handle it.
 type CodingToolProvider =
-    | Claude
-    | Copilot
-    static member Default = Copilot
+    | CopilotCli
+    static member Default = CopilotCli
 
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for

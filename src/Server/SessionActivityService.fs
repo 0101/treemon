@@ -43,7 +43,7 @@ type SessionActivityRequest =
 
 // --- DTO → domain (pure, HTTP-free so it is unit-testable) -------------------------------------
 
-let private parseProvider (s: string) : Result<PushProvider, string> =
+let private parseProvider (s: string) : Result<CodingToolProvider, string> =
     match s with
     | "copilot_cli" -> Ok CopilotCli
     | other -> Error $"unknown provider '{other}'"

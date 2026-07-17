@@ -28,7 +28,7 @@ open Server.SessionActivity
 type StoredStatus =
     { SessionId: SessionId
       WorktreePath: WorktreePath
-      Provider: PushProvider
+      Provider: CodingToolProvider
       Status: SessionStatus
       UpdatedAt: DateTimeOffset
       LastSeen: DateTimeOffset }
@@ -40,7 +40,7 @@ type ActivityEventRow =
     { EventId: EventId
       SessionId: SessionId
       WorktreePath: WorktreePath
-      Provider: PushProvider
+      Provider: CodingToolProvider
       Kind: string
       Status: SessionLevelStatus
       Skill: string option
