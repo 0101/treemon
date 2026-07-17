@@ -155,7 +155,7 @@ let private wtAzDoMain: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
       Planning = BeadsPlanning.zero
-      CodingTool = Idle
+      CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
       CurrentSkill = None
@@ -178,7 +178,7 @@ let private wtRetryLogic: WorktreeStatus =
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
       CurrentSkill = None
       LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
@@ -200,7 +200,7 @@ let private wtConfigLoading: WorktreeStatus =
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
       Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
       CurrentSkill = None
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
@@ -221,8 +221,8 @@ let private wtAuthMiddleware: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
-      CodingTool = Done
-      CodingToolProvider = Some Copilot
+      CodingTool = Idle
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
       CurrentSkill = None
       LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
@@ -243,8 +243,8 @@ let private wtArchived: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddHours(-48.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
       Planning = BeadsPlanning.zero
-      CodingTool = Done
-      CodingToolProvider = Some Claude
+      CodingTool = Idle
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
       CurrentSkill = None
       LastUserMessage = None
@@ -265,7 +265,7 @@ let private wtGithubMain: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-15.0)
       Beads = BeadsSummary.zero
       Planning = BeadsPlanning.zero
-      CodingTool = Idle
+      CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
       CurrentSkill = None
@@ -288,7 +288,7 @@ let private wtStreaming: WorktreeStatus =
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
       Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Copilot
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
       CurrentSkill = None
       LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
@@ -309,8 +309,8 @@ let private wtCsvFix: WorktreeStatus =
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       Planning = BeadsPlanning.zero
-      CodingTool = Done
-      CodingToolProvider = Some Copilot
+      CodingTool = Idle
+      CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
       CurrentSkill = None
       LastUserMessage = None
@@ -330,7 +330,7 @@ let private baseLatestByCategory: Map<string, CardEvent> =
     [ "WorktreeList", evt "WorktreeList" $"{azDoEvt}" 18 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.3))
       "GitRefresh", evt "GitRefresh" $"{azDoEvt}/feature-retry (3 files)" 10 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.8))
       "BeadsRefresh", evt "BeadsRefresh" $"{azDoEvt}/feature-retry" 6 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.4))
-      "CodingToolRefresh", evt "CodingToolRefresh" "4 agents checked" 4 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.2))
+      "CodingToolRefresh", evt "CodingToolRefresh" $"{azDoEvt}/feature-retry" 4 (Some StepStatus.Succeeded) None
       "PrFetch", evt "PrFetch" $"{azDoEvt}" 8 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.8))
       "GitFetch", evt "GitFetch" $"{azDoEvt} (2 new commits)" 12 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 2.1)) ]
     |> Map.ofList
@@ -391,13 +391,13 @@ let private baseFixture: FixtureData =
 // ============================================================
 // FRAME SEQUENCE — 12 frames, 24s total
 //
-// Starting state: 3 Working (retry, config, streaming) + 1 Done (auth)
+// Starting state: 3 Working (retry, config, streaming) + 1 Idle (auth)
 // Each frame changes ONE card. Distributed over time.
 //
 // Story arcs:
 //   retry-logic: Building → Failed → fix → Rebuilding → Succeeded
 //   config:      working steadily, commits accumulate
-//   auth:        Done → user prompt → Working → Copilot events → Done (loops)
+//   auth:        Idle → user prompt → Working → Copilot events → Idle (loops)
 //   streaming:   steady background work
 // ============================================================
 
@@ -455,10 +455,10 @@ let private f7 =
             WorkMetrics = Some { CommitCount = 13; LinesAdded = 612; LinesRemoved = 131 } })
     |> withCpu 68.0 16800
 
-// F8 (14-16s): Auth — Copilot finishes, back to Done (matches base)
+// F8 (14-16s): Auth — Copilot finishes, back to Idle (matches base)
 let private f8 =
     f7
-    |> withAuth (fun wt -> { wt with CodingTool = Done; CodingToolSince = Some baseTimestamp })
+    |> withAuth (fun wt -> { wt with CodingTool = Idle; CodingToolSince = Some baseTimestamp })
     |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800

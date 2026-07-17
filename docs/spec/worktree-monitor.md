@@ -47,7 +47,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
-- Coding tool status dot (Working / WaitingForUser / Done / Idle) with tooltip showing provider name
+- Coding tool status dot (Working / WaitingForUser / Idle / NoSession) with tooltip showing provider name
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
@@ -68,73 +68,19 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Coding Tool Detection
 
-- Supports multiple providers: Claude Code, Copilot CLI, VS Code Copilot. Adding a new provider = one detector module + registration in orchestrator. Both CLI and VS Code Copilot report as `Provider = Copilot`; `pickActiveProvider` selects the most recently active one.
-- Every 15s refresh cycle checks all registered providers for each worktree
-- Each provider reads its own session files and returns `CodingToolStatus` (Working/WaitingForUser/Done/Idle)
-- Orchestrator picks the most recently active non-Idle provider (by session file mtime)
-- `.treemon.json` optional `"codingTool": "claude"|"copilot"` overrides auto-detect
-- Detectors return `Idle` gracefully when session directories don't exist or files are corrupt
-- Claude: reads `~/.claude/projects/{encoded-path}/*.jsonl` — path encoding replaces `:`, `\`, `/` with `-`
-- Copilot: reads `~/.copilot/session-state/{uuid}/workspace.yaml` to match `cwd` to worktree, then `events.jsonl` for status
-- VS Code Copilot: reads `%APPDATA%/Code/User/workspaceStorage/{hash}/chatSessions/*.jsonl` mutation logs, maps workspace storage hash dirs to worktree paths via `workspace.json` folder URIs, replays JSONL mutation log (kind 0: snapshot, 1: set, 2: push/splice; kind 3 delete intentionally ignored) to reconstruct last request's model state and response
+Coding-tool status is **pushed** by the Copilot CLI extension, not parsed from session log files —
+the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
+`getStatusFromFiles`) have been **removed**. The extension observes the SDK session event stream and
+POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
+worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). See
+`docs/spec/session-status-push.md` for the full model.
 
-#### Copilot CLI Status Detection
-
-Copilot CLI writes streaming events to `events.jsonl`. Recognized events: `user.message`, `assistant.turn_start`, `assistant.turn_end`, `assistant.message`, `skill.invoked`, `subagent.started`, `subagent.completed`. Status, the current skill, and the last user/assistant messages are all derived from a single **forward fold** of the file (oldest→newest, `foldSessionEvents` in `CopilotDetector.fs`) through an **append-aware per-session cache**, so a `skill.invoked` or `user.message` megabytes back is still seen regardless of session size.
-
-**Why forward + incremental.** A `/skill` invocation is written once, at session start — a `skill.invoked` event plus a `user.message` with `source: "skill-<name>"` and `<skill-context>` content; there is no later plain `/skill` line. Sub-agents (Task tool) emit only `subagent.*` + tool/assistant events, never `user.message`. On real sessions the skill invocation and the sole `user.message` sit 2–12 MB back while sessions run 2–207 MB, so a fixed ~1 MB backward tail scan saw neither and reported a generic `Working` with no user line. Folding the whole stream forward fixes this; the incremental cache keeps it O(new bytes) per refresh instead of re-reading the file each cycle.
-
-**Fold state** (`SessionScanCache`): `CurrentSkill`, `LastUserMessage` (genuine prompts only), `LastAssistantMessage`, `RawStatus`, `LastAssistantWasAskUser`, `SubagentDepth`. Key rules:
-
-- **Current skill persists** from its `skill.invoked` until a genuine new top-level `user.message` supersedes it. An `ask_user` reply mid-skill resumes the same skill; a `<skill-context>` injection is transparent (not a boundary).
-- **`<skill-context>` injections are never recorded** as `LastUserMessage` — but, like any `user.message`, they still set `RawStatus = Working`. `skill.invoked` alone does not change `RawStatus` (the following `assistant.message` does).
-- **Sub-agent depth gating:** `subagent.started`/`subagent.completed` bracket a sub-agent's events; a `skill.invoked` inside a bracket is the sub-agent's and is ignored (gated on `SubagentDepth = 0`) so the top-level skill the user invoked (e.g. `bd-execute`) is what surfaces. A sub-agent's `skill.invoked` bubbles into the parent file with no depth marker of its own, so the enclosing bracket is the only signal — see the depth-gating comment on `foldForwardEvent`.
-
-**Incremental cache.** A `ConcurrentDictionary<eventsPath, SessionScanEntry>` (`{ State; Length }`) holds the fold state plus bytes consumed. Each refresh reads only bytes `[Length, fileLength)` (`FileUtils.readByteRangeLines`, a chunked int64 read), folds the complete newline-terminated lines onto the cached state, and advances `Length` past the last `\n` (a partial trailing line is left for next time). A shrunken file (rotation) or a cache miss triggers a full rescan; `getRefreshData` prunes entries whose file is missing or older than the 2 h Idle cutoff, throttled to once per 5 minutes. `CodingToolStatus` assembles a worktree's Copilot surface from **one** `getRefreshData` call (`Status`, `Mtime`, `CurrentSkill`, `LastUserMessage`, `LastMessage`) instead of four separate ~1 MB scans. A path-based `getStatusFromEventsFile` (full `File.ReadLines` forward scan) is retained for the status unit tests.
-
-**Card display.** When `CurrentSkill` is `Some`, the card surfaces a `▶ <skill>` label in place of the user line; otherwise it shows `LastUserMessage` (never a `<skill-context>` injection). The choice is a pure `cardUserLine` decision in `CardViews.fs`, unit-testable without rendering React.
-
-**Temporal adjustments** (applied after raw status is determined from events):
-
-- **Grace period (15s):** `Done → Working` when the events file was modified within 15 seconds. Copilot CLI emits `turn_end` between every turn in a multi-turn interaction, and LLM thinking gaps of 27-35 seconds are common between `turn_start` and the next `assistant.message`. Without the grace window, the dashboard flickers to Done during these gaps. The 15s value (vs Claude's 10s) accounts for Copilot's longer inter-turn gaps and background agent startup time.
-- **Staleness (30min):** `Working → Idle` when the events file hasn't been modified for 30 minutes. Catches abandoned sessions where the CLI exited without writing a final `turn_end`.
-- **Age cutoff (2h):** Any file older than 2 hours returns `Idle` regardless of last event.
-
-Both grace period and staleness use file mtime (not event timestamps). This differs from Claude's staleness check which uses parsed event timestamps with file mtime as fallback.
-
-#### Claude Parent/Subagent Detection
-
-Claude Code spawns subagent sessions (via the Task tool) that write to nested JSONL files:
-
-```
-~/.claude/projects/{encoded-path}/
-+-- {sessionUuid}.jsonl                          <- parent session
-+-- {sessionUuid}/subagents/agent-{id}.jsonl     <- subagent files
-```
-
-`SessionFileKind` (Parent | Subagent) is determined by path: any `.jsonl` inside a `subagents/` subdirectory is a subagent; top-level `.jsonl` files are parent sessions.
-
-**Status resolution rules:**
-
-1. Compute per-file status (staleness, Done-to-Working within 10s, 2-hour age cutoff) for all files
-2. Take the highest-priority parent status (Working > WaitingForUser > Done > Idle)
-3. If parent status is `Working` or `WaitingForUser` -- return it (definitive user-facing states)
-4. If parent status is `Done` -- return `Done` (parent Done is authoritative; all subagents have completed before parent reaches end_turn)
-5. If parent status is `Idle` -- check subagent files: if any subagent is `Working`, return `Working`; otherwise return `Idle`
-
-Parent `Done` and `WaitingForUser` are never overridden by subagent activity. Only `Idle` can be upgraded to `Working` by an active subagent.
-
-**Scoping rules:**
-- `getLastMessage` / `getLastUserMessage` / `getSessionMtime` use only parent session files (subagent messages are not user-facing)
-- File enumeration is consolidated: `enumerateFiles` runs once per poll cycle, results passed to status/message functions
-
-#### Claude Status Detection (Pure Logic)
-
-Status detection is split into pure logic and I/O:
-- **Pure core** (`getStatusFromFiles`): takes `now: DateTimeOffset` and `SessionFileData list` (kind, mtime, last lines reversed), returns `CodingToolStatus`. Testable without filesystem access.
-- **I/O wrapper** (`getStatus`): discovers all `.jsonl` files, reads last N lines, calls `getStatusFromFiles` with current time.
-
-Timeline replay tests verify status transitions against checked-in fixture data (`src/Tests/fixtures/claude/multi-session/expected-statuses.jsonl`). The fixture captures a real session with parent + 3 subagents; the test replays entries chronologically through `getStatusFromFiles` and asserts each status change matches recorded expectations.
+- Status vocabulary is `CodingToolStatus = Working | WaitingForUser | Idle | NoSession`; the dot is a
+  pure function of the collapsed status (red / yellow / blue open-idle / grey no-session).
+- `.treemon.json` optional `"codingTool": "claude"|"copilot"` still selects the per-worktree
+  provider for command-building (`readConfiguredProvider`); the push status source is Copilot-CLI-only today.
+- The card footer shows a `▶ <skill>` label when a skill is running, else the last user message
+  (never a `<skill-context>` injection) — a pure `cardUserLine` decision in `CardViews.fs`.
 
 ### Create Worktree
 
@@ -233,7 +179,7 @@ Each repo can configure which branch is considered the "base" for ahead/behind c
 On startup, a one-time parallel burst populates the dashboard in ~5-10 seconds instead of 30-60:
 
 1. **Phase 1** — `RefreshWorktreeList` for all repos in parallel
-2. **Phase 2** — `RefreshGit`, `RefreshBeads`, `RefreshClaude`, `RefreshFetch` for all repos/worktrees in parallel
+2. **Phase 2** — `RefreshGit`, `RefreshBeads`, `RefreshFetch` for all repos/worktrees in parallel (coding-tool status is pushed, not scheduled)
 3. **Phase 3** — `RefreshPr` for all repos in parallel (needs branch names from Phase 2)
 
 After the burst, `lastRuns` is pre-populated and the normal sequential loop takes over unchanged.
@@ -245,10 +191,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
-| `src/Server/ClaudeDetector.fs` | Claude Code session file scanning, parent/subagent detection |
-| `src/Server/CopilotDetector.fs` | Copilot CLI session scanning, workspace index |
-| `src/Server/VsCodeCopilotDetector.fs` | VS Code Copilot workspace storage scanning, JSONL mutation log replay |
-| `src/Server/CodingToolStatus.fs` | Coding tool orchestrator: config override, provider dispatch, winner selection |
+| `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
+| `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, work metrics |
@@ -264,7 +208,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |
 | `src/Client/CanvasView.fs` | Canvas pane view wiring (`CanvasPane.view` callbacks/slices) |
 | `src/Client/Navigation.fs` | Keyboard navigation: spatial arrow keys, key bindings |
-| `src/Tests/fixtures/` | Captured AzDo, GitHub, Copilot, and Claude session data for offline parsing/replay tests |
+| `src/Tests/fixtures/` | Captured AzDo/GitHub PR + build data and dashboard fixtures for offline tests |
 
 ## Decisions
 
@@ -277,10 +221,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Single API call returns all repos: client doesn't need to know repo count
 - Repo ID = folder name: simple, human-readable, no config needed
 - `CommentSummary` DU over nullable fields: cleanly models provider capability differences
-- Pluggable coding tool detection over hardcoded Claude: same interface pattern as PR providers, auto-detect with config override
-- Claude parent/subagent: parent status is authoritative -- subagents can only upgrade Done/Idle to Working, never downgrade WaitingForUser
-- Claude subagent detection is path-based only (directory structure), no content parsing needed
-- Claude replay test fixtures are checked in and immutable -- algorithm changes require re-generation and diff review of expected statuses
+- Push model over log-parsing for coding-tool status: explicit lifecycle events beat mtime inference; one pure server fold replaces three per-provider detectors (see `docs/spec/session-status-push.md`)
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK

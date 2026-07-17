@@ -13,11 +13,6 @@ type PerRepoState =
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
       PlanningData: Map<string, BeadsPlanning>
-      CodingToolData: Map<string, CodingToolStatus.CodingToolResult>
-      /// When each worktree ENTERED its current coding-tool status, stamped at the transition and
-      /// frozen until the next one (dropped when it goes Idle). Drives the Overview band's per-agent
-      /// "time in category".
-      CodingToolSince: Map<string, DateTimeOffset>
       PrData: Map<string, PrStatus>
       CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
@@ -32,8 +27,6 @@ module PerRepoState =
           GitData = Map.empty
           BeadsData = Map.empty
           PlanningData = Map.empty
-          CodingToolData = Map.empty
-          CodingToolSince = Map.empty
           PrData = Map.empty
           CanvasData = Map.empty
           Provider = None
@@ -48,7 +41,22 @@ type DashboardState =
       LatestByCategory: Map<string, CardEvent>
       ExpeditedRepos: Set<RepoId>
       ClientActivity: ActivityLevel
-      ClientActivityAt: DateTimeOffset }
+      ClientActivityAt: DateTimeOffset
+      // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
+      // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. Kept bounded by
+      // evicting entries older than the idle window (relative to the newest LastSeen) on each update
+      // (evictStaleStatuses), so it mirrors the store's live cache (LoadLiveStatuses) rather than
+      // growing append-only. This is the substrate the worktree card's coding-tool fields collapse
+      // over (pickActive) — see the push-only repoint task; today it is populated but not yet read by
+      // WorktreeApi.
+      SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>
+      // Per-worktree "entered Idle" timestamp for the time-since-idle chip (WorktreeStatus.CodingToolSince).
+      // Keyed by the (normalised) worktree path. Stamped ONCE when a worktree's collapsed coding-tool
+      // status transitions INTO Idle (the turn-end / last-active time), then FROZEN across the idle
+      // heartbeats that keep advancing last_seen (so the chip shows time-in-category, not
+      // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
+      // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
+      CodingToolSinceByWorktree: Map<string, DateTimeOffset> }
 
 module DashboardState =
     let empty =
@@ -58,13 +66,14 @@ module DashboardState =
           LatestByCategory = Map.empty
           ExpeditedRepos = Set.empty
           ClientActivity = ActivityLevel.Idle
-          ClientActivityAt = DateTimeOffset.MinValue }
+          ClientActivityAt = DateTimeOffset.MinValue
+          SessionStatuses = Map.empty
+          CodingToolSinceByWorktree = Map.empty }
 
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
-    | UpdateCodingTool of repoId: RepoId * path: string * CodingToolStatus.CodingToolResult
     | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
     | UpdatePr of repoId: RepoId * Map<string, PrStatus>
     | UpdateProvider of repoId: RepoId * RepoProvider option
@@ -76,6 +85,15 @@ type StateMsg =
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
     | ReportClientActivity of ActivityLevel * DateTimeOffset
+    /// Push-model live status for one session, produced by the SessionActivity single-writer
+    /// mailbox after folding an ingested event. Stored keyed by SessionId so a worktree's live
+    /// sessions can later be collapsed (pickActive) into the card's coding-tool fields.
+    | UpdateSessionStatus of SessionActivityStore.StoredStatus
+    /// Restart rebuild: seed the whole live-status map in one shot (rows arrive oldest-first from
+    /// LoadLiveStatuses) and stamp each worktree's time-since-idle from its NEWEST session — never the
+    /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
+    /// chip for the whole post-restart idle span (F11/C-14).
+    | SeedSessionStatuses of SessionActivityStore.StoredStatus list
 
 let private maxEvents = 50
 
@@ -105,43 +123,57 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         GitData = repo.GitData |> Map.remove path
         BeadsData = repo.BeadsData |> Map.remove path
         PlanningData = repo.PlanningData |> Map.remove path
-        CodingToolData = repo.CodingToolData |> Map.remove path
-        CodingToolSince = repo.CodingToolSince |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
 
-/// The Overview "category" a coding-tool scan maps to — the granularity CodingToolSince tracks so the
-/// drill-down's per-agent time reflects time-in-category. A Working agent is bucketed by its classified
-/// activity (Investigating/Executing/…, via the shared Activity.classify, matching the client's band
-/// grouping), so a mid-session skill switch is a real transition; every other status is its own single
-/// category. Idle is dropped before this is consulted.
-let private codingToolCategory (data: CodingToolStatus.CodingToolResult) : CodingToolStatus * CurrentActivity option =
-    match data.Status with
-    | CodingToolStatus.Working -> CodingToolStatus.Working, Some(Activity.classify (data.CurrentSkill |> Option.defaultValue ""))
-    | status -> status, None
+/// Evict live session-status entries older than the idle window. `SessionStatuses` is otherwise
+/// append-only, so without this it grows unboundedly and drifts from the store's live cache
+/// (`LoadLiveStatuses`, same `idleWindow` cutoff) — long-dead sessions would linger in memory forever.
+/// The window is measured against the NEWEST `LastSeen` in the map (the freshest heartbeat observed)
+/// rather than wall-clock, so it stays deterministic and replay-safe (events can carry historical
+/// timestamps) and never drops the entry that was just added. Applied on every `UpdateSessionStatus`.
+let internal evictStaleStatuses
+    (statuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>)
+    =
+    if Map.isEmpty statuses then
+        statuses
+    else
+        let newest = statuses |> Seq.map _.Value.LastSeen |> Seq.max
+        let cutoff = newest - SessionActivity.idleWindow
+        statuses |> Map.filter (fun _ s -> s.LastSeen >= cutoff)
 
-/// Update the per-worktree "entered current category at" stamp after observing a fresh coding-tool
-/// scan. Stamps (freezes) the moment a worktree ENTERS a new non-Idle Overview category — its
-/// classified activity while Working (so a mid-session skill switch re-stamps), else its status —
-/// keeps the existing stamp while the category is unchanged (so an agent shows time-in-its-current-
-/// activity, not time-since-last-write), and drops it when the agent goes Idle. The transition time is
-/// the winning surface's mtime (LastActivity), with `now` as the fallback when the scan carried no
-/// mtime. Since this map is in-memory, a restart re-derives every stamp from the current mtime on
-/// first observation: exact for a terminal Done/WaitingForUser surface (its mtime IS when it stopped),
-/// but a still-Working agent's stamp collapses to its recent last-write time until its next category
-/// change.
-let recordCodingToolSince
+/// Stamp / freeze / clear a worktree's time-since-idle timestamp from its freshly-collapsed
+/// coding-tool status. Pure so it is unit-testable in isolation:
+///   * status = Idle → stamp `now` on the FIRST entry, then FREEZE (keep the existing stamp across
+///     the idle heartbeats that keep advancing last_seen — the chip must show time-IN-category, not
+///     time-since-last-write);
+///   * status = Working / WaitingForUser / NoSession → clear the entry (a new Working turn moves the
+///     chip; a lost session leaves no idle time).
+/// `worktreePath` is the normalised path key (`WorktreePath.value`) that WorktreeApi looks up.
+let internal stampIdleSince
     (now: DateTimeOffset)
-    (path: string)
-    (prev: CodingToolStatus.CodingToolResult option)
-    (data: CodingToolStatus.CodingToolResult)
-    (since: Map<string, DateTimeOffset>)
+    (worktreePath: string)
+    (status: CodingToolStatus)
+    (idleSince: Map<string, DateTimeOffset>)
     : Map<string, DateTimeOffset> =
-    match data.Status with
-    | CodingToolStatus.Idle -> since |> Map.remove path
-    | _ when prev |> Option.map codingToolCategory = Some(codingToolCategory data) && Map.containsKey path since -> since
-    | _ -> since |> Map.add path (data.LastActivity |> Option.defaultValue now)
+    match status with
+    | Idle -> if Map.containsKey worktreePath idleSince then idleSince else idleSince |> Map.add worktreePath now
+    | Working
+    | WaitingForUser
+    | NoSession -> idleSince |> Map.remove worktreePath
 
-let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: StateMsg) =
+/// The status-overview "Agent \u2191" row (category `CodingToolRefresh`). Under the push model there is
+/// no poll to log, so the row would sit permanently `pending`; instead we mark the latest extension
+/// push here — which worktree last reported and when — as a green success, so a growing "X ago"
+/// signals that pushes have stopped. `LastSeen` is the push instant; duration is meaningless for a
+/// push (no server-side work) so it stays blank.
+let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : CardEvent =
+    { Source = "CodingToolRefresh"
+      Message = WorktreePath.value stored.WorktreePath
+      Timestamp = stored.LastSeen
+      Status = Some StepStatus.Succeeded
+      Duration = None }
+
+let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList(repoId, worktrees) ->
         let repo = getRepo repoId state
@@ -158,7 +190,15 @@ let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: S
                 KnownPaths = newPaths
                 IsReady = true }
 
-        updateRepo repoId updated state
+        // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
+        // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
+        // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
+        // freezes existing keys), overstating the chip on reuse (F10/C-13).
+        let prunedSince =
+            removedPaths
+            |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
+
+        updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
 
     | UpdateGit(repoId, path, gitData) ->
         let repo = getRepo repoId state
@@ -174,19 +214,6 @@ let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: S
                 { repo with
                     BeadsData = repo.BeadsData |> Map.add path beads
                     PlanningData = repo.PlanningData |> Map.add path planning }
-                state
-        else
-            state
-
-    | UpdateCodingTool(repoId, path, data) ->
-        let repo = getRepo repoId state
-        if Set.contains path repo.KnownPaths then
-            let prev = repo.CodingToolData |> Map.tryFind path
-            let since = recordCodingToolSince now path prev data repo.CodingToolSince
-            updateRepo repoId
-                { repo with
-                    CodingToolData = repo.CodingToolData |> Map.add path data
-                    CodingToolSince = since }
                 state
         else
             state
@@ -216,7 +243,10 @@ let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: S
 
     | RemoveWorktree(repoId, path) ->
         let repo = getRepo repoId state
-        updateRepo repoId (removeWorktreeData path repo) state
+        // Also drop the worktree's GLOBAL time-since-idle stamp (same reason as UpdateWorktreeList —
+        // it lives on DashboardState, not PerRepoState, so removeWorktreeData can't reach it; F10/C-13).
+        let prunedSince = state.CodingToolSinceByWorktree |> Map.remove path
+        updateRepo repoId (removeWorktreeData path repo) { state with CodingToolSinceByWorktree = prunedSince }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -237,12 +267,79 @@ let private processMessage (now: DateTimeOffset) (state: DashboardState) (msg: S
     | ReportClientActivity(activity, timestamp) ->
         { state with ClientActivity = activity; ClientActivityAt = timestamp }
 
+    | UpdateSessionStatus stored ->
+        // Add the fresh report, then evict entries past the idle window (measured against the newest
+        // LastSeen) so the map stays bounded and mirrors the store's live cache instead of growing
+        // append-only.
+        let newStatuses =
+            state.SessionStatuses
+            |> Map.add stored.SessionId stored
+            |> evictStaleStatuses
+
+        // Re-collapse THIS worktree's live sessions (using the freshest observed time as `now`) to see
+        // whether it just entered / left Idle, then stamp / freeze / clear the time-since-idle chip.
+        let worktreePath = WorktreePath.value stored.WorktreePath
+
+        let worktreeSessions =
+            newStatuses
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun s -> s.WorktreePath = stored.WorktreePath)
+
+        let collapsed = CodingToolStatus.fromPushSessions stored.LastSeen worktreeSessions
+
+        { state with
+            SessionStatuses = newStatuses
+            LatestByCategory = state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent stored)
+            CodingToolSinceByWorktree =
+                stampIdleSince stored.LastSeen worktreePath collapsed.Status state.CodingToolSinceByWorktree }
+
+    | SeedSessionStatuses stored ->
+        // Restart rebuild. LoadLiveStatuses replays rows OLDEST-first; feeding them one-by-one through
+        // UpdateSessionStatus lets the oldest idle row stamp+FREEZE the chip, so a long-stale idle
+        // session's timestamp gets locked in instead of the current open session's — the chip then
+        // OVERSTATES time-since-idle for the whole post-restart idle span (F11/C-14). Instead seed the
+        // map in one shot (same final set as replaying each row: evict measures against the global
+        // newest), then stamp each worktree's chip from its NEWEST session's last_seen, collapsed at
+        // that time. That yields the accepted "chip resets on restart" behaviour (Decision #8) rather
+        // than an overstated old stamp — WITHOUT reversing the seed order to DESC.
+        let seeded =
+            (state.SessionStatuses, stored)
+            ||> List.fold (fun m s -> Map.add s.SessionId s m)
+            |> evictStaleStatuses
+
+        let idleSince =
+            seeded
+            |> Map.toList
+            |> List.map snd
+            |> List.groupBy (fun s -> WorktreePath.value s.WorktreePath)
+            |> List.fold
+                (fun acc (worktreePath, sessions) ->
+                    let newestSeen = sessions |> List.map _.LastSeen |> List.max
+                    let collapsed = CodingToolStatus.fromPushSessions newestSeen sessions
+                    stampIdleSince newestSeen worktreePath collapsed.Status acc)
+                state.CodingToolSinceByWorktree
+
+        // Prime the "Agent" push row from the newest seeded session so it reflects the last known push
+        // immediately after restart instead of reverting to `pending` until the first live heartbeat.
+        let latestByCategory =
+            match seeded |> Map.toList |> List.map snd with
+            | [] -> state.LatestByCategory
+            | sessions ->
+                let newest = sessions |> List.maxBy _.LastSeen
+                state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent newest)
+
+        { state with
+            SessionStatuses = seeded
+            LatestByCategory = latestByCategory
+            CodingToolSinceByWorktree = idleSince }
+
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
         let rec loop (state: DashboardState) =
             async {
                 let! msg = inbox.Receive()
-                let newState = processMessage DateTimeOffset.UtcNow state msg
+                let newState = processMessage state msg
                 return! loop newState
             }
 
@@ -252,7 +349,6 @@ type RefreshTask =
     | RefreshWorktreeList of repoId: RepoId
     | RefreshGit of repoId: RepoId * path: string
     | RefreshBeads of repoId: RepoId * path: string
-    | RefreshCodingTool of repoId: RepoId * path: string
     | RefreshPr of repoId: RepoId
     | RefreshFetch of repoId: RepoId
 
@@ -260,7 +356,6 @@ let private taskLabel = function
     | RefreshWorktreeList repoId -> "WorktreeList", RepoId.value repoId
     | RefreshGit(repoId, path) -> "GitRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
     | RefreshBeads(repoId, path) -> "BeadsRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
-    | RefreshCodingTool(repoId, path) -> "CodingToolRefresh", $"{RepoId.value repoId}/{Path.GetFileName(path)}"
     | RefreshPr repoId -> "PrFetch", RepoId.value repoId
     | RefreshFetch repoId -> "GitFetch", RepoId.value repoId
 
@@ -275,9 +370,6 @@ let internal intervalOf (activity: ActivityLevel) (task: RefreshTask) =
     | ActivityLevel.Active,   RefreshBeads _        -> TimeSpan.FromSeconds(30.0)
     | ActivityLevel.Idle,     RefreshBeads _        -> TimeSpan.FromSeconds(60.0)
     | ActivityLevel.DeepIdle, RefreshBeads _        -> TimeSpan.FromSeconds(240.0)
-    | ActivityLevel.Active,   RefreshCodingTool _   -> TimeSpan.FromSeconds(5.0)
-    | ActivityLevel.Idle,     RefreshCodingTool _   -> TimeSpan.FromSeconds(15.0)
-    | ActivityLevel.DeepIdle, RefreshCodingTool _   -> TimeSpan.FromSeconds(60.0)
     | ActivityLevel.Active,   RefreshPr _           -> TimeSpan.FromSeconds(10.0)
     | ActivityLevel.Idle,     RefreshPr _           -> TimeSpan.FromSeconds(120.0)
     | ActivityLevel.DeepIdle, RefreshPr _           -> TimeSpan.FromSeconds(600.0)
@@ -285,26 +377,15 @@ let internal intervalOf (activity: ActivityLevel) (task: RefreshTask) =
     | ActivityLevel.Idle,     RefreshFetch _        -> TimeSpan.FromSeconds(120.0)
     | ActivityLevel.DeepIdle, RefreshFetch _        -> TimeSpan.FromSeconds(600.0)
 
-let private codingToolActivityThreshold = TimeSpan.FromMinutes(5.0)
 let private clientActivityTimeout = TimeSpan.FromMinutes(5.0)
 let private clientDeepIdleTimeout = TimeSpan.FromMinutes(20.0)
 
 let effectiveActivity (now: DateTimeOffset) (state: DashboardState) =
-    let hasCodingToolActivity =
-        state.Repos
-        |> Map.exists (fun _ repo ->
-            repo.CodingToolData
-            |> Map.exists (fun _ ct ->
-                ct.LastUserMessage
-                |> Option.exists (fun (_, ts) -> now - ts < codingToolActivityThreshold)))
+    let elapsed = now - state.ClientActivityAt
 
-    if hasCodingToolActivity then ActivityLevel.Active
-    else
-        let elapsed = now - state.ClientActivityAt
-
-        if elapsed >= clientDeepIdleTimeout then ActivityLevel.DeepIdle
-        elif elapsed >= clientActivityTimeout && state.ClientActivity = ActivityLevel.Active then ActivityLevel.Idle
-        else state.ClientActivity
+    if elapsed >= clientDeepIdleTimeout then ActivityLevel.DeepIdle
+    elif elapsed >= clientActivityTimeout && state.ClientActivity = ActivityLevel.Active then ActivityLevel.Idle
+    else state.ClientActivity
 
 let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths
@@ -359,8 +440,7 @@ let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
                 && not (isPathInSet filters.Ignored repoId wt.Path))
             |> List.collect (fun wt ->
                 [ RefreshGit(repoId, wt.Path)
-                  RefreshBeads(repoId, wt.Path)
-                  RefreshCodingTool(repoId, wt.Path) ]))
+                  RefreshBeads(repoId, wt.Path) ]))
 
     let networkTasks =
         repoList
@@ -383,8 +463,7 @@ let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
                 let archived = isPathInSet filters.Archived repoId wt.Path
                 [ RefreshGit(repoId, wt.Path)
                   if not archived then
-                      RefreshBeads(repoId, wt.Path)
-                      RefreshCodingTool(repoId, wt.Path) ])
+                      RefreshBeads(repoId, wt.Path) ])
 
         RefreshFetch repoId :: perWorktree)
 
@@ -467,10 +546,6 @@ let private executeTask
 
             BeadspaceProvisioner.provisionDashboard path beads
             |> Option.iter (Log.log "BeadspaceProvisioner")
-
-        | RefreshCodingTool(repoId, path) ->
-            let result = CodingToolStatus.getRefreshData path
-            agent.Post(UpdateCodingTool(repoId, path, result))
 
         | RefreshPr repoId ->
             let root = rootPaths |> Map.find repoId

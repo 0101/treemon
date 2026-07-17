@@ -130,23 +130,21 @@ let private assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
     (hasTestFailureLog: bool)
+    (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
+    (codingToolSince: Map<string, DateTimeOffset>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
     let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
+    // Card coding-tool fields now come from the push live state (SessionActivity), collapsed per
+    // worktree via pickActive — NOT the log-parsing detectors (repointed here; detectors deleted next
+    // task). An unknown/quiet worktree falls back to the same blank Idle card as before.
     let codingToolData =
-        repo.CodingToolData
+        pushByWorktree
         |> Map.tryFind wt.Path
-        |> Option.defaultValue
-            { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
-              Provider = None
-              CurrentSkill = None
-              LastUserMessage = None
-              LastAssistantMessage = None
-              LastMessageProvider = None
-              LastActivity = None }
+        |> Option.defaultValue CodingToolStatus.noSessionPushResult
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -158,7 +156,15 @@ let private assembleFromState
       Planning = planning
       CodingTool = codingToolData.Status
       CodingToolProvider = codingToolData.Provider
-      CodingToolSince = repo.CodingToolSince |> Map.tryFind wt.Path
+      // Time-since-idle: the frozen "entered Idle" timestamp for this worktree, surfaced ONLY while
+      // its authoritative (openness-driven) status is still Idle. A stale stamp for a worktree that
+      // has since decayed to NoSession/Working is ignored by the status guard.
+      CodingToolSince =
+        match codingToolData.Status with
+        | Idle -> codingToolSince |> Map.tryFind wt.Path
+        | Working
+        | WaitingForUser
+        | NoSession -> None
       CurrentSkill = codingToolData.CurrentSkill
       LastUserMessage = codingToolData.LastUserMessage
       Pr = pr
@@ -209,17 +215,10 @@ let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value
 
 let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 
-let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
-    state.Repos
-    |> Map.values
-    |> Seq.tryPick (fun repo ->
-        repo.CodingToolData
-        |> Map.tryFind path
-        |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
-
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     (deployBranch: string option)
@@ -230,6 +229,22 @@ let getWorktrees
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
         let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+
+        // Collapse the push live state (all live sessions, keyed by SessionId) to one coding-tool
+        // result per worktree once, up front: each worktree's sessions → openness-driven status +
+        // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
+        // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
+        // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
+        // live idle window (after a restart), so their footer + resume button survive (keeping the dot
+        // NoSession).
+        let retainedByWorktree =
+            activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
+        let pushByWorktree =
+            CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+            |> CodingToolStatus.withRetainedFallback retainedByWorktree
+
+        let codingToolSince = state.CodingToolSinceByWorktree
 
         let repos =
             state.Repos
@@ -245,7 +260,7 @@ let getWorktrees
                     |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
+                        assembleFromState activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
 
                 let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -372,6 +387,7 @@ let worktreeApi
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -410,7 +426,7 @@ let worktreeApi
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
             createWorktree = fun _ -> async { return Ok [] } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun wtPath ->
@@ -424,7 +440,7 @@ let worktreeApi
                       | Some { Branch = None } -> Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
                       | Some ({ Branch = Some branch } as ctx) -> Ok (ctx, branch)
                   let syncKey = scopedBranchKey ctx.RepoId branch
-                  let provider = resolveProvider state ctx.Worktree.Path
+                  let provider = CodingToolStatus.readConfiguredProvider ctx.Worktree.Path
 
                   let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
                   cardLog.Post(CardEventLog.SyncStarted syncKey)
@@ -478,14 +494,23 @@ let worktreeApi
                         yield! syncKeyToPath |> Map.keys ]
                       |> List.distinct
 
+                  // The card's last-assistant message per worktree now comes from the push live state
+                  // (collapsed via pickActive), not the log-parsing detectors — same repoint as the
+                  // worktree cards. Merged with sync events below to build each card's recent-message pair.
+                  // Retained fallback keeps the last-assistant message for worktrees aged out of the live
+                  // idle window (restart), matching the worktree-card assembly.
+                  let retainedByWorktree =
+                      activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
+                  let pushByWorktree =
+                      CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+                      |> CodingToolStatus.withRetainedFallback retainedByWorktree
+
                   let cachedLastMessages =
-                      state.Repos
+                      pushByWorktree
                       |> Map.toList
-                      |> List.collect (fun (_, repo) ->
-                          repo.CodingToolData
-                          |> Map.toList
-                          |> List.choose (fun (path, data) ->
-                              data.LastAssistantMessage |> Option.map (fun msg -> path, msg)))
+                      |> List.choose (fun (path, data) ->
+                          data.LastAssistantMessage |> Option.map (fun msg -> path, msg))
                       |> Map.ofList
 
                   return
@@ -522,8 +547,7 @@ let worktreeApi
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       let inv = CodingToolCli.build provider (CodingToolCli.Interactive req.Prompt)
                       return! SessionManager.spawnSession sessionAgent req.Path inv.AsShellString
                   })
@@ -573,10 +597,9 @@ let worktreeApi
                           let newPath = fork.WorktreePath
                           // Provider is read directly from .treemon.json — the new worktree first (its
                           // config exists once create returns and can differ from the root working
-                          // copy), then the root as fallback. This intentionally does NOT go through
-                          // resolveProvider (the scheduler-state routing the other launch sites use): a
-                          // just-created worktree is not yet in KnownPaths/CodingToolData, so
-                          // resolveProvider would return None here. Keep this a direct config read.
+                          // copy), then the root as fallback. A just-created worktree needs the root
+                          // fallback because its own config may not exist yet; the other launch sites
+                          // read the (already-present) per-worktree config directly.
                           let provider =
                               CodingToolStatus.readConfiguredProvider newPath
                               |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
@@ -640,7 +663,7 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       let prompt =
                           match req.Action with
                           | ConfigureTests ->
@@ -660,9 +683,25 @@ let worktreeApi
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {
                       let path = WorktreePath.value wtPath
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
-                      let sessionId = CodingToolStatus.getLastSessionId provider path
+                      let provider = CodingToolStatus.readConfiguredProvider path
+                      // Resume pick is the most-recent session for this worktree regardless of
+                      // active/idle (distinct from the display pick). Read from the DURABLE store,
+                      // not the idle-window live cache (state.SessionStatuses): after a restart a
+                      // session last active >2h ago is absent from that cache, so the pick returned
+                      // None and resume wrongly fell back to `--continue` instead of `--resume <id>`
+                      // (F10/C-02). session_status keeps the row until the 14d retention prune, so
+                      // the resume identity survives a restart.
+                      let sessions =
+                          activityStore
+                          |> Option.map _.StatusesForWorktree(PathUtils.toWorktreePath path)
+                          |> Option.defaultValue []
+                      // Only resume by stored ID when it belongs to the configured provider. Push
+                      // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
+                      // future provider that resumes differently (or can't) gets its own arm — the
+                      // compiler flags this match when a new provider case is added.
+                      let sessionId =
+                          match provider |> Option.defaultValue CodingToolProvider.Default with
+                          | CodingToolProvider.CopilotCli -> CodingToolStatus.getLastSessionId sessions
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
@@ -676,8 +715,7 @@ let worktreeApi
                       if canvasSpawnInFlight.TryAdd(guardKey, true) then
                           try
                               let! owner = CanvasDocOwnership.getOwner path request.Filename
-                              let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                              let provider = resolveProvider state path
+                              let provider = CodingToolStatus.readConfiguredProvider path
                               // Open a new tab in the live session window when one is tracked, and
                               // spawn only when none exists (launchAction semantics). This path is
                               // reached automatically by a canvas-iframe postMessage and has no
