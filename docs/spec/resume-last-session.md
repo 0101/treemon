@@ -13,7 +13,7 @@
 The resume button appears on a worktree card when ALL of these conditions are true:
 - No tracked terminal window exists (`HasActiveSession = false`)
 - A previous session message exists (`LastUserMessage.IsSome`) — proves there was a real session to resume
-- The coding tool is not actively running (`CodingTool = Idle` or `Done`)
+- The coding tool is not actively running (`CodingTool = Idle` or `NoSession`)
 
 The button is **hidden** (not disabled) when conditions aren't met — unlike contextual action buttons which show disabled.
 

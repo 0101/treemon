@@ -105,8 +105,8 @@
         .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .ct-dot.working  { background: #ff0000; animation: pulse 2s ease-in-out infinite; }
         .ct-dot.waiting  { background: #f9e2af; }
-        .ct-dot.done     { background: #89b4fa; }
-        .ct-dot.idle     { background: #585b70; }
+        .ct-dot.idle     { background: #89b4fa; }
+        .ct-dot.nosession { background: #585b70; }
         .canvas-badge { background: #89b4fa; color: #1e1e2e; font-size: 0.7em; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; display: inline-block; margin-left: 4px; padding: 0 4px; }
 
         @keyframes pulse {
@@ -195,7 +195,7 @@
         .activity-fixing { color: #fab387; }
         .activity-working { color: #ff0000; }
         .activity-waiting { color: #f9e2af; }
-        .activity-stopped { color: #89b4fa; }
+        .activity-idle { color: #89b4fa; }
 
         /* Drill-down breakdown panel (overview-drilldown): the black panel rendered INSIDE a section,
            flush beneath the selected group's black tab. Only the ✕ close button remains as chrome

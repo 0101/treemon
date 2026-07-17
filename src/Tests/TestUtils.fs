@@ -2,12 +2,21 @@ module Tests.TestUtils
 
 open System
 open System.Diagnostics
+open System.Globalization
 open System.IO
 open System.Net.Http
 open System.Runtime.InteropServices
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
+open Server.SessionActivity
+
+/// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the
+/// SessionActivity domain/store/service tests, which all build fixtures from literal timestamps.
+let ts (s: string) : DateTimeOffset = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
+
+/// Build a push-model `Message` (domain record) from body text and an ISO-8601 timestamp string.
+let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 
 let resolveCmdShim (fileName: string) =
     if Path.GetExtension(fileName) = "" then

@@ -64,8 +64,8 @@ let sanitizeForTerminal (s: string) =
 let formatCodingTool = function
     | Working -> "🔧 Working"
     | WaitingForUser -> "⏳ Waiting"
-    | Done -> "✅ Done"
     | Idle -> "💤 Idle"
+    | NoSession -> "⚫ No session"
 
 let formatPr = function
     | NoPr -> "No PR"

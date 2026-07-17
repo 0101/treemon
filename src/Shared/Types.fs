@@ -52,13 +52,15 @@ module BeadsPlanning =
 type CodingToolStatus =
     | Working
     | WaitingForUser
-    | Done
     | Idle
+    | NoSession
 
+/// The coding tool driving a worktree — its launcher, prompt format, and push-status source. A DU of
+/// one today: only the Copilot CLI can push its live status. Adding a provider (e.g. a future GitHub
+/// App) is a new case; the compiler then flags every provider-specific branch that must handle it.
 type CodingToolProvider =
-    | Claude
-    | Copilot
-    static member Default = Copilot
+    | CopilotCli
+    static member Default = CopilotCli
 
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
@@ -249,8 +251,8 @@ type WorktreeStatus =
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
       /// When the agent entered its current Overview category — its classified activity while Working
-      /// (Investigating/Executing/…), else its status (WaitingForUser/Done). Recorded at the transition
-      /// so the Overview band can show "time in category". None when Idle or no session was observed.
+      /// (Investigating/Executing/…), else its status (WaitingForUser/Idle). Recorded at the transition
+      /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
       LastUserMessage: (string * DateTimeOffset) option

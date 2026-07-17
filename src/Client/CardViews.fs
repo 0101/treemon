@@ -12,15 +12,15 @@ let ctClassName =
     function
     | Working        -> "working"
     | WaitingForUser -> "waiting"
-    | Done           -> "done"
     | Idle           -> "idle"
+    | NoSession      -> "nosession"
 
 let ctTooltip =
     function
     | Working        -> "Working"
     | WaitingForUser -> "Waiting for user"
-    | Done           -> "Done"
     | Idle           -> "Idle"
+    | NoSession      -> "No session"
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
@@ -136,8 +136,7 @@ let isBranchSyncing (events: CardEvent list) =
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
-    | Some Claude -> "Claude"
-    | Some Copilot -> "Copilot"
+    | Some CopilotCli -> "Copilot"
     | None -> "Coding tool"
 
 let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =

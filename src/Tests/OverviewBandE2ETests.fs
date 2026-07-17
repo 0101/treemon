@@ -114,13 +114,13 @@ let private bandProbeJs =
           agentPlanning: bg(itemByLabel(agentsSec, 'Planning') && itemByLabel(agentsSec, 'Planning').querySelector('.overview-circle')),
           agentReviewing: bg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
           agentWaiting: bg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle')),
-          agentStopped: bg(itemByLabel(agentsSec, 'Stopped') && itemByLabel(agentsSec, 'Stopped').querySelector('.overview-circle'))
+          agentIdle: bg(itemByLabel(agentsSec, 'Idle') && itemByLabel(agentsSec, 'Idle').querySelector('.overview-circle'))
         },
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
         queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
         fixingPresent: !!itemByLabel(agentsSec, 'Fixing'),
         genericWorkingPresent: !!itemByLabel(agentsSec, 'Working'),
-        stoppedPresent: !!itemByLabel(agentsSec, 'Stopped'),
+        idlePresent: !!itemByLabel(agentsSec, 'Idle'),
         zeroTextCount: qa('.overview-band .overview-count').filter(c => c.textContent.trim() === '0').length
       });
     }
@@ -275,8 +275,8 @@ type OverviewBandE2ETests() =
         Assert.That(colors.Value<string>("agentPlanning"), Is.EqualTo(rgb "#cba6f7"), "agent Planning = mauve")
         Assert.That(colors.Value<string>("agentReviewing"), Is.EqualTo(rgb "#f5c2e7"), "agent Reviewing = pink")
         Assert.That(colors.Value<string>("agentWaiting"), Is.EqualTo(rgb "#f9e2af"), "Waiting = yellow")
-        Assert.That(probe.Value<bool>("stoppedPresent"), Is.True, "Stopped group (blue-dot Done agents) renders in the Agents row")
-        Assert.That(colors.Value<string>("agentStopped"), Is.EqualTo(rgb "#89b4fa"), "Stopped = blue")
+        Assert.That(probe.Value<bool>("idlePresent"), Is.True, "Idle group (blue-dot idle agents) renders in the Agents row")
+        Assert.That(colors.Value<string>("agentIdle"), Is.EqualTo(rgb "#89b4fa"), "Idle = blue")
 
     // Step 6: zero-count buckets are omitted, never rendered as 0.
     [<Test>]

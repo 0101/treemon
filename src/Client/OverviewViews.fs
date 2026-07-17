@@ -14,7 +14,7 @@ let categoryDisplayName =
     | "WorktreeList"   -> "Worktree \u2630"
     | "GitRefresh"     -> "Git \u21BB"
     | "BeadsRefresh"   -> "Beads \u21BB"
-    | "CodingToolRefresh" -> "Agent \u21BB"
+    | "CodingToolRefresh" -> "Agent \u2191"
     | "PrFetch"        -> "PR \u2913"
     | "GitFetch"       -> "Git \u2913"
     | other            -> other

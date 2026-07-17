@@ -23,27 +23,15 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
     let p = provider |> Option.defaultValue CodingToolProvider.Default
 
     match p, mode with
-    | CodingToolProvider.Claude, Interactive prompt ->
-        { Executable = "claude"
-          Args = $"--dangerously-skip-permissions '{escape prompt}'" }
-    | CodingToolProvider.Claude, Resume (Some id) ->
-        { Executable = "claude"
-          Args = $"--dangerously-skip-permissions --resume '{escape id}'" }
-    | CodingToolProvider.Claude, Resume None ->
-        { Executable = "claude"
-          Args = "--dangerously-skip-permissions --continue" }
-    | CodingToolProvider.Claude, NonInteractive prompt ->
-        { Executable = "claude"
-          Args = $"-p \"{escape prompt}\" --dangerously-skip-permissions" }
-    | CodingToolProvider.Copilot, Interactive prompt ->
+    | CodingToolProvider.CopilotCli, Interactive prompt ->
         { Executable = "copilot"
           Args = $"--yolo -i '{escape prompt}'" }
-    | CodingToolProvider.Copilot, Resume (Some id) ->
+    | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
           Args = $"--yolo --resume '{escape id}'" }
-    | CodingToolProvider.Copilot, Resume None ->
+    | CodingToolProvider.CopilotCli, Resume None ->
         { Executable = "copilot"
           Args = "--yolo --continue" }
-    | CodingToolProvider.Copilot, NonInteractive prompt ->
+    | CodingToolProvider.CopilotCli, NonInteractive prompt ->
         { Executable = "copilot"
           Args = $"-p \"{escape prompt}\" --allow-all --no-ask-user -s --autopilot" }
