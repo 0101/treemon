@@ -58,18 +58,36 @@ type SessionActivityReport =
 
 // --- Per-session fold -------------------------------------------------------------------------
 
+/// A single push session's own status. `NoSession` is a *worktree-level* collapse result
+/// (`CodingToolStatus`), never a per-session value — so it is intentionally absent here, making that
+/// illegal state unrepresentable rather than guarding it with a runtime failwith. It is widened to the
+/// four-case `CodingToolStatus` only at the worktree-collapse boundary (`CodingToolStatus.fromPushSessions`).
+[<RequireQualifiedAccess>]
+type SessionLevelStatus =
+    | Working
+    | WaitingForUser
+    | Idle
+
+/// Widen a per-session status to the card/worktree `CodingToolStatus`. Total — `NoSession` is only
+/// ever produced by the collapse, never by the per-session fold.
+let toCodingToolStatus =
+    function
+    | SessionLevelStatus.Working -> Working
+    | SessionLevelStatus.WaitingForUser -> WaitingForUser
+    | SessionLevelStatus.Idle -> Idle
+
 /// The running per-session state produced by folding events oldest→newest. Deliberately smaller than
 /// the old SessionScanCache: no SubagentDepth, no LastAssistantWasAskUser, no separate raw-status
 /// type — the fold sets Status directly (incl. Idle from WentIdle).
 type SessionStatus =
-    { Status: CodingToolStatus
+    { Status: SessionLevelStatus
       Skill: string option
       LastUserMessage: Message option
       LastAssistantMessage: Message option }
 
 /// The starting state for a session with no events yet.
 let emptyStatus =
-    { Status = Idle
+    { Status = SessionLevelStatus.Idle
       Skill = None
       LastUserMessage = None
       LastAssistantMessage = None }
@@ -78,23 +96,23 @@ let emptyStatus =
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
 let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     match e with
-    | TurnStarted -> { s with Status = Working }
-    | AssistantMessage m -> { s with Status = Working; LastAssistantMessage = Some m }
+    | TurnStarted -> { s with Status = SessionLevelStatus.Working }
+    | AssistantMessage m -> { s with Status = SessionLevelStatus.Working; LastAssistantMessage = Some m }
     | SkillInvoked name -> { s with Skill = Some name }
     | AwaitingUserInput q ->
         // The ask_user question is surfaced as the last assistant message; keep the prior one if the
         // question carries no text.
         { s with
-            Status = WaitingForUser
+            Status = SessionLevelStatus.WaitingForUser
             LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage) }
-    | TurnEnded -> { s with Status = Idle }
-    | WentIdle -> { s with Status = Idle }
+    | TurnEnded -> { s with Status = SessionLevelStatus.Idle }
+    | WentIdle -> { s with Status = SessionLevelStatus.Idle }
     | UserPrompt m ->
         // A reply to an ask_user keeps the running skill; any other prompt is a new request that ends
         // the prior skill's run.
-        let keepSkill = s.Status = WaitingForUser
+        let keepSkill = s.Status = SessionLevelStatus.WaitingForUser
         { s with
-            Status = Working
+            Status = SessionLevelStatus.Working
             Skill = (if keepSkill then s.Skill else None)
             LastUserMessage = Some m }
 
@@ -127,8 +145,8 @@ let openWindow = TimeSpan.FromMinutes 3.0
 /// timeout reads as Idle. `session.idle` (WentIdle) already sets Idle directly, so an explicitly-idle
 /// session is unaffected. `last_seen` is the direct analogue of the old file mtime.
 let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: SessionStatus) : SessionStatus =
-    if s.Status <> Idle && now - lastSeen > stalenessTimeout then
-        { s with Status = Idle }
+    if s.Status <> SessionLevelStatus.Idle && now - lastSeen > stalenessTimeout then
+        { s with Status = SessionLevelStatus.Idle }
     else
         s
 
@@ -144,7 +162,7 @@ let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: Sessi
 /// and drop out here).
 let pickActive (sessions: (SessionStatus * DateTimeOffset) list) : SessionStatus option =
     sessions
-    |> List.filter (fun (s, _) -> s.Status <> Idle)
+    |> List.filter (fun (s, _) -> s.Status <> SessionLevelStatus.Idle)
     |> List.sortByDescending snd
     |> List.tryHead
     |> Option.map fst

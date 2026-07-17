@@ -140,7 +140,10 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     let status =
         match openSessions with
         | [] -> NoSession
-        | _ -> activeWinner |> Option.map _.Status |> Option.defaultValue Idle
+        | _ ->
+            activeWinner
+            |> Option.map (fun w -> SessionActivity.toCodingToolStatus w.Status)
+            |> Option.defaultValue Idle
 
     // Footer source: the active winner if running, else the most-recent session of ANY status so the
     // footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain their last
@@ -158,7 +161,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     let lastActivity =
         if activeWinner.IsSome then
             adjustedOpen
-            |> List.filter (fun (st, _) -> st.Status <> Idle)
+            |> List.filter (fun (st, _) -> st.Status <> SessionLevelStatus.Idle)
             |> List.map snd
             |> List.max
             |> Some

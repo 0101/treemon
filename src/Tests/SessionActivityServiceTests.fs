@@ -269,7 +269,7 @@ type IngestTests() =
         withService "C:/wt/a" (fun (svc, _, _) ->
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
-            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo Working))
+            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Working))
 
     [<Test>]
     member _.``an ingested status is fed to the scheduler``() =
@@ -277,7 +277,7 @@ type IngestTests() =
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             svc.LiveSnapshot() |> ignore // barrier: the mailbox has posted UpdateSessionStatus by now
             match schedulerStatus agent "s1" with
-            | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo Working)
+            | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             | None -> Assert.Fail "scheduler never received the session status")
 
     [<Test>]
@@ -287,7 +287,7 @@ type IngestTests() =
             svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" (UserPrompt(msg "do it" "2026-03-01T10:00:01Z")))
             svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" (AssistantMessage(msg "on it" "2026-03-01T10:00:02Z")))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo Working)
+            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastUserMessage, Is.EqualTo(Some(msg "do it" "2026-03-01T10:00:01Z")))
             Assert.That(s.LastAssistantMessage, Is.EqualTo(Some(msg "on it" "2026-03-01T10:00:02Z"))))
 
@@ -310,7 +310,7 @@ type IngestTests() =
             // Replay the first event verbatim.
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
-            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo Idle, "replay must not resurrect Working")
+            Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Idle, "replay must not resurrect Working")
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 2, "the duplicate event_id must be deduped"))
 
@@ -322,7 +322,7 @@ type IngestTests() =
             // An older, distinct event arrives late.
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" (AssistantMessage(msg "stale" "2026-03-01T10:00:00Z")))
             let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
-            Assert.That(s.Status, Is.EqualTo Working)
+            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastAssistantMessage, Is.EqualTo None, "the stale message must not overwrite live state")
             // But the older event IS in the history substrate, and the store row keeps the newer updated_at.
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
@@ -346,7 +346,7 @@ type RestartRebuildTests() =
                 { SessionId = SessionId "s1"
                   WorktreePath = WorktreePath "C:/wt/a"
                   Provider = CopilotCli
-                  Status = { emptyStatus with Status = Working; Skill = Some "investigate" }
+                  Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
                   UpdatedAt = now.AddMinutes(-1.0)
                   LastSeen = now.AddMinutes(-1.0) }
 
@@ -355,7 +355,7 @@ type RestartRebuildTests() =
             // The in-memory fold map is primed, so a subsequent event folds onto the rebuilt state.
             let live = svc.LiveSnapshot()
             let restored = live |> Map.find (SessionId "s1")
-            Assert.That(restored.Status.Status, Is.EqualTo Working)
+            Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(restored.Status.Skill, Is.EqualTo(Some "investigate"))
             // And the card path (scheduler) sees it immediately, before any new event.
             match schedulerStatus agent "s1" with
@@ -371,7 +371,7 @@ type RestartRebuildTests() =
                 { SessionId = SessionId "stale"
                   WorktreePath = WorktreePath "C:/wt/a"
                   Provider = CopilotCli
-                  Status = { emptyStatus with Status = Working }
+                  Status = { emptyStatus with Status = SessionLevelStatus.Working }
                   UpdatedAt = now - idleWindow - TimeSpan.FromMinutes 5.0
                   LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0 }
 

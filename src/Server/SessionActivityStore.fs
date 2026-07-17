@@ -42,7 +42,7 @@ type ActivityEventRow =
       WorktreePath: WorktreePath
       Provider: PushProvider
       Kind: string
-      Status: CodingToolStatus
+      Status: SessionLevelStatus
       Skill: string option
       Ts: DateTimeOffset }
 
@@ -59,16 +59,15 @@ let private parseIso (s: string) =
 
 let private statusText =
     function
-    | Working -> "working"
-    | WaitingForUser -> "waiting_for_user"
-    | Idle -> "idle"
-    | NoSession -> failwith "SessionActivityStore: NoSession is a worktree-level collapse result, never a stored per-session status"
+    | SessionLevelStatus.Working -> "working"
+    | SessionLevelStatus.WaitingForUser -> "waiting_for_user"
+    | SessionLevelStatus.Idle -> "idle"
 
 let private parseStatus =
     function
-    | "working" -> Working
-    | "waiting_for_user" -> WaitingForUser
-    | "idle" -> Idle
+    | "working" -> SessionLevelStatus.Working
+    | "waiting_for_user" -> SessionLevelStatus.WaitingForUser
+    | "idle" -> SessionLevelStatus.Idle
     | other -> failwithf "SessionActivityStore: unknown status text %A" other
 
 let private providerText =
