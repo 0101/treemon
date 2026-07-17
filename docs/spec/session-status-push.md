@@ -139,20 +139,26 @@ server:
 2. **Skill-context injections** — a skill's `<skill-context>` injection arrives as a `user.message`;
    the extension drops it (source starts `skill-` AND content starts `<skill-context`). → every
    `UserPrompt` the server sees is genuine.
-3. **Irrelevant events** — only the ~7 relevant SDK types are mapped; all others are ignored. → the
+3. **Irrelevant events** — only the ~8 relevant SDK types are mapped; all others are ignored. → the
    `SessionEvent` union has no catch-all.
 
 ### Ingestion: endpoint + single-writer mailbox
 
-- `POST /api/session/activity` mirrors `canvasRegisterHandler`: JSON DTO → domain
-  `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
-- **Wire contract** — the one coupling point between `extension.mjs` (producer) and the handler
-  (consumer). The body is one report:
-  `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }`. `kind` is
-  one of `turn_started`, `user_prompt`, `assistant_message`, `skill_invoked`, `awaiting_user_input`,
-  `turn_ended`, `went_idle`, `heartbeat`, mapping 1:1 onto `SessionEvent`. `message` (`{ text; at }`)
-  accompanies the two message kinds and the ask_user question; `skillName` only `skill_invoked`. An
-  unknown `kind` is a validation error, never silently dropped.
+- `POST /api/session/activity` handler mirrors `canvasRegisterHandler`: JSON DTO →
+  domain `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
+- **Wire contract — the single coupling point between `extension.mjs` (producer) and the
+  handler (consumer); both tasks MUST implement this exact set.** The POST body is one report:
+  `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, currentTokens?, tokenLimit? }`,
+  where `kind` is exactly one of the eight the fold consumes (mapping 1:1 onto `SessionEvent`, no
+  catch-all) or the liveness-only `heartbeat`:
+  `turn_started`→`TurnStarted`, `user_prompt`→`UserPrompt`, `assistant_message`→
+  `AssistantMessage`, `skill_invoked`→`SkillInvoked`, `awaiting_user_input`→`AwaitingUserInput`,
+  `turn_ended`→`TurnEnded`, `went_idle`→`WentIdle`, `usage_info`→`UsageInfo`, `heartbeat`→`Heartbeat`. `message` (`{ text; at }`) is present for
+  `user_prompt`, `assistant_message`, and `awaiting_user_input` (the ask_user question, folded
+  into `LastAssistantMessage`); `skillName` only for `skill_invoked`; `currentTokens`/`tokenLimit`
+  only for `usage_info` (a status-preserving context-window gauge folded into `ContextUsage`);
+  `turn_started` / `turn_ended` / `went_idle` / `heartbeat` carry none of these. An unknown `kind` is a validation error (rejected),
+  never silently dropped.
 - A dedicated `SessionActivity` `MailboxProcessor` is the **single writer** (the only mutable
   boundary). Per report: `fold` onto that session's state → update the in-memory
   `Map<SessionId, SessionStatus>` → persist (upsert + append) → feed `RefreshScheduler`

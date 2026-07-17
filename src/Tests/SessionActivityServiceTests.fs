@@ -11,7 +11,7 @@ open Server.SessionActivityService
 open Tests.TestUtils
 
 // Covers the ingestion layer of the push status model: the wire-contract DTO → domain parse (the
-// seven kinds, unknown rejected, per-kind message/skill rules), the known-worktree guard
+// nine kinds, unknown rejected, per-kind message/skill rules), the known-worktree guard
 // (tryAcceptReport), and the single-writer mailbox flow (fold → append/dedupe → last-write-wins
 // upsert → feed RefreshScheduler), plus the restart rebuild from the store. Fast/in-process — no
 // HTTP; the handler is a thin wrapper over these tested seams (its known-worktree guard is exactly
