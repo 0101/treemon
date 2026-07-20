@@ -22,6 +22,45 @@ let ctTooltip =
     | Idle           -> "Idle"
     | NoSession      -> "No session"
 
+let private ctDot (status: CodingToolStatus) =
+    Html.span [ prop.className ($"ct-dot {ctClassName status}"); prop.title (ctTooltip status) ]
+
+/// A per-session marker: a context-usage donut (arc = remaining context) when the session has
+/// reported usage, else a plain status dot. Colour comes from the session's OWN status.
+let private sessionMarker (i: int) (s: SessionDot) =
+    match s.ContextUsage with
+    | Some usage ->
+        Html.span
+            [ prop.key i
+              prop.className $"ct-dot ct-donut {ctClassName s.Status}"
+              prop.title (ctTooltip s.Status)
+              prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
+    | None ->
+        Html.span [ prop.key i; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ]
+
+/// Per-session donuts for a worktree card: one marker per live session (donut when it has usage,
+/// else a plain status dot). Falls back to the single collapsed CodingTool dot when there are no
+/// live sessions (a NoSession worktree → grey), reproducing the pre-per-session single-dot behaviour.
+let sessionDots (wt: WorktreeStatus) =
+    Html.span
+        [ prop.className "ct-dots"
+          prop.children (
+              match wt.Sessions with
+              | [] -> [ ctDot wt.CodingTool ]
+              | sessions -> sessions |> List.mapi sessionMarker) ]
+
+/// Plain per-session status dots for ONE worktree (never a donut — the header is too dense for arcs),
+/// returned as a flat, keyed list so the repo header can `List.collect` every worktree's dots into a
+/// single row with one uniform gap. A worktree with no live session contributes its single collapsed
+/// dot.
+let sessionDotsPlain (wt: WorktreeStatus) =
+    let key = WorktreePath.value wt.Path
+    match wt.Sessions with
+    | [] -> [ Html.span [ prop.key key; prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ] ]
+    | sessions ->
+        sessions
+        |> List.mapi (fun i s -> Html.span [ prop.key $"{key}-{i}"; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ])
+
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
     | HasPr pr -> pr.IsMerged
@@ -568,7 +607,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     Html.div [
                         prop.className "header-info"
                         prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                            sessionDots wt
                             Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
@@ -614,7 +653,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             Html.div [
                                 prop.className "header-info"
                                 prop.children [
-                                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                                    sessionDots wt
                                     Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
@@ -738,10 +777,7 @@ let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget op
             if repo.IsCollapsed then
                 Html.span [
                     prop.className "repo-ct-dots"
-                    prop.children (
-                        repo.Worktrees
-                        |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
+                    prop.children (repo.Worktrees |> List.collect sessionDotsPlain)
                 ]
             Html.button [
                 prop.className "create-wt-btn"

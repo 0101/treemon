@@ -22,6 +22,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       CodingToolProvider = None
       CodingToolSince = None
       CurrentSkill = None
+      Sessions = []
       LastUserMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0

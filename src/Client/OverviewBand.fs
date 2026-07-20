@@ -40,13 +40,34 @@ let private metaLine (accentClass: string) (label: string) (count: int) =
                 Html.span [ prop.className "overview-label"; prop.text label ] ] ]
 
 /// One agent group column: the meta line above a row of ~15px circles, one per agent, tinted to the
-/// group's accent (circle fill = currentColor, driven by the accent class). Clicking the column
-/// raises onSelectGroup (App toggles the drill-down selection); when this group is the selected one
-/// it renders as the black "tab" (overview-item-selected) sitting flush above its breakdown panel.
+/// group's accent (circle fill = currentColor, driven by the accent class). Each agent with a known
+/// context-window occupancy renders as a donut whose arc = fraction of context *remaining* (inline
+/// `--ctx-remaining`), so a healthy low-usage agent reads as a nearly full ring and one near its limit
+/// thins to a sliver; an agent that hasn't reported usage falls back to the plain solid circle.
+/// Clicking the column raises onSelectGroup (App toggles the drill-down selection); when this group is
+/// the selected one it renders as the black "tab" (overview-item-selected) sitting flush above its
+/// breakdown panel.
 let private agentColumn (selection: OverviewSelection option) (onSelectGroup: OverviewSelection -> unit) (group: AgentGroup) =
     let accent = agentClass group.Kind
     let target = OverviewSelection.Agents group.Kind
     let isSelected = selection = Some target
+
+    // One circle per SESSION, tinted to the group accent and — when the session has reported context
+    // usage — rendered as a donut filled to its remaining context. Grouping is per session, so each
+    // group holds only the sessions actually in that state; every agent member carries at least one
+    // matching session. All circles share one uniform gap regardless of which worktree they belong to.
+    let sessionCircle (key: string) (s: SessionDot) =
+        match s.ContextUsage with
+        | Some usage ->
+            Html.span
+                [ prop.key key
+                  prop.className [ "overview-circle"; "overview-donut"; accent ]
+                  prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
+        | None -> Html.span [ prop.key key; prop.className ("overview-circle " + accent) ]
+
+    let circles =
+        group.Members
+        |> List.collect (fun m -> m.Sessions |> List.mapi (fun j s -> sessionCircle $"{m.ScopedKey}-{j}" s))
 
     Html.div
         [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]
@@ -54,11 +75,7 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
           prop.onClick (fun _ -> onSelectGroup target)
           prop.children
               [ metaLine accent (agentLabel group.Kind) group.Count
-                Html.div
-                    [ prop.className "overview-circles"
-                      prop.children (
-                          List.init group.Count (fun i ->
-                              Html.span [ prop.key i; prop.className ("overview-circle " + accent) ]) ) ] ] ]
+                Html.div [ prop.className "overview-circles"; prop.children circles ] ] ]
 
 /// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
 /// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by
@@ -123,9 +140,20 @@ let private breakdownPanel
 let private repoNameLabel (name: string) =
     Html.div [ prop.className "overview-bd-repo-name"; prop.text name ]
 
-/// Agent breakdown for one selected agent group: per repo, borderless [● branch] chips (one per
-/// member worktree, dot in the group's activity colour). Clicking a chip focuses that worktree with
-/// arrow-nav parity (onSelectWorktree). The ✕ re-selects the group to close the panel.
+/// The fraction of context used by the most-loaded of a member's sessions, for the drill-down chip's
+/// progress-bar background fill (0 when no session has reported usage). Uses the max so the chip
+/// reflects the session closest to its limit — the one worth noticing.
+let private chipUsedFraction (sessions: SessionDot list) =
+    sessions
+    |> List.choose _.ContextUsage
+    |> List.map ContextUsage.fraction
+    |> function
+        | [] -> 0.0
+        | fractions -> List.max fractions
+
+/// Agent breakdown for one selected agent group: per repo, borderless [branch] chips whose background
+/// fills as a subtle progress bar to the member's most-loaded session's context usage. Clicking a chip
+/// focuses that worktree with arrow-nav parity (onSelectWorktree). The ✕ re-selects the group to close.
 let private agentBreakdown
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
@@ -148,10 +176,10 @@ let private agentBreakdown
                                       Html.div
                                           [ prop.className [ "overview-chip"; accent ]
                                             prop.key m.ScopedKey
+                                            prop.style [ style.custom ("--ctx-used", string (chipUsedFraction m.Sessions)) ]
                                             prop.onClick (fun _ -> onSelectWorktree m.ScopedKey)
                                             prop.children
-                                                [ Html.span [ prop.className "overview-chip-dot" ]
-                                                  Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ]
+                                                [ Html.span [ prop.className "overview-chip-name"; prop.text m.Branch ]
                                                   match m.Since with
                                                   | Some since ->
                                                       Html.span

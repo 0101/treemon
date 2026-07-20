@@ -1501,7 +1501,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``All ct-dots are circles with 10px size``() =
+    member this.``All ct-dots are circles with 15px size``() =
         task {
             let dots = this.Page.Locator(".wt-card .ct-dot")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -1509,10 +1509,10 @@ type DashboardTests() =
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
             let! width = dots.First |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("10px"), "CT dot width should be 10px")
+            Assert.That(width, Is.EqualTo("15px"), "CT dot width should be 15px")
 
             let! height = dots.First |> computedStyle "height"
-            Assert.That(height, Is.EqualTo("10px"), "CT dot height should be 10px")
+            Assert.That(height, Is.EqualTo("15px"), "CT dot height should be 15px")
 
             let! borderRadius = dots.First |> computedStyle "borderRadius"
             Assert.That(borderRadius, Is.EqualTo("50%"), "CT dot should be circular (border-radius: 50%)")

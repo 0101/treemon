@@ -34,11 +34,18 @@ let private stored
         { Status = status
           Skill = skill
           LastUserMessage = lastUser
-          LastAssistantMessage = lastAsst }
+          LastAssistantMessage = lastAsst
+          ContextUsage = None }
       UpdatedAt = ts seen
-      LastSeen = ts seen }
+      LastSeen = ts seen
+      ContextUsageAt = None }
 
 let private now = ts "2026-03-01T12:00:00Z"
+
+/// A stored OPEN session carrying a context-usage snapshot — for the per-session donut tests.
+let private storedUsage sid wt status usage seen : StoredStatus =
+    let s = stored sid wt status None None None seen
+    { s with Status.ContextUsage = usage }
 
 
 [<TestFixture>]
@@ -191,6 +198,52 @@ type FromPushSessionsTests() =
         Assert.That(event.Message.Length, Is.EqualTo 83)
         Assert.That(event.Message, Does.EndWith "...")
         Assert.That(event.Source, Is.EqualTo "copilot")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SessionStatusesTests() =
+
+    let usage cur lim = Some { CurrentTokens = cur; TokenLimit = lim }
+
+    [<Test>]
+    member _.``No open sessions yields an empty per-session list``() =
+        Assert.That((fromPushSessions now []).SessionStatuses, Is.Empty)
+        let stale = stored "a" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:00:00Z"
+        Assert.That((fromPushSessions now [ stale ]).SessionStatuses, Is.Empty)
+
+    [<Test>]
+    member _.``Each open session keeps its OWN context usage (no footer collapse)``() =
+        // The regression fix: the WORKING winner has not reported usage yet, but a sibling idle
+        // session did. That donut must survive independently of which session wins the status — the
+        // old single-footer ContextUsage blanked the whole worktree the moment the winner switched.
+        let winner = storedUsage "win" "wt" SessionLevelStatus.Working None "2026-03-01T11:59:00Z"
+        let reported = storedUsage "rep" "wt" SessionLevelStatus.Idle (usage 50000 200000) "2026-03-01T11:58:00Z"
+        let result = fromPushSessions now [ reported; winner ]
+        Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo [ Working; Idle ])
+        Assert.That(result.SessionStatuses |> List.map _.ContextUsage, Is.EqualTo [ None; usage 50000 200000 ])
+
+    [<Test>]
+    member _.``Per-session dots are ordered Working, Waiting, Idle``() =
+        let idle = stored "i" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z"
+        let working = stored "w" "wt" SessionLevelStatus.Working None None None "2026-03-01T11:58:00Z"
+        let waiting = stored "q" "wt" SessionLevelStatus.WaitingForUser None None None "2026-03-01T11:57:30Z"
+        let result = fromPushSessions now [ idle; working; waiting ]
+        Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo [ Working; WaitingForUser; Idle ])
+
+    [<Test>]
+    member _.``Closed (stale) sessions are excluded from the per-session dots``() =
+        let openWorking = storedUsage "o" "wt" SessionLevelStatus.Working (usage 10000 200000) "2026-03-01T11:59:00Z"
+        let closed = storedUsage "c" "wt" SessionLevelStatus.Working (usage 99000 200000) "2026-03-01T11:00:00Z"
+        let result = fromPushSessions now [ openWorking; closed ]
+        Assert.That(result.SessionStatuses |> List.map _.ContextUsage, Is.EqualTo [ usage 10000 200000 ])
+
+    [<Test>]
+    member _.``noSessionPushResult and the retained fallback carry no per-session dots``() =
+        Assert.That(noSessionPushResult.SessionStatuses, Is.Empty)
+        let retained = stored "r" "wt" SessionLevelStatus.Idle None (Some(msg "resume" "2026-03-01T08:00:00Z")) None "2026-03-01T08:00:00Z"
+        Assert.That((retainedFooterResult retained).SessionStatuses, Is.Empty)
 
 
 [<TestFixture>]

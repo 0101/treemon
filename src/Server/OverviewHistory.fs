@@ -49,14 +49,20 @@ let private sessionAsOf (t: DateTimeOffset) (rows: ActivityEventRow list) : Stor
             { Status = r.Status
               Skill = r.Skill
               LastUserMessage = None
-              LastAssistantMessage = None }
+              LastAssistantMessage = None
+              ContextUsage = None }
           UpdatedAt = r.Ts
-          LastSeen = r.Ts })
+          LastSeen = r.Ts
+          ContextUsageAt = None })
 
 /// Derive the Agents history over the window from the raw push event stream. For each candidate
-/// instant, reconstruct every session's state as of that instant, collapse per worktree exactly like
-/// the live band (`collapseByWorktree` → openness-driven status dot), classify into agent groups, and
+/// instant, reconstruct every session's state as of that instant, collapse per worktree
+/// (`collapseByWorktree` → openness-driven status dot), classify into agent groups, and
 /// emit the count vector — dropping consecutive unchanged vectors so only real transitions appear.
+///
+/// NOTE: the history collapses one status per worktree, whereas the live band (since #125) counts each
+/// open session individually. History is therefore a coarser per-worktree view of the same event
+/// stream; unifying it onto the per-session model is a possible follow-up.
 ///
 /// Candidate instants are the window's left edge, each session's status/skill TRANSITIONS (heartbeats
 /// that merely re-assert the same status are skipped — they can't move the counts), and each session's
