@@ -34,26 +34,35 @@ let tasksChanged (last: TaskCount list option) (current: TaskCount list) : bool 
     | None -> true
     | Some prev -> prev <> current
 
-/// Reconstruct one session's fold state as of instant `t` — its most-recent event at or before `t`,
-/// projected to the StoredStatus shape `collapseByWorktree` consumes. Only Status/Skill/LastSeen bear
-/// on the agent grouping, so the message fields are left empty.
-let private sessionAsOf (t: DateTimeOffset) (rows: ActivityEventRow list) : StoredStatus option =
-    rows
-    |> List.filter (fun r -> r.Ts <= t)
-    |> List.tryLast
-    |> Option.map (fun r ->
-        { SessionId = r.SessionId
-          WorktreePath = r.WorktreePath
-          Provider = r.Provider
-          Status =
-            { Status = r.Status
-              Skill = r.Skill
-              LastUserMessage = None
-              LastAssistantMessage = None
-              ContextUsage = None }
-          UpdatedAt = r.Ts
-          LastSeen = r.Ts
-          ContextUsageAt = None })
+/// Project one event row to the StoredStatus shape `collapseByWorktree` consumes. Only Status/Skill/
+/// LastSeen bear on the agent grouping, so the message/usage fields are left empty.
+let private toStored (r: ActivityEventRow) : StoredStatus =
+    { SessionId = r.SessionId
+      WorktreePath = r.WorktreePath
+      Provider = r.Provider
+      Status =
+        { Status = r.Status
+          Skill = r.Skill
+          LastUserMessage = None
+          LastAssistantMessage = None
+          ContextUsage = None }
+      UpdatedAt = r.Ts
+      LastSeen = r.Ts
+      ContextUsageAt = None }
+
+/// One session's state as of instant `t`: the StoredStatus of its last event at or before `t`, found by
+/// binary search over a time-ascending `(Ts, StoredStatus)` array. None when every event is after `t`.
+/// O(log rows) so the sweep does not re-scan a session's whole (idle-heartbeat-heavy) row list at every
+/// candidate instant.
+let private sessionAsOf (arr: (DateTimeOffset * StoredStatus)[]) (t: DateTimeOffset) : StoredStatus option =
+    let rec search lo hi best =
+        if lo > hi then best
+        else
+            let mid = (lo + hi) / 2
+            if fst arr[mid] <= t then search (mid + 1) hi (Some(snd arr[mid]))
+            else search lo (mid - 1) best
+
+    search 0 (arr.Length - 1) None
 
 /// Derive the Agents history over the window from the raw push event stream. For each candidate
 /// instant, reconstruct every session's state as of that instant, collapse per worktree
@@ -78,9 +87,17 @@ let deriveAgents (now: DateTimeOffset) (window: TimeSpan) (events: ActivityEvent
         |> List.groupBy _.SessionId
         |> List.map (fun (_, rows) -> rows |> List.sortBy _.Ts)
 
-    let agentsAt (t: DateTimeOffset) : AgentCount list =
+    // Per-session time-ascending (Ts, StoredStatus) arrays, built ONCE up front so each candidate
+    // instant reconstructs a session's state by binary search rather than re-scanning all its rows.
+    // With idle heartbeats appending thousands of same-status rows per session, the old per-instant
+    // full scan was ~instants × events; this makes the sweep ~instants × sessions × log rows.
+    let bySessionStored =
         bySession
-        |> List.choose (sessionAsOf t)
+        |> List.map (fun rows -> rows |> List.map (fun r -> r.Ts, toStored r) |> List.toArray)
+
+    let agentsAt (t: DateTimeOffset) : AgentCount list =
+        bySessionStored
+        |> List.choose (fun arr -> sessionAsOf arr t)
         |> CodingToolStatus.collapseByWorktree t
         |> Map.values
         |> Seq.map (fun r -> r.Status, r.CurrentSkill)

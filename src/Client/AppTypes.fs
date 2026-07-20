@@ -54,8 +54,9 @@ type Model =
       // Ephemeral in-band history chart (spec: docs/spec/overview-activity-history.md). OverviewChartWindow
       // is the cycle-button state (Hidden/24h/72h); OverviewHistory holds the snapshots last fetched from
       // getOverviewHistory for the active window. OverviewHistoryNow anchors the chart's right edge to the
-      // instant that history was fetched, so the axis steps forward once per poll (with fresh data) instead
-      // of drifting continuously against a stale dataset on every render. Both reset on reload and stay
+      // instant that history was fetched, so the axis steps forward once per refresh (with fresh data)
+      // instead of drifting continuously against a stale dataset on every render. It doubles as the
+      // refresh throttle marker (see overviewHistoryRefreshInterval). Both reset on reload and stay
       // mutually exclusive with the drill-down (SelectedOverviewGroup) — opening the chart clears the
       // selection and vice versa.
       OverviewChartWindow: OverviewChartWindow

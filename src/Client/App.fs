@@ -24,6 +24,12 @@ let fetchSyncStatus () =
 let fetchOverviewHistory () =
     Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory () OverviewHistoryLoaded (fun _ -> OverviewHistoryLoaded [])
 
+// The in-band history chart is refreshed no more often than this while open. The poll ticks ~1/s and
+// getOverviewHistory reconstructs the whole agent timeline from the event window (hundreds of ms on a
+// busy store), so a per-tick refetch would run it back-to-back. A multi-hour chart does not need
+// sub-30s freshness.
+let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
+
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
     |> Map.exists (fun _ evts ->
@@ -299,17 +305,23 @@ let update msg model =
         // Tick stays in the root update because it also expires canvas events and drives the
         // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
         let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
-        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
+        let nowDto = System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)
+        let expiredEvents = expireCanvasEvents nowDto model.Canvas.CanvasEvents
 
         // A queued canvas message is honestly pending, not failed: it is delivered to the
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        // Refresh the in-band history chart on the same poll cycle when it is open, so its data stays
-        // live and advances in step with `OverviewHistoryNow` (no continuous drift against stale data).
-        // Skipped when the chart is Hidden to avoid needless server-side reconstruction each poll.
-        let historyCmd =
-            if model.OverviewChartWindow <> OverviewChartWindow.Hidden then fetchOverviewHistory () else Cmd.none
+        // Refresh the in-band history chart while it is open, but THROTTLED to overviewHistoryRefreshInterval
+        // (the poll fires ~1/s and getOverviewHistory is expensive). OverviewHistoryNow doubles as the
+        // last-fetch marker — bumped here on dispatch so the 1s poll can't stampede overlapping fetches —
+        // and as the chart's right-edge anchor, so the axis steps forward with the data, not on every render.
+        let shouldRefreshHistory =
+            model.OverviewChartWindow <> OverviewChartWindow.Hidden
+            && nowDto - model.OverviewHistoryNow >= overviewHistoryRefreshInterval
+
+        let historyCmd = if shouldRefreshHistory then fetchOverviewHistory () else Cmd.none
+        let model = if shouldRefreshHistory then { model with OverviewHistoryNow = nowDto } else model
 
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
@@ -534,12 +546,14 @@ let update msg model =
             { model with OverviewChartWindow = next }, Cmd.none
         | _ ->
             // Entering a non-hidden window is the band's other mutually-exclusive detail view: clear any
-            // drill-down selection and (re)fetch the history that scopes the chart.
-            { model with OverviewChartWindow = next; SelectedOverviewGroup = None }, fetchOverviewHistory ()
+            // drill-down selection and (re)fetch the history that scopes the chart. Anchor the chart to now
+            // so the first render is placed correctly and the throttle countdown starts from the open.
+            { model with OverviewChartWindow = next; SelectedOverviewGroup = None; OverviewHistoryNow = System.DateTimeOffset.Now },
+            fetchOverviewHistory ()
 
     | OverviewHistoryLoaded history ->
-        // Anchor the chart's right edge to the instant this history was fetched, so the axis advances
-        // in discrete once-per-poll steps (with fresh data) instead of drifting on every render.
+        // Anchor the chart's right edge to the instant this history was fetched, so the axis advances in
+        // discrete steps once per refresh (with fresh data) instead of drifting on every render.
         { model with OverviewHistory = history; OverviewHistoryNow = System.DateTimeOffset.Now }, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
