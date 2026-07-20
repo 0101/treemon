@@ -94,7 +94,8 @@ type OverviewHistoryTests() =
     member _.``deriveAgents collapses two sessions in one worktree to the active winner``() =
         let window = TimeSpan.FromHours 72.0
         // Same worktree: one Working session, one Idle session, both fresh at -20m. The worktree
-        // collapses (pickActive) to the active winner → one Working agent, not two.
+        // collapses (pickActive) to the active winner → one Working agent, not two. The "pr" skill
+        // classifies to the PR activity (main #122 skill remap).
         let events =
             [ evt "s1" "C:/wt/a" SessionLevelStatus.Idle None 20.0
               evt "s2" "C:/wt/a" SessionLevelStatus.Working (Some "pr") 20.0 ]
@@ -102,7 +103,7 @@ type OverviewHistoryTests() =
         let derived = OverviewHistory.deriveAgents baseTime window events
         let atAppearance = derived |> List.find (fun (t, _) -> t = baseTime.AddMinutes(-20.0)) |> snd
 
-        Assert.That(atAppearance, Is.EqualTo [ ac (AgentGroupKind.Activity CurrentActivity.Reviewing) 1 ])
+        Assert.That(atAppearance, Is.EqualTo [ ac (AgentGroupKind.Activity CurrentActivity.PR) 1 ])
 
     [<Test>]
     member _.``deriveAgents returns a single empty baseline when there are no events``() =

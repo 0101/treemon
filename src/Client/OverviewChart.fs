@@ -58,7 +58,7 @@ let private agentDefs : SeriesDef list =
       AgentGroupKind.Activity CurrentActivity.Planning
       AgentGroupKind.Activity CurrentActivity.Executing
       AgentGroupKind.Activity CurrentActivity.Reviewing
-      AgentGroupKind.Activity CurrentActivity.Fixing
+      AgentGroupKind.Activity CurrentActivity.PR
       AgentGroupKind.Activity CurrentActivity.Working
       AgentGroupKind.Waiting
       AgentGroupKind.Idle ]
@@ -124,7 +124,7 @@ let private buildPoints (defs: SeriesDef list) (now: DateTimeOffset) (window: Ti
         { Fraction = 0.0; Counts = head } :: (insidePts @ [ { Fraction = 1.0; Counts = lastCounts } ])
 
 /// Windowed points for the AGENT series (counts aligned to the canonical agent order
-/// Investigating, Planning, Executing, Reviewing, Fixing, Working, Waiting). Pure test/reuse seam.
+/// Investigating, Planning, Executing, Reviewing, PR, Working, Waiting). Pure test/reuse seam.
 let agentPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : Point list =
     buildPoints agentDefs now window snapshots
 

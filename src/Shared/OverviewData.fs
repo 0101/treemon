@@ -137,7 +137,7 @@ let private activityOrder =
       CurrentActivity.Planning
       CurrentActivity.Executing
       CurrentActivity.Reviewing
-      CurrentActivity.Fixing
+      CurrentActivity.PR
       CurrentActivity.Working ]
 
 // Canonical order of the agent groups: the activity groups (in the order above), then the Waiting
@@ -180,7 +180,7 @@ let activityLabel =
     | CurrentActivity.Planning -> "Planning"
     | CurrentActivity.Executing -> "Executing"
     | CurrentActivity.Reviewing -> "Reviewing"
-    | CurrentActivity.Fixing -> "Fixing"
+    | CurrentActivity.PR -> "PR"
     | CurrentActivity.Working -> "Working"
 
 /// Accent-color modifier class per activity bucket (same currentColor scheme as taskClass).
@@ -190,7 +190,7 @@ let activityClass =
     | CurrentActivity.Planning -> "activity-planning"
     | CurrentActivity.Executing -> "activity-executing"
     | CurrentActivity.Reviewing -> "activity-reviewing"
-    | CurrentActivity.Fixing -> "activity-fixing"
+    | CurrentActivity.PR -> "activity-pr"
     | CurrentActivity.Working -> "activity-working"
 
 /// Display label per agent group: the skill-derived activity, or the distinct Waiting group.

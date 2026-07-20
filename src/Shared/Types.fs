@@ -73,7 +73,7 @@ type CurrentActivity =
     | Planning
     | Executing
     | Reviewing
-    | Fixing
+    | PR
     | Working
 
 module Activity =
@@ -95,13 +95,13 @@ module Activity =
             else (firstToken (skill.Trim())).TrimStart('/').ToLowerInvariant()
 
         match normalized with
-        | "investigate" -> CurrentActivity.Investigating
-        | "bd-plan" | "bd-improve" | "bd-autoimprove" | "spec-management" -> CurrentActivity.Planning
-        | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
-        | "pr" | "review-branch" | "reviewing-tests" | "comprehensive-review"
+        | "investigate" | "research" -> CurrentActivity.Investigating
+        | "bd-plan" | "bd-improve" | "bd-autoimprove" -> CurrentActivity.Planning
+        | "execute" | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
+        | "review-branch" | "reviewing-tests" | "comprehensive-review"
         | "code-review" | "bd-review" | "contribution"
         | "review" | "focused-review:review" -> CurrentActivity.Reviewing
-        | "fix-build" | "conflict" -> CurrentActivity.Fixing
+        | "babysit-pr" | "pr" | "github" | "fix-build" -> CurrentActivity.PR
         | _ -> CurrentActivity.Working
 
 [<RequireQualifiedAccess>]

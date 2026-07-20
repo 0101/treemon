@@ -128,7 +128,8 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
               Title = Server.CanvasExport.resolveTitle html request.Filename }
     }
 
-let private assembleFromState
+let internal assembleFromState
+    (now: DateTimeOffset)
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
     (hasTestFailureLog: bool)
@@ -147,6 +148,15 @@ let private assembleFromState
         pushByWorktree
         |> Map.tryFind wt.Path
         |> Option.defaultValue CodingToolStatus.noSessionPushResult
+    // Debounce the Working→Idle edge so a brief inter-turn idle doesn't flicker the dot blue: hold
+    // Working until the worktree has been Idle for idleDebounceWindow (per the frozen entered-Idle
+    // stamp). The classified activity is unaffected — it derives from the retained skill below.
+    let displayStatus =
+        SessionActivity.debounceIdle
+            SessionActivity.idleDebounceWindow
+            now
+            (codingToolSince |> Map.tryFind wt.Path)
+            codingToolData.Status
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -156,13 +166,14 @@ let private assembleFromState
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
       Planning = planning
-      CodingTool = codingToolData.Status
+      CodingTool = displayStatus
       CodingToolProvider = codingToolData.Provider
       // Time-since-idle: the frozen "entered Idle" timestamp for this worktree, surfaced ONLY while
-      // its authoritative (openness-driven) status is still Idle. A stale stamp for a worktree that
-      // has since decayed to NoSession/Working is ignored by the status guard.
+      // its DISPLAYED status is still Idle (past the debounce window). A stale stamp for a worktree
+      // that has since decayed to NoSession/Working — or is still inside the debounce hold — is not
+      // surfaced.
       CodingToolSince =
-        match codingToolData.Status with
+        match displayStatus with
         | Idle -> codingToolSince |> Map.tryFind wt.Path
         | Working
         | WaitingForUser
@@ -238,11 +249,13 @@ let assembleRepos
     // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
     // live idle window (after a restart), so their footer + resume button survive (keeping the dot
     // NoSession).
+    // One `now` for the whole assembly so the collapse and the idle-display debounce agree.
+    let now = DateTimeOffset.UtcNow
     let retainedByWorktree =
         activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
 
     let pushByWorktree =
-        CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
+        CodingToolStatus.collapseByWorktree now (state.SessionStatuses |> Map.values)
         |> CodingToolStatus.withRetainedFallback retainedByWorktree
 
     let codingToolSince = state.CodingToolSinceByWorktree
@@ -260,7 +273,7 @@ let assembleRepos
             |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
             |> List.map (fun wt ->
                 let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                assembleFromState activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
+                assembleFromState now activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
 
         let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -285,7 +298,6 @@ let getWorktrees
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
         let repos = assembleRepos activityStore rootPaths activeSessionPaths state
-
 
         return
             { Repos = repos

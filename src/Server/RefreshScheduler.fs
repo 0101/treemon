@@ -148,6 +148,10 @@ let internal evictStaleStatuses
 ///     time-since-last-write);
 ///   * status = Working / WaitingForUser / NoSession → clear the entry (a new Working turn moves the
 ///     chip; a lost session leaves no idle time).
+/// This stamp has TWO consumers that both depend on the freeze/reset policy above: the time-since-idle
+/// chip (surfaced only while Idle) and `SessionActivity.debounceIdle` (the card read path), which
+/// measures its Working→Idle display hold from this frozen transition instant — so weigh both before
+/// changing when the stamp freezes or clears.
 /// `worktreePath` is the normalised path key (`WorktreePath.value`) that WorktreeApi looks up.
 let internal stampIdleSince
     (now: DateTimeOffset)
