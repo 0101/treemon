@@ -176,8 +176,8 @@ let private wtRetryLogic: WorktreeStatus =
       Branch = "feature/retry-logic"
       LastCommitMessage = "Add exponential backoff to blob storage retries"
       Sessions =
-        [ { Status = Working; ContextUsage = Some { CurrentTokens = 142000; TokenLimit = 200000 } }
-          { Status = Idle; ContextUsage = Some { CurrentTokens = 47000; TokenLimit = 200000 } } ]
+        [ { Status = Working; Skill = Some "pr"; ContextUsage = Some { CurrentTokens = 142000; TokenLimit = 200000 } }
+          { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 47000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
@@ -200,7 +200,7 @@ let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
       Branch = "refactor/config-loading"
       LastCommitMessage = "Extract config validation into separate module"
-      Sessions = [ { Status = Working; ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 } } ]
+      Sessions = [ { Status = Working; Skill = Some "refactor"; ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
       Planning = BeadsPlanning.zero
@@ -223,7 +223,7 @@ let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
       Branch = "feature/auth-middleware"
       LastCommitMessage = "Add JWT validation and claims extraction"
-      Sessions = [ { Status = Idle; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ]
+      Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       Planning = BeadsPlanning.zero
@@ -293,9 +293,9 @@ let private wtStreaming: WorktreeStatus =
       Branch = "feature/streaming-agg"
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
       Sessions =
-        [ { Status = Working; ContextUsage = Some { CurrentTokens = 92000; TokenLimit = 200000 } }
-          { Status = Working; ContextUsage = Some { CurrentTokens = 150000; TokenLimit = 200000 } }
-          { Status = Idle; ContextUsage = None } ]
+        [ { Status = Working; Skill = Some "bd-execute"; ContextUsage = Some { CurrentTokens = 92000; TokenLimit = 200000 } }
+          { Status = Working; Skill = Some "review"; ContextUsage = Some { CurrentTokens = 150000; TokenLimit = 200000 } }
+          { Status = Idle; Skill = None; ContextUsage = None } ]
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
       Planning = BeadsPlanning.zero
@@ -318,7 +318,7 @@ let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
       Branch = "fix/csv-parser"
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
-      Sessions = [ { Status = Idle; ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 } } ]
+      Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       Planning = BeadsPlanning.zero
@@ -432,7 +432,7 @@ let private f3 =
         { wt with
             CodingTool = Working
             CodingToolSince = Some baseTimestamp
-            Sessions = [ { Status = Working; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
+            Sessions = [ { Status = Working; Skill = Some "investigate"; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCardEvt authKey
         (evt "copilot" "Reading authorization middleware" 1 None None)
     |> withCpu 45.0 14800
@@ -479,7 +479,7 @@ let private f8 =
         { wt with
             CodingTool = Idle
             CodingToolSince = Some baseTimestamp
-            Sessions = [ { Status = Idle; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
+            Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800

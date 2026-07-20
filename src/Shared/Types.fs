@@ -79,11 +79,16 @@ module ContextUsage =
     /// ring and one near its limit thins to a sliver.
     let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
 
-/// One live (open) session's own status plus its context-window occupancy — the unit behind the
-/// per-session donuts. `ContextUsage` is None until the session reports usage (or after a restart, as
-/// it is not persisted), in which case the session renders as a plain status dot rather than a donut.
+/// One live (open) session's own status, the skill it is running, and its context-window occupancy —
+/// the unit behind the per-session donuts. `Skill` is the session's OWN running skill (None when it
+/// is running no recognized skill); the Overview band classifies each session's activity from it
+/// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
+/// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
+/// session reports usage (or after a restart, as it is not persisted), in which case the session
+/// renders as a plain status dot rather than a donut.
 type SessionDot =
     { Status: CodingToolStatus
+      Skill: string option
       ContextUsage: ContextUsage option }
 
 /// Live-agent activity buckets derived from the skill/command an agent is running,

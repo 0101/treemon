@@ -107,9 +107,10 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
     let target = OverviewSelection.Agents group.Kind
     let isSelected = selection = Some target
 
-    // One circle per SESSION across the whole group, tinted to the group accent and — when the
-    // session has reported context usage — rendered as a donut filled to its remaining context. All
-    // circles share one uniform gap regardless of which worktree they belong to.
+    // One circle per SESSION, tinted to the group accent and — when the session has reported context
+    // usage — rendered as a donut filled to its remaining context. Grouping is per session, so each
+    // group holds only the sessions actually in that state; every agent member carries at least one
+    // matching session. All circles share one uniform gap regardless of which worktree they belong to.
     let sessionCircle (key: string) (s: SessionDot) =
         match s.ContextUsage with
         | Some usage ->
@@ -121,11 +122,7 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
 
     let circles =
         group.Members
-        |> List.collect (fun m ->
-            match m.Sessions with
-            | [] -> [ m.ScopedKey, { Status = NoSession; ContextUsage = None } ]
-            | sessions -> sessions |> List.mapi (fun j s -> $"{m.ScopedKey}-{j}", s))
-        |> List.map (fun (key, s) -> sessionCircle key s)
+        |> List.collect (fun m -> m.Sessions |> List.mapi (fun j s -> sessionCircle $"{m.ScopedKey}-{j}" s))
 
     Html.div
         [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]

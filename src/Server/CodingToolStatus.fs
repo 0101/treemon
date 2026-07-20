@@ -151,15 +151,17 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
             |> Option.map (fun w -> SessionActivity.toCodingToolStatus w.Status)
             |> Option.defaultValue Idle
 
-    // Per-session dots: every open session's freshness-adjusted status paired with its own context
-    // usage, ordered Working→Waiting→Idle then most-recently-seen first for a stable, flicker-free
-    // render. Each session keeps its OWN ContextUsage — no footer collapse — so a session that has
-    // reported usage renders a donut regardless of which session currently wins status. Empty ⇔
-    // status = NoSession, so the client reproduces the single grey dot from an empty list.
+    // Per-session dots: every open session's freshness-adjusted status paired with its own running
+    // skill and context usage, ordered Working→Waiting→Idle then most-recently-seen first for a
+    // stable, flicker-free render. Each session keeps its OWN skill + ContextUsage — no footer
+    // collapse — so the Overview band can classify each session's activity independently and a session
+    // that has reported usage renders a donut regardless of which session currently wins status. Empty
+    // ⇔ status = NoSession, so the client reproduces the single grey dot from an empty list.
     let sessionStatuses =
         adjustedOpen
         |> List.map (fun (s, seen) ->
             { Status = SessionActivity.toCodingToolStatus s.Status
+              Skill = s.Skill
               ContextUsage = s.ContextUsage },
             seen)
         |> List.sortWith (fun (a, aSeen) (b, bSeen) ->

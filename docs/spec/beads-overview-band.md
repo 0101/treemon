@@ -33,16 +33,19 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   headers stay bare (no count suffix, no "across all worktrees" caption).
 - Each category is a column with its **count-first label above the visual**: the count uses the
   category accent, the label stays neutral, and both share the same font size/weight.
-  1. **Agents** — **circles** (~15px), grouped by the running skill (working agents),
-     the waiting-for-user state, or the **idle** state (blue-dot idle agents that finished a
-     turn with the CLI still open). One circle **per live session**, clustered per agent (a worktree
-     with several open sessions shows several adjacent circles), so all of an agent's sessions are
-     visible rather than a single collapsed mark. Each circle is a **context-usage donut**: a ring
-     filled to the fraction of context-window still **remaining** (`1 − currentTokens / tokenLimit`,
-     from the SDK `session.usage_info` event) — a healthy low-usage session is a nearly full ring and
-     one near its limit thins to a sliver. A session that has not reported usage yet (or after a
-     restart — the value is not persisted) falls back to the solid circle. Idle is a second track
-     sharing the Agents row.
+  1. **Agents** — **circles** (~15px), one **per live session**, each placed in its own group by
+     **that session's own** status and skill: a working session by the skill it is running, a
+     waiting-for-user session in the **waiting** group, an idle session (blue-dot, finished a turn
+     with the CLI still open) in the **idle** group. Grouping is **per session, not per worktree**, so
+     a worktree whose sessions are doing different things (e.g. one running `pr` while two sit idle)
+     splits across the matching groups rather than clumping all its sessions under the worktree's
+     single collapsed activity — only the sessions actually in a state appear under it. A group's
+     count is its number of sessions. Circles share one uniform gap (no per-worktree clustering). Each
+     circle is a **context-usage donut**: a ring filled to the fraction of context-window still
+     **remaining** (`1 − currentTokens / tokenLimit`, from the SDK `session.usage_info` event) — a
+     healthy low-usage session is a nearly full ring and one near its limit thins to a sliver. A
+     session that has not reported usage yet (or after a restart — the value is not persisted) falls
+     back to the solid circle. Idle is a second track sharing the Agents row.
   2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
