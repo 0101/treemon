@@ -406,6 +406,68 @@ type IngestTests() =
                 |> List.find (fun r -> r.EventId = EventId "e1")
             Assert.That(older.Status, Is.EqualTo SessionLevelStatus.Working, "out-of-order row reflects the event's own effect, not the newest Idle"))
 
+    [<Test>]
+    member _.``a usage_info gauge updates ContextUsage without moving the status clock or appending history``() =
+        withService "C:/wt/a" (fun (svc, agent, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.LiveSnapshot() |> ignore
+            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
+            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(s.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is recorded")
+            Assert.That(s.Status.Status, Is.EqualTo SessionLevelStatus.Working, "a gauge never changes status")
+            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"), "a gauge must not move the status last-write-wins clock")
+            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "the gauge bumps openness")
+            // No synthetic row appended (like a heartbeat) — only the one real status event is in history.
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 1, "a usage_info must not append to activity_events")
+            // The card path (scheduler) sees the gauge.
+            match schedulerStatus agent "s1" with
+            | Some fed -> Assert.That(fed.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))
+            | None -> Assert.Fail "the gauge was not fed to the scheduler")
+
+    [<Test>]
+    member _.``a later usage report does not block a slightly-earlier status transition``() =
+        withService "C:/wt/a" (fun (svc, _, _) ->
+            // The gauge (10:00:05) is NEWER than the turn_ended (10:00:03) but arrives first. Sharing the
+            // status clock would reject the turn_ended as out-of-order and leave the card stuck Working.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(120000, 200000)))
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:03Z" TurnEnded)
+            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
+            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Idle, "the turn still ends despite the newer gauge")
+            Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is preserved across the transition"))
+
+    [<Test>]
+    member _.``a usage snapshot arriving after a newer status event is not discarded``() =
+        withService "C:/wt/a" (fun (svc, _, _) ->
+            // The gauge (10:00:03) is OLDER than the turn_ended (10:00:05) and arrives after it. Sharing
+            // the status clock would reject it as out-of-order and drop the snapshot.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:05Z" TurnEnded)
+            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:03Z" (UsageInfo(50000, 200000)))
+            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
+            Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 50000; TokenLimit = 200000 }), "the gauge survives a newer status event")
+            Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Idle, "the gauge never changes status"))
+
+    [<Test>]
+    member _.``an out-of-order older usage snapshot does not clobber a fresher gauge``() =
+        withService "C:/wt/a" (fun (svc, _, _) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "u2" "2026-03-01T10:00:10Z" (UsageInfo(150000, 200000)))
+            // A delayed OLDER snapshot arrives last; its own usage LWW clock rejects it.
+            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:05Z" (UsageInfo(80000, 200000)))
+            let s = (svc.LiveSnapshot() |> Map.find (SessionId "s1")).Status
+            Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 150000; TokenLimit = 200000 }), "the fresher gauge is kept"))
+
+    [<Test>]
+    member _.``a usage_info for a session with no prior status is dropped``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:00:00Z" (UsageInfo(120000, 200000)))
+            let live = svc.LiveSnapshot()
+            Assert.That(live.ContainsKey(SessionId "s1"), Is.False, "a gauge never creates a session")
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(events.Length, Is.EqualTo 0))
+
 
 // ── restart rebuild ───────────────────────────────────────────────────────────
 [<TestFixture>]
@@ -424,7 +486,8 @@ type RestartRebuildTests() =
                   Provider = CopilotCli
                   Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
                   UpdatedAt = now.AddMinutes(-1.0)
-                  LastSeen = now.AddMinutes(-1.0) }
+                  LastSeen = now.AddMinutes(-1.0)
+                  ContextUsageAt = None }
 
         withServiceSeeded "C:/wt/a" seed (fun (svc, agent, _) ->
             svc.Start()
@@ -449,7 +512,8 @@ type RestartRebuildTests() =
                   Provider = CopilotCli
                   Status = { emptyStatus with Status = SessionLevelStatus.Working }
                   UpdatedAt = now - idleWindow - TimeSpan.FromMinutes 5.0
-                  LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0 }
+                  LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0
+                  ContextUsageAt = None }
 
         withServiceSeeded "C:/wt/a" seed (fun (svc, _, _) ->
             svc.Start()

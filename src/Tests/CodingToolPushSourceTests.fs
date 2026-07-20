@@ -37,7 +37,8 @@ let private stored
           LastAssistantMessage = lastAsst
           ContextUsage = None }
       UpdatedAt = ts seen
-      LastSeen = ts seen }
+      LastSeen = ts seen
+      ContextUsageAt = None }
 
 let private now = ts "2026-03-01T12:00:00Z"
 

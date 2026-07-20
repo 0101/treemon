@@ -236,6 +236,36 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 store.TouchLastSeen(report.SessionId, bumped.LastSeen)
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
                 live |> Map.add report.SessionId bumped
+        | UsageInfo(currentTokens, tokenLimit) ->
+            // A pure context-window gauge on its OWN order path, DECOUPLED from the status
+            // last-write-wins clock (UpdatedAt). Sharing that clock let a usage report's timestamp
+            // block a slightly-earlier status transition (turn stuck Working), and in the reverse
+            // arrival order let the status out-of-order guard discard the usage snapshot. So, like a
+            // heartbeat, it never moves UpdatedAt and never appends a history row; it is ordered only
+            // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
+            // to — a usage report for a session with no prior status is dropped (nothing to gauge).
+            match live |> Map.tryFind report.SessionId with
+            | None -> live
+            | Some prior ->
+                // Usage LWW: a snapshot older than the one already held is ignored, so an out-of-order
+                // (delayed) older gauge can never clobber a fresher reading.
+                let isStaleUsage =
+                    match prior.ContextUsageAt with
+                    | Some at -> report.OccurredAt < at
+                    | None -> false
+
+                if isStaleUsage then
+                    live
+                else
+                    let usage = { CurrentTokens = currentTokens; TokenLimit = tokenLimit }
+                    let bumped =
+                        { prior with
+                            Status.ContextUsage = Some usage
+                            ContextUsageAt = Some report.OccurredAt
+                            LastSeen = max prior.LastSeen report.OccurredAt }
+                    store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                    scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
+                    live |> Map.add report.SessionId bumped
         | _ ->
             let prior = live |> Map.tryFind report.SessionId
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
@@ -279,7 +309,10 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   Provider = report.Provider
                   Status = newStatus
                   UpdatedAt = report.OccurredAt
-                  LastSeen = lastSeen }
+                  LastSeen = lastSeen
+                  // Carry the usage LWW clock forward: a status event neither carries nor reorders the
+                  // gauge, and `fold` already preserves ContextUsage, so its ordering stamp survives too.
+                  ContextUsageAt = prior |> Option.bind _.ContextUsageAt }
 
             // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
             // status can never diverge on a mid-pair failure. Returns false for a duplicate event_id

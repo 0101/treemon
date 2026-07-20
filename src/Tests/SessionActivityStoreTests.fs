@@ -51,7 +51,8 @@ let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredS
       Provider = CopilotCli
       Status = status
       UpdatedAt = ts updatedAt
-      LastSeen = ts lastSeen }
+      LastSeen = ts lastSeen
+      ContextUsageAt = None }
 
 let private eventOf eid sid kind status skill t : ActivityEventRow =
     { EventId = EventId eid
