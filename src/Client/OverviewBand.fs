@@ -27,6 +27,7 @@ open Shared
 open Navigation
 open Feliz
 open OverviewData
+open OverviewPresentation
 open AppTypes
 
 /// The count+label meta line shown ABOVE each visual: count FIRST in the accent colour, label

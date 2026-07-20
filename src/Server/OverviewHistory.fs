@@ -8,11 +8,10 @@ module Server.OverviewHistory
 //   - Tasks  (beads planning counts) are NOT event-sourced — they are snapshot-based: the scheduler
 //            logs the count-only projection to SessionActivityStore.task_snapshots on change
 //            (`tasksChanged`), exactly as before, just persisted in SQLite instead of a JSONL file.
-//   - Agents are DERIVED ON READ from `activity_events` (the durable push event stream): `deriveAgents`
-//            replays each session's status/skill over the window and collapses it per worktree with the
-//            SAME `CodingToolStatus.collapseByWorktree` the live band uses — so the history and the live
-//            band bucket a status identically, with openness/staleness decay modelled (a closed/crashed
-//            session drops out of the counts after `openWindow`, matching what the band showed then).
+//   - Agents are DERIVED ON READ from status-bearing `activity_events` plus the separate compact
+//            `session_liveness` timeline. Status/skill comes from events; heartbeat/usage points extend
+//            LastSeen without fabricating activity events. The live collapse and history therefore use
+//            the same openness and per-session grouping rules.
 //
 // `mergeHistory` stitches the two independently-changing series into one stepped OverviewSnapshot
 // stream (carry each dimension forward at every change point), so getOverviewHistory and
@@ -43,6 +42,8 @@ let private toStored (r: ActivityEventRow) : StoredStatus =
       Status =
         { Status = r.Status
           Skill = r.Skill
+          Intent = None
+          Title = None
           LastUserMessage = None
           LastAssistantMessage = None
           ContextUsage = None }
@@ -64,22 +65,31 @@ let private sessionAsOf (arr: (DateTimeOffset * StoredStatus)[]) (t: DateTimeOff
 
     search 0 (arr.Length - 1) None
 
+let private latestAt (arr: DateTimeOffset[]) (t: DateTimeOffset) : DateTimeOffset option =
+    let rec search lo hi best =
+        if lo > hi then best
+        else
+            let mid = (lo + hi) / 2
+            if arr[mid] <= t then search (mid + 1) hi (Some arr[mid])
+            else search lo (mid - 1) best
+
+    search 0 (arr.Length - 1) None
+
 /// Derive the Agents history over the window from the raw push event stream. For each candidate
 /// instant, reconstruct every session's state as of that instant, collapse per worktree
-/// (`collapseByWorktree` → openness-driven status dot), classify into agent groups, and
-/// emit the count vector — dropping consecutive unchanged vectors so only real transitions appear.
+/// (`collapseByWorktree` → the same per-session statuses consumed by the live Overview), classify
+/// each open session into an agent group, and emit the count vector — dropping consecutive unchanged
+/// vectors so only real transitions appear.
 ///
-/// NOTE: the history collapses one status per worktree, whereas the live band (since #125) counts each
-/// open session individually. History is therefore a coarser per-worktree view of the same event
-/// stream; unifying it onto the per-session model is a possible follow-up.
-///
-/// Candidate instants are the window's left edge, each session's status/skill TRANSITIONS (heartbeats
-/// that merely re-assert the same status are skipped — they can't move the counts), and each session's
-/// openness-decay boundary (`lastEvent + openWindow`, when a quiet session stops counting). `events`
-/// must cover a little BEFORE `now - window` (the caller widens the query) so a session already running
-/// at the window's left edge is reconstructed there rather than materialising at its first in-window
-/// heartbeat.
-let deriveAgents (now: DateTimeOffset) (window: TimeSpan) (events: ActivityEventRow list) : (DateTimeOffset * AgentCount list) list =
+/// Candidate instants are the window edges, every status event, and the start/end of each coalesced
+/// open interval. Heartbeats inside one continuously-open interval do not trigger full reconstruction;
+/// a gap longer than openWindow closes the interval and a later observation reopens it.
+let deriveAgents
+    (now: DateTimeOffset)
+    (window: TimeSpan)
+    (events: ActivityEventRow list)
+    (liveness: (SessionId * DateTimeOffset) list)
+    : (DateTimeOffset * AgentCount list) list =
     let start = now - window
 
     let bySession =
@@ -95,37 +105,55 @@ let deriveAgents (now: DateTimeOffset) (window: TimeSpan) (events: ActivityEvent
         bySession
         |> List.map (fun rows -> rows |> List.map (fun r -> r.Ts, toStored r) |> List.toArray)
 
+    let livenessBySession =
+        liveness
+        |> List.groupBy fst
+        |> List.map (fun (sessionId, rows) -> sessionId, rows |> List.map snd |> List.sort |> List.toArray)
+        |> Map.ofList
+
+    let withLatestLiveness t (stored: StoredStatus) =
+        livenessBySession
+        |> Map.tryFind stored.SessionId
+        |> Option.bind (fun rows -> latestAt rows t)
+        |> Option.map (fun lastSeen -> { stored with LastSeen = max stored.LastSeen lastSeen })
+        |> Option.defaultValue stored
+
     let agentsAt (t: DateTimeOffset) : AgentCount list =
         bySessionStored
         |> List.choose (fun arr -> sessionAsOf arr t)
+        |> List.map (withLatestLiveness t)
         |> CodingToolStatus.collapseByWorktree t
         |> Map.values
-        |> Seq.map (fun r -> r.Status, r.CurrentSkill)
+        |> Seq.collect _.SessionStatuses
+        |> Seq.map (fun s -> s.Status, s.Skill)
         |> agentCountsOf
 
-    // A session's status/skill transitions: its first event (establishes its state) plus every event
-    // whose (status, skill) differs from the immediately preceding event of the same session.
-    let transitionTimes =
-        bySession
-        |> List.collect (fun rows ->
-            let changes =
-                rows
-                |> List.pairwise
-                |> List.choose (fun (prev, cur) ->
-                    if (prev.Status, prev.Skill) <> (cur.Status, cur.Skill) then Some cur.Ts else None)
+    let openIntervals (times: DateTimeOffset list) =
+        match times |> List.sort with
+        | [] -> []
+        | first :: rest ->
+            let intervalStart, lastSeen, completed =
+                rest
+                |> List.fold (fun (intervalStart, lastSeen, completed) observedAt ->
+                    if observedAt - lastSeen <= openWindow then
+                        intervalStart, observedAt, completed
+                    else
+                        observedAt, observedAt, (intervalStart, lastSeen + openWindow) :: completed
+                ) (first, first, [])
 
-            match rows with
-            | first :: _ -> first.Ts :: changes
-            | [] -> changes)
+            List.rev ((intervalStart, lastSeen + openWindow) :: completed)
 
-    // Where a quiet session stops being "open" (drops out of the status dot). openWindow < staleness,
-    // so this openness boundary is the binding decay transition.
-    let decayBoundaries =
-        bySession
-        |> List.choose (fun rows -> rows |> List.tryLast |> Option.map (fun last -> last.Ts + openWindow))
+    let intervalBoundaries =
+        ((events |> List.map (fun event -> event.SessionId, event.Ts)) @ liveness)
+        |> List.groupBy fst
+        |> List.collect (fun (_, rows) ->
+            rows
+            |> List.map snd
+            |> openIntervals
+            |> List.collect (fun (opensAt, closesAt) -> [ opensAt; closesAt ]))
 
     let instants =
-        (start :: now :: (transitionTimes @ decayBoundaries))
+        (start :: now :: ((events |> List.map _.Ts) @ intervalBoundaries))
         |> List.filter (fun t -> t >= start && t <= now)
         |> List.distinct
         |> List.sort

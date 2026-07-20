@@ -11,6 +11,7 @@ open Shared
 open Shared.EventUtils
 open Navigation
 open OverviewData
+open OverviewPresentation
 open Elmish
 open Fable.Remoting.Client
 
@@ -108,8 +109,8 @@ type Msg =
     // ephemeral OverviewChartWindow (Hidden -> 24h -> 72h -> Hidden); entering a non-hidden window clears the
     // drill-down selection and fetches getOverviewHistory. OverviewHistoryLoaded carries the fetched snapshots
     // (or [] on failure, so the chart degrades gracefully) into the model.
-    | CycleOverviewChart
-    | OverviewHistoryLoaded of OverviewData.OverviewSnapshot list
+    | CycleOverviewChart of now: System.DateTimeOffset
+    | OverviewHistoryLoaded of history: OverviewData.OverviewSnapshot list * fetchedAt: System.DateTimeOffset
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string

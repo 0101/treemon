@@ -109,7 +109,7 @@ type OverviewChartTests() =
     [<Test>]
     member _.``tooltipAt returns None when there is no history`` () =
         let pts = OverviewChart.taskPoints now window []
-        Assert.That(OverviewChart.tooltipAt false window pts 0.5, Is.EqualTo None)
+        Assert.That(OverviewChart.tooltipAt OverviewChart.ChartKind.Tasks window pts 0.5, Is.EqualTo None)
 
     [<Test>]
     member _.``tooltipAt snaps to the active stepped snapshot and totals its non-empty series`` () =
@@ -122,13 +122,13 @@ type OverviewChartTests() =
 
         // Cursor past the 12h mark but before the 2h change -> the stepped value still held is Done = 2,
         // and only that non-empty series shows as a row.
-        let m1 = OverviewChart.tooltipAt false window pts 0.6 |> Option.get
+        let m1 = OverviewChart.tooltipAt OverviewChart.ChartKind.Tasks window pts 0.6 |> Option.get
         Assert.That(m1.Total, Is.EqualTo 2)
         Assert.That(m1.Rows |> List.map (fun r -> r.Label, r.Count), Is.EqualTo [ ("Done", 2) ])
         Assert.That(m1.Rows.Head.Accent, Is.EqualTo "task-done")
 
         // Cursor past the 2h change -> the held value snaps up to Done = 7.
-        let m2 = OverviewChart.tooltipAt false window pts 0.95 |> Option.get
+        let m2 = OverviewChart.tooltipAt OverviewChart.ChartKind.Tasks window pts 0.95 |> Option.get
         Assert.That(m2.Total, Is.EqualTo 7)
         Assert.That(m2.Rows |> List.exists (fun r -> r.Label = "Done" && r.Count = 7))
 
@@ -136,10 +136,10 @@ type OverviewChartTests() =
     member _.``tooltipAt header reads the snapped point's relative time`` () =
         let pts = OverviewChart.taskPoints now window [ taskSnap (hoursAgo 12.0) TaskBucketKind.Done 2 ]
         // The head (fraction 0.0) sits a full window back in a 24h window -> "24h 0m ago".
-        let head = OverviewChart.tooltipAt false window pts 0.0 |> Option.get
+        let head = OverviewChart.tooltipAt OverviewChart.ChartKind.Tasks window pts 0.0 |> Option.get
         Assert.That(head.RelativeLabel, Is.EqualTo "24h 0m ago")
         // The right-edge hold (fraction 1.0) is "now".
-        let tail = OverviewChart.tooltipAt false window pts 1.0 |> Option.get
+        let tail = OverviewChart.tooltipAt OverviewChart.ChartKind.Tasks window pts 1.0 |> Option.get
         Assert.That(tail.RelativeLabel, Is.EqualTo "now")
 
     [<Test>]
@@ -152,7 +152,15 @@ type OverviewChartTests() =
                   { AgentCount.Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 3 } ] }
 
         let pts = OverviewChart.agentPoints now window [ agentSnap ]
-        let model = OverviewChart.tooltipAt true window pts 1.0 |> Option.get
+        let model = OverviewChart.tooltipAt OverviewChart.ChartKind.Agents window pts 1.0 |> Option.get
         // Executing (canonical index 2) precedes Waiting (index 6); both are non-empty, nothing else is.
         Assert.That(model.Rows |> List.map _.Label, Is.EqualTo [ "Executing"; "Waiting" ])
         Assert.That(model.Total, Is.EqualTo 5)
+
+    [<Test>]
+    member _.``history refresh is disabled while the Overview panel is closed`` () =
+        let lastFetchedAt = now - App.overviewHistoryRefreshInterval
+        Assert.That(
+            App.shouldRefreshOverviewHistory false OverviewChartWindow.Hours24 lastFetchedAt now,
+            Is.False
+        )

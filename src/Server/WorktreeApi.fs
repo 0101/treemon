@@ -234,35 +234,47 @@ let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value
 
 let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 
-/// Assemble the RepoWorktrees list from a scheduler DashboardState. Shared by the
-/// client-poll path (getWorktrees) and the 24/7 scheduler task-history logger so both
-/// observe the identical worktree roll-up. Collapses the push live state to one
-/// coding-tool result per worktree (openness-driven status + decoupled footer), then
-/// reads config (ignore patterns, archived branches) and the filesystem (test-failure
-/// log presence) — the same side effects the poll path had.
-let assembleRepos
+type RepoAssemblyInputs =
+    { Now: DateTimeOffset
+      IgnorePredicate: string -> bool
+      RetainedByWorktree: Map<string, SessionActivityStore.StoredStatus>
+      ArchivedBranches: Map<RepoId, Set<string>>
+      TestFailureLogPaths: Set<string> }
+
+let loadRepoAssemblyInputs
     (activityStore: SessionActivityStore.SessionActivityStore option)
+    (rootPaths: Map<RepoId, string>)
+    (state: RefreshScheduler.DashboardState)
+    =
+    let testFailureLogPaths =
+        state.Repos
+        |> Map.values
+        |> Seq.collect _.WorktreeList
+        |> Seq.map _.Path
+        |> Seq.filter (SyncEngine.testFailureLogPath >> File.Exists)
+        |> Set.ofSeq
+
+    { Now = DateTimeOffset.UtcNow
+      IgnorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+      RetainedByWorktree =
+        activityStore
+        |> Option.map _.RetainedByWorktree()
+        |> Option.defaultValue Map.empty
+      ArchivedBranches =
+        rootPaths
+        |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root))
+      TestFailureLogPaths = testFailureLogPaths }
+
+/// Pure RepoWorktrees assembly shared by the client poll and scheduler history projection.
+let assembleRepos
+    (inputs: RepoAssemblyInputs)
     (rootPaths: Map<RepoId, string>)
     (activeSessionPaths: Set<string>)
     (state: RefreshScheduler.DashboardState)
     : RepoWorktrees list =
-    let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
-
-    // Collapse the push live state (all live sessions, keyed by SessionId) to one coding-tool
-    // result per worktree once, up front: each worktree's sessions → openness-driven status +
-    // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
-    // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
-    // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
-    // live idle window (after a restart), so their footer + resume button survive (keeping the dot
-    // NoSession).
-    // One `now` for the whole assembly so the collapse and the idle-display debounce agree.
-    let now = DateTimeOffset.UtcNow
-    let retainedByWorktree =
-        activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
-
     let pushByWorktree =
-        CodingToolStatus.collapseByWorktree now (state.SessionStatuses |> Map.values)
-        |> CodingToolStatus.withRetainedFallback retainedByWorktree
+        CodingToolStatus.collapseByWorktree inputs.Now (state.SessionStatuses |> Map.values)
+        |> CodingToolStatus.withRetainedFallback inputs.RetainedByWorktree
 
     let codingToolSince = state.CodingToolSinceByWorktree
 
@@ -270,16 +282,16 @@ let assembleRepos
     |> Map.toList
     |> List.map (fun (repoId, repo) ->
         let archivedBranches =
-            rootPaths
+            inputs.ArchivedBranches
             |> Map.tryFind repoId
-            |> TreemonConfig.readArchivedBranchSet
+            |> Option.defaultValue Set.empty
 
         let statuses =
             repo.WorktreeList
-            |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
+            |> List.filter (RefreshScheduler.isWorktreeIgnored inputs.IgnorePredicate >> not)
             |> List.map (fun wt ->
-                let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                assembleFromState now activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
+                let hasLog = Set.contains wt.Path inputs.TestFailureLogPaths
+                assembleFromState inputs.Now activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
 
         let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -303,7 +315,8 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let repos = assembleRepos activityStore rootPaths activeSessionPaths state
+        let inputs = loadRepoAssemblyInputs activityStore rootPaths state
+        let repos = assembleRepos inputs rootPaths activeSessionPaths state
 
         return
             { Repos = repos
@@ -770,9 +783,8 @@ let worktreeApi
           removeRoot = fun path -> async { return removeRootFromConfig path }
           getRoots = fun () -> async { return readWorktreeRootsConfig () }
           // 72h is the widest window the in-band chart offers; the client narrows to 24h itself.
-          // Tasks come from the store's snapshot table; Agents are derived on read from the push event
-          // stream (widen the event query a little before the window start so a session already running
-          // at the left edge is reconstructed there — see OverviewHistory.deriveAgents). Merged into one
+          // Tasks come from the store's snapshot table; Agents are derived on read from status events
+          // plus the liveness timeline, carrying the state active at the left edge. Merged into one
           // stepped OverviewSnapshot stream. No store (demo/fixture) → no history.
           getOverviewHistory =
             fun () ->
@@ -783,8 +795,12 @@ let worktreeApi
                         let now = DateTimeOffset.UtcNow
                         let window = TimeSpan.FromHours 72.0
                         let start = now - window
-                        let taskSnaps = store.QueryTaskSnapshots(start, now)
-                        let events = store.QueryWindow(start - SessionActivity.openWindow, now)
-                        let agentSnaps = OverviewHistory.deriveAgents now window events
+                        let taskSnaps =
+                            match store.QueryTaskSnapshotBefore start with
+                            | Some (_, tasks) -> (start, tasks) :: store.QueryTaskSnapshots(start, now)
+                            | None -> store.QueryTaskSnapshots(start, now)
+                        let events = store.QueryHistoryWindow(start, now)
+                        let liveness = store.QueryLiveness(start - SessionActivity.openWindow, now)
+                        let agentSnaps = OverviewHistory.deriveAgents now window events liveness
                         return OverviewHistory.mergeHistory taskSnaps agentSnaps
                 } }

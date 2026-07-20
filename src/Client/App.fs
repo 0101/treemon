@@ -12,6 +12,7 @@ open ActionButtons
 open CanvasAwareness
 open CardViews
 open AppTypes
+open OverviewPresentation
 
 let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
@@ -22,7 +23,8 @@ let fetchSyncStatus () =
 // Fetch the Overview band's recent history (last 72h) for the in-band chart. On failure it degrades to
 // an empty snapshot list rather than an error, matching the spec's "renders nothing" fallback.
 let fetchOverviewHistory () =
-    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory () OverviewHistoryLoaded (fun _ -> OverviewHistoryLoaded [])
+    let loaded history = OverviewHistoryLoaded(history, System.DateTimeOffset.Now)
+    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory () loaded (fun _ -> loaded [])
 
 // The in-band history chart is refreshed no more often than this while open. The poll ticks ~1/s and
 // getOverviewHistory reconstructs the whole agent timeline from the event window (hundreds of ms on a
@@ -30,15 +32,17 @@ let fetchOverviewHistory () =
 // sub-30s freshness.
 let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
 
+let shouldRefreshOverviewHistory panelOpen chartWindow lastFetchedAt now =
+    panelOpen
+    && chartWindow <> OverviewChartWindow.Hidden
+    && now - lastFetchedAt >= overviewHistoryRefreshInterval
+
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
     |> Map.exists (fun _ evts ->
         evts
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
-
-// Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
-// Navigation.overviewSelectionPresent (same pure roll-up pipeline as the band view).
 
 let init () =
     { Repos = []
@@ -220,8 +224,10 @@ let update msg model =
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
                 // the selected group (its count fell to 0), clear it so the panel closes.
                 match m.SelectedOverviewGroup with
-                | Some selection when not (Navigation.overviewSelectionPresent selection m.Repos) ->
-                    { m with SelectedOverviewGroup = None }
+                | Some selection ->
+                    let overview = m.Repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+                    if OverviewPresentation.selectionPresent selection overview then m
+                    else { m with SelectedOverviewGroup = None }
                 | _ -> m)
             |> (fun m ->
                 if isFirstLoad then
@@ -317,8 +323,11 @@ let update msg model =
         // last-fetch marker — bumped here on dispatch so the 1s poll can't stampede overlapping fetches —
         // and as the chart's right-edge anchor, so the axis steps forward with the data, not on every render.
         let shouldRefreshHistory =
-            model.OverviewChartWindow <> OverviewChartWindow.Hidden
-            && nowDto - model.OverviewHistoryNow >= overviewHistoryRefreshInterval
+            shouldRefreshOverviewHistory
+                model.OverviewPanelOpen
+                model.OverviewChartWindow
+                model.OverviewHistoryNow
+                nowDto
 
         let historyCmd = if shouldRefreshHistory then fetchOverviewHistory () else Cmd.none
         let model = if shouldRefreshHistory then { model with OverviewHistoryNow = nowDto } else model
@@ -533,7 +542,7 @@ let update msg model =
         let chartWindow = if Option.isSome next then OverviewChartWindow.Hidden else model.OverviewChartWindow
         { model with SelectedOverviewGroup = next; OverviewChartWindow = chartWindow }, Cmd.none
 
-    | CycleOverviewChart ->
+    | CycleOverviewChart now ->
         // Advance the ephemeral window: Hidden -> 24h -> 72h -> Hidden.
         let next =
             match model.OverviewChartWindow with
@@ -548,13 +557,13 @@ let update msg model =
             // Entering a non-hidden window is the band's other mutually-exclusive detail view: clear any
             // drill-down selection and (re)fetch the history that scopes the chart. Anchor the chart to now
             // so the first render is placed correctly and the throttle countdown starts from the open.
-            { model with OverviewChartWindow = next; SelectedOverviewGroup = None; OverviewHistoryNow = System.DateTimeOffset.Now },
+            { model with OverviewChartWindow = next; SelectedOverviewGroup = None; OverviewHistoryNow = now },
             fetchOverviewHistory ()
 
-    | OverviewHistoryLoaded history ->
+    | OverviewHistoryLoaded (history, fetchedAt) ->
         // Anchor the chart's right edge to the instant this history was fetched, so the axis advances in
         // discrete steps once per refresh (with fresh data) instead of drifting on every render.
-        { model with OverviewHistory = history; OverviewHistoryNow = System.DateTimeOffset.Now }, Cmd.none
+        { model with OverviewHistory = history; OverviewHistoryNow = fetchedAt }, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -932,7 +941,7 @@ let view model dispatch =
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)
                         model.OverviewChartWindow
-                        (fun () -> dispatch CycleOverviewChart)
+                        (fun () -> dispatch (CycleOverviewChart System.DateTimeOffset.Now))
                         model.OverviewHistory
                         model.OverviewHistoryNow
                         model.Repos

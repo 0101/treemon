@@ -115,22 +115,6 @@ type OverviewSnapshot =
       Tasks: TaskCount list
       Agents: AgentCount list }
 
-/// Project the full Overview roll-up down to its count-only lenses, dropping every `Members` list.
-/// Both logging and change-detection run on this projection, so identical counts with churning
-/// membership never produce a log line. Returns an anonymous record (structural equality) so the
-/// scheduler can compare two projections directly.
-let toCounts (overview: Overview) =
-    {| Tasks = overview.Tasks |> List.map (fun b -> { TaskCount.Kind = b.Kind; Count = b.Count })
-       Agents = overview.Agents |> List.map (fun g -> { AgentCount.Kind = g.Kind; Count = g.Count }) |}
-
-/// Which Overview-band group the drill-down panel is currently showing. Single-select across both
-/// sections (at most one is set): an agent group (Active agents section) or a task bucket (Tasks
-/// section). Ephemeral session state — never persisted (unlike OverviewPanelOpen).
-[<RequireQualifiedAccess>]
-type OverviewSelection =
-    | Agents of AgentGroupKind
-    | Tasks of TaskBucketKind
-
 // Canonical left-to-right order of the task bars. Unattended trails Done: it is the muted
 // catch-all for In-progress/Queued tasks whose worktree has no active agent.
 let private taskOrder =
@@ -156,67 +140,6 @@ let private activityOrder =
 let private agentGroupOrder =
     (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting; AgentGroupKind.Idle ]
 
-// ── Shared kind -> display-label and kind -> accent-class mappings ──
-// The single owner of the label + CSS-class strings for every task/activity/agent kind. Both the live
-// band (OverviewBand) and the in-band history chart (OverviewChart) read these so a label rename, typo
-// fix, or palette change happens in exactly one place and the band + chart legend can never drift. The
-// accent class sets `color`, which tints both the count text and the visual (bar/circle/area paint
-// `currentColor`).
-
-/// Display label per task bucket, in the aggregate's canonical left-to-right order.
-let taskLabel =
-    function
-    | TaskBucketKind.Planned -> "Planned"
-    | TaskBucketKind.Queued -> "Queued"
-    | TaskBucketKind.InProgress -> "In progress"
-    | TaskBucketKind.Blocked -> "Blocked"
-    | TaskBucketKind.Done -> "Done"
-    | TaskBucketKind.Unattended -> "Unattended"
-
-/// Accent-color modifier class per task bucket.
-let taskClass =
-    function
-    | TaskBucketKind.Planned -> "task-planned"
-    | TaskBucketKind.Queued -> "task-queued"
-    | TaskBucketKind.InProgress -> "task-inprogress"
-    | TaskBucketKind.Blocked -> "task-blocked"
-    | TaskBucketKind.Done -> "task-done"
-    | TaskBucketKind.Unattended -> "task-unattended"
-
-/// Display label per activity bucket, in the aggregate's canonical order.
-let activityLabel =
-    function
-    | CurrentActivity.Investigating -> "Investigating"
-    | CurrentActivity.Planning -> "Planning"
-    | CurrentActivity.Executing -> "Executing"
-    | CurrentActivity.Reviewing -> "Reviewing"
-    | CurrentActivity.PR -> "PR"
-    | CurrentActivity.Working -> "Working"
-
-/// Accent-color modifier class per activity bucket (same currentColor scheme as taskClass).
-let activityClass =
-    function
-    | CurrentActivity.Investigating -> "activity-investigating"
-    | CurrentActivity.Planning -> "activity-planning"
-    | CurrentActivity.Executing -> "activity-executing"
-    | CurrentActivity.Reviewing -> "activity-reviewing"
-    | CurrentActivity.PR -> "activity-pr"
-    | CurrentActivity.Working -> "activity-working"
-
-/// Display label per agent group: the skill-derived activity, or the distinct Waiting group.
-let agentLabel =
-    function
-    | AgentGroupKind.Activity activity -> activityLabel activity
-    | AgentGroupKind.Waiting -> "Waiting"
-    | AgentGroupKind.Idle -> "Idle"
-
-/// Accent-color modifier class per agent group (same currentColor scheme as activityClass).
-let agentClass =
-    function
-    | AgentGroupKind.Activity activity -> activityClass activity
-    | AgentGroupKind.Waiting -> "activity-waiting"
-    | AgentGroupKind.Idle -> "activity-idle"
-
 /// The agent group a worktree's collapsed coding-tool status + skill maps to, or None when it is not
 /// a live agent (NoSession — grey, no open session). The SINGLE source of truth for status → agent
 /// group, shared by the live band aggregate and the event-derived history reconstruction
@@ -232,7 +155,7 @@ let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGr
 /// Count agents per group from a set of collapsed per-worktree (status, skill) pairs, in the canonical
 /// agent-group order with empty groups dropped — the count-only agent projection. Shared by the
 /// history reconstruction (Server.OverviewHistory.deriveAgents) so an event-derived Agents snapshot is
-/// bucketed and ordered exactly like `aggregate`'s live one, then reduced to counts by `toCounts`.
+/// bucketed and ordered exactly like `aggregate`'s live one.
 let agentCountsOf (worktrees: (CodingToolStatus * string option) seq) : AgentCount list =
     let counts =
         worktrees
@@ -245,20 +168,6 @@ let agentCountsOf (worktrees: (CodingToolStatus * string option) seq) : AgentCou
         match Map.tryFind kind counts with
         | Some c when c > 0 -> Some { AgentCount.Kind = kind; Count = c }
         | _ -> None)
-
-/// The agent group a single live session belongs to, from its OWN status and skill: a Working session
-/// is classified by the skill IT is running (Activity.classify — absent skill → Working, matching the
-/// spec's "red-dot agent, no recognized skill → generic Working group"), a WaitingForUser session
-/// joins the Waiting group, an Idle session the Idle group. NoSession is never a per-session status
-/// (the empty-session worktree collapse), so it maps to no group. This replaces the old per-worktree
-/// classification: grouping is now per session, so a worktree's sessions split across groups by what
-/// each is actually doing rather than clumping under the worktree's single collapsed skill.
-let private sessionGroupKind (s: SessionDot) : AgentGroupKind option =
-    match s.Status with
-    | CodingToolStatus.Working -> Some(AgentGroupKind.Activity(Activity.classify (s.Skill |> Option.defaultValue "")))
-    | CodingToolStatus.WaitingForUser -> Some AgentGroupKind.Waiting
-    | CodingToolStatus.Idle -> Some AgentGroupKind.Idle
-    | CodingToolStatus.NoSession -> None
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
@@ -329,7 +238,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let scale = taskGroups |> List.map (fun (_, _, count) -> count) |> List.max
 
     // Agent groups, now split per SESSION (not per worktree): each open session lands in the group its
-    // OWN status/skill classifies to (sessionGroupKind) — a red-dot Working session by its running
+    // OWN status/skill classifies via agentGroupOf — a red-dot Working session by its running
     // skill, a WaitingForUser session in Waiting, an Idle session in Idle. A worktree therefore
     // appears in every group its sessions span, carrying only the matching subset, and contributes
     // that subset's size (so Count = Σ Contribution = total sessions in the group). NoSession sessions
@@ -339,7 +248,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let agentMembersFor kind =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
-            match w.Sessions |> List.filter (fun s -> sessionGroupKind s = Some kind) with
+            match w.Sessions |> List.filter (fun s -> agentGroupOf s.Status s.Skill = Some kind) with
             | [] -> None
             | matched -> Some(memberOf repoId repoName w.CodingToolSince matched w (List.length matched)))
 

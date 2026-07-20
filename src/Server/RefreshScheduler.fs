@@ -804,6 +804,25 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
+let internal updateTaskHistory
+    (assembleTasks: DashboardState -> Async<OverviewData.TaskCount list>)
+    (persistTasks: DateTimeOffset -> OverviewData.TaskCount list -> bool)
+    (state: DashboardState)
+    (lastLoggedTasks: OverviewData.TaskCount list option)
+    =
+    async {
+        try
+            let! tasks = assembleTasks state
+
+            if OverviewHistory.tasksChanged lastLoggedTasks tasks then
+                return if persistTasks DateTimeOffset.UtcNow tasks then Some tasks else lastLoggedTasks
+            else
+                return lastLoggedTasks
+        with ex ->
+            Log.log "OverviewHistory" $"task history update failed, continuing refresh scheduling: {ex.Message}"
+            return lastLoggedTasks
+    }
+
 let start
     (agent: MailboxProcessor<StateMsg>)
     (assembleTasks: DashboardState -> Async<OverviewData.TaskCount list>)
@@ -846,24 +865,9 @@ let start
                         let! watchers = CanvasWatchers.reconcile agent repos watchers
                         latestWatchers.Value <- watchers
 
-                        // 24/7 Tasks history logging (spec: docs/spec/overview-activity-history.md +
-                        // session-status-push.md "Overview-history unification"). Assemble the SAME
-                        // count-only Tasks projection the client band shows and persist one task_snapshots
-                        // row only when it changed since the last logged one. The Agents dimension is NOT
-                        // snapshotted here — it is derived on read from the push event stream. The
-                        // accumulator threads immutably through the recursion, exactly like lastRuns/watchers
-                        // — no `let mutable`. `assembleTasks`/`persistTasks` are injected by the caller
-                        // because assembleRepos and the activity store live in later-compiled modules.
-                        let! tasks = assembleTasks state
-                        let lastLoggedTasks =
-                            if OverviewHistory.tasksChanged lastLoggedTasks tasks then
-                                // Only advance the accumulator when the write actually reached the store;
-                                // on a failed append keep the previous projection so the next iteration
-                                // retries and the changed transition is not lost.
-                                if persistTasks DateTimeOffset.UtcNow tasks then Some tasks
-                                else lastLoggedTasks
-                            else
-                                lastLoggedTasks
+                        // Optional task-history capture has its own failure boundary. A slow or failed
+                        // history read/write must never skip the core refresh task selected below.
+                        let! lastLoggedTasks = updateTaskHistory assembleTasks persistTasks state lastLoggedTasks
 
                         let archivedBranchSets = readArchivedBranchSets rootPaths
                         let archivedPaths = resolveArchivedPaths archivedBranchSets repos

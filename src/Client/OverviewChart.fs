@@ -17,11 +17,11 @@ module OverviewChart
 open System
 open Shared
 open OverviewData
+open OverviewPresentation
 open AppTypes
 open Feliz
 open Fable.Core.JsInterop
 
-// ── Fixed geometry (verbatim from the prototype) ──
 let [<Literal>] private w = 760.0
 let [<Literal>] private h = 170.0
 let [<Literal>] private padL = 34.0
@@ -38,6 +38,11 @@ type private SeriesDef =
       Accent: string
       ValueAt: OverviewSnapshot -> int }
 
+[<RequireQualifiedAccess>]
+type ChartKind =
+    | Agents
+    | Tasks
+
 // Count of one agent group in a snapshot (0 when the group is absent — empty groups are dropped upstream).
 let private agentCount kind (s: OverviewSnapshot) =
     s.Agents
@@ -51,8 +56,7 @@ let private taskCount kind (s: OverviewSnapshot) =
     |> Option.defaultValue 0
 
 // Agent series in canonical stacking order (bottom -> top): the activity groups, then Waiting last —
-// mirroring OverviewData.agentGroupOrder and the band's palette. Labels/classes come from the shared
-// OverviewData.agentLabel/agentClass so the legend never drifts from the live band.
+// mirroring OverviewData.agentGroupOrder and the band's palette.
 let private agentDefs : SeriesDef list =
     [ AgentGroupKind.Activity CurrentActivity.Investigating
       AgentGroupKind.Activity CurrentActivity.Planning
@@ -65,7 +69,6 @@ let private agentDefs : SeriesDef list =
     |> List.map (fun kind -> { Label = agentLabel kind; Accent = agentClass kind; ValueAt = agentCount kind })
 
 // Task series in canonical stacking order, mirroring OverviewData.taskOrder and the band's task-* palette.
-// Labels/classes come from the shared OverviewData.taskLabel/taskClass so the legend never drifts.
 let private taskDefs : SeriesDef list =
     [ TaskBucketKind.Planned
       TaskBucketKind.Queued
@@ -74,6 +77,11 @@ let private taskDefs : SeriesDef list =
       TaskBucketKind.Done
       TaskBucketKind.Unattended ]
     |> List.map (fun kind -> { Label = taskLabel kind; Accent = taskClass kind; ValueAt = taskCount kind })
+
+let private definitions =
+    function
+    | ChartKind.Agents -> agentDefs
+    | ChartKind.Tasks -> taskDefs
 
 /// The TimeSpan a window scopes to (Hidden collapses to zero — callers gate on non-Hidden before rendering).
 let private windowSpan =
@@ -105,11 +113,10 @@ let private buildPoints (defs: SeriesDef list) (now: DateTimeOffset) (window: Ti
     let countsOf (s: OverviewSnapshot) = defs |> List.map (fun d -> d.ValueAt s)
 
     let headCounts =
-        match before, inside, sorted with
-        | Some b, _, _ -> Some(countsOf b)          // carry the snapshot active at the window start
-        | None, first :: _, _ -> Some(countsOf first) // window opens before any history -> carry the first
-        | None, [], first :: _ -> Some(countsOf first)
-        | None, [], [] -> None
+        match before, inside with
+        | Some b, _ -> Some(countsOf b)
+        | None, first :: _ -> Some(countsOf first)
+        | None, [] -> None
 
     match headCounts with
     | None -> []
@@ -156,13 +163,13 @@ let private relativeLabel (window: TimeSpan) (fraction: float) =
 /// Snap to the ACTIVE stepped snapshot for a cursor fraction and project the crosshair tooltip model: the
 /// last point at or before the cursor (the value actually held then — matching the stepped rendering),
 /// its non-empty series as rows in canonical order, a total, and a relative-time header. Returns None when
-/// there is no history to snap to. `isAgents` selects the canonical series set (matching
+/// there is no history to snap to. `chartKind` selects the canonical series set (matching
 /// agentPoints/taskPoints). Pure test/reuse seam — the React component is the only impure caller.
-let tooltipAt (isAgents: bool) (window: TimeSpan) (points: Point list) (cursorFraction: float) : TooltipModel option =
+let tooltipAt chartKind (window: TimeSpan) (points: Point list) (cursorFraction: float) : TooltipModel option =
     match points with
     | [] -> None
     | head :: _ ->
-        let defs = if isAgents then agentDefs else taskDefs
+        let defs = definitions chartKind
         let snap =
             points
             |> List.filter (fun p -> p.Fraction <= cursorFraction)
@@ -194,7 +201,7 @@ type private HoverState =
 
 /// Render one stacked stepped-area chart with its title, legend, and crosshair tooltip for the given
 /// series over the window (spec decision #8). `title` is the section name ("Active agents" / "Tasks");
-/// `isAgents` selects the canonical series set. When there is no history the chart degrades to a bare
+/// `chartKind` selects the canonical series set. When there is no history the chart degrades to a bare
 /// baseline (grid + axes, no areas, no hover) rather than erroring.
 ///
 /// Hovering the plot shows a dashed vertical crosshair at the cursor and a tooltip SNAPPED to the active
@@ -204,8 +211,8 @@ type private HoverState =
 /// geometry (buildPoints/agentDefs/taskDefs) is shared with the static path & legend builders above and
 /// with the `agentPoints`/`taskPoints` test seams.
 [<ReactComponent>]
-let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : ReactElement =
-    let defs = if isAgents then agentDefs else taskDefs
+let HistoryChart (title: string) (winLabel: string) chartKind (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : ReactElement =
+    let defs = definitions chartKind
     let hover, setHover = React.useState (None: HoverState option)
     let pts = buildPoints defs now window snapshots |> List.toArray
     let n = pts.Length
@@ -259,17 +266,17 @@ let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateT
     let buildPath (accent: string) (lower: float[]) (upper: float[]) =
         let stepSegs =
             [ for i in 1 .. n - 1 ->
-                  $"L {ix xs.[i]} {ix (yOf upper.[i - 1])} L {ix xs.[i]} {ix (yOf upper.[i])}" ]
+                  $"L {ix xs[i]} {ix (yOf upper[i - 1])} L {ix xs[i]} {ix (yOf upper[i])}" ]
         let downSegs =
             [ for i in n - 1 .. -1 .. 1 ->
-                  $"L {ix xs.[i]} {ix (yOf lower.[i])} L {ix xs.[i]} {ix (yOf lower.[i - 1])}" ]
+                  $"L {ix xs[i]} {ix (yOf lower[i])} L {ix xs[i]} {ix (yOf lower[i - 1])}" ]
         let d =
             String.concat
                 " "
-                ([ $"M {ix xs.[0]} {ix (yOf upper.[0])}" ]
+                ([ $"M {ix xs[0]} {ix (yOf upper[0])}" ]
                  @ stepSegs
                  @ downSegs
-                 @ [ $"L {ix xs.[0]} {ix (yOf lower.[0])} Z" ])
+                 @ [ $"L {ix xs[0]} {ix (yOf lower[0])} Z" ])
         Svg.path [ svg.className accent; svg.d d; svg.fill "currentColor"; svg.fillOpacity 0.82 ]
 
     let areaEls =
@@ -282,7 +289,7 @@ let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateT
                 |> List.fold
                     (fun (lower: float[], acc) (k, def) ->
                         let vals = pts |> Array.map (fun p -> float (List.item k p.Counts))
-                        let upper = Array.init n (fun i -> lower.[i] + vals.[i])
+                        let upper = Array.init n (fun i -> lower[i] + vals[i])
                         let acc' =
                             if vals |> Array.exists (fun v -> v > 0.0) then buildPath def.Accent lower upper :: acc
                             else acc
@@ -310,7 +317,6 @@ let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateT
                 else
                     None)
 
-    // ── Crosshair tooltip (spec decision #8) ──
     // Map a pointer move over the whole SVG into SVG-x + window-fraction + figure-pixel offset (mirrors
     // the prototype: cursor scaled by the viewBox width / rendered width, clamped to the plot). No-op when
     // there is no history to snap to.
@@ -363,7 +369,7 @@ let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateT
     let tooltipEl =
         match hover with
         | Some hv ->
-            match tooltipAt isAgents window (List.ofArray pts) hv.Frac with
+            match tooltipAt chartKind window (List.ofArray pts) hv.Frac with
             | Some model ->
                 let rows =
                     model.Rows
@@ -396,22 +402,17 @@ let HistoryChart (title: string) (winLabel: string) (isAgents: bool) (now: DateT
     Html.div
         [ prop.className "history-charts"
           prop.children
-              [ Html.div
-                    [ prop.className "chart-title"
-                      prop.children
-                          [ Html.text (title + " \u00B7 last ")
-                            Html.span [ prop.className "win-label"; prop.text winLabel ] ] ]
-                Html.figure [ prop.children [ svgEl; tooltipEl ] ]
+              [ Html.figure [ prop.children [ svgEl; tooltipEl ] ]
                 Html.div [ prop.className "chart-legend"; prop.children legendEls ] ] ]
 
 /// The Active-agents history chart for the given window. Returns Html.none when the window is Hidden.
 let agentsChart (window: OverviewChartWindow) (now: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
     match window with
     | OverviewChartWindow.Hidden -> Html.none
-    | _ -> HistoryChart "Active agents" (windowLabel window) true now (windowSpan window) snapshots
+    | _ -> HistoryChart "Active agents" (windowLabel window) ChartKind.Agents now (windowSpan window) snapshots
 
 /// The Tasks history chart for the given window. Returns Html.none when the window is Hidden.
 let tasksChart (window: OverviewChartWindow) (now: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
     match window with
     | OverviewChartWindow.Hidden -> Html.none
-    | _ -> HistoryChart "Tasks" (windowLabel window) false now (windowSpan window) snapshots
+    | _ -> HistoryChart "Tasks" (windowLabel window) ChartKind.Tasks now (windowSpan window) snapshots

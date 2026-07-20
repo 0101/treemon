@@ -376,6 +376,37 @@ type QueryWindowTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type TaskSnapshotTests() =
+
+    let task count : OverviewData.TaskCount =
+        { Kind = OverviewData.TaskBucketKind.Planned; Count = count }
+
+    [<Test>]
+    member _.``latest task snapshot survives a store reopen for restart dedupe``() =
+        withDbPath (fun dbPath ->
+            let expected = [ task 5 ]
+            (use store = new SessionActivityStore(dbPath)
+             store.AppendTaskSnapshot(ts "2026-03-01T10:00:00Z", expected))
+
+            use reopened = new SessionActivityStore(dbPath)
+            Assert.That(
+                reopened.QueryLatestTaskSnapshot(),
+                Is.EqualTo(Some(ts "2026-03-01T10:00:00Z", expected))
+            )
+            Assert.That(
+                reopened.AppendTaskSnapshotIfChanged(ts "2026-03-01T11:00:00Z", expected),
+                Is.False,
+                "an unchanged restart projection must not append"
+            )
+            Assert.That(
+                reopened.QueryTaskSnapshots(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z").Length,
+                Is.EqualTo 1
+            ))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type PruneOldTests() =
 
     [<Test>]
@@ -407,6 +438,27 @@ type PruneOldTests() =
     [<Test>]
     member _.``pruneOld on an empty store deletes nothing``() =
         withStore (fun store -> Assert.That(store.PruneOld(ts "2026-03-01T12:00:00Z"), Is.EqualTo(0)))
+
+    [<Test>]
+    member _.``pruneOld keeps the latest old event for a session whose liveness is retained``() =
+        withStore (fun store ->
+            let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2025-12-01T10:00:00Z"
+            store.AppendEvent oldEvent |> ignore
+            store.UpsertStatus(
+                storedOf
+                    "s1"
+                    "C:/wt/a"
+                    { emptyStatus with Status = SessionLevelStatus.Working }
+                    "2025-12-01T10:00:00Z"
+                    "2026-03-01T11:59:00Z"
+            )
+
+            store.PruneOld(ts "2026-01-01T00:00:00Z") |> ignore
+
+            Assert.That(
+                store.QueryHistoryWindow(ts "2026-02-28T00:00:00Z", ts "2026-03-01T12:00:00Z"),
+                Is.EqualTo [ oldEvent ]
+            ))
 
 
 [<TestFixture>]

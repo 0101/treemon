@@ -300,7 +300,7 @@ let main args =
                 // the client-poll path builds (assembleRepos + OverviewData.aggregate), including active
                 // agent sessions, so the logged history matches what the band shows. Persisted to the
                 // push-model store's task_snapshots table (the Agents dimension is derived on read from
-                // the event stream). Injected here because assembleRepos/SessionManager and the store
+                // status events plus liveness). Injected here because assembleRepos/SessionManager and the store
                 // live in modules compiled after RefreshScheduler.
                 let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
 
@@ -308,15 +308,21 @@ let main args =
                     async {
                         let! activeSessions = SessionManager.getActiveSessions sessionAgent
                         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-                        let repos = WorktreeApi.assembleRepos sessionActivityStore rootPaths activeSessionPaths state
-                        return (OverviewData.aggregate repos |> OverviewData.toCounts).Tasks
+                        let inputs = WorktreeApi.loadRepoAssemblyInputs sessionActivityStore rootPaths state
+                        let repos = WorktreeApi.assembleRepos inputs rootPaths activeSessionPaths state
+                        return
+                            OverviewData.aggregate repos
+                            |> _.Tasks
+                            |> List.map (fun bucket ->
+                                { Kind = bucket.Kind
+                                  Count = bucket.Count } : OverviewData.TaskCount)
                     }
 
                 let persistTasks (ts: System.DateTimeOffset) (tasks: OverviewData.TaskCount list) : bool =
                     match sessionActivityStore with
                     | Some store ->
                         try
-                            store.AppendTaskSnapshot(ts, tasks)
+                            store.AppendTaskSnapshotIfChanged(ts, tasks) |> ignore
                             true
                         with ex ->
                             Log.log "OverviewHistory" $"task snapshot append failed, will retry next iteration: {ex.Message}"

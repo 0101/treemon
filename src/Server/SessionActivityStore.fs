@@ -178,6 +178,14 @@ CREATE TABLE IF NOT EXISTS activity_events (
     ts            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
+CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
+
+CREATE TABLE IF NOT EXISTS session_liveness (
+    session_id TEXT NOT NULL,
+    ts         TEXT NOT NULL,
+    PRIMARY KEY (session_id, ts)
+);
+CREATE INDEX IF NOT EXISTS ix_liveness_ts ON session_liveness(ts);
 
 CREATE TABLE IF NOT EXISTS task_snapshots (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,6 +250,11 @@ let private touchSql =
 UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
 """
 
+let private appendLivenessSql =
+    """
+INSERT OR IGNORE INTO session_liveness (session_id, ts) VALUES ($sid, $seen);
+"""
+
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
@@ -281,6 +294,32 @@ WHERE ts >= $start AND ts <= $end
 ORDER BY ts;
 """
 
+let private queryHistoryWindowSql =
+    """
+SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
+FROM activity_events AS event
+WHERE event.rowid = (
+    SELECT baseline.rowid
+    FROM activity_events AS baseline
+    WHERE baseline.session_id = event.session_id AND baseline.ts < $start
+    ORDER BY baseline.ts DESC, baseline.rowid DESC
+    LIMIT 1
+)
+UNION ALL
+SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
+FROM activity_events
+WHERE ts >= $start AND ts <= $end
+ORDER BY ts;
+"""
+
+let private queryLivenessSql =
+    """
+SELECT session_id, ts
+FROM session_liveness
+WHERE ts >= $start AND ts <= $end
+ORDER BY ts;
+"""
+
 let private appendTaskSnapshotSql =
     """
 INSERT INTO task_snapshots (ts, tasks) VALUES ($ts, $tasks);
@@ -294,12 +333,58 @@ WHERE ts >= $start AND ts <= $end
 ORDER BY ts;
 """
 
-// pruneOld trims every table past the retention cutoff: the append-only event stream and task-snapshot
-// stream (the unbounded ones) plus long-dead session rows well outside any live window.
+let private queryLatestTaskSnapshotSql =
+    """
+SELECT ts, tasks
+FROM task_snapshots
+ORDER BY ts DESC, id DESC
+LIMIT 1;
+"""
+
+let private queryTaskSnapshotBeforeSql =
+    """
+SELECT ts, tasks
+FROM task_snapshots
+WHERE ts < $start
+ORDER BY ts DESC, id DESC
+LIMIT 1;
+"""
+
+// Prune redundant history before the cutoff while retaining the one baseline needed to carry state
+// into later windows: the latest old event for each still-retained session and the latest old task
+// snapshot. Liveness needs no old baseline beyond openWindow.
 let private pruneSql =
     """
-DELETE FROM activity_events WHERE ts < $cutoff;
-DELETE FROM task_snapshots WHERE ts < $cutoff;
+WITH retained_event_baselines AS (
+    SELECT event.rowid
+    FROM activity_events AS event
+    JOIN session_status AS status
+      ON status.session_id = event.session_id
+     AND status.last_seen >= $cutoff
+    WHERE event.ts < $cutoff
+      AND event.rowid = (
+          SELECT baseline.rowid
+          FROM activity_events AS baseline
+          WHERE baseline.session_id = event.session_id
+            AND baseline.ts < $cutoff
+          ORDER BY baseline.ts DESC, baseline.rowid DESC
+          LIMIT 1
+      )
+)
+DELETE FROM activity_events
+WHERE ts < $cutoff
+  AND rowid NOT IN (SELECT rowid FROM retained_event_baselines);
+
+DELETE FROM session_liveness WHERE ts < $cutoff;
+DELETE FROM task_snapshots
+WHERE ts < $cutoff
+  AND id <> (
+      SELECT baseline.id
+      FROM task_snapshots AS baseline
+      WHERE baseline.ts < $cutoff
+      ORDER BY baseline.ts DESC, baseline.id DESC
+      LIMIT 1
+  );
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
 
@@ -464,15 +549,26 @@ type SessionActivityStore(dbPath: string) =
         tx.Commit()
         inserted
 
-    /// Advance a session's `last_seen` (openness heartbeat) without touching status/updated_at or the
-    /// message fields. Only moves it forward; a no-op if the row is absent or already fresher.
-    member _.TouchLastSeen(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
+    /// Advance `last_seen` and append the compact liveness point used by historical openness
+    /// reconstruction. Both writes share one transaction so live state and history cannot diverge.
+    member _.RecordLiveness(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- touchSql
-        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
-        cmd.ExecuteNonQuery() |> ignore
+        use tx = conn.BeginTransaction()
+        let bind (cmd: SqliteCommand) =
+            cmd.Transaction <- tx
+            cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+            cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+
+        use touchCmd = conn.CreateCommand()
+        touchCmd.CommandText <- touchSql
+        bind touchCmd
+        touchCmd.ExecuteNonQuery() |> ignore
+
+        use livenessCmd = conn.CreateCommand()
+        livenessCmd.CommandText <- appendLivenessSql
+        bind livenessCmd
+        livenessCmd.ExecuteNonQuery() |> ignore
+        tx.Commit()
 
     /// Read one durable session row regardless of the live idle-window cutoff.
     member _.StatusBySession(sessionId: SessionId) : StoredStatus option =
@@ -546,6 +642,30 @@ type SessionActivityStore(dbPath: string) =
 
         readRows reader readEventRow []
 
+    /// History events in [startTime, endTime], plus each session's latest event before startTime so
+    /// a status established before the chart window can be carried across its left edge.
+    member _.QueryHistoryWindow(startTime: DateTimeOffset, endTime: DateTimeOffset) : ActivityEventRow list =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- queryHistoryWindowSql
+        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
+        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
+        use reader = cmd.ExecuteReader()
+
+        readRows reader readEventRow []
+
+    /// Liveness-only points in [startTime, endTime], oldest first. These remain separate from
+    /// activity_events because they extend openness without changing status or skill.
+    member _.QueryLiveness(startTime: DateTimeOffset, endTime: DateTimeOffset) : (SessionId * DateTimeOffset) list =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- queryLivenessSql
+        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
+        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
+        use reader = cmd.ExecuteReader()
+
+        readRows reader (fun row -> SessionId(row.GetString 0), parseIso (row.GetString 1)) []
+
     /// Append one Tasks (beads) history snapshot — the count-only projection, logged only on change by
     /// the scheduler. The Agents dimension is NOT stored here: it is derived on read from
     /// `activity_events` (the push event stream), so only Tasks are snapshot-based.
@@ -556,6 +676,13 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
         cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
         cmd.ExecuteNonQuery() |> ignore
+
+    member this.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =
+        match this.QueryLatestTaskSnapshot() with
+        | Some (_, previous) when previous = tasks -> false
+        | _ ->
+            this.AppendTaskSnapshot(ts, tasks)
+            true
 
     /// The Tasks history substrate: task snapshots with `ts` in [startTime, endTime], oldest first.
     /// Merged with the event-derived Agents history into the OverviewSnapshot stream on read.
@@ -569,6 +696,25 @@ type SessionActivityStore(dbPath: string) =
 
         [ while reader.Read() do
               yield parseIso (reader.GetString 0), parseTasks (reader.GetString 1) ]
+
+    member _.QueryLatestTaskSnapshot() : (DateTimeOffset * OverviewData.TaskCount list) option =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- queryLatestTaskSnapshotSql
+        use reader = cmd.ExecuteReader()
+
+        if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
+        else None
+
+    member _.QueryTaskSnapshotBefore(startTime: DateTimeOffset) : (DateTimeOffset * OverviewData.TaskCount list) option =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- queryTaskSnapshotBeforeSql
+        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
+        use reader = cmd.ExecuteReader()
+
+        if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
+        else None
 
     interface IDisposable with
         member _.Dispose() = keepAlive.Dispose()

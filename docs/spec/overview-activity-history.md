@@ -1,223 +1,114 @@
 # Overview Activity History
 
-Persist every change to the dashboard **Overview** roll-up (cross-worktree agent stats + task stats)
-as timestamped records, and surface a past-**24h/72h** timeseries chart **inside** the Overview band.
+## Overview
 
-Investigation: `.agents/overview-activity-history-investigation.md`.
-Prototype: `.agents/canvas/overview-chart-prototype.html`.
-Related: `docs/spec/beads-overview-band.md` (the live band this extends);
-`docs/spec/session-status-push.md` (the push event store this is now unified onto).
+Treemon records the count-only Overview roll-up and renders stepped 24-hour or 72-hour charts
+inside the Overview band. Historical agent values use the same per-session projection as the live
+Overview, so multiple sessions in one worktree contribute identically in both views.
 
-## Update (v2) — unified onto the push event store
-
-The history is now sourced from the push-model store (`SessionActivityStore`, spec:
-`session-status-push.md`) instead of a standalone JSON-Lines logfile. An `OverviewSnapshot` is still
-`{ Timestamp; Tasks; Agents }` and `getOverviewHistory` / `OverviewChart.fs` are unchanged, but the two
-dimensions come from different sources and are reconciled only on read:
-
-- **Tasks** (beads planning counts) stay **snapshot-based**: the scheduler logs the count-only
-  projection to the store's `task_snapshots` table on change (`OverviewHistory.tasksChanged`) — the
-  same change-detection as before, just persisted in SQLite (WAL), retention-pruned with the rest of
-  the store (60 days). Beads counts are not pushed as events, so they cannot be event-derived.
-- **Agents** are **derived on read** from `activity_events` (the durable push event stream), NOT
-  snapshotted each scheduler cycle. `OverviewHistory.deriveAgents` replays each session's status/skill
-  over the window and collapses it per worktree with the SAME `CodingToolStatus.collapseByWorktree` the
-  live band uses (openness/staleness decay modelled — a closed/crashed session drops out of the counts
-  one `openWindow` after its last event, matching what the band showed then). Status→agent-group
-  bucketing is the single shared `OverviewData.agentGroupOf`/`agentCountsOf`, so history and live band
-  can never drift. The push model added a blue-dot **Idle** agent group, which the chart renders too.
-- `OverviewHistory.mergeHistory` stitches the two independently-changing series into one stepped
-  `OverviewSnapshot` stream (carry each dimension forward at every change point), so the read contract
-  and the client chart are untouched.
-
-The rest of this document describes the original (v1) JSON-Lines design; where it says "JSONL",
-"`logs/overview-history.jsonl`", or "log only the Agents on change", read the v2 model above. The v1
-change-detection, count-only projection, window semantics, and stepped chart all carry over verbatim.
+Tasks and Agents use different durable sources: task counts are snapshotted when they change, while
+agent counts are reconstructed from status-bearing activity events plus a compact liveness timeline.
+The API merges both dimensions into one `OverviewSnapshot` timeline.
 
 ## Goals
 
-- Give the Overview band a **history**: record how agent activity and task buckets evolve over time,
-  so trends (overnight execution, backlog draining, planning cadence) are visible — not just the
-  current snapshot.
-- Capture that history **24/7**, independent of whether any browser is open, from the existing
-  server-side scan — one aggregation, no second collection path.
-- Let the user **see** the history in place: a togglable stacked-area chart under each Overview
-  section, scoped to the last 24h or 72h.
-- Add **no runtime dependency** and keep a single source of truth for the aggregation shared by the
-  live band, the logfile, and the chart.
-
-## Decisions
-
-These were settled with the user during investigation and prototyping:
-
-1. **Trigger:** log continuously from the `RefreshScheduler` loop (24/7), not the client-poll path.
-2. **Format:** JSON Lines (`logs/overview-history.jsonl`), append-only, one snapshot per line.
-3. **Dedupe:** log **only on change** — append a record only when the `{Tasks; Agents}` aggregate
-   differs from the last logged one (drop the timestamp from the comparison). No fixed-interval
-   sampling.
-4. **Chart location:** in-band, directly under each live section — order is **agents live → agents
-   history → tasks live → tasks history**.
-5. **Window control:** a single **cycle** button in the band toggles **hidden → 24h → 72h → hidden**.
-6. **Toggle state is ephemeral** — client-only model state, resets on reload. No config, no
-   persistence API.
-7. **Chart type:** hand-rolled inline **SVG stacked-area, stepped** (value holds until the next
-   logged change), reusing the band's existing accent CSS classes for colour. No charting library.
-8. **Tooltips:** crosshair tooltip on hover, snapped to the active stepped snapshot, listing each
-   non-empty series as `label: count` plus a total and a relative timestamp.
-9. **Mutually exclusive with the drill-down panel** (`docs/spec/overview-drilldown.md`): the band's
-   two ephemeral detail views never coexist. Opening the history chart clears any drill-down
-   selection; selecting a drill-down group hides the history chart. One detail view at a time.
-10. **Snapshot stores counts only.** The persisted record carries just `{Kind; Count}` per bucket/
-    group — never the drill-down `Members` — so the JSONL stays lean and change-detection tracks
-    count transitions, not per-worktree membership churn.
-11. **Loop assembly is injected, not called directly.** `RefreshScheduler.fs` is compiled *before*
-    `WorktreeApi.fs`/`SyncEngine.fs`, so `RefreshScheduler.loop` cannot name `WorktreeApi.assembleRepos`
-    (which depends on `SyncEngine`). `RefreshScheduler.start` therefore takes an injected
-    `assembleOverview : DashboardState -> Async<Overview>`; `Program.fs` supplies the closure
-    (`getActiveSessions` → `assembleRepos rootPaths activeSessionPaths state` → `OverviewData.aggregate`).
-    Active sessions are included so the logged roll-up matches the client band exactly. The
-    change-detection + append + immutably-threaded `lastLoggedSnapshot` accumulator all stay inside
-    `loop` as intended.
-12. **`OverviewChartWindow` cases are `Hidden | Hours24 | Hours72`** (client `AppTypes.fs`,
-    `[<RequireQualifiedAccess>]`). Named `Hidden` rather than the §5 sketch's `None` to avoid
-    colliding with `Option.None` in the reducer. The cycle button advances
-    `Hidden → Hours24 → Hours72 → Hidden`; the ephemeral snapshots fetched for the active window live
-    in `Model.OverviewHistory` (both reset on reload).
-13. **`OverviewChart.fs` renders the static stacked chart + legend only; the crosshair tooltip is
-    deferred** to its own follow-up task (`tm-activity-history-zx6`). The module exposes pure
-    windowing seams (`agentPoints`/`taskPoints` returning a `Point list` — fraction 0..1 across the
-    window + per-series counts in canonical order) that the tooltip task can reuse, plus the
-    `agentsChart`/`tasksChart` `ReactElement` builders `OverviewBand.view` calls.
-14. **A section's history chart renders only when that live section is present.** The agents chart
-    renders under the agents section only when `overview.Agents` is non-empty, and likewise the tasks
-    chart under a non-empty `overview.Tasks` — so an idle roll-up with only tasks shows just the tasks
-    history, matching the "chart directly under its section" framing. Coordinates are rounded to
-    integer pixels (culture-invariant, deterministic under both Fable and the .NET test compile);
-    adjacent stacked edges share the identical rounding formula so no seams appear.
-15. **Crosshair tooltip (task `tm-activity-history-zx6`) is a Feliz React component with local hover
-    state, not a static builder.** `OverviewChart.HistoryChart` (`[<ReactComponent>]`, matching the
-    `Components.FitOrHide` precedent) holds an ephemeral `HoverState` via `React.useState`; a
-    `svg.onMouseMove` on the SVG root maps the cursor to an SVG-x + window-fraction (scaled by
-    viewBox/rendered width, clamped to the plot, mirroring the prototype), drawing a dashed
-    `.cursor-line` at the cursor and an absolutely-positioned `.chart-tip` snapped to the active
-    snapshot. The snap + rows + total + relative header are a **pure, unit-tested seam**
-    `tooltipAt : isAgents -> window -> Point list -> cursorFraction -> TooltipModel option` (reusing
-    the `agentPoints`/`taskPoints` `Point` seam from #13): it picks the last point at or before the
-    cursor and lists each non-empty series in canonical order. The relative-time header is derived
-    from the snapped point's **fraction** (`minutes-ago = window * (1 - fraction)`, "Hh Mm ago" /
-    "Mm ago" / "now") — internally consistent with the stepped x-axis, so no per-point timestamp is
-    added to `Point`. The tooltip flips left of the cursor near the right edge and sits above it via
-    `translate(±100%, -100%)`, so its size never needs measuring. No history ⇒ no hover (bare
-    baseline). `agentsChart`/`tasksChart` now instantiate `HistoryChart` (passing `isAgents`) instead
-    of a plain builder.
+- Preserve a server-side Overview history without requiring an open browser.
+- Make historical task and agent counts match the live Overview projection at capture time.
+- Reuse the push event stream instead of maintaining a second agent snapshot stream.
+- Keep storage bounded and expose only count data, never drill-down membership.
+- Show history in place without adding a charting dependency.
 
 ## Expected Behavior
 
-### Logging (server, 24/7)
+### Historical data
 
-- On each scheduler iteration the server computes the same `Overview` aggregate the client band
-  shows (via the relocated shared `OverviewData.aggregate`).
-- If the freshly computed `{Tasks; Agents}` differs from the last appended record, a new line is
-  appended to `logs/overview-history.jsonl`: `{ "ts": <ISO-8601>, "tasks": [...], "agents": [...] }`.
-  Identical consecutive aggregates append nothing.
-- The file is append-only and tolerant of a partial trailing line on read (a crash mid-write must
-  not break parsing of prior records). `logs/` is gitignored.
+- The scheduler writes the count-only Tasks projection to `task_snapshots` when it changes. The first
+  projection establishes a baseline; unchanged consecutive values are not written.
+- Agents are derived from `activity_events` plus `session_liveness`. Events establish status and
+  skill; heartbeat and usage points extend `last_seen` without fabricating status transitions. Each
+  session is filtered through the same openness rules as the live card, then counted from the same
+  per-session projection used by `OverviewData.aggregate`.
+- A worktree with multiple open sessions contributes each session independently, including sessions
+  split across different activity, Waiting, or Idle groups.
+- `getOverviewHistory` returns at most 72 hours. The store prunes redundant history after 60 days but
+  retains one pre-cutoff status baseline per still-retained session and one task baseline.
+- Task reads include the latest snapshot before the requested window and carry it to the left edge.
+  Agent reads include each session's latest status event before the window plus liveness from one
+  `openWindow` before the edge.
+- `mergeHistory` carries the latest Tasks and Agents values forward at every change point. Before a
+  dimension has a value, it is empty.
 
-### History retrieval
+### In-band charts
 
-- `IWorktreeApi.getOverviewHistory : unit -> Async<OverviewSnapshot list>` returns the records within
-  the last **72h** (the widest window the chart offers), newest data included, parsed from the JSONL.
-- Records older than 72h are ignored on read (not required to be pruned from disk in v1).
-
-### In-band chart
-
-- The band gains a single cycle button (styled like the band's controls). Clicking cycles
-  hidden → 24h → 72h → hidden; the label reflects the state (e.g. `◷ History` / `◷ 24h` / `◷ 72h`).
-- **Opening the chart** (entering any non-hidden window) **clears the drill-down selection**
-  (`SelectedOverviewGroup = None`); conversely **selecting a drill-down group hides the chart**
-  (window → hidden). The two band detail views are mutually exclusive.
-- When a window is active, two stacked-area charts render — one under the Active-agents section, one
-  under the Tasks section — each scoped to the selected window ending at "now".
-- Series use the **same palette** as the live band (`task-*`, `activity-*`, waiting) so a bucket's
-  bar/circle and its area share one colour. Empty series are omitted from chart + legend.
-- Rendering is **stepped**: each value holds until the next logged change; irregular gaps produce
-  uneven step widths (correct — a wide flat band is a quiet stretch). The window may open mid-gap, so
-  the left edge carries the snapshot active at the window start; the right edge holds flat to now.
-- Hovering shows a dashed vertical crosshair and a tooltip snapped to the active snapshot: relative
-  time header, one `label: count` row per non-empty series with a colour swatch, and a total.
-- When the selected window has no history, the chart degrades gracefully (renders nothing or a flat
-  baseline) — never an error.
+- One button cycles `Hidden -> 24h -> 72h -> Hidden`; the state is client-only and resets on reload.
+- History and drill-down are mutually exclusive: opening either closes the other.
+- The client fetches immediately when the chart opens and refreshes it at most every 30 seconds while
+  visible. The fetch time anchors the chart's right edge.
+- Agents and Tasks each render a stepped stacked-area chart directly below their live section. A
+  chart is omitted when that live section is empty.
+- The left edge carries the value active at the window start; the right edge holds the latest value
+  to the fetch time. Hover shows a snapped crosshair, non-empty series, total, and relative time.
 
 ## Technical Approach
 
-### 1. Relocate the aggregation to `Shared`
-Move `src/Client/OverviewData.fs` → `src/Shared/OverviewData.fs`; add it to `Shared.fsproj` after
-`Types.fs`; remove it from `Client.fsproj`. The module already depends only on `Shared` and is
-Fable-safe (confirmed post-merge — the drill-down additions `GroupMember`, `OverviewSelection`, and
-the per-bucket/group `Members` lists all use `Shared` types only), so no code change is needed. Both
-`OverviewBand.view` (client) and the server logger then call the same `aggregate`. The server ignores
-the `Members` lists when logging (it projects to counts — see §2).
+### Shared count model
 
-### 2. Snapshot type + history module
-- Add a **count-only** snapshot shape in `Shared` (deliberately NOT reusing `TaskBucket`/`AgentGroup`,
-  which now carry drill-down `Members`):
-  ```fsharp
-  type TaskCount  = { Kind: TaskBucketKind; Count: int }
-  type AgentCount = { Kind: AgentGroupKind;  Count: int }
-  type OverviewSnapshot = { Timestamp: DateTimeOffset; Tasks: TaskCount list; Agents: AgentCount list }
-  ```
-  (Scale is derived by the view; `Members` are omitted so the log stays lean.)
-- A projection `Overview -> {Tasks: TaskCount list; Agents: AgentCount list}` drops `Members`; both
-  logging and change-detection operate on this projection.
-- New `src/Server/OverviewHistory.fs`:
-  - `serialize`/`append` one JSONL line via the existing `Log.fs` `FileStream`+lock pattern and
-    `JsonHelpers`/Newtonsoft.
-  - `changed : OverviewSnapshot option -> Overview -> bool` — compares the count-only projection of
-    the new `Overview` against the last snapshot's `{Tasks; Agents}`, ignoring the timestamp (and,
-    by construction, membership). Identical counts → no append.
-  - `readWindow : TimeSpan -> OverviewSnapshot list` — parse the JSONL, drop records older than the
-    window, tolerate a partial trailing line.
+`OverviewData` owns `TaskCount`, `AgentCount`, and `OverviewSnapshot`. These omit `Members` and
+`Scale`; history tracks count transitions only. Client-only selection state, labels, and CSS mappings
+live in `OverviewPresentation`.
 
-### 3. Factor out server-side repo assembly + wire the loop
-- Extract the `DashboardState -> RepoWorktrees list` assembly currently inline in
-  `WorktreeApi.getWorktrees` (needs active sessions, archived branch sets, ignore predicate) into a
-  reusable function so both the poll path and the scheduler reuse it.
-- In `RefreshScheduler.loop`, after `GetState`, assemble repos, `OverviewData.aggregate`, and if
-  `changed` against a threaded `lastLoggedSnapshot` accumulator, append and recurse with the updated
-  accumulator (immutable threading, matching existing `lastRuns`/`watchers`; no `let mutable`).
+### Server reconstruction
 
-### 4. Expose history over the API
-Add `getOverviewHistory` to `IWorktreeApi` (Shared) and implement it in the server
-(`OverviewHistory.readWindow (TimeSpan.FromHours 72)`). Update every `IWorktreeApi` implementer/stub
-(demo fixture, test doubles, CLI proxy usage) — no compat shim.
+`RefreshScheduler` receives injected task assembly and persistence functions because the scheduler
+is compiled before the worktree API modules. It threads the last persisted Tasks projection through
+its immutable loop and writes only changes. History assembly and persistence have their own guarded
+failure boundary, so they cannot prevent overdue Git, beads, PR, or worktree refresh work.
 
-> **Compile-order note.** `OverviewSnapshot` lives in `module OverviewData`, which compiles *after*
-> `Types.fs`, so `IWorktreeApi` (which now returns `OverviewData.OverviewSnapshot list`) cannot stay
-> in `Types.fs`. It was moved verbatim into a new `src/Shared/WorktreeApi.fs` (`namespace Shared`,
-> registered after `OverviewData.fs`), so all `IWorktreeApi` references resolve unchanged. The demo/
-> fixture stub (`WorktreeApi.readOnlyApi`) returns `[]` (nothing is logged in those modes); the
-> `{ readOnlyApi ... with ... }` fixture branch and `Program.buildDemoApi` inherit that. The CLI/
-> client `Remoting.buildProxy<IWorktreeApi>` usages need no change (auto-derived).
+`OverviewHistory.deriveAgents` receives each session's latest status event before the requested
+window, all in-window status events, and the liveness points needed for openness. It evaluates
+status/skill transitions, liveness observations, and openness-decay boundaries, finds each session's
+latest state and `last_seen` by timestamp, applies
+`CodingToolStatus.collapseByWorktree`, and counts the resulting per-session statuses with
+`OverviewData.agentCountsOf`. Consecutive identical count vectors are collapsed.
 
-### 5. Client: ephemeral window state + charts
-- `AppTypes.fs`: add ephemeral `OverviewChartWindow` (e.g. `None | Hours24 | Hours72`) to the model
-  and a `CycleOverviewChart` message; hold fetched `OverviewSnapshot list` in the model.
-- `App.fs`: handle `CycleOverviewChart` (advance the state; on entering a non-hidden state,
-  **clear `SelectedOverviewGroup`** and `Cmd.OfAsync` fetch `getOverviewHistory`); render the cycle
-  button inside the band. In the existing `SelectOverviewGroup` handler, when a selection is set,
-  **reset `OverviewChartWindow` to hidden** — enforcing mutual exclusivity (mirrors how
-  `ToggleOverviewPanel` already clears the drill-down selection).
-- New `src/Client/OverviewChart.fs`: pure builders that turn `OverviewSnapshot list` + a window into
-  stacked stepped-area SVG (`Feliz` inline SVG), legend, and crosshair tooltip, reusing the `task-*`
-  / `activity-*` accent classes. `OverviewBand.view` renders each chart directly under its section.
-  Inline SVG geometry is the documented dynamic-value exception (same as the proportional bar width).
-- Chart geometry/interaction mirrors `.agents/canvas/overview-chart-prototype.html` (windowing with
-  left-edge carry, stepped stacked areas, snapped tooltip).
+`WorktreeApi.getOverviewHistory` queries task snapshots and activity events, derives the agent
+timeline, and combines both with `OverviewHistory.mergeHistory`.
+
+### Client rendering
+
+`App` owns the ephemeral window, fetched snapshots, refresh throttle, and right-edge timestamp.
+`OverviewChart` contains the pure windowing and tooltip logic plus the Feliz SVG component;
+`OverviewBand` places each chart under its corresponding live section.
+
+## Decisions
+
+| Decision | Choice |
+|---|---|
+| Agent persistence | Derive status from `activity_events` and openness from `session_liveness`; do not store agent snapshots. |
+| Task persistence | Snapshot on count changes because task state has no event stream. |
+| Historical unit | Count sessions exactly as the live Overview does, not collapsed worktrees. |
+| Stored shape | Persist counts only; omit drill-down members and derive chart scale. |
+| Window | Serve 72 hours; the client narrows to 24 hours when selected. |
+| Rendering | Hand-written stepped SVG using the existing Overview palette. |
+| Detail state | History and drill-down are ephemeral and mutually exclusive. |
 
 ## Key Files
 
-- `src/Shared/OverviewData.fs` (relocated, holds `OverviewSnapshot`), `src/Shared/WorktreeApi.fs`
-  (`IWorktreeApi`, split out of `Types.fs` for compile order)
-- `src/Server/OverviewHistory.fs` (new), `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs`
-- `src/Client/OverviewChart.fs` (new), `src/Client/OverviewBand.fs`, `src/Client/App.fs`,
-  `src/Client/AppTypes.fs`, `src/Client/Client.fsproj`, `src/Shared/Shared.fsproj`
+| File | Role |
+|---|---|
+| `src/Shared/OverviewData.fs` | Count-only history types and shared agent grouping. |
+| `src/Client/OverviewPresentation.fs` | Client-only selection, labels, and CSS mappings. |
+| `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract. |
+| `src/Server/OverviewHistory.fs` | Task change detection, agent reconstruction, and timeline merge. |
+| `src/Server/SessionActivityStore.fs` | `activity_events`, `session_liveness`, and `task_snapshots` persistence. |
+| `src/Server/RefreshScheduler.fs` | Continuous task snapshot capture. |
+| `src/Server/WorktreeApi.fs` | 72-hour history query and merge. |
+| `src/Client/App.fs` | Window state, fetching, and refresh throttle. |
+| `src/Client/OverviewChart.fs` | Stepped chart geometry, SVG, and tooltip. |
+| `src/Client/OverviewBand.fs` | In-band chart placement and controls. |
+
+## Related Specs
+
+- `docs/spec/session-status-push.md` - session events, openness, and durable activity storage.
+- `docs/spec/beads-overview-band.md` - live Overview aggregation and presentation.
+- `docs/spec/overview-drilldown.md` - the mutually exclusive detail view.

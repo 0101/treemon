@@ -532,6 +532,23 @@ type IngestTests() =
             // No synthetic row appended to the history stream (only the one real event is there).
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 1, "a heartbeat must not append to activity_events")
+            let liveness = store.QueryLiveness(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+            Assert.That(liveness, Is.EqualTo [ SessionId "s1", ts "2026-03-01T10:01:00Z" ])
+            let historyEvents = store.QueryHistoryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T10:03:00Z")
+            let agents =
+                OverviewHistory.deriveAgents
+                    (ts "2026-03-01T10:03:00Z")
+                    (TimeSpan.FromHours 1.0)
+                    historyEvents
+                    liveness
+            let expected : OverviewData.AgentCount list =
+                [ { Kind = OverviewData.AgentGroupKind.Activity CurrentActivity.Working
+                    Count = 1 } ]
+            Assert.That(
+                agents |> List.last |> snd,
+                Is.EqualTo expected,
+                "the heartbeat keeps the historical agent open past the original event's openWindow"
+            )
             // The durable row's last_seen was bumped, its updated_at left intact.
             let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun r -> r.SessionId = SessionId "s1")
             Assert.That(stored.LastSeen, Is.EqualTo(ts "2026-03-01T10:01:00Z"))

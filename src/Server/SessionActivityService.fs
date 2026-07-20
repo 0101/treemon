@@ -250,7 +250,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             | None -> live
             | Some prior ->
                 let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }
-                store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                store.RecordLiveness(report.SessionId, bumped.LastSeen)
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
                 live |> Map.add report.SessionId bumped
         | UsageInfo(currentTokens, tokenLimit) ->
@@ -280,7 +280,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
-                    store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                    store.RecordLiveness(report.SessionId, bumped.LastSeen)
                     scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
                     live |> Map.add report.SessionId bumped
         | TitleBootstrap _ ->
