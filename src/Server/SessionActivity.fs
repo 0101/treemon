@@ -30,9 +30,9 @@ type Message = { Text: string; At: DateTimeOffset }
 
 // --- Events -----------------------------------------------------------------------------------
 
-/// The events that bear on status (plus the liveness-only `Heartbeat`). Anything else the extension
-/// never sends, so the server has no "irrelevant event" branch to carry. These map 1:1 onto the wire
-/// `kind` values (see the handler).
+/// The events that bear on status plus the state-only bootstrap/gauge/liveness reports. Anything
+/// else the extension never sends, so the server has no "irrelevant event" branch to carry. These
+/// map 1:1 onto the wire `kind` values (see the handler).
 type SessionEvent =
     | TurnStarted
     /// A genuine user prompt (never a skill-context injection — those are dropped at the source).
@@ -43,10 +43,11 @@ type SessionEvent =
     /// non-empty text by construction (blank is dropped at the source / rejected by the handler), so
     /// the fold can only advance intent between real values — it never regresses to blank.
     | IntentReported of Message
-    /// The session's rolling title/summary (SDK `session.title_changed`) — the same text the Copilot
-    /// CLI shows in its tab. Non-empty by construction (blank dropped at the source). Orthogonal to
-    /// status; combined with intent by `effectiveActivity` (freshest of the two wins).
+    /// A live session-title change from SDK `session.title_changed`. Non-empty by construction.
     | TitleReported of Message
+    /// Join/rejoin hydration from `metadata.snapshot().summary`. Persisted without appending source
+    /// history or advancing the lifecycle ordering clock.
+    | TitleBootstrap of Message
     /// ask_user — carries the question text to surface as the last assistant message.
     | AwaitingUserInput of question: Message option
     | TurnEnded
@@ -112,9 +113,9 @@ let emptyStatus =
       LastAssistantMessage = None
       ContextUsage = None }
 
-let private retainIfTextUnchanged current next =
+let private retainLatestChange current next =
     match current with
-    | Some previous when previous.Text = next.Text -> current
+    | Some previous when previous.Text = next.Text || previous.At > next.At -> current
     | _ -> Some next
 
 /// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
@@ -128,12 +129,13 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
         // Intent is orthogonal to status. Keep the existing change-time when the text is unchanged so
         // "time ago" reflects when the intent last CHANGED; `m` is non-empty by construction, so intent
         // only ever advances between real values (never regresses to blank).
-        { s with Intent = retainIfTextUnchanged s.Intent m }
-    | TitleReported m ->
+        { s with Intent = retainLatestChange s.Intent m }
+    | TitleReported m
+    | TitleBootstrap m ->
         // Same change-time discipline as intent: keep the existing time when the title text is
         // unchanged so `effectiveActivity`'s "freshest wins" reflects real changes, not re-emits (a
-        // resume re-announces the same title).
-        { s with Title = retainIfTextUnchanged s.Title m }
+        // resume re-announces the same title). An older bootstrap cannot overwrite a newer live title.
+        { s with Title = retainLatestChange s.Title m }
     | AwaitingUserInput q ->
         // The ask_user question is surfaced as the last assistant message; keep the prior one if the
         // question carries no text.
@@ -159,8 +161,8 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
 let foldMany (initial: SessionStatus) (events: SessionEvent seq) : SessionStatus =
     Seq.fold fold initial events
 
-/// The card's activity line: whichever of the reported intent (`assistant.intent`) or rolling session
-/// title (`session.title_changed`) changed most recently, preserving the source in the shared domain.
+/// The card's activity line: whichever of the reported intent (`assistant.intent`) or session title
+/// (live `session.title_changed` or metadata bootstrap) changed most recently, preserving the source.
 let effectiveActivity (s: SessionStatus) : AgentActivity option =
     match s.Intent, s.Title with
     | Some intent, Some title when intent.At >= title.At ->

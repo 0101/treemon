@@ -211,11 +211,25 @@ type FoldTitleTests() =
         Assert.That(s.Title, Is.EqualTo(Some t))
 
     [<Test>]
+    member _.``TitleBootstrap records the title without changing status``() =
+        let t = msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ TurnStarted; TitleBootstrap t ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.Title, Is.EqualTo(Some t))
+
+    [<Test>]
     member _.``A re-reported identical title keeps the original change-time``() =
         let first = msg "Fix the auth bug" "2026-03-01T10:00:00Z"
         let again = msg "Fix the auth bug" "2026-03-01T10:05:00Z"
         let s = foldMany emptyStatus [ TitleReported first; TitleReported again ]
         Assert.That(s.Title, Is.EqualTo(Some first))
+
+    [<Test>]
+    member _.``An older bootstrap cannot overwrite a newer live title``() =
+        let older = msg "Older snapshot" "2026-03-01T10:00:00Z"
+        let newer = msg "New live title" "2026-03-01T10:05:00Z"
+        let s = foldMany emptyStatus [ TitleReported newer; TitleBootstrap older ]
+        Assert.That(s.Title, Is.EqualTo(Some newer))
 
     [<Test>]
     member _.``effectiveActivity prefers whichever of intent or title changed most recently``() =

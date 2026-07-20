@@ -112,6 +112,7 @@ type SessionEvent =
     | SkillInvoked of name: string
     | IntentReported of Message             // SDK assistant.intent
     | TitleReported of Message              // SDK session.title_changed
+    | TitleBootstrap of Message             // metadata.snapshot().summary state hydration
     | AwaitingUserInput of question: Message option   // ask_user; carries the question to surface
     | TurnEnded
     | WentIdle
@@ -135,14 +136,15 @@ type SessionStatus =
 ```
 
 `fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
-`IntentReported` / `TitleReported` update their status-neutral fields while preserving the original
-change time when identical text is re-emitted, `AwaitingUserInput` → WaitingForUser (question folded
-into `LastAssistantMessage`), `TurnEnded` / `WentIdle` → Idle, `UsageInfo` updates only
-`ContextUsage`, and `Heartbeat` → no-op. A `UserPrompt` replying to an `ask_user` keeps the running
-skill; any other prompt starts fresh. `effectiveActivity` selects the newer intent/title and returns
-a source-tagged `AgentActivity` (`Intent` or `SessionTitle`) so the collapse boundary never mislabels
-a title as intent. The fold is pure and append-friendly — folding a later batch onto an earlier
-result equals folding the whole stream.
+`IntentReported` / `TitleReported` / `TitleBootstrap` update their status-neutral fields while
+preserving the original change time when identical text is re-emitted and rejecting an older value
+after a newer one, `AwaitingUserInput` → WaitingForUser (question folded into
+`LastAssistantMessage`), `TurnEnded` / `WentIdle` → Idle, `UsageInfo` updates only `ContextUsage`,
+and `Heartbeat` → no-op. A `UserPrompt` replying to an `ask_user` keeps the running skill; any other
+prompt starts fresh. `effectiveActivity` selects the newer intent/title and returns a source-tagged
+`AgentActivity` (`Intent` or `SessionTitle`) so the collapse boundary never mislabels a title as
+intent. The fold is pure and append-friendly — folding a later batch onto an earlier result equals
+folding the whole stream.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
@@ -157,8 +159,8 @@ server:
    the extension drops it (source starts `skill-` AND content starts `<skill-context`). → every
    `UserPrompt` the server sees is genuine.
 3. **Irrelevant events** — only events mapping to the ten SDK-backed wire kinds are forwarded; all
-   other SDK events are ignored. The eleventh accepted kind, `heartbeat`, is timer-generated. → the
-   `SessionEvent` union has no catch-all.
+   other SDK events are ignored. `title_bootstrap` is metadata-generated and `heartbeat` is
+   timer-generated. → the `SessionEvent` union has no catch-all.
 
 ### Ingestion: endpoint + single-writer mailbox
 
@@ -167,13 +169,14 @@ server:
 - **Wire contract — the single coupling point between `extension.mjs` (producer) and the
   handler (consumer).** The POST body is one report:
   `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?,
-  currentTokens?, tokenLimit? }`. Exactly eleven `kind` strings are accepted:
+  currentTokens?, tokenLimit? }`. Exactly twelve `kind` strings are accepted:
   `turn_started`→`TurnStarted`, `user_prompt`→`UserPrompt`, `assistant_message`→
   `AssistantMessage`, `skill_invoked`→`SkillInvoked`, `awaiting_user_input`→`AwaitingUserInput`,
   `intent_reported`→`IntentReported`, `title_reported`→`TitleReported`,
+  `title_bootstrap`→`TitleBootstrap`,
   `turn_ended`→`TurnEnded`, `went_idle`→`WentIdle`, `usage_info`→`UsageInfo`, and
   `heartbeat`→`Heartbeat`. `message` (`{ text; at }`) is mandatory for `user_prompt`,
-  `assistant_message`, `intent_reported`, and `title_reported`, and optional only for
+  `assistant_message`, `intent_reported`, `title_reported`, and `title_bootstrap`, and optional only for
   `awaiting_user_input` (the ask_user question). `skillName` applies only to `skill_invoked`;
   `currentTokens` and `tokenLimit` apply only to `usage_info`, with `tokenLimit > 0` and negative
   `currentTokens` normalized to zero. All other kinds carry none of those event-specific fields.
@@ -186,6 +189,10 @@ server:
   changing `updated_at`, or appending history. `usage_info` is also live-only and status-preserving:
   it updates `ContextUsage` and `last_seen` for an existing session using a separate usage
   last-write-wins clock, without changing `updated_at`, appending history, or persisting the gauge.
+- `title_bootstrap` is durable state hydration, not source history: it updates the persisted title
+  without appending `activity_events` or advancing the lifecycle `updated_at` clock. If it arrives
+  before delayed replay, it creates an Idle shell with a minimum lifecycle timestamp so every real
+  SDK event can still apply; the join time seeds `last_seen` until replay or heartbeat takes over.
 - **Ordering guard** (both map and store): upsert only when `OccurredAt >= updated_at`; an
   out-of-order (older) event is still appended to `activity_events` (history substrate) but does not
   regress the live fold or the shown card. `activity_events` dedupes on `EventId`.
@@ -274,12 +281,13 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
   older builds used `user_input.*` with `data.question` — both are handled, question reads
   `data.message ?? data.question`.) Blank-text messages and invalid usage gauges are dropped.
 - **Title bootstrap:** after live subscriptions are installed and persisted history is replayed,
-  the extension reads `session.rpc.metadata.snapshot()`. Replaying first preserves the historical
-  lifecycle fold before the join-time title report advances the server's ordering clock. If no
-  nonblank live `session.title_changed` arrived during startup, a nonblank `summary` is emitted
-  through the same `title_reported` wire path. This recovers the current title on join/rejoin even
-  though `session.title_changed` is ephemeral and absent from `getEvents()`. A metadata RPC failure
-  is logged and does not block other reporting.
+  the extension installs heartbeat/cleanup handling and reads `session.rpc.metadata.snapshot()` in
+  a caught background task. If no nonblank live `session.title_changed` arrived during startup, a
+  nonblank `summary` is emitted as `title_bootstrap`. The server persists it on an independent
+  state-hydration path, so it neither pollutes source-event history nor blocks older replay/status
+  transitions. This recovers the current title on join/rejoin even though `session.title_changed`
+  is ephemeral and absent from `getEvents()`. A slow or failed metadata RPC cannot block heartbeat
+  or other reporting.
 - **Intent is opportunistic:** nonblank `assistant.intent` events are still accepted and persisted,
   but ordinary turns are not expected to emit one. The extension does not synthesize intent from
   assistant prose, tools, or skills.
@@ -329,7 +337,8 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
   uses its own ordering clock, and stores neither gauge columns nor an `activity_events` row; after
   restart each session shows a plain status dot until a fresh gauge arrives.
 - **Title is bootstrapped; intent is optional.** Metadata summary supplies the durable join/rejoin
-  title when the ephemeral live event was missed. `assistant.intent` remains source-authored
+  title when the ephemeral live event was missed. Bootstrap is persisted as state, not lifecycle
+  history, and has an independent ordering path. `assistant.intent` remains source-authored
   enrichment and is never inferred by Treemon.
 - **`HasActiveSession` (tmux/window) stays distinct from push openness** — the coding-tool dot uses
   push openness only; no merge.
