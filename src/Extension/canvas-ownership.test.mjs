@@ -4,7 +4,6 @@ import { EOL } from "node:os";
 import { join, resolve } from "node:path";
 import {
   canvasChangesForTool,
-  createOwnershipDeclarer,
   isValidCanvasFilename,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
@@ -112,7 +111,7 @@ test("ignores canvas-shaped paths outside the worktree root canvas directory", (
 test("attributes all buffered apply_patch writes only after successful completion", () => {
   const worktreePath = resolve("worktree");
   const session = fakeSession();
-  const watcher = watchCanvasWrites(session, worktreePath, () => 123);
+  const watcher = watchCanvasWrites(session, worktreePath);
   const writes = [];
 
   session.emit("tool.execution_start", {
@@ -145,78 +144,8 @@ test("attributes all buffered apply_patch writes only after successful completio
   watcher.activate((filename) => writes.push(filename));
 
   assert.deepEqual(writes, [
-    { kind: "attribute", filename: "one.html", version: 123 },
-    { kind: "attribute", filename: "two.html", version: 123 },
+    { kind: "attribute", filename: "one.html" },
+    { kind: "attribute", filename: "two.html" },
   ]);
   watcher.stop();
-});
-
-test("replays failed declarations once and clears them after success", async () => {
-  const attempts = [];
-  const outcomes = [
-    { ok: false, retryable: true, error: "offline" },
-    { ok: true, attributed: true },
-  ];
-  const declarations = createOwnershipDeclarer(async (filename) => {
-    attempts.push(filename);
-    return outcomes.shift();
-  });
-
-  await declarations.declare({ kind: "attribute", filename: "report.html", version: 1 });
-  await declarations.replay();
-  await declarations.replay();
-
-  assert.deepEqual(attempts, [
-    { kind: "attribute", filename: "report.html", version: 1 },
-    { kind: "attribute", filename: "report.html", version: 1 },
-  ]);
-});
-
-test("does not retain an unmonitored ownership response", async () => {
-  const attempts = [];
-  const declarations = createOwnershipDeclarer(async (filename) => {
-    attempts.push(filename);
-    return { ok: true, attributed: false };
-  });
-
-  await declarations.declare({ kind: "attribute", filename: "report.html", version: 1 });
-  await declarations.replay();
-
-  assert.deepEqual(attempts, [{ kind: "attribute", filename: "report.html", version: 1 }]);
-});
-
-test("does not retain a permanent ownership failure", async () => {
-  const attempts = [];
-  const declarations = createOwnershipDeclarer(async (filename) => {
-    attempts.push(filename);
-    return { ok: false, retryable: false, error: "bad request" };
-  });
-
-  await declarations.declare({ kind: "attribute", filename: "report.html", version: 1 });
-  await declarations.replay();
-
-  assert.deepEqual(attempts, [{ kind: "attribute", filename: "report.html", version: 1 }]);
-});
-
-test("a newer failed write replaces an older pending declaration for the same doc", async () => {
-  const attempts = [];
-  const outcomes = [
-    { ok: false, retryable: true, error: "offline" },
-    { ok: false, retryable: true, error: "offline" },
-    { ok: true, attributed: true },
-  ];
-  const declarations = createOwnershipDeclarer(async (write) => {
-    attempts.push(write);
-    return outcomes.shift();
-  });
-
-  await declarations.declare({ kind: "remove", filename: "report.html", version: 1 });
-  await declarations.declare({ kind: "attribute", filename: "report.html", version: 2 });
-  await declarations.replay();
-
-  assert.deepEqual(attempts, [
-    { kind: "remove", filename: "report.html", version: 1 },
-    { kind: "attribute", filename: "report.html", version: 2 },
-    { kind: "attribute", filename: "report.html", version: 2 },
-  ]);
 });

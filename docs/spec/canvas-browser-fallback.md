@@ -83,6 +83,6 @@ the ownership changes instead.
 ## Key Files
 
 - `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, message endpoint
-- `src/Extension/canvas-ownership.mjs` — session-event write watcher, patch parsing, versioned retry state
+- `src/Extension/canvas-ownership.mjs` — session-event write watcher and lifecycle-aware patch parsing
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

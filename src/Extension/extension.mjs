@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
-  createOwnershipDeclarer,
   isValidCanvasFilename,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
@@ -239,9 +238,8 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
   }
 }
 
-// Apply a versioned ownership change for an automatic write, or an unversioned explicit claim.
-// The extension stamps its own sessionId; Treemon rejects delayed automatic changes older than the
-// current owner. Unmonitored worktrees are completed no-ops, while retryable failures are retained.
+// Apply an ownership change for a successful write. The extension stamps its own sessionId;
+// unreachable or unmonitored Treemon remains a best-effort no-op.
 async function changeOwnership(worktreePath, change, sessionId) {
   try {
     const res = await fetch(TREEMON_ATTRIBUTE_URL, {
@@ -252,7 +250,6 @@ async function changeOwnership(worktreePath, change, sessionId) {
         filename: change.filename,
         sessionId,
         remove: change.kind === "remove",
-        ...(change.version === undefined ? {} : { version: change.version }),
       }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
@@ -260,7 +257,6 @@ async function changeOwnership(worktreePath, change, sessionId) {
       log(`ownership change failed for ${change.filename}: ${res.status} ${res.statusText}`);
       return {
         ok: false,
-        retryable: res.status === 408 || res.status === 429 || res.status >= 500,
         error: `Treemon returned ${res.status} ${res.statusText}`,
       };
     }
@@ -270,11 +266,11 @@ async function changeOwnership(worktreePath, change, sessionId) {
     return { ok: true, attributed };
   } catch (err) {
     log(`could not change ownership for ${change.filename}: ${err.message}`);
-    return { ok: false, retryable: true, error: err.message };
+    return { ok: false, error: err.message };
   }
 }
 
-function startHeartbeat(worktreePath, injectUrl, sessionId, replayOwnership) {
+function startHeartbeat(worktreePath, injectUrl, sessionId) {
   let currentInterval = HEARTBEAT_INTERVAL_MS;
   let wasDisconnected = false;
   let timerId = null;
@@ -284,11 +280,7 @@ function startHeartbeat(worktreePath, injectUrl, sessionId, replayOwnership) {
   };
 
   const tick = async () => {
-    const registration = await registerWithTreemon(worktreePath, injectUrl, sessionId);
-    if (registration.reachable && registration.monitored) {
-      await replayOwnership();
-    }
-    const { reachable } = registration;
+    const { reachable } = await registerWithTreemon(worktreePath, injectUrl, sessionId);
     if (reachable) {
       if (wasDisconnected) {
         log("Bridge reconnected to Treemon");
@@ -318,7 +310,7 @@ function startHeartbeat(worktreePath, injectUrl, sessionId, replayOwnership) {
 // sessionId, the agent only supplied the filename. Browser mode (Treemon unreachable/unmonitored):
 // serve the doc locally and hand the session a clickable URL via session.send (events cannot inject
 // tool-result context the way the old onPostToolUse hook did).
-async function handleCanvasWrite(session, state, write, declareOwner) {
+async function handleCanvasWrite(session, state, write) {
   const { filename } = write;
   if (!isValidCanvasFilename(filename)) {
     log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
@@ -326,7 +318,7 @@ async function handleCanvasWrite(session, state, write, declareOwner) {
   }
   if (!state.browserMode) {
     if (state.sessionId) {
-      await declareOwner(write);
+      await changeOwnership(state.worktreePath, write, state.sessionId);
     } else {
       log(`canvas write: sessionId not ready, skipping ownership declaration for ${filename}`);
     }
@@ -345,13 +337,6 @@ async function handleCanvasWrite(session, state, write, declareOwner) {
 
 const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
-const automaticOwnership = createOwnershipDeclarer((write) =>
-  changeOwnership(
-    extensionState.worktreePath,
-    write,
-    extensionState.sessionId,
-  ),
-);
 
 // Explicit ownership tool the agent can call on demand — for a doc produced by a script or
 // another tool (no supported write event fired to auto-declare), or one whose messages are reaching
@@ -426,9 +411,7 @@ extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 // State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
-canvasWrites.activate((write) =>
-  handleCanvasWrite(session, extensionState, write, automaticOwnership.declare),
-);
+canvasWrites.activate((write) => handleCanvasWrite(session, extensionState, write));
 
 if (browserMode) {
   const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";
@@ -440,7 +423,7 @@ if (browserMode) {
 const stopHeartbeat =
   browserMode
     ? () => {}
-    : startHeartbeat(worktreePath, injectUrl, sessionId, automaticOwnership.replay);
+    : startHeartbeat(worktreePath, injectUrl, sessionId);
 
 const cleanup = () => {
   canvasWrites.stop();

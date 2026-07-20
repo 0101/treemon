@@ -1,4 +1,3 @@
-import { performance } from "node:perf_hooks";
 import { basename, dirname, relative, resolve } from "node:path";
 
 const CANVAS_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$/;
@@ -86,15 +85,7 @@ export function canvasChangesForTool(toolName, toolArgs, worktreePath = process.
   );
 }
 
-export function currentOwnershipVersion() {
-  return Math.round((performance.timeOrigin + performance.now()) * 1000);
-}
-
-export function watchCanvasWrites(
-  session,
-  worktreePath = process.cwd(),
-  ownershipVersion = currentOwnershipVersion,
-) {
+export function watchCanvasWrites(session, worktreePath = process.cwd()) {
   const pendingByToolCallId = new Map();
   const bufferedWrites = [];
   let onCanvasWrite = (write) => bufferedWrites.push(write);
@@ -113,8 +104,7 @@ export function watchCanvasWrites(
     if (changes === undefined) return;
     pendingByToolCallId.delete(data.toolCallId);
     if (!data.success) return;
-    const version = ownershipVersion();
-    changes.map((change) => ({ ...change, version })).forEach(onCanvasWrite);
+    changes.forEach(onCanvasWrite);
   });
 
   const stop = () => {
@@ -128,21 +118,4 @@ export function watchCanvasWrites(
   };
 
   return { stop, activate };
-}
-
-export function createOwnershipDeclarer(declareOwnership) {
-  const pending = new Map();
-
-  const declare = async (write) => {
-    const result = await declareOwnership(write);
-    if (result.ok || !result.retryable) pending.delete(write.filename);
-    else pending.set(write.filename, write);
-    return result;
-  };
-
-  const replay = async () => {
-    await Promise.all([...pending.values()].map(declare));
-  };
-
-  return { declare, replay };
 }
