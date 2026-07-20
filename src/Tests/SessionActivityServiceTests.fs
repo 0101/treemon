@@ -192,6 +192,41 @@ type ParseReportTests() =
         let req = { baseReq "turn_started" with occurredAt = within }
         Assert.That((parseOk req).OccurredAt, Is.EqualTo(ts within))
 
+    [<TestCase("intent_reported")>]
+    [<TestCase("title_reported")>]
+    member _.``a future message timestamp is normalized to the clamped report timestamp``(kind: string) =
+        let req =
+            { baseReq kind with
+                occurredAt = "2999-01-01T00:00:00Z"
+                message = msgDto "future activity" "2999-01-01T00:00:00Z" }
+        let report = parseOk req
+        let messageAt =
+            match kind, report.Event with
+            | "intent_reported", IntentReported message
+            | "title_reported", TitleReported message -> message.At
+            | _ -> failwith $"unexpected parsed event for {kind}: {report.Event}"
+
+        Assert.Multiple(fun () ->
+            Assert.That(report.OccurredAt, Is.EqualTo refNow)
+            Assert.That(messageAt, Is.EqualTo report.OccurredAt))
+
+    [<Test>]
+    member _.``a future-skewed intent no longer permanently outranks a genuine later title in effectiveActivity``() =
+        let poisoned =
+            { baseReq "intent_reported" with
+                occurredAt = "2999-01-01T00:00:00Z"
+                message = msgDto "runaway clock intent" "2999-01-01T00:00:00Z" }
+        let corrected =
+            { baseReq "title_reported" with
+                occurredAt = "2026-03-01T10:06:00Z"
+                message = msgDto "Investigate Work Item 261312" "2026-03-01T10:06:00Z" }
+
+        let status = foldMany emptyStatus [ (parseOk poisoned).Event; (parseOk corrected).Event ]
+
+        Assert.That(
+            effectiveActivity status,
+            Is.EqualTo(Some(AgentActivity.SessionTitle("Investigate Work Item 261312", ts "2026-03-01T10:06:00Z"))))
+
     [<Test>]
     member _.``a blank sessionId is rejected``() =
         Assert.That(parseErr { baseReq "turn_started" with sessionId = "  " }, Does.Contain "sessionId")

@@ -79,8 +79,11 @@ worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). See
   pure function of the collapsed status (red / yellow / blue open-idle / grey no-session).
 - `.treemon.json` optional `"codingTool": "claude"|"copilot"` still selects the per-worktree
   provider for command-building (`readConfiguredProvider`); the push status source is Copilot-CLI-only today.
-- The card footer shows a `▶ <skill>` label when a skill is running, else the last user message
-  (never a `<skill-context>` injection) — a pure `cardUserLine` decision in `CardViews.fs`.
+- The card footer has up to three lines: the freshest source-tagged activity (`assistant.intent` or
+  `session.title_changed`) with an optional `▶ <skill>` pill, the last genuine user message (never a
+  `<skill-context>` injection), and the last assistant message tagged with its coding-tool provider.
+  Canvas notifications temporarily replace the activity and user lines while remaining visible
+  alongside the assistant line.
 
 ### Create Worktree
 

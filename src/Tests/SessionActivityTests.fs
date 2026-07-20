@@ -200,20 +200,20 @@ type FoldTitleTests() =
         Assert.That(s.Title, Is.EqualTo(Some first))
 
     [<Test>]
-    member _.``effectiveIntent prefers whichever of intent or title changed most recently``() =
+    member _.``effectiveActivity prefers whichever of intent or title changed most recently``() =
         let older = msg "older intent" "2026-03-01T10:00:00Z"
         let newer = msg "newer title" "2026-03-01T10:05:00Z"
         let intentFresher = { emptyStatus with Intent = Some newer; Title = Some older }
         let titleFresher = { emptyStatus with Intent = Some older; Title = Some newer }
-        Assert.That(effectiveIntent intentFresher, Is.EqualTo(Some newer))
-        Assert.That(effectiveIntent titleFresher, Is.EqualTo(Some newer))
+        Assert.That(effectiveActivity intentFresher, Is.EqualTo(Some(AgentActivity.Intent(newer.Text, newer.At))))
+        Assert.That(effectiveActivity titleFresher, Is.EqualTo(Some(AgentActivity.SessionTitle(newer.Text, newer.At))))
 
     [<Test>]
-    member _.``effectiveIntent falls back to whichever single value is present``() =
+    member _.``effectiveActivity falls back to whichever single value is present``() =
         let only = msg "only one set" "2026-03-01T10:00:00Z"
-        Assert.That(effectiveIntent { emptyStatus with Intent = Some only }, Is.EqualTo(Some only))
-        Assert.That(effectiveIntent { emptyStatus with Title = Some only }, Is.EqualTo(Some only))
-        Assert.That(effectiveIntent emptyStatus, Is.EqualTo(None))
+        Assert.That(effectiveActivity { emptyStatus with Intent = Some only }, Is.EqualTo(Some(AgentActivity.Intent(only.Text, only.At))))
+        Assert.That(effectiveActivity { emptyStatus with Title = Some only }, Is.EqualTo(Some(AgentActivity.SessionTitle(only.Text, only.At))))
+        Assert.That(effectiveActivity emptyStatus, Is.EqualTo(None))
 
 
 [<TestFixture>]

@@ -34,12 +34,10 @@ type CodingToolResult =
     { Status: CodingToolStatus
       Provider: CodingToolProvider option
       CurrentSkill: string option
-      /// The agent's current intent (SDK `assistant.intent`) with the time it last changed — the card's
-      /// live "what it's doing" line. Sourced from the same footer session as the other footer fields.
-      AgentIntent: (string * DateTimeOffset) option
+      /// The freshest source-tagged activity value from the same footer session as the other fields.
+      AgentActivity: AgentActivity option
       LastUserMessage: (string * DateTimeOffset) option
-      LastAssistantMessage: CardEvent option
-      LastMessageProvider: CodingToolProvider option
+      LastAssistantMessage: (string * DateTimeOffset) option
       /// Mtime of the active session surface that won status resolution (its last write) — the best
       /// available "the agent last did something" time, and the value the scheduler freezes as the
       /// state-transition timestamp. None when every surface is Idle.
@@ -76,8 +74,8 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 // makes TWO decoupled picks:
 //   * the STATUS dot is driven by OPENNESS (only sessions still heartbeating count): open-active →
 //     Working/WaitingForUser, open-but-idle → Idle (blue), no open session → NoSession (grey);
-//   * the FOOTER (skill / last-user / last-assistant) comes from the active winner when one runs,
-//     else the most-recent session of ANY status, so it survives Idle / NoSession.
+//   * the FOOTER (activity / skill / last-user / last-assistant) comes from the active winner when
+//     one runs, else the most-recent session of ANY status, so it survives Idle / NoSession.
 // Resume is a THIRD, distinct pick (getLastSessionId): the most-recent session regardless of
 // active/idle (the session the user last touched).
 
@@ -90,20 +88,13 @@ let noSessionPushResult: CodingToolResult =
     { Status = NoSession
       Provider = None
       CurrentSkill = None
-      AgentIntent = None
+      AgentActivity = None
       LastUserMessage = None
       LastAssistantMessage = None
-      LastMessageProvider = None
       LastActivity = None }
 
-/// The last assistant message as the card's `CardEvent` (the exact shape the detectors produced): a
-/// single line truncated to 80 chars, tagged with the push provider's source string.
-let private toLastAssistantEvent (m: Message) : CardEvent =
-    { Source = "copilot"
-      Message = FileUtils.truncateMessage 80 m.Text
-      Timestamp = m.At
-      Status = None
-      Duration = None }
+let private toFooterMessage maxLength (message: Message) =
+    FileUtils.truncateMessage maxLength message.Text, message.At
 
 /// Collapse a worktree's live push sessions into the card's coding-tool fields. Two DECOUPLED picks:
 ///
@@ -113,8 +104,8 @@ let private toLastAssistantEvent (m: Message) : CardEvent =
 ///   session collapses to `NoSession` (grey). `openWindow` (~3 min) is smaller than
 ///   `stalenessTimeout`, so a dead Working session drops out of openness (→ grey) before the crash-net
 ///   would rewrite it to Idle — it never lingers blue.
-/// * **Footer** (skill / last user / last assistant) — DECOUPLED from the dot: the active winner when
-///   one is running, otherwise the MOST-RECENT session of ANY status (the same pick
+/// * **Footer** (activity / skill / last user / last assistant) — DECOUPLED from the dot: the active
+///   winner when one is running, otherwise the MOST-RECENT session of ANY status (the same pick
 ///   `getLastSessionId` uses for resume). Going Idle or losing the open session therefore does NOT
 ///   blank the footer: it stays populated while any session for the worktree remains in the store
 ///   (retention / `idleWindow`). This is the fix for the idle-only worktree whose footer/event-log
@@ -168,13 +159,18 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       // Single push provider today (Copilot CLI); a future provider threads its own value here.
       Provider = footer |> Option.map (fun _ -> CopilotCli)
       CurrentSkill = footer |> Option.bind _.Skill
-      AgentIntent = footer |> Option.bind SessionActivity.effectiveIntent |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+      AgentActivity =
+        footer
+        |> Option.bind SessionActivity.effectiveActivity
+        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
-        |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
-      LastAssistantMessage = footer |> Option.bind _.LastAssistantMessage |> Option.map toLastAssistantEvent
-      LastMessageProvider = footer |> Option.bind _.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
+        |> Option.map (toFooterMessage 120)
+      LastAssistantMessage =
+        footer
+        |> Option.bind _.LastAssistantMessage
+        |> Option.map (toFooterMessage 80)
       LastActivity = lastActivity }
 
 /// Group a flat set of live push session-statuses by worktree path and collapse each group into the
@@ -201,10 +197,11 @@ let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
     { Status = NoSession
       Provider = if hasFooter then Some CopilotCli else None
       CurrentSkill = s.Skill
-      AgentIntent = SessionActivity.effectiveIntent s |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
-      LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
-      LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
-      LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)
+      AgentActivity =
+        SessionActivity.effectiveActivity s
+        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
+      LastUserMessage = s.LastUserMessage |> Option.map (toFooterMessage 120)
+      LastAssistantMessage = s.LastAssistantMessage |> Option.map (toFooterMessage 80)
       LastActivity = None }
 
 /// Fill gaps in the live collapse with the durable retained fallback: a worktree present in `live`
@@ -228,4 +225,3 @@ let getLastSessionId (sessions: StoredStatus list) : string option =
     |> List.sortByDescending _.LastSeen
     |> List.tryHead
     |> Option.map (_.SessionId >> SessionId.value)
-

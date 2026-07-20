@@ -127,11 +127,21 @@ let internal kindText =
     | WentIdle -> "went_idle"
     | Heartbeat -> "heartbeat"
 
+let private withMessageTimestamp at =
+    function
+    | UserPrompt message -> UserPrompt { message with At = at }
+    | AssistantMessage message -> AssistantMessage { message with At = at }
+    | IntentReported message -> IntentReported { message with At = at }
+    | TitleReported message -> TitleReported { message with At = at }
+    | AwaitingUserInput (Some message) -> AwaitingUserInput(Some { message with At = at })
+    | event -> event
+
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
-/// is clamped against `now` so a future timestamp can't poison the freshness/staleness net. Pure
-/// (given `now`), so the whole contract (7 kinds, unknown rejected, per-kind message/skill rules,
-/// future-timestamp clamp) is unit-testable without HTTP plumbing.
+/// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
+/// Message-bearing events use that same normalized timestamp. Pure (given `now`), so the whole
+/// contract (10 kinds, unknown rejected, per-kind message/skill rules, future-timestamp clamp) is
+/// unit-testable without HTTP plumbing.
 let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
     elif String.IsNullOrWhiteSpace req.sessionId then Error "missing sessionId"
@@ -143,15 +153,16 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
         parseProvider req.provider
         |> Result.bind (fun provider ->
             tryParseTimestamp req.occurredAt
-            |> Result.bind (fun occurredAt ->
+            |> Result.bind (fun rawOccurredAt ->
+                let occurredAt = clampFutureTimestamp now rawOccurredAt
                 parseEvent req.kind req.message req.skillName
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
                       Provider = provider
                       EventId = EventId req.eventId
-                      OccurredAt = clampFutureTimestamp now occurredAt
-                      Event = ev })))
+                      OccurredAt = occurredAt
+                      Event = withMessageTimestamp occurredAt ev })))
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
 

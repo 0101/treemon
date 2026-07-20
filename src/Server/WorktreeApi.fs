@@ -177,9 +177,9 @@ let internal assembleFromState
         | WaitingForUser
         | NoSession -> None
       CurrentSkill = codingToolData.CurrentSkill
-      AgentIntent = codingToolData.AgentIntent
+      AgentActivity = codingToolData.AgentActivity
       LastUserMessage = codingToolData.LastUserMessage
-      LastAssistantMessage = codingToolData.LastAssistantMessage |> Option.map (fun e -> e.Message, e.Timestamp)
+      LastAssistantMessage = codingToolData.LastAssistantMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false

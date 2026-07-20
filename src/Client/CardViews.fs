@@ -516,38 +516,34 @@ let canResumeSession (wt: WorktreeStatus) =
     && wt.CodingTool <> Working
     && wt.CodingTool <> WaitingForUser
 
-/// The card's intent line: the agent's current intent (SDK `assistant.intent`) plus, when a skill is
-/// running, that skill as a pill. Kept as a pure decision (not a ReactElement) so the presence logic
-/// is unit-testable without rendering React. `Line` carries at least one of intent/skill; `Empty`
-/// when neither is present. A blank/whitespace skill is treated as no skill.
+/// The card's activity line: the freshest source-tagged intent or session title plus, when a skill is
+/// running, that skill as a pill. Kept as a pure decision so presence logic is independently testable.
 [<RequireQualifiedAccess>]
-type CardIntentLine =
-    | Line of intent: (string * System.DateTimeOffset) option * skill: string option
+type CardActivityLine =
+    | Line of activity: AgentActivity option * skill: string option
     | Empty
 
-let cardIntentLine (wt: WorktreeStatus) : CardIntentLine =
+let cardActivityLine (wt: WorktreeStatus) : CardActivityLine =
     let skill =
         wt.CurrentSkill
         |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
         |> Option.map _.Trim()
-    match wt.AgentIntent, skill with
-    | None, None -> CardIntentLine.Empty
-    | intent, sk -> CardIntentLine.Line(intent, sk)
+    match wt.AgentActivity, skill with
+    | None, None -> CardActivityLine.Empty
+    | activity, sk -> CardActivityLine.Line(activity, sk)
 
-/// Line 1 of the footer: the intent text (with the time it last changed) and the running skill as a
-/// right-aligned pill. Reuses `.user-prompt` for layout; the pill and intent text carry their own
-/// classes. Renders nothing when there is neither an intent nor a skill.
-let intentLineView (wt: WorktreeStatus) =
-    match cardIntentLine wt with
-    | CardIntentLine.Empty -> Html.none
-    | CardIntentLine.Line (intent, skill) ->
+/// Line 1 of the footer: the activity text and running skill as a right-aligned pill.
+let activityLineView (wt: WorktreeStatus) =
+    match cardActivityLine wt with
+    | CardActivityLine.Empty -> Html.none
+    | CardActivityLine.Line (activity, skill) ->
         Html.div [
-            prop.className "user-prompt intent-line"
+            prop.className "user-prompt activity-line"
             prop.children [
-                match intent with
-                | Some (text, since) ->
-                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime since) ]
-                    Html.span [ prop.className "intent-text"; prop.text text ]
+                match activity |> Option.map AgentActivity.textAndTimestamp with
+                | Some (text, changedAt) ->
+                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime changedAt) ]
+                    Html.span [ prop.className "activity-text"; prop.text text ]
                 | None -> ()
                 match skill with
                 | Some name -> Html.span [ prop.className "skill-pill"; prop.text $"▶ {name}" ]
@@ -556,7 +552,7 @@ let intentLineView (wt: WorktreeStatus) =
         ]
 
 /// A footer message line: `[time-ago] <source?> <text>`. Shared by the last-user-message and
-/// last-assistant-message lines; the assistant line tags its source ("copilot"), the user line does not.
+/// last-assistant-message lines; the assistant line tags its provider, the user line does not.
 let private messageLineView (source: string option) (msg: (string * System.DateTimeOffset) option) =
     match msg with
     | None -> Html.none
@@ -572,9 +568,10 @@ let private messageLineView (source: string option) (msg: (string * System.DateT
             ]
         ]
 
-/// Line 2 (last user message) and line 3 (last assistant message, tagged `copilot`) of the footer.
+/// Line 2 (last user message) and line 3 (last assistant message, tagged by provider) of the footer.
 let userMsgLineView (wt: WorktreeStatus) = messageLineView None wt.LastUserMessage
-let assistantMsgLineView (wt: WorktreeStatus) = messageLineView (Some "copilot") wt.LastAssistantMessage
+let assistantMsgLineView (wt: WorktreeStatus) =
+    messageLineView (Some(providerDisplayName wt.CodingToolProvider)) wt.LastAssistantMessage
 
 let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
@@ -619,7 +616,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasFooterLines =
-        (match cardIntentLine wt with CardIntentLine.Empty -> false | _ -> true)
+        (match cardActivityLine wt with CardActivityLine.Empty -> false | _ -> true)
         || wt.LastUserMessage.IsSome
         || wt.LastAssistantMessage.IsSome
     let visibleBranchEvents = branchEvents |> List.filter isVisibleCardEvent
@@ -672,9 +669,10 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                 prop.className footerClass
                 prop.children [
                     if List.isEmpty canvasEvents then
-                        intentLineView wt
+                        activityLineView wt
                         userMsgLineView wt
-                        assistantMsgLineView wt
+
+                    assistantMsgLineView wt
 
                     eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog visibleBranchEvents
                     canvasEventLog callbacks scopedKey canvasEvents

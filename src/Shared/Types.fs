@@ -241,6 +241,22 @@ type CreateWorktreeRequest =
 /// script is present, or the post-fork setup hook failed). Empty means a clean create.
 type CreateWorktreeWarnings = string list
 
+[<RequireQualifiedAccess>]
+type AgentActivity =
+    | Intent of text: string * changedAt: DateTimeOffset
+    | SessionTitle of text: string * changedAt: DateTimeOffset
+
+module AgentActivity =
+    let textAndTimestamp =
+        function
+        | AgentActivity.Intent (text, changedAt)
+        | AgentActivity.SessionTitle (text, changedAt) -> text, changedAt
+
+    let mapText transform =
+        function
+        | AgentActivity.Intent (text, changedAt) -> AgentActivity.Intent(transform text, changedAt)
+        | AgentActivity.SessionTitle (text, changedAt) -> AgentActivity.SessionTitle(transform text, changedAt)
+
 type WorktreeStatus =
     { Path: WorktreePath
       Branch: string
@@ -255,9 +271,9 @@ type WorktreeStatus =
       /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
       CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
-      /// The agent's current intent (SDK `assistant.intent`) + when it last changed — the card's live
-      /// "what it's doing" line. `None` when no session has reported an intent.
-      AgentIntent: (string * DateTimeOffset) option
+      /// The freshest activity signal for the card's "what it's doing" line, preserving whether it
+      /// came from SDK `assistant.intent` or `session.title_changed`.
+      AgentActivity: AgentActivity option
       LastUserMessage: (string * DateTimeOffset) option
       /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
       /// footer line. `None` when the session has produced no assistant message yet.

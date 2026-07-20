@@ -23,7 +23,7 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       CodingToolProvider = None
       CodingToolSince = None
       CurrentSkill = None
-      AgentIntent = None
+      AgentActivity = None
       LastUserMessage = None
       LastAssistantMessage = None
       Pr = PrStatus.NoPr

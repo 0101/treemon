@@ -45,7 +45,7 @@ type SessionEvent =
     | IntentReported of Message
     /// The session's rolling title/summary (SDK `session.title_changed`) — the same text the Copilot
     /// CLI shows in its tab. Non-empty by construction (blank dropped at the source). Orthogonal to
-    /// status; combined with intent by `effectiveIntent` (freshest of the two wins).
+    /// status; combined with intent by `effectiveActivity` (freshest of the two wins).
     | TitleReported of Message
     /// ask_user — carries the question text to surface as the last assistant message.
     | AwaitingUserInput of question: Message option
@@ -105,6 +105,11 @@ let emptyStatus =
       LastUserMessage = None
       LastAssistantMessage = None }
 
+let private retainIfTextUnchanged current next =
+    match current with
+    | Some previous when previous.Text = next.Text -> current
+    | _ -> Some next
+
 /// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
 let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
@@ -116,16 +121,12 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
         // Intent is orthogonal to status. Keep the existing change-time when the text is unchanged so
         // "time ago" reflects when the intent last CHANGED; `m` is non-empty by construction, so intent
         // only ever advances between real values (never regresses to blank).
-        match s.Intent with
-        | Some prev when prev.Text = m.Text -> s
-        | _ -> { s with Intent = Some m }
+        { s with Intent = retainIfTextUnchanged s.Intent m }
     | TitleReported m ->
         // Same change-time discipline as intent: keep the existing time when the title text is
-        // unchanged so `effectiveIntent`'s "freshest wins" reflects real changes, not re-emits (a
+        // unchanged so `effectiveActivity`'s "freshest wins" reflects real changes, not re-emits (a
         // resume re-announces the same title).
-        match s.Title with
-        | Some prev when prev.Text = m.Text -> s
-        | _ -> { s with Title = Some m }
+        { s with Title = retainIfTextUnchanged s.Title m }
     | AwaitingUserInput q ->
         // The ask_user question is surfaced as the last assistant message; keep the prior one if the
         // question carries no text.
@@ -148,15 +149,19 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
 let foldMany (initial: SessionStatus) (events: SessionEvent seq) : SessionStatus =
     Seq.fold fold initial events
 
-/// The card's intent-line text: whichever of the reported intent (`assistant.intent`) or the rolling
-/// session title (`session.title_changed`) changed most recently. Both carry their own change-time, so
-/// "freshest wins" lets a newer title supersede a stale intent — and a live intent supersede an older
-/// title. `None` only when neither has ever been reported.
-let effectiveIntent (s: SessionStatus) : Message option =
+/// The card's activity line: whichever of the reported intent (`assistant.intent`) or rolling session
+/// title (`session.title_changed`) changed most recently, preserving the source in the shared domain.
+let effectiveActivity (s: SessionStatus) : AgentActivity option =
     match s.Intent, s.Title with
-    | Some i, Some t -> Some(if i.At >= t.At then i else t)
-    | Some i, None -> Some i
-    | None, t -> t
+    | Some intent, Some title when intent.At >= title.At ->
+        Some(AgentActivity.Intent(intent.Text, intent.At))
+    | Some _, Some title ->
+        Some(AgentActivity.SessionTitle(title.Text, title.At))
+    | Some intent, None ->
+        Some(AgentActivity.Intent(intent.Text, intent.At))
+    | None, Some title ->
+        Some(AgentActivity.SessionTitle(title.Text, title.At))
+    | None, None -> None
 
 // --- Freshness (crash safety-net) -------------------------------------------------------------
 

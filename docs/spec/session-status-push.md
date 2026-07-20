@@ -57,10 +57,10 @@ but rarely fires. A longer **idle window** (2 h) bounds the in-memory live map a
 
 ### Footer persists (decoupled from the dot)
 
-The card footer — running skill, last user message, last assistant message — is sourced from the
-**most-recent session that has them** (most-recent-*any*), NOT from the status-dot collapse. Going
-Idle or losing the open session therefore does **not** blank the footer; it stays populated while any
-session for the worktree remains in the store (retention / idle window).
+The card footer — freshest source-tagged activity, running skill, last user message, last assistant
+message — is sourced from the **most-recent session that has them** (most-recent-*any*), NOT from the
+status-dot collapse. Going Idle or losing the open session therefore does **not** blank the footer; it
+stays populated while any session for the worktree remains in the store (retention / idle window).
 
 ### Multiple sessions in one worktree
 
@@ -102,6 +102,8 @@ type SessionEvent =
     | UserPrompt of Message                 // a genuine user prompt (never a skill-context injection)
     | AssistantMessage of Message
     | SkillInvoked of name: string
+    | IntentReported of Message             // SDK assistant.intent
+    | TitleReported of Message              // SDK session.title_changed
     | AwaitingUserInput of question: Message option   // ask_user; carries the question to surface
     | TurnEnded
     | WentIdle
@@ -118,14 +120,18 @@ is a worktree-level collapse result, made unrepresentable per session). The fold
 ```fsharp
 type SessionStatus =
     { Status: SessionLevelStatus; Skill: string option
+      Intent: Message option; Title: Message option
       LastUserMessage: Message option; LastAssistantMessage: Message option }
 ```
 
 `fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
-`AwaitingUserInput` → WaitingForUser (question folded into `LastAssistantMessage`), `TurnEnded` /
-`WentIdle` → Idle, `Heartbeat` → no-op. A `UserPrompt` replying to an `ask_user` keeps the running
-skill; any other prompt starts fresh. The fold is pure and append-friendly — folding a later batch
-onto an earlier result equals folding the whole stream.
+`IntentReported` / `TitleReported` update their status-neutral fields while preserving the original
+change time when identical text is re-emitted, `AwaitingUserInput` → WaitingForUser (question folded
+into `LastAssistantMessage`), `TurnEnded` / `WentIdle` → Idle, `Heartbeat` → no-op. A `UserPrompt`
+replying to an `ask_user` keeps the running skill; any other prompt starts fresh. `effectiveActivity`
+selects the newer intent/title and returns a source-tagged `AgentActivity` (`Intent` or
+`SessionTitle`) so the collapse boundary never mislabels a title as intent. The fold is pure and
+append-friendly — folding a later batch onto an earlier result equals folding the whole stream.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
@@ -139,7 +145,7 @@ server:
 2. **Skill-context injections** — a skill's `<skill-context>` injection arrives as a `user.message`;
    the extension drops it (source starts `skill-` AND content starts `<skill-context`). → every
    `UserPrompt` the server sees is genuine.
-3. **Irrelevant events** — only the ~7 relevant SDK types are mapped; all others are ignored. → the
+3. **Irrelevant events** — only the 10 relevant wire kinds are mapped; all others are ignored. → the
    `SessionEvent` union has no catch-all.
 
 ### Ingestion: endpoint + single-writer mailbox
@@ -150,8 +156,9 @@ server:
   (consumer). The body is one report:
   `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }`. `kind` is
   one of `turn_started`, `user_prompt`, `assistant_message`, `skill_invoked`, `awaiting_user_input`,
-  `turn_ended`, `went_idle`, `heartbeat`, mapping 1:1 onto `SessionEvent`. `message` (`{ text; at }`)
-  accompanies the two message kinds and the ask_user question; `skillName` only `skill_invoked`. An
+  `intent_reported`, `title_reported`, `turn_ended`, `went_idle`, `heartbeat`, mapping 1:1 onto
+  `SessionEvent`. `message` (`{ text; at }`) is mandatory for user, assistant, intent, and title
+  reports and optional for the ask_user question; `skillName` applies only to `skill_invoked`. An
   unknown `kind` is a validation error, never silently dropped.
 - A dedicated `SessionActivity` `MailboxProcessor` is the **single writer** (the only mutable
   boundary). Per report: `fold` onto that session's state → update the in-memory
@@ -162,7 +169,8 @@ server:
   regress the live fold or the shown card. `activity_events` dedupes on `EventId`.
 - **Future timestamps are clamped, not trusted.** `last_seen` comes from `occurredAt`; a future value
   would make the freshness net never decay. `parseReport` clamps any `occurredAt` beyond `now + 5 min`
-  down to `now`.
+  down to `now`, then normalizes every message-bearing event's nested `Message.At` to that same value
+  so a replayed future timestamp cannot pin stale intent/title text in the freshest-activity choice.
 - **Free text is length-capped server-side** (8 KB) before persistence — defence in depth above the
   extension's 2000-char POST-body cap; truncated (not rejected) so an over-long field never drops the
   whole event and regresses the live fold. (Display truncation to 80/120 chars stays downstream in
@@ -176,12 +184,15 @@ collides:
 
 ```sql
 session_status(session_id PK, worktree_path, provider, status, current_skill,
-  last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen);
+  last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+  intent_text, intent_ts, title_text, title_ts, updated_at, last_seen);
 activity_events(event_id PK, session_id, worktree_path, provider, kind, status, skill, ts);
 ```
 
 PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; each op runs on its own
 short-lived connection (thread-safe against the single-writer mailbox and concurrent WAL readers).
+Construction applies a bounded, idempotent additive migration for the four intent/title columns so
+upgrading an existing durable database preserves retained footer and resume state.
 All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
 order — the `ts` / `last_seen` range filters depend on it. `upsertStatus` is last-write-wins;
 `appendEvent` is `INSERT OR IGNORE`; `pruneOld(now − 14d)` runs hourly and trims both tables.
@@ -192,7 +203,10 @@ started only in the real monitoring path — demo/fixture mode serves synthetic 
 
 `collapseByWorktree` groups the live session-statuses by worktree path; `fromPushSessions` collapses
 each group with the two decoupled picks (openness-driven status dot + most-recent-any footer, above).
-The push provider is Copilot-only today, so an active card always reads `Copilot`.
+The footer exposes `AgentActivity` as a source-tagged union: the freshest intent/title value keeps
+its original source while the card may render both identically. Assistant footer messages use a
+direct `(text, timestamp)` value; the enclosing `CodingToolProvider` supplies the rendered provider
+label. The push provider is Copilot-only today, so an active card reads `Copilot`.
 
 `CodingToolSince` (time-since-idle) is stamped the moment a worktree's collapsed status **enters**
 Idle and frozen until it changes — **not** recomputed from `last_seen` (which an open idle session
@@ -225,7 +239,8 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
 - **SDK → wire mapping:** `assistant.turn_start`→`turn_started`, `assistant.message` (non-blank)→
   `assistant_message`, genuine `user.message` (non-blank)→`user_prompt`, `skill.invoked`→
   `skill_invoked`, `elicitation.requested` / `user_input.requested`→`awaiting_user_input`,
-  `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`. (`ask_user` emits
+  `assistant.intent` (non-blank)→`intent_reported`, `session.title_changed` (non-blank)→
+  `title_reported`, `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`. (`ask_user` emits
   `elicitation.requested` / `.completed` in Copilot CLI 1.0.71+ with the prompt in `data.message`;
   older builds used `user_input.*` with `data.question` — both are handled, question reads
   `data.message ?? data.question`.) Blank-text messages are dropped.
@@ -268,8 +283,9 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
   collapse blanked idle worktrees.
 - **Display pick ≠ footer pick ≠ resume pick.** Display = most-recent *open active*; footer =
   most-recent-any (live); resume = most-recent-any (durable store, survives restart).
-- **Future `occurredAt` is clamped, not trusted; free text is length-capped server-side** (see
-  Technical Approach) — the loopback ingest endpoint does not trust the producer's bounds.
+- **Future timestamps are normalized, not trusted; free text is length-capped server-side** (see
+  Technical Approach) — the loopback ingest endpoint clamps `occurredAt` and uses that normalized
+  value for nested message timestamps before any fold or freshest-activity comparison.
 - **`HasActiveSession` (tmux/window) stays distinct from push openness** — the coding-tool dot uses
   push openness only; no merge.
 - **Explicit session-closed event deferred.** None of the wire kinds signals "closed"; an instant-grey
