@@ -102,11 +102,21 @@
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
         .btn-icon { width: 13px; height: 13px; display: block; }
 
-        .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-        .ct-dot.working  { background: #ff0000; animation: pulse 2s ease-in-out infinite; }
-        .ct-dot.waiting  { background: #f9e2af; }
-        .ct-dot.idle     { background: #89b4fa; }
-        .ct-dot.nosession { background: #585b70; }
+        .ct-dot { width: 15px; height: 15px; border-radius: 50%; flex-shrink: 0; }
+        .ct-dot.working  { --ct-color: #ff0000; background: var(--ct-color); animation: pulse 2s ease-in-out infinite; }
+        .ct-dot.waiting  { --ct-color: #f9e2af; background: var(--ct-color); }
+        .ct-dot.idle     { --ct-color: #89b4fa; background: var(--ct-color); }
+        .ct-dot.nosession { --ct-color: #585b70; background: var(--ct-color); }
+        .ct-dots { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+        /* Per-session context donut: the arc (the session's status colour) spans `--ctx-remaining`
+           (0–1, set inline per session) of the ring over a muted track — so a healthy low-usage
+           session is a nearly full ring and one near its limit thins to a sliver; a radial mask
+           punches the centre hole. A session with no reported usage keeps the plain `.ct-dot`. */
+        .ct-dot.ct-donut {
+          background: conic-gradient(var(--ct-color) calc(var(--ctx-remaining, 1) * 360deg), #45475a 0);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 50%, #000 53%);
+                  mask: radial-gradient(circle closest-side, transparent 0 50%, #000 53%);
+        }
         .canvas-badge { background: #89b4fa; color: #1e1e2e; font-size: 0.7em; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; display: inline-block; margin-left: 4px; padding: 0 4px; }
 
         @keyframes pulse {
@@ -173,8 +183,18 @@
            it tints the count text while the label keeps the neutral .overview-meta colour. */
         .overview-count { font-weight: 400; margin-right: 3px; }
         .overview-label { font-weight: 400; }
-        .overview-circles { display: flex; gap: 5px; }
+        .overview-circles { display: flex; align-items: center; gap: 7px; }
         .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
+        /* Context-usage donut: the filled arc (currentColor accent) spans `--ctx-remaining` (0–1, set
+           inline per agent) of the ring over a muted track — so a healthy low-usage agent is a nearly
+           full ring and one near its limit thins to a sliver; a radial mask punches the centre hole.
+           An agent with no reported usage keeps the plain solid `.overview-circle` above (the
+           `.overview-donut` class is simply not applied). */
+        .overview-donut {
+          background: conic-gradient(currentColor calc(var(--ctx-remaining, 1) * 360deg), #45475a 0);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 55%, #000 57%);
+                  mask: radial-gradient(circle closest-side, transparent 0 55%, #000 57%);
+        }
         /* Bar width = its share of the shared scale (`--bar-fill`, set inline per bar) times a
            RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
            single bar never overflows a narrow pane, while every bar scales together (shared scale
@@ -213,9 +233,19 @@
         .overview-bd-repo-name { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: #6c7086; margin: 0 0 7px; }
         /* Agent breakdown: borderless [dot name] chips, the dot in the group's activity colour (currentColor). */
         .overview-chips { display: flex; flex-wrap: wrap; gap: 6px 10px; }
-        .overview-chip { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; background: #1e1e2e; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12.5px; }
-        .overview-chip:hover { background: #242438; }
-        .overview-chip-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex: none; }
+        /* The chip background is a subtle progress bar: a low-opacity accent fill (background-image
+           gradient) runs from the left to `--ctx-used` (0–1, the member's most-loaded session's
+           context usage) over the base colour. Kept faint so the label keeps its contrast; hover only
+           shifts the base colour, leaving the fill in place. currentColor is the group accent. */
+        .overview-chip {
+          display: inline-flex; align-items: center; gap: 7px; cursor: pointer; border: none;
+          border-radius: 6px; padding: 4px 10px; font-size: 12.5px;
+          background-color: #1e1e2e;
+          background-image: linear-gradient(to right,
+            color-mix(in srgb, currentColor 22%, transparent) 0 calc(var(--ctx-used, 0) * 100%),
+            transparent calc(var(--ctx-used, 0) * 100%));
+        }
+        .overview-chip:hover { background-color: #242438; }
         .overview-chip-name { color: #cdd6f4; }
         .overview-chip-since { color: #9399b2; font-size: 0.85em; font-variant-numeric: tabular-nums; }
         /* Task breakdown: worktree name + a bar in the bucket colour, sized on the SAME shared scale as
@@ -409,7 +439,7 @@
         .provider-icon { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.5; }
         .provider-link { display: inline-flex; align-items: center; text-decoration: none; color: inherit; }
         .provider-link:hover .provider-icon { opacity: 1; color: #cdd6f4; }
-        .repo-ct-dots { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+        .repo-ct-dots { display: flex; align-items: center; gap: 5px; margin-left: 8px; }
         .repo-ct-dots .ct-dot { width: 8px; height: 8px; }
 
 
