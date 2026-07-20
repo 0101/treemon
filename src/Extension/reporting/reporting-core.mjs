@@ -16,14 +16,14 @@ export function buildReport(context, kind) {
   };
 }
 
-export function buildMessageReport(context, kind, text) {
+function buildMessageReport(context, kind, text) {
   return {
     ...buildReport(context, kind),
     message: { text: cap(text), at: context.occurredAt },
   };
 }
 
-export function buildTitleBootstrapReport(snapshot, context) {
-  const text = String(snapshot?.summary ?? "");
-  return text.trim() ? buildMessageReport(context, "title_bootstrap", text) : null;
+export function buildNonBlankMessageReport(context, kind, text) {
+  const value = String(text ?? "");
+  return value.trim() ? buildMessageReport(context, kind, value) : null;
 }

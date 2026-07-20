@@ -219,6 +219,7 @@ type ParseReportTests() =
 
     [<TestCase("intent_reported")>]
     [<TestCase("title_reported")>]
+    [<TestCase("title_bootstrap")>]
     member _.``a future message timestamp is normalized to the clamped report timestamp``(kind: string) =
         let req =
             { baseReq kind with
@@ -228,7 +229,8 @@ type ParseReportTests() =
         let messageAt =
             match kind, report.Event with
             | "intent_reported", IntentReported message
-            | "title_reported", TitleReported message -> message.At
+            | "title_reported", TitleReported message
+            | "title_bootstrap", TitleBootstrap message -> message.At
             | _ -> failwith $"unexpected parsed event for {kind}: {report.Event}"
 
         Assert.Multiple(fun () ->
@@ -427,6 +429,46 @@ type IngestTests() =
             Assert.That(replayed.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:03Z"))
             Assert.That(replayed.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "lifecycle replay must not regress join liveness")
             Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 1))
+
+    [<Test>]
+    member _.``title bootstrap revives a retained durable session without losing footer state``() =
+        let retained =
+            { SessionId = SessionId "s1"
+              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              Provider = CopilotCli
+              Status =
+                { Status = SessionLevelStatus.Working
+                  Skill = Some "review"
+                  Intent = Some(msg "reviewing the fix" "2026-03-01T07:58:00Z")
+                  Title = Some(msg "Old title" "2026-03-01T07:59:00Z")
+                  LastUserMessage = Some(msg "resume this" "2026-03-01T07:58:30Z")
+                  LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
+                  ContextUsage = None }
+              UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LastSeen = ts "2026-03-01T08:00:00Z"
+              ContextUsageAt = None }
+
+        withServiceSeeded
+            "C:/wt/a"
+            (fun store -> store.UpsertStatus retained)
+            (fun (svc, _, store) ->
+                let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
+                svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
+
+                let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+                Assert.Multiple(fun () ->
+                    Assert.That(hydrated.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                    Assert.That(hydrated.Status.Skill, Is.EqualTo(Some "review"))
+                    Assert.That(hydrated.Status.Intent, Is.EqualTo retained.Status.Intent)
+                    Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
+                    Assert.That(hydrated.Status.LastUserMessage, Is.EqualTo retained.Status.LastUserMessage)
+                    Assert.That(hydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
+                    Assert.That(hydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
+                    Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
+
+                let durable = store.StatusBySession(SessionId "s1") |> Option.get
+                Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row")
+                Assert.That(store.QueryWindow(ts "2026-03-01T07:00:00Z", ts "2026-03-01T11:00:00Z"), Is.Empty))
 
     [<Test>]
     member _.``an older title bootstrap cannot overwrite a newer live title``() =

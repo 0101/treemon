@@ -190,9 +190,11 @@ server:
   it updates `ContextUsage` and `last_seen` for an existing session using a separate usage
   last-write-wins clock, without changing `updated_at`, appending history, or persisting the gauge.
 - `title_bootstrap` is durable state hydration, not source history: it updates the persisted title
-  without appending `activity_events` or advancing the lifecycle `updated_at` clock. If it arrives
-  before delayed replay, it creates an Idle shell with a minimum lifecycle timestamp so every real
-  SDK event can still apply; the join time seeds `last_seen` until replay or heartbeat takes over.
+  and forward-only `last_seen` without appending `activity_events` or advancing the lifecycle
+  `updated_at` clock. The service loads the session's durable row regardless of the two-hour live
+  cutoff, preserving status, skill, intent, and footer messages before applying the title. With no
+  durable row it creates an Idle shell with a minimum lifecycle timestamp so every real SDK event
+  can still apply.
 - **Ordering guard** (both map and store): upsert only when `OccurredAt >= updated_at`; an
   out-of-order (older) event is still appended to `activity_events` (history substrate) but does not
   regress the live fold or the shown card. `activity_events` dedupes on `EventId`.
@@ -263,8 +265,9 @@ read path merges the two into the unchanged `OverviewSnapshot` shape, so `Overvi
 
 ### Reporting extension (`src/Extension/reporting/`)
 
-A passive reporting-only extension (`extension.mjs` + `@treemon/reporting` `package.json`), installed
-to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas-bridge` by
+A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
+`@treemon/reporting` `package.json`), installed to
+`~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas-bridge` by
 `Install-ReportingExtension` in `treemon.ps1`. It joins with no tools/canvas and never calls
 `session.send`.
 

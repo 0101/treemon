@@ -289,7 +289,10 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
-            let prior = live |> Map.tryFind report.SessionId
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
             let status =
                 prior
                 |> Option.map _.Status
@@ -297,7 +300,10 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 |> fun current -> SessionActivity.fold current report.Event
             let stored =
                 match prior with
-                | Some existing -> { existing with Status = status }
+                | Some existing ->
+                    { existing with
+                        Status = status
+                        LastSeen = max existing.LastSeen report.OccurredAt }
                 | None ->
                     { SessionId = report.SessionId
                       WorktreePath = report.WorktreePath

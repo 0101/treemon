@@ -246,6 +246,15 @@ WHERE worktree_path = $wt
 ORDER BY last_seen DESC;
 """
 
+let private statusBySessionSql =
+    """
+SELECT session_id, worktree_path, provider, status, current_skill,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen, title_text, title_ts
+FROM session_status
+WHERE session_id = $sid
+LIMIT 1;
+"""
+
 let private queryWindowSql =
     """
 SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
@@ -432,6 +441,15 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
         cmd.ExecuteNonQuery() |> ignore
+
+    /// Read one durable session row regardless of the live idle-window cutoff.
+    member _.StatusBySession(sessionId: SessionId) : StoredStatus option =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- statusBySessionSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        use reader = cmd.ExecuteReader()
+        if reader.Read() then Some(readStored reader) else None
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMessageReport, buildTitleBootstrapReport } from "./reporting-core.mjs";
+import { buildNonBlankMessageReport } from "./reporting-core.mjs";
 
 const context = {
   sessionId: "session-1",
@@ -11,7 +11,7 @@ const context = {
 };
 
 test("metadata summary maps to title_bootstrap without a live title event", () => {
-  assert.deepEqual(buildTitleBootstrapReport({ summary: "Investigate Intent Title Runtime" }, context), {
+  assert.deepEqual(buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"), {
     sessionId: "session-1",
     worktreePath: "worktree",
     provider: "copilot_cli",
@@ -26,12 +26,12 @@ test("metadata summary maps to title_bootstrap without a live title event", () =
 });
 
 test("blank metadata summary emits no title report", () => {
-  assert.equal(buildTitleBootstrapReport({ summary: "   " }, context), null);
-  assert.equal(buildTitleBootstrapReport({}, context), null);
+  assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", "   "), null);
+  assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", undefined), null);
 });
 
 test("live and bootstrap messages share the canonical report shape", () => {
-  assert.deepEqual(buildMessageReport(context, "title_reported", "Live title"), {
+  assert.deepEqual(buildNonBlankMessageReport(context, "title_reported", "Live title"), {
     sessionId: "session-1",
     worktreePath: "worktree",
     provider: "copilot_cli",

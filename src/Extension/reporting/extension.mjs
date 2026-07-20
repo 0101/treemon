@@ -1,6 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
-import { buildMessageReport, buildReport, buildTitleBootstrapReport } from "./reporting-core.mjs";
+import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
@@ -177,7 +177,7 @@ function base(event, kind) {
 }
 
 function messageReport(event, kind, text) {
-  return buildMessageReport(
+  return buildNonBlankMessageReport(
     {
       sessionId,
       worktreePath,
@@ -218,26 +218,22 @@ function mapEvent(event) {
       return name ? { ...base(event, "skill_invoked"), skillName: name } : null;
     }
     case "assistant.message": {
-      const text = String(data.content ?? "");
-      return text.trim() ? messageReport(event, "assistant_message", text) : null;
+      return messageReport(event, "assistant_message", data.content);
     }
     case "assistant.intent": {
       // The agent's short description of what it's currently doing/planning. Blank is dropped so a
       // "cleared" intent never regresses the card — the last non-empty intent is retained.
-      const text = String(data.intent ?? "");
-      return text.trim() ? messageReport(event, "intent_reported", text) : null;
+      return messageReport(event, "intent_reported", data.intent);
     }
     case "session.title_changed": {
       // The session's rolling title/summary — the same text the CLI shows in its tab. The server
       // combines it with the intent (freshest of the two wins), so a fresh title supersedes a stale
       // intent. Blank is dropped (nothing to show).
-      const text = String(data.title ?? "");
-      return text.trim() ? messageReport(event, "title_reported", text) : null;
+      return messageReport(event, "title_reported", data.title);
     }
     case "user.message": {
       if (isSkillContextInjection(data)) return null;
-      const text = String(data.content ?? "");
-      return text.trim() ? messageReport(event, "user_prompt", text) : null;
+      return messageReport(event, "user_prompt", data.content);
     }
     case "session.usage_info": {
       // The context-window gauge: currentTokens of tokenLimit. Status-preserving (statusForKind
@@ -254,10 +250,8 @@ function mapEvent(event) {
       // ask_user in Copilot CLI 1.0.71+ emits elicitation.requested carrying the prompt in
       // `data.message`; older builds emitted user_input.requested carrying it in `data.question`.
       // Accept either shape so the ask_user question surfaces as LastAssistantMessage.
-      const question = String(data.message ?? data.question ?? "");
-      return question.trim()
-        ? messageReport(event, "awaiting_user_input", question)
-        : base(event, "awaiting_user_input");
+      return messageReport(event, "awaiting_user_input", data.message ?? data.question)
+        ?? base(event, "awaiting_user_input");
     }
     default:
       return null;
@@ -406,13 +400,17 @@ process.on("SIGINT", cleanup);
 void (async () => {
   try {
     const snapshot = await session.rpc.metadata.snapshot();
-    const report = buildTitleBootstrapReport(snapshot, {
-      sessionId,
-      worktreePath,
-      provider: PROVIDER,
-      eventId: randomUUID(),
-      occurredAt: new Date().toISOString(),
-    });
+    const report = buildNonBlankMessageReport(
+      {
+        sessionId,
+        worktreePath,
+        provider: PROVIDER,
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+      },
+      "title_bootstrap",
+      snapshot?.summary,
+    );
     if (!liveTitleSeen && report) postReport(report);
   } catch (err) {
     log(`metadata title bootstrap failed: ${err?.message ?? err}`);
