@@ -49,15 +49,17 @@ let sessionDots (wt: WorktreeStatus) =
               | [] -> [ ctDot wt.CodingTool ]
               | sessions -> sessions |> List.mapi sessionMarker) ]
 
-/// Per-session PLAIN dots for the collapsed repo header: one status dot per live session (never a
-/// donut — the header is too dense for arcs). Same empty-list fallback as `sessionDots`.
+/// Plain per-session status dots for ONE worktree (never a donut — the header is too dense for arcs),
+/// returned as a flat, keyed list so the repo header can `List.collect` every worktree's dots into a
+/// single row with one uniform gap. A worktree with no live session contributes its single collapsed
+/// dot.
 let sessionDotsPlain (wt: WorktreeStatus) =
-    Html.span
-        [ prop.className "ct-dots"
-          prop.children (
-              match wt.Sessions with
-              | [] -> [ ctDot wt.CodingTool ]
-              | sessions -> sessions |> List.mapi (fun i s -> Html.span [ prop.key i; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ])) ]
+    let key = WorktreePath.value wt.Path
+    match wt.Sessions with
+    | [] -> [ Html.span [ prop.key key; prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ] ]
+    | sessions ->
+        sessions
+        |> List.mapi (fun i s -> Html.span [ prop.key $"{key}-{i}"; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ])
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
@@ -775,7 +777,7 @@ let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget op
             if repo.IsCollapsed then
                 Html.span [
                     prop.className "repo-ct-dots"
-                    prop.children (repo.Worktrees |> List.map sessionDotsPlain)
+                    prop.children (repo.Worktrees |> List.collect sessionDotsPlain)
                 ]
             Html.button [
                 prop.className "create-wt-btn"
