@@ -64,10 +64,9 @@ internal `session.resume`), so canvas writes are observed via **session events**
 `session.on("tool.execution_start", …)` / `session.on("tool.execution_complete", …)`. The completion
 event carries neither the tool name nor its arguments, so supported canvas targets are captured from
 the **start** event (keyed by `toolCallId`) and acted on once the matching completion reports success.
-Create/edit arguments contribute one attribute operation; `apply_patch` contributes lifecycle-aware
-attribute/removal operations from Add/Update/Delete/Move headers. In browser mode the extension sends
-serving URLs for written docs via `session.send()` and ignores removals; in Treemon mode it applies
-the ownership changes instead.
+Create/edit arguments contribute one destination; `apply_patch` contributes canvas HTML destinations
+from Add/Update/Move headers. In browser mode the extension sends serving URLs for written docs via
+`session.send()`; in Treemon mode it declares ownership instead.
 
 ### Path Security
 
@@ -83,6 +82,6 @@ the ownership changes instead.
 ## Key Files
 
 - `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, message endpoint
-- `src/Extension/canvas-ownership.mjs` — session-event write watcher and lifecycle-aware patch parsing
+- `src/Extension/canvas-ownership.mjs` — session-event write watcher and apply-patch destination parsing
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

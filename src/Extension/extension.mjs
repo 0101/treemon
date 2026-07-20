@@ -238,23 +238,22 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
   }
 }
 
-// Apply an ownership change for a successful write. The extension stamps its own sessionId;
+// Declare ownership for a successful write. The extension stamps its own sessionId;
 // unreachable or unmonitored Treemon remains a best-effort no-op.
-async function changeOwnership(worktreePath, change, sessionId) {
+async function declareOwnership(worktreePath, filename, sessionId) {
   try {
     const res = await fetch(TREEMON_ATTRIBUTE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         worktreePath,
-        filename: change.filename,
+        filename,
         sessionId,
-        remove: change.kind === "remove",
       }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
-      log(`ownership change failed for ${change.filename}: ${res.status} ${res.statusText}`);
+      log(`ownership declaration failed for ${filename}: ${res.status} ${res.statusText}`);
       return {
         ok: false,
         error: `Treemon returned ${res.status} ${res.statusText}`,
@@ -262,10 +261,10 @@ async function changeOwnership(worktreePath, change, sessionId) {
     }
     const outcome = await res.json().catch(() => ({}));
     const attributed = outcome?.attributed === true;
-    log(`ownership change: ${change.kind} ${change.filename} → ${sessionId} (attributed=${attributed})`);
+    log(`declared ownership: ${filename} → ${sessionId} (attributed=${attributed})`);
     return { ok: true, attributed };
   } catch (err) {
-    log(`could not change ownership for ${change.filename}: ${err.message}`);
+    log(`could not declare ownership for ${filename}: ${err.message}`);
     return { ok: false, error: err.message };
   }
 }
@@ -310,22 +309,19 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
 // sessionId, the agent only supplied the filename. Browser mode (Treemon unreachable/unmonitored):
 // serve the doc locally and hand the session a clickable URL via session.send (events cannot inject
 // tool-result context the way the old onPostToolUse hook did).
-async function handleCanvasWrite(session, state, write) {
-  const { filename } = write;
+async function handleCanvasWrite(session, state, filename) {
   if (!isValidCanvasFilename(filename)) {
     log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
     return;
   }
   if (!state.browserMode) {
     if (state.sessionId) {
-      await changeOwnership(state.worktreePath, write, state.sessionId);
+      await declareOwnership(state.worktreePath, filename, state.sessionId);
     } else {
       log(`canvas write: sessionId not ready, skipping ownership declaration for ${filename}`);
     }
     return;
   }
-
-  if (write.kind === "remove") return;
 
   const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
@@ -366,11 +362,7 @@ const takeOwnershipTool = {
       throw new Error("This session has no id yet; cannot declare ownership.");
     }
     const result =
-      await changeOwnership(
-        extensionState.worktreePath,
-        { kind: "attribute", filename: name },
-        extensionState.sessionId,
-      );
+      await declareOwnership(extensionState.worktreePath, name, extensionState.sessionId);
     if (!result.ok) {
       throw new Error(`Ownership declaration failed: ${result.error}`);
     }

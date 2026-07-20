@@ -9,7 +9,6 @@ let private filePath = Path.Combine("data", "canvas-owners.json")
 
 type private Msg =
     | Attribute of key: string * filename: string * sessionId: string
-    | Remove of key: string * filename: string
     | GetOwner of key: string * filename: string * AsyncReplyChannel<string option>
     | GetAll of key: string * AsyncReplyChannel<Map<string, string>>
     | Load of state: Map<string, Map<string, string>>
@@ -62,20 +61,6 @@ let private agent =
                     do! persistImpl state'
                     return! loop state'
 
-                | Remove(key, filename) ->
-                    let docs =
-                        state
-                        |> Map.tryFind key
-                        |> Option.defaultValue Map.empty
-                        |> Map.remove filename
-
-                    let state' =
-                        if Map.isEmpty docs then state |> Map.remove key
-                        else state |> Map.add key docs
-
-                    do! persistImpl state'
-                    return! loop state'
-
                 | GetOwner(key, filename, reply) ->
                     state
                     |> Map.tryFind key
@@ -101,9 +86,6 @@ let private agent =
 
 let attribute (worktreePath: string) (filename: string) (sessionId: string) =
     agent.Post(Attribute(normalizePath worktreePath, filename, sessionId))
-
-let remove (worktreePath: string) (filename: string) =
-    agent.Post(Remove(normalizePath worktreePath, filename))
 
 let getOwner (worktreePath: string) (filename: string) =
     agent.PostAndAsyncReply(fun reply -> GetOwner(normalizePath worktreePath, filename, reply))

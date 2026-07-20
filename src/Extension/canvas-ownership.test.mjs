@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EOL } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  canvasChangesForTool,
+  canvasFilenamesForTool,
   isValidCanvasFilename,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
@@ -26,7 +26,7 @@ function fakeSession() {
   };
 }
 
-test("extracts lifecycle-aware canvas changes from apply_patch headers", () => {
+test("extracts every unique canvas destination from apply_patch headers", () => {
   const worktreePath = resolve("worktree");
   const input = patch([
     "*** Begin Patch",
@@ -49,40 +49,34 @@ test("extracts lifecycle-aware canvas changes from apply_patch headers", () => {
     "+content",
     "*** Add File: .agents/canvas/unsafe name.html",
     "+content",
-    "*** Delete File: .agents/canvas/deleted.html",
     "*** End Patch",
   ]);
 
   assert.deepEqual(
-    canvasChangesForTool("apply_patch", input, worktreePath),
-    [
-      { kind: "remove", filename: "updated.html" },
-      { kind: "attribute", filename: "moved.html" },
-      { kind: "attribute", filename: "added.html" },
-      { kind: "remove", filename: "deleted.html" },
-    ],
+    canvasFilenamesForTool("apply_patch", input, worktreePath),
+    ["moved.html", "added.html"],
   );
 });
 
 test("preserves create and edit canvas detection", () => {
   const worktreePath = resolve("worktree");
   assert.deepEqual(
-    canvasChangesForTool(
+    canvasFilenamesForTool(
       "create",
       { path: join(worktreePath, ".agents", "canvas", "created.html") },
       worktreePath,
     ),
-    [{ kind: "attribute", filename: "created.html" }],
+    ["created.html"],
   );
   assert.deepEqual(
-    canvasChangesForTool(
+    canvasFilenamesForTool(
       "edit",
       JSON.stringify({ file_path: ".agents/canvas/edited.html" }),
       worktreePath,
     ),
-    [{ kind: "attribute", filename: "edited.html" }],
+    ["edited.html"],
   );
-  assert.deepEqual(canvasChangesForTool("edit", { path: "src/ignored.html" }, worktreePath), []);
+  assert.deepEqual(canvasFilenamesForTool("edit", { path: "src/ignored.html" }, worktreePath), []);
   assert.equal(isValidCanvasFilename("unsafe name.html"), false);
 });
 
@@ -91,7 +85,7 @@ test("ignores canvas-shaped paths outside the worktree root canvas directory", (
   const nestedPath = join("fixtures", ".agents", "canvas", "report.html");
 
   assert.deepEqual(
-    canvasChangesForTool(
+    canvasFilenamesForTool(
       "apply_patch",
       patch(["*** Begin Patch", `*** Update File: ${nestedPath}`, "*** End Patch"]),
       worktreePath,
@@ -99,7 +93,7 @@ test("ignores canvas-shaped paths outside the worktree root canvas directory", (
     [],
   );
   assert.deepEqual(
-    canvasChangesForTool(
+    canvasFilenamesForTool(
       "edit",
       { path: join(worktreePath, nestedPath) },
       worktreePath,
@@ -143,9 +137,6 @@ test("attributes all buffered apply_patch writes only after successful completio
 
   watcher.activate((filename) => writes.push(filename));
 
-  assert.deepEqual(writes, [
-    { kind: "attribute", filename: "one.html" },
-    { kind: "attribute", filename: "two.html" },
-  ]);
+  assert.deepEqual(writes, ["one.html", "two.html"]);
   watcher.stop();
 });

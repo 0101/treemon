@@ -2,7 +2,7 @@ import { basename, dirname, relative, resolve } from "node:path";
 
 const CANVAS_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$/;
 const PATCH_FILE_HEADER_RE =
-  /^\*\*\* (Add File|Update File|Delete File|Move to):[ \t]*(.+?)[ \t]*\r?$/gm;
+  /^\*\*\* (Add File|Update File|Move to):[ \t]*(.+?)[ \t]*\r?$/gm;
 
 function parseToolArgs(toolArgs) {
   if (typeof toolArgs === "string") {
@@ -33,54 +33,42 @@ function patchText(toolArgs) {
   }
 }
 
-function canvasChange(kind, worktreePath, filePath) {
-  const filename = canvasFilename(worktreePath, filePath);
-  return filename ? { kind, filename } : null;
+function uniqueLatestFilenames(filenames) {
+  return filenames.filter((filename, index) => !filenames.slice(index + 1).includes(filename));
 }
 
-function uniqueLatestChanges(changes) {
-  return changes.filter((change, index) =>
-    !changes.slice(index + 1).some((candidate) => candidate.filename === change.filename));
-}
-
-function patchCanvasChanges(worktreePath, toolArgs) {
+function patchCanvasFilenames(worktreePath, toolArgs) {
   const headers = [...patchText(toolArgs).matchAll(PATCH_FILE_HEADER_RE)]
     .map(([, operation, filePath]) => ({ operation, filePath }));
 
-  return uniqueLatestChanges(
+  return uniqueLatestFilenames(
     headers.flatMap((header, index) => {
       const next = headers[index + 1];
       if (header.operation === "Move to") return [];
-      if (header.operation === "Delete File") {
-        return [canvasChange("remove", worktreePath, header.filePath)];
-      }
       if (header.operation === "Update File" && next?.operation === "Move to") {
-        return [
-          canvasChange("remove", worktreePath, header.filePath),
-          canvasChange("attribute", worktreePath, next.filePath),
-        ];
+        return [canvasFilename(worktreePath, next.filePath)];
       }
-      return [canvasChange("attribute", worktreePath, header.filePath)];
+      return [canvasFilename(worktreePath, header.filePath)];
     })
     .filter(Boolean),
   );
 }
 
-function directCanvasChanges(worktreePath, toolArgs) {
+function directCanvasFilenames(worktreePath, toolArgs) {
   const args = parseToolArgs(toolArgs);
-  return [canvasChange("attribute", worktreePath, args?.path ?? args?.file_path)].filter(Boolean);
+  return [canvasFilename(worktreePath, args?.path ?? args?.file_path)].filter(Boolean);
 }
 
 export function isValidCanvasFilename(filename) {
   return typeof filename === "string" && CANVAS_FILENAME_RE.test(filename);
 }
 
-export function canvasChangesForTool(toolName, toolArgs, worktreePath = process.cwd()) {
+export function canvasFilenamesForTool(toolName, toolArgs, worktreePath = process.cwd()) {
   return (
     toolName === "apply_patch"
-      ? patchCanvasChanges(worktreePath, toolArgs)
+      ? patchCanvasFilenames(worktreePath, toolArgs)
       : toolName === "create" || toolName === "edit"
-        ? directCanvasChanges(worktreePath, toolArgs)
+        ? directCanvasFilenames(worktreePath, toolArgs)
         : []
   );
 }
@@ -93,18 +81,18 @@ export function watchCanvasWrites(session, worktreePath = process.cwd()) {
   const unsubscribeStart = session.on("tool.execution_start", (event) => {
     const data = event?.data;
     if (!data) return;
-    const changes = canvasChangesForTool(data.toolName, data.arguments, worktreePath);
-    if (changes.length > 0) pendingByToolCallId.set(data.toolCallId, changes);
+    const filenames = canvasFilenamesForTool(data.toolName, data.arguments, worktreePath);
+    if (filenames.length > 0) pendingByToolCallId.set(data.toolCallId, filenames);
   });
 
   const unsubscribeComplete = session.on("tool.execution_complete", (event) => {
     const data = event?.data;
     if (!data) return;
-    const changes = pendingByToolCallId.get(data.toolCallId);
-    if (changes === undefined) return;
+    const filenames = pendingByToolCallId.get(data.toolCallId);
+    if (filenames === undefined) return;
     pendingByToolCallId.delete(data.toolCallId);
     if (!data.success) return;
-    changes.forEach(onCanvasWrite);
+    filenames.forEach(onCanvasWrite);
   });
 
   const stop = () => {

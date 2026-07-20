@@ -428,21 +428,6 @@ type AttributeOwnershipTests() =
                         "getOwner must return the sessionId the authoring session declared"))
 
     [<Test>]
-    member _.``a removal clears existing ownership``() =
-        withTempCwd (fun () ->
-            let worktree = uniquePath "attr-remove"
-            let agent = agentKnowing worktree
-            let sessionId = uniqueSid "owner"
-
-            let attributed = runAsync (attributeOwnership agent worktree "a.html" sessionId)
-            let removed = runAsync (removeOwnership agent worktree "a.html" sessionId)
-            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
-
-            Assert.That(attributed, Is.EqualTo(Attributed))
-            Assert.That(removed, Is.EqualTo(Removed))
-            Assert.That(owner, Is.EqualTo(None: string option)))
-
-    [<Test>]
     member _.``an unknown worktree is rejected and records no ownership``() =
         withTempCwd (fun () ->
             let unknown = uniquePath "attr-unknown"
