@@ -315,6 +315,49 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             store.UpsertStatus stored
             scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
             live |> Map.add report.SessionId stored
+        | IntentReported _
+        | TitleReported _ ->
+            // Activity fields are source events, but they are ordered independently from lifecycle
+            // status. Preserve UpdatedAt so a fire-and-forget report cannot block an older lifecycle
+            // transition or be discarded merely because a newer lifecycle event arrived first.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let status =
+                prior
+                |> Option.map _.Status
+                |> Option.defaultValue emptyStatus
+                |> fun current -> SessionActivity.fold current report.Event
+            let stored =
+                match prior with
+                | Some existing ->
+                    { existing with
+                        Status = status
+                        LastSeen = max existing.LastSeen report.OccurredAt }
+                | None ->
+                    { SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Status = status
+                      UpdatedAt = DateTimeOffset.MinValue
+                      LastSeen = report.OccurredAt
+                      ContextUsageAt = None }
+            let eventRow =
+                { EventId = report.EventId
+                  SessionId = report.SessionId
+                  WorktreePath = report.WorktreePath
+                  Provider = report.Provider
+                  Kind = kindText report.Event
+                  Status = status.Status
+                  Skill = status.Skill
+                  Ts = report.OccurredAt }
+
+            if not (store.AppendAndUpsert(eventRow, stored)) then
+                live
+            else
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
+                live |> Map.add report.SessionId stored
         | _ ->
             let prior = live |> Map.tryFind report.SessionId
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus

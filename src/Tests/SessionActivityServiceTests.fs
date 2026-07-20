@@ -480,8 +480,42 @@ type IngestTests() =
 
             let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(s.Status.Title, Is.EqualTo(Some liveTitle))
-            Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:10Z"))
+            Assert.That(s.UpdatedAt, Is.EqualTo DateTimeOffset.MinValue, "title reports do not advance the lifecycle clock")
             Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 1))
+
+    [<Test>]
+    member _.``a newer intent arriving first does not block an older lifecycle transition``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let intent = msg "Implementing the fix" "2026-03-01T10:00:06Z"
+            svc.Submit(mkReport "s1" "C:/wt/a" "i1" "2026-03-01T10:00:06Z" (IntentReported intent))
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:05Z" TurnStarted)
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.Multiple(fun () ->
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.Status.Intent, Is.EqualTo(Some intent))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "intent must not advance the lifecycle clock")
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "the newer report still advances openness"))
+            Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 2))
+
+    [<Test>]
+    member _.``a title arriving after a newer lifecycle event still updates the activity field``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let oldTitle = msg "Initial title" "2026-03-01T10:00:04Z"
+            let newTitle = msg "Updated title" "2026-03-01T10:00:05Z"
+            svc.Submit(mkReport "s1" "C:/wt/a" "t1" "2026-03-01T10:00:04Z" (TitleReported oldTitle))
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:06Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "t2" "2026-03-01T10:00:05Z" (TitleReported newTitle))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.Multiple(fun () ->
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.Status.Title, Is.EqualTo(Some newTitle))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "title must preserve the lifecycle clock")
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z")))
+            Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 3))
 
     [<Test>]
     member _.``a heartbeat bumps last_seen for openness without appending, moving updated_at, or changing status``() =
