@@ -96,6 +96,12 @@ let private msgToDb (m: Message option) : obj * obj =
     | Some x -> box x.Text, box (isoUtc x.At)
     | None -> box DBNull.Value, box DBNull.Value
 
+let private contextToDb (stored: StoredStatus) : obj * obj * obj =
+    match stored.Status.ContextUsage, stored.ContextUsageAt with
+    | None, None -> box DBNull.Value, box DBNull.Value, box DBNull.Value
+    | Some usage, Some usageAt -> box usage.CurrentTokens, box usage.TokenLimit, box (isoUtc usageAt)
+    | _ -> invalidArg (nameof stored) "ContextUsage and ContextUsageAt must both be present or absent"
+
 let private readOptStr (r: SqliteDataReader) (i: int) =
     if r.IsDBNull i then None else Some(r.GetString i)
 
@@ -108,7 +114,7 @@ let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimit
               TokenLimit = r.GetInt32 tokenLimitIndex }
 
         Some usage, Some(parseIso (r.GetString usageAtIndex))
-    | _ -> failwith "SessionActivityStore: incomplete persisted context usage"
+    | _ -> failwith $"{nameof StoredStatus}: incomplete persisted context usage"
 
 /// Reconstruct a `Message option` from a text column + a timestamp column; present only when both
 /// are non-NULL (they are written together, so this is really an all-or-nothing pair).
@@ -224,8 +230,10 @@ let private upsertSql =
     """
 INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen)
-VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $upd, $seen)
+     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+     context_current_tokens, context_token_limit, context_usage_at)
+VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $upd, $seen,
+        $contextCurrent, $contextLimit, $contextAt)
 ON CONFLICT(session_id) DO UPDATE SET
     worktree_path = excluded.worktree_path,
     provider      = excluded.provider,
@@ -258,15 +266,24 @@ let private touchSql =
 UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
 """
 
-let private updateContextUsageSql =
+let private upsertContextUsageSql =
     """
-UPDATE session_status
-SET context_current_tokens = $current,
-    context_token_limit = $limit,
-    context_usage_at = $usageAt,
-    last_seen = CASE WHEN last_seen < $seen THEN $seen ELSE last_seen END
-WHERE session_id = $sid
-  AND (context_usage_at IS NULL OR context_usage_at <= $usageAt);
+INSERT INTO session_status
+    (session_id, worktree_path, provider, status, current_skill,
+     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+     context_current_tokens, context_token_limit, context_usage_at)
+VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $upd, $seen,
+        $contextCurrent, $contextLimit, $contextAt)
+ON CONFLICT(session_id) DO UPDATE SET
+    context_current_tokens = excluded.context_current_tokens,
+    context_token_limit = excluded.context_token_limit,
+    context_usage_at = excluded.context_usage_at,
+    last_seen = CASE
+        WHEN session_status.last_seen < excluded.last_seen THEN excluded.last_seen
+        ELSE session_status.last_seen
+    END
+WHERE session_status.context_usage_at IS NULL
+   OR session_status.context_usage_at <= excluded.context_usage_at;
 """
 
 let private loadSql =
@@ -321,6 +338,15 @@ FROM session_status
 ORDER BY last_seen;
 """
 
+let private statusBySessionSql =
+    """
+SELECT session_id, worktree_path, provider, status, current_skill,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       context_current_tokens, context_token_limit, context_usage_at
+FROM session_status
+WHERE session_id = $sid;
+"""
+
 // --- Reader / binder helpers ------------------------------------------------------------------
 
 // Drain the reader through an immutable recursive accumulator instead of a mutable list-building
@@ -346,6 +372,7 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     let s = stored.Status
     let umText, umTs = msgToDb s.LastUserMessage
     let amText, amTs = msgToDb s.LastAssistantMessage
+    let contextCurrent, contextLimit, contextAt = contextToDb stored
     cmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
     cmd.Parameters.AddWithValue("$wt", WorktreePath.value stored.WorktreePath) |> ignore
     cmd.Parameters.AddWithValue("$prov", providerText stored.Provider) |> ignore
@@ -357,6 +384,26 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$ats", amTs) |> ignore
     cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
     cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
+    cmd.Parameters.AddWithValue("$contextCurrent", contextCurrent) |> ignore
+    cmd.Parameters.AddWithValue("$contextLimit", contextLimit) |> ignore
+    cmd.Parameters.AddWithValue("$contextAt", contextAt) |> ignore
+
+let private readStoredBySession
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    (sessionId: SessionId)
+    : StoredStatus
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- statusBySessionSql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    use reader = cmd.ExecuteReader()
+
+    if reader.Read() then
+        readStored reader
+    else
+        failwith $"{nameof StoredStatus}: persisted session row missing"
 
 // --- Store ------------------------------------------------------------------------------------
 
@@ -424,9 +471,9 @@ type SessionActivityStore(dbPath: string) =
     /// connection, so the durable status can never diverge from the appended history. With the two on
     /// separate connections a failed upsert AFTER a committed append left the event_id permanently
     /// deduped on replay while the status never recovered; here a mid-pair failure rolls both back.
-    /// Returns true when the event was newly inserted (upsert applied), false when the event_id
-    /// already existed (a full idempotent no-op — nothing appended, nothing upserted).
-    member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : bool =
+    /// Returns the authoritative persisted status when the event was newly inserted, or None when
+    /// the event_id already existed (a full idempotent no-op — nothing appended or upserted).
+    member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : StoredStatus option =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
         use appendCmd = conn.CreateCommand()
@@ -435,15 +482,19 @@ type SessionActivityStore(dbPath: string) =
         bindAppend appendCmd row
         let inserted = appendCmd.ExecuteNonQuery() = 1
 
-        if inserted then
-            use upsertCmd = conn.CreateCommand()
-            upsertCmd.Transaction <- tx
-            upsertCmd.CommandText <- upsertSql
-            bindUpsert upsertCmd stored
-            upsertCmd.ExecuteNonQuery() |> ignore
+        let persisted =
+            if inserted then
+                use upsertCmd = conn.CreateCommand()
+                upsertCmd.Transaction <- tx
+                upsertCmd.CommandText <- upsertSql
+                bindUpsert upsertCmd stored
+                upsertCmd.ExecuteNonQuery() |> ignore
+                Some(readStoredBySession conn tx stored.SessionId)
+            else
+                None
 
         tx.Commit()
-        inserted
+        persisted
 
     /// Advance a session's `last_seen` (openness heartbeat) without touching status/updated_at or the
     /// message fields. Only moves it forward; a no-op if the row is absent or already fresher.
@@ -455,22 +506,20 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
-    /// Persist the latest accepted context-window gauge without touching status/updated_at or
-    /// activity history. The independent usage timestamp prevents an older delayed gauge from
-    /// replacing a newer snapshot, including after restart.
-    member _.UpdateContextUsage
-        (sessionId: SessionId, usage: ContextUsage, usageAt: DateTimeOffset, lastSeen: DateTimeOffset)
-        : unit
-        =
+    /// Persist the latest accepted context-window gauge, inserting the full session snapshot when a
+    /// retained in-memory session outlives its pruned row. Returns the authoritative persisted state,
+    /// including a newer gauge that may already have won the independent usage clock.
+    member _.UpsertContextUsage(stored: StoredStatus) : StoredStatus =
         use conn = openConn ()
+        use tx = conn.BeginTransaction()
         use cmd = conn.CreateCommand()
-        cmd.CommandText <- updateContextUsageSql
-        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-        cmd.Parameters.AddWithValue("$current", usage.CurrentTokens) |> ignore
-        cmd.Parameters.AddWithValue("$limit", usage.TokenLimit) |> ignore
-        cmd.Parameters.AddWithValue("$usageAt", isoUtc usageAt) |> ignore
-        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        cmd.Transaction <- tx
+        cmd.CommandText <- upsertContextUsageSql
+        bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
+        let persisted = readStoredBySession conn tx stored.SessionId
+        tx.Commit()
+        persisted
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.

@@ -263,9 +263,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
-                    store.UpdateContextUsage(report.SessionId, usage, report.OccurredAt, bumped.LastSeen)
-                    scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
-                    live |> Map.add report.SessionId bumped
+                    let persisted = store.UpsertContextUsage bumped
+                    scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                    live |> Map.add report.SessionId persisted
         | _ ->
             let prior = live |> Map.tryFind report.SessionId
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
@@ -315,17 +315,18 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   ContextUsageAt = prior |> Option.bind _.ContextUsageAt }
 
             // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
-            // status can never diverge on a mid-pair failure. Returns false for a duplicate event_id
-            // (nothing appended or upserted) → live map unchanged.
-            if not (store.AppendAndUpsert(eventRow, stored)) then
-                live
-            elif isOutOfOrder then
+            // status can never diverge on a mid-pair failure. A duplicate event_id returns None
+            // (nothing appended or upserted), while a new event returns the authoritative persisted
+            // row so retained context cannot diverge from the live maps.
+            match store.AppendAndUpsert(eventRow, stored) with
+            | None -> live
+            | Some _ when isOutOfOrder ->
                 // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
                 // history substrate but must not regress the live fold state or the shown card.
                 live
-            else
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
-                live |> Map.add report.SessionId stored
+            | Some persisted ->
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                live |> Map.add report.SessionId persisted
 
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->

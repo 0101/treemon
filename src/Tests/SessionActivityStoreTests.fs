@@ -59,6 +59,12 @@ let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredS
       LastSeen = ts lastSeen
       ContextUsageAt = None }
 
+let private withUsage (usage: ContextUsage) usageAt lastSeen (stored: StoredStatus) : StoredStatus =
+    { stored with
+        Status.ContextUsage = Some usage
+        ContextUsageAt = Some usageAt
+        LastSeen = lastSeen }
+
 let private eventOf eid sid kind status skill t : ActivityEventRow =
     { EventId = EventId eid
       SessionId = SessionId sid
@@ -162,7 +168,12 @@ type UpsertStatusTests() =
             let idle = { emptyStatus with Status = SessionLevelStatus.Idle }
 
             store.UpsertStatus(storedOf "s1" contextWorktree working "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
-            store.UpdateContextUsage(SessionId "s1", usage, ts "2026-03-01T10:00:05Z", ts "2026-03-01T10:00:05Z")
+
+            storedOf "s1" contextWorktree working "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+            |> withUsage usage (ts "2026-03-01T10:00:05Z") (ts "2026-03-01T10:00:05Z")
+            |> store.UpsertContextUsage
+            |> ignore
+
             store.UpsertStatus(storedOf "s1" contextWorktree idle "2026-03-01T10:00:10Z" "2026-03-01T10:00:10Z")
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:10:00Z") |> find "s1"
@@ -182,14 +193,43 @@ type ContextUsagePersistenceTests() =
             let newer = { CurrentTokens = 150000; TokenLimit = 200000 }
             let older = { CurrentTokens = 80000; TokenLimit = 200000 }
 
-            store.UpsertStatus(storedOf "s1" contextWorktree emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
-            store.UpdateContextUsage(SessionId "s1", newer, ts "2026-03-01T10:00:10Z", ts "2026-03-01T10:00:10Z")
-            store.UpdateContextUsage(SessionId "s1", older, ts "2026-03-01T10:00:05Z", ts "2026-03-01T10:00:05Z")
+            let stored = storedOf "s1" contextWorktree emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+            store.UpsertStatus stored
+
+            stored
+            |> withUsage newer (ts "2026-03-01T10:00:10Z") (ts "2026-03-01T10:00:10Z")
+            |> store.UpsertContextUsage
+            |> ignore
+
+            let persisted =
+                stored
+                |> withUsage older (ts "2026-03-01T10:00:05Z") (ts "2026-03-01T10:00:05Z")
+                |> store.UpsertContextUsage
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:10:00Z") |> find "s1"
+            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some newer))
             Assert.That(row.Status.ContextUsage, Is.EqualTo(Some newer))
             Assert.That(row.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:10Z")))
             Assert.That(row.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:10Z")))
+
+    [<Test>]
+    member _.``A context update recreates a session row removed by retention``() =
+        withStore (fun store ->
+            let usage = { CurrentTokens = 90000; TokenLimit = 200000 }
+            let stored = storedOf "s1" contextWorktree emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z"
+            store.UpsertStatus stored
+            Assert.That(store.PruneOld(ts "2026-03-01T09:00:00Z"), Is.EqualTo(1))
+
+            let recreated =
+                stored
+                |> withUsage usage (ts "2026-03-01T10:00:00Z") (ts "2026-03-01T10:00:00Z")
+                |> store.UpsertContextUsage
+
+            Assert.That(recreated.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(recreated.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:00Z")))
+
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
+            Assert.That(row, Is.EqualTo(recreated)))
 
 
 [<TestFixture>]
@@ -244,7 +284,7 @@ type AppendAndUpsertTests() =
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
             let stored = storedOf "s1" "C:/wt/a" status "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
 
-            Assert.That(store.AppendAndUpsert(e, stored), Is.True, "a new event reports inserted")
+            Assert.That(store.AppendAndUpsert(e, stored), Is.EqualTo(Some stored), "a new event returns the persisted row")
 
             let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
             Assert.That(events.Length, Is.EqualTo 1, "the event was appended")
@@ -257,7 +297,8 @@ type AppendAndUpsertTests() =
             let first = { emptyStatus with Status = SessionLevelStatus.Working }
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
             Assert.That(
-                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"),
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
+                |> Option.isSome,
                 Is.True
             )
 
@@ -265,8 +306,9 @@ type AppendAndUpsertTests() =
             // the append, so the status can never advance off a deduped event.
             let laterStatus = { emptyStatus with Status = SessionLevelStatus.WaitingForUser }
             Assert.That(
-                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z"),
-                Is.False,
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z")
+                |> Option.isNone,
+                Is.True,
                 "a duplicate event_id reports ignored"
             )
 
@@ -318,15 +360,15 @@ type LoadLiveStatusesTests() =
             let usageAt = ts "2026-03-01T11:30:05Z"
 
             (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(
-                 storedOf
-                     "s1"
-                     contextWorktree
-                     { emptyStatus with Status = SessionLevelStatus.Working }
-                     "2026-03-01T11:30:00Z"
-                     "2026-03-01T11:30:00Z"
-             )
-             store.UpdateContextUsage(SessionId "s1", usage, usageAt, usageAt))
+             storedOf
+                 "s1"
+                 contextWorktree
+                 { emptyStatus with Status = SessionLevelStatus.Working }
+                 "2026-03-01T11:30:00Z"
+                 "2026-03-01T11:30:00Z"
+             |> withUsage usage usageAt usageAt
+             |> store.UpsertContextUsage
+             |> ignore)
 
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
@@ -597,7 +639,13 @@ VALUES
 
             let usage = { CurrentTokens = 50000; TokenLimit = 200000 }
             let usageAt = ts "2026-03-01T11:45:00Z"
-            store.UpdateContextUsage(SessionId "legacy", usage, usageAt, usageAt)
+
+            { migrated with
+                Status.ContextUsage = Some usage
+                ContextUsageAt = Some usageAt
+                LastSeen = usageAt }
+            |> store.UpsertContextUsage
+            |> ignore
 
             let updated = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
             Assert.That(updated.Status.ContextUsage, Is.EqualTo(Some usage))

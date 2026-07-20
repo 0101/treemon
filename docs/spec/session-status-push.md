@@ -205,9 +205,12 @@ short-lived connection (thread-safe against the single-writer mailbox and concur
 All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
 order — the `ts` / `last_seen` range filters and both ordering clocks depend on it. Construction
 inspects `PRAGMA table_info(session_status)` and adds any missing context columns individually, so
-old or partially migrated databases upgrade idempotently with `NULL` usage. `upsertStatus` is
-last-write-wins and preserves existing context columns; `updateContextUsage` atomically replaces the
-three context fields and advances `last_seen` only for an equal-or-newer usage timestamp.
+old or partially migrated databases upgrade idempotently with `NULL` usage. `upsertStatus` inserts
+the complete aggregate for a new row and preserves existing context columns on conflict.
+`upsertContextUsage` inserts the complete aggregate when a retained in-memory session outlives its
+pruned row, otherwise atomically replaces the three context fields and advances `last_seen` only for
+an equal-or-newer usage timestamp. Both write paths return the authoritative persisted row, which is
+then used for the scheduler and service maps so retained and live context cannot diverge.
 `appendEvent` is `INSERT OR IGNORE`; usage remains a last-known gauge and is not appended to history.
 `pruneOld(now − 14d)` runs hourly and trims both tables. `loadLiveStatuses` rebuilds status, usage,
 and both ordering clocks on restart for rows within the idle window. The service is started only in
