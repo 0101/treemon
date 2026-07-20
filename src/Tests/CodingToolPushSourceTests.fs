@@ -33,6 +33,8 @@ let private stored
       Status =
         { Status = status
           Skill = skill
+          Intent = None
+          Title = None
           LastUserMessage = lastUser
           LastAssistantMessage = lastAsst
           ContextUsage = None }
@@ -99,7 +101,7 @@ type FromPushSessionsTests() =
         Assert.That(result.Status, Is.EqualTo Idle)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
         Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "ship it"))
-        Assert.That(result.LastAssistantMessage |> Option.map _.Message, Is.EqualTo(Some "done, all green"))
+        Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "done, all green"))
 
     [<Test>]
     member _.``A NoSession worktree with retained data keeps its footer``() =
@@ -114,7 +116,7 @@ type FromPushSessionsTests() =
         Assert.That(result.Status, Is.EqualTo NoSession)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
         Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "look at auth"))
-        Assert.That(result.LastAssistantMessage |> Option.map _.Message, Is.EqualTo(Some "which file?"))
+        Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
     member _.``The most-recent active session wins and every field comes from it``() =
@@ -135,7 +137,7 @@ type FromPushSessionsTests() =
         Assert.That(result.Provider, Is.EqualTo(Some CopilotCli))
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
         Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "the auth module"))
-        Assert.That(result.LastAssistantMessage |> Option.map _.Message, Is.EqualTo(Some "which file?"))
+        Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
     member _.``A just-idled newer session does not hide an actively-working sibling``() =
@@ -188,16 +190,15 @@ type FromPushSessionsTests() =
         Assert.That(truncated, Does.EndWith "...")
 
     [<Test>]
-    member _.``The last assistant message is truncated to the 80-char cap and tagged copilot``() =
+    member _.``The last assistant message is truncated to the 80-char cap``() =
         let longText = String('y', 200)
         let session =
             stored "a" "wt" SessionLevelStatus.Working None None (Some(msg longText "2026-03-01T11:59:00Z"))
                 "2026-03-01T11:59:00Z"
         let result = fromPushSessions now [ session ]
-        let event = result.LastAssistantMessage |> Option.get
-        Assert.That(event.Message.Length, Is.EqualTo 83)
-        Assert.That(event.Message, Does.EndWith "...")
-        Assert.That(event.Source, Is.EqualTo "copilot")
+        let text, _ = result.LastAssistantMessage |> Option.get
+        Assert.That(text.Length, Is.EqualTo 83)
+        Assert.That(text, Does.EndWith "...")
 
 
 [<TestFixture>]
@@ -293,6 +294,26 @@ type WithRetainedFallbackTests() =
             Is.EqualTo(Some "resume me"),
             "the retained footer/resume message is surfaced so the resume button is reachable"
         )
+
+    [<Test>]
+    member _.``An intent-only retained session still carries the provider indicator``() =
+        // Regression: hasFooter must count Intent. A session folded from IntentReported alone still has
+        // footer content (its intent line renders), so its retained card must carry the provider.
+        let intentOnly: StoredStatus =
+            { SessionId = SessionId "i"
+              WorktreePath = WorktreePath "wt-i"
+              Provider = CopilotCli
+              Status = { emptyStatus with Intent = Some(msg "investigating the fold" "2026-03-01T08:00:00Z") }
+              UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LastSeen = ts "2026-03-01T08:00:00Z"
+              ContextUsageAt = None }
+
+        let result = retainedFooterResult intentOnly
+
+        Assert.That(
+            result.AgentActivity,
+            Is.EqualTo(Some(AgentActivity.Intent("investigating the fold", ts "2026-03-01T08:00:00Z"))))
+        Assert.That(result.Provider, Is.EqualTo(Some CopilotCli), "an intent-only footer must still carry the provider")
 
     [<Test>]
     member _.``A live worktree keeps its live card (retained fallback only fills gaps)``() =
