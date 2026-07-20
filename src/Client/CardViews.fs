@@ -707,10 +707,8 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
             Html.div [
                 prop.className footerClass
                 prop.children [
-                    if List.isEmpty canvasEvents then
-                        activityLineView wt
-                        userMsgLineView wt
-
+                    activityLineView wt
+                    userMsgLineView wt
                     assistantMsgLineView wt
 
                     eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog visibleBranchEvents

@@ -1,5 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
+import { cap, loadMetadataTitleReport } from "./reporting-core.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
@@ -55,11 +56,6 @@ const TREEMON_FETCH_TIMEOUT_MS = 5000;
 // genuinely-active session that emits no events for a while (a long tool run, or a pending ask_user)
 // is not wrongly decayed to Idle. Within the spec's ~30–120s band.
 const HEARTBEAT_INTERVAL_MS = 60000;
-
-// Only ever displayed as <=120 chars server-side; this cap only bounds the wire payload for a runaway
-// multi-KB message. The raw (untruncated within the cap) text is forwarded — the server owns display
-// truncation, keeping this extension a thin forwarder.
-const MAX_MESSAGE_CHARS = 2000;
 
 // The relevant SDK event types (the eight mapped kinds + the two ask_user "completed" events, which
 // are unmapped but close the ask_user window). ask_user in Copilot CLI 1.0.71+ emits
@@ -165,11 +161,6 @@ function postReport(report) {
 }
 
 // --- Event mapping -----------------------------------------------------------------------------
-
-function cap(text) {
-  const s = String(text ?? "");
-  return s.length > MAX_MESSAGE_CHARS ? s.slice(0, MAX_MESSAGE_CHARS) : s;
-}
 
 function base(event, kind) {
   return {
@@ -343,7 +334,19 @@ if (!sessionId) {
 // Subscribe to the live stream first so no event is missed, then replay history. Overlap between the
 // two is harmless: the server dedupes on eventId, and the newest-wins status guard keeps live status
 // from being rewound by older replayed events.
-const unsubscribes = SUBSCRIBED_TYPES.map((type) => session.on(type, (event) => handle(event)));
+let liveTitleSeen = false;
+const unsubscribes = SUBSCRIBED_TYPES.map((type) =>
+  session.on(type, (event) => {
+    if (
+      event.type === "session.title_changed" &&
+      !event.agentId &&
+      String(event.data?.title ?? "").trim()
+    ) {
+      liveTitleSeen = true;
+    }
+    handle(event);
+  }),
+);
 
 try {
   const history = await session.getEvents();
@@ -370,6 +373,20 @@ try {
   );
 } catch (err) {
   log(`getEvents replay failed: ${err?.message ?? err}`);
+}
+
+try {
+  const occurredAt = new Date().toISOString();
+  const report = await loadMetadataTitleReport(session, {
+    sessionId,
+    worktreePath,
+    provider: PROVIDER,
+    eventId: randomUUID(),
+    occurredAt,
+  });
+  if (!liveTitleSeen && report) postReport(report);
+} catch (err) {
+  log(`metadata title bootstrap failed: ${err?.message ?? err}`);
 }
 
 const heartbeatTimer = setInterval(heartbeatTick, HEARTBEAT_INTERVAL_MS);

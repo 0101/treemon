@@ -63,6 +63,13 @@ message — is sourced from the **most-recent session that has them** (most-rece
 status-dot collapse. Going Idle or losing the open session therefore does **not** blank the footer; it
 stays populated while any session for the worktree remains in the store (retention / idle window).
 
+The session title is the reliable activity source: after joining, subscribing, and replaying
+persisted history, the reporting extension reads `session.rpc.metadata.snapshot().summary` and
+reports a nonblank summary when no live `session.title_changed` arrived during startup. Live
+title-change events continue to update it afterward. `assistant.intent` is optional enrichment only;
+the CLI does not emit it for every ordinary turn, so its absence is expected and never blocks title
+display.
+
 ### Multiple sessions in one worktree
 
 A worktree's live sessions collapse to one card via two decoupled picks:
@@ -266,6 +273,16 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
   `elicitation.requested` / `.completed` in Copilot CLI 1.0.71+ with the prompt in `data.message`;
   older builds used `user_input.*` with `data.question` — both are handled, question reads
   `data.message ?? data.question`.) Blank-text messages and invalid usage gauges are dropped.
+- **Title bootstrap:** after live subscriptions are installed and persisted history is replayed,
+  the extension reads `session.rpc.metadata.snapshot()`. Replaying first preserves the historical
+  lifecycle fold before the join-time title report advances the server's ordering clock. If no
+  nonblank live `session.title_changed` arrived during startup, a nonblank `summary` is emitted
+  through the same `title_reported` wire path. This recovers the current title on join/rejoin even
+  though `session.title_changed` is ephemeral and absent from `getEvents()`. A metadata RPC failure
+  is logged and does not block other reporting.
+- **Intent is opportunistic:** nonblank `assistant.intent` events are still accepted and persisted,
+  but ordinary turns are not expected to emit one. The extension does not synthesize intent from
+  assistant prose, tools, or skills.
 - **ask_user exactness:** a live-only `pendingAskUser` flag (set on the request, cleared on the
   completion or a genuine `user_prompt`) suppresses `went_idle` while a prompt is unanswered, so the
   card stays WaitingForUser even though `session.idle` is ephemeral. Because the flag is not rebuilt on
@@ -311,6 +328,9 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
 - **Context usage is a live-only gauge, not durable session state.** `usage_info` preserves status,
   uses its own ordering clock, and stores neither gauge columns nor an `activity_events` row; after
   restart each session shows a plain status dot until a fresh gauge arrives.
+- **Title is bootstrapped; intent is optional.** Metadata summary supplies the durable join/rejoin
+  title when the ephemeral live event was missed. `assistant.intent` remains source-authored
+  enrichment and is never inferred by Treemon.
 - **`HasActiveSession` (tmux/window) stays distinct from push openness** — the coding-tool dot uses
   push openness only; no merge.
 - **Explicit session-closed event deferred.** None of the wire kinds signals "closed"; an instant-grey
@@ -334,7 +354,7 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
 | `src/Server/Program.fs` | Routes `/api/session/activity`; starts the service + rebuild. |
 | `src/Shared/Types.fs` | `ContextUsage` / per-session `SessionDot` wire types used by the card and Overview. |
 | `src/Client/CardViews.fs`, `src/Client/index.html` | Per-session status dots/context donuts; colours (idle blue, nosession grey); Overview Idle group. |
-| `src/Extension/reporting/` | Passive reporting-only extension (`extension.mjs` + `package.json`). |
+| `src/Extension/reporting/` | Passive reporting-only extension (`extension.mjs`, metadata-title report builder, and package metadata). |
 | `treemon.ps1` | `Install-ReportingExtension` — installs `treemon-reporting` alongside `canvas-bridge`. |
 
 ## Related Specs

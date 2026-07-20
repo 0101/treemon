@@ -71,11 +71,13 @@ type CardActivityLineTests() =
 
 let private dashboardConverter = Fable.Remoting.Json.FableJsonConverter()
 
-let private withChangedCanvasAndAssistantMessage branch changedAt (response: DashboardResponse) =
+let private withChangedCanvasAndFooter branch changedAt (response: DashboardResponse) =
     let updateWorktree wt =
         if wt.Branch <> branch then wt
         else
             { wt with
+                AgentActivity = Some(AgentActivity.SessionTitle("Investigate Intent Title Runtime", changedAt))
+                LastUserMessage = Some("user prompt", changedAt)
                 LastAssistantMessage = Some("assistant response", changedAt)
                 CanvasDocs =
                     wt.CanvasDocs
@@ -97,7 +99,7 @@ type CardFooterRenderingTests() =
     inherit PageTest()
 
     [<Test>]
-    member this.``Canvas event and last assistant message render together in the card footer``() =
+    member this.``Canvas event activity and messages render together in the card footer``() =
         task {
             let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
             let branch = "feature-active"
@@ -113,25 +115,35 @@ type CardFooterRenderingTests() =
                         let! upstream = route.FetchAsync()
                         let! json = upstream.TextAsync()
                         let response = JsonConvert.DeserializeObject<DashboardResponse>(json, dashboardConverter)
-                        let changed = withChangedCanvasAndAssistantMessage branch DateTimeOffset.UtcNow response
+                        let changed = withChangedCanvasAndFooter branch DateTimeOffset.UtcNow response
                         let body = JsonConvert.SerializeObject(changed, dashboardConverter)
                         do! route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = body))
                     } :> System.Threading.Tasks.Task))
             do! this.Page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler)
 
             let footer = targetCard.Locator(".card-footer")
+            let activityLine = footer.Locator(":scope > .user-prompt.activity-line")
+            let userLine = footer.Locator(":scope > .user-prompt:not(.activity-line):not(.assistant-line)")
             let assistantLine = footer.Locator(":scope > .user-prompt.assistant-line")
             let canvasEvent = footer.Locator(":scope > .event-log > .event-entry.canvas-event")
 
+            do! activityLine.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! userLine.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! assistantLine.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! canvasEvent.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
+            let! activityLineCount = activityLine.CountAsync()
+            let! activityTextCount = activityLine.Locator(":scope > .activity-text").CountAsync()
+            let! userSpanCount = userLine.Locator(":scope > span").CountAsync()
             let! assistantSpanCount = assistantLine.Locator(":scope > span").CountAsync()
             let! eventTimeCount = assistantLine.Locator(":scope > .event-time").CountAsync()
             let! eventSourceCount = assistantLine.Locator(":scope > .event-source").CountAsync()
             let! canvasEventCount = canvasEvent.CountAsync()
 
             Assert.Multiple(fun () ->
+                Assert.That(activityLineCount, Is.EqualTo(1), "Activity line should remain visible beside a canvas event")
+                Assert.That(activityTextCount, Is.EqualTo(1), "Activity line should contain one activity-text span")
+                Assert.That(userSpanCount, Is.EqualTo(2), "User line should keep its two-span DOM structure")
                 Assert.That(assistantSpanCount, Is.EqualTo(3), "Assistant line should keep its three-span DOM structure")
                 Assert.That(eventTimeCount, Is.EqualTo(1), "Assistant line should contain one event-time span")
                 Assert.That(eventSourceCount, Is.EqualTo(1), "Assistant line should contain one event-source span")
