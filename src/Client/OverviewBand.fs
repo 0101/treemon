@@ -277,11 +277,13 @@ let view
     (chartWindow: OverviewChartWindow)
     (onCycleChart: unit -> unit)
     (history: OverviewSnapshot list)
+    (now: System.DateTimeOffset)
     (repos: RepoModel list)
     : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
-    // "Now" anchors the charts' right edge (right-edge hold to now); computed once so both charts agree.
-    let now = System.DateTimeOffset.Now
+    // "Now" anchors the charts' right edge (right-edge hold to now). Passed in from the model (the
+    // history-fetch instant) rather than read live here, so the axis steps forward once per poll with
+    // fresh data instead of drifting on every render.
     let chartsOpen = chartWindow <> OverviewChartWindow.Hidden
 
     match overview.Agents, overview.Tasks with

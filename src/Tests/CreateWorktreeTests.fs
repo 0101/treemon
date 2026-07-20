@@ -39,7 +39,8 @@ let private defaultModel : Model =
       OverviewPanelOpen = false
       SelectedOverviewGroup = None
       OverviewChartWindow = OverviewChartWindow.Hidden
-      OverviewHistory = [] }
+      OverviewHistory = []
+      OverviewHistoryNow = System.DateTimeOffset.Now }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy

@@ -60,7 +60,8 @@ let init () =
       OverviewPanelOpen = false
       SelectedOverviewGroup = None
       OverviewChartWindow = OverviewChartWindow.Hidden
-      OverviewHistory = [] },
+      OverviewHistory = []
+      OverviewHistoryNow = System.DateTimeOffset.Now },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -304,8 +305,14 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
+        // Refresh the in-band history chart on the same poll cycle when it is open, so its data stays
+        // live and advances in step with `OverviewHistoryNow` (no continuous drift against stale data).
+        // Skipped when the chart is Hidden to avoid needless server-side reconstruction each poll.
+        let historyCmd =
+            if model.OverviewChartWindow <> OverviewChartWindow.Hidden then fetchOverviewHistory () else Cmd.none
+
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
-        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
@@ -531,7 +538,9 @@ let update msg model =
             { model with OverviewChartWindow = next; SelectedOverviewGroup = None }, fetchOverviewHistory ()
 
     | OverviewHistoryLoaded history ->
-        { model with OverviewHistory = history }, Cmd.none
+        // Anchor the chart's right edge to the instant this history was fetched, so the axis advances
+        // in discrete once-per-poll steps (with fresh data) instead of drifting on every render.
+        { model with OverviewHistory = history; OverviewHistoryNow = System.DateTimeOffset.Now }, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -911,6 +920,7 @@ let view model dispatch =
                         model.OverviewChartWindow
                         (fun () -> dispatch CycleOverviewChart)
                         model.OverviewHistory
+                        model.OverviewHistoryNow
                         model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
