@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto";
 //   skill.invoked          -> skill_invoked        (skillName required)
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
 //   assistant.intent       -> intent_reported     (message = the intent text, required)
+//   session.title_changed  -> title_reported      (message = the session title, required)
 //   assistant.turn_end     -> turn_ended
 //   session.idle           -> went_idle
 //   (timer, no SDK event)  -> heartbeat            (liveness only; bumps last_seen, never folded/stored)
@@ -69,6 +70,7 @@ const SUBSCRIBED_TYPES = [
   "assistant.turn_start",
   "assistant.turn_end",
   "assistant.intent",
+  "session.title_changed",
   "session.idle",
   "skill.invoked",
   "assistant.message",
@@ -112,7 +114,7 @@ function statusForKind(kind) {
     case "went_idle":
       return "idle";
     default:
-      return null; // skill_invoked / intent_reported set skill/intent, not the status
+      return null; // skill_invoked / intent_reported / title_reported set skill/intent/title, not the status
   }
 }
 
@@ -217,6 +219,13 @@ function mapEvent(event) {
       // "cleared" intent never regresses the card — the last non-empty intent is retained.
       const text = String(data.intent ?? "");
       return text.trim() ? { ...base(event, "intent_reported"), message: message(text, event.timestamp) } : null;
+    }
+    case "session.title_changed": {
+      // The session's rolling title/summary — the same text the CLI shows in its tab. The server
+      // combines it with the intent (freshest of the two wins), so a fresh title supersedes a stale
+      // intent. Blank is dropped (nothing to show).
+      const text = String(data.title ?? "");
+      return text.trim() ? { ...base(event, "title_reported"), message: message(text, event.timestamp) } : null;
     }
     case "user.message": {
       if (isSkillContextInjection(data)) return null;

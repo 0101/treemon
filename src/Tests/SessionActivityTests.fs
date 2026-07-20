@@ -183,6 +183,42 @@ type FoldIntentTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type FoldTitleTests() =
+
+    [<Test>]
+    member _.``TitleReported records the title without changing status``() =
+        let t = msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ TurnStarted; TitleReported t ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.Title, Is.EqualTo(Some t))
+
+    [<Test>]
+    member _.``A re-reported identical title keeps the original change-time``() =
+        let first = msg "Fix the auth bug" "2026-03-01T10:00:00Z"
+        let again = msg "Fix the auth bug" "2026-03-01T10:05:00Z"
+        let s = foldMany emptyStatus [ TitleReported first; TitleReported again ]
+        Assert.That(s.Title, Is.EqualTo(Some first))
+
+    [<Test>]
+    member _.``effectiveIntent prefers whichever of intent or title changed most recently``() =
+        let older = msg "older intent" "2026-03-01T10:00:00Z"
+        let newer = msg "newer title" "2026-03-01T10:05:00Z"
+        let intentFresher = { emptyStatus with Intent = Some newer; Title = Some older }
+        let titleFresher = { emptyStatus with Intent = Some older; Title = Some newer }
+        Assert.That(effectiveIntent intentFresher, Is.EqualTo(Some newer))
+        Assert.That(effectiveIntent titleFresher, Is.EqualTo(Some newer))
+
+    [<Test>]
+    member _.``effectiveIntent falls back to whichever single value is present``() =
+        let only = msg "only one set" "2026-03-01T10:00:00Z"
+        Assert.That(effectiveIntent { emptyStatus with Intent = Some only }, Is.EqualTo(Some only))
+        Assert.That(effectiveIntent { emptyStatus with Title = Some only }, Is.EqualTo(Some only))
+        Assert.That(effectiveIntent emptyStatus, Is.EqualTo(None))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type FoldSkillTests() =
 
     [<Test>]
@@ -298,6 +334,7 @@ type FreshnessTests() =
             { Status = SessionLevelStatus.WaitingForUser
               Skill = Some "review"
               Intent = None
+              Title = None
               LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z") }
         let lastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
@@ -353,6 +390,7 @@ type PickActiveTests() =
             { Status = SessionLevelStatus.Working
               Skill = Some "bd-execute"
               Intent = None
+              Title = None
               LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z") }
         let sessions =

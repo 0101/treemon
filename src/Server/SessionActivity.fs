@@ -43,6 +43,10 @@ type SessionEvent =
     /// non-empty text by construction (blank is dropped at the source / rejected by the handler), so
     /// the fold can only advance intent between real values — it never regresses to blank.
     | IntentReported of Message
+    /// The session's rolling title/summary (SDK `session.title_changed`) — the same text the Copilot
+    /// CLI shows in its tab. Non-empty by construction (blank dropped at the source). Orthogonal to
+    /// status; combined with intent by `effectiveIntent` (freshest of the two wins).
+    | TitleReported of Message
     /// ask_user — carries the question text to surface as the last assistant message.
     | AwaitingUserInput of question: Message option
     | TurnEnded
@@ -88,6 +92,7 @@ type SessionStatus =
     { Status: SessionLevelStatus
       Skill: string option
       Intent: Message option
+      Title: Message option
       LastUserMessage: Message option
       LastAssistantMessage: Message option }
 
@@ -96,6 +101,7 @@ let emptyStatus =
     { Status = SessionLevelStatus.Idle
       Skill = None
       Intent = None
+      Title = None
       LastUserMessage = None
       LastAssistantMessage = None }
 
@@ -113,6 +119,13 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
         match s.Intent with
         | Some prev when prev.Text = m.Text -> s
         | _ -> { s with Intent = Some m }
+    | TitleReported m ->
+        // Same change-time discipline as intent: keep the existing time when the title text is
+        // unchanged so `effectiveIntent`'s "freshest wins" reflects real changes, not re-emits (a
+        // resume re-announces the same title).
+        match s.Title with
+        | Some prev when prev.Text = m.Text -> s
+        | _ -> { s with Title = Some m }
     | AwaitingUserInput q ->
         // The ask_user question is surfaced as the last assistant message; keep the prior one if the
         // question carries no text.
@@ -134,6 +147,16 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
 /// Fold a batch of events (oldest→newest) onto an existing state.
 let foldMany (initial: SessionStatus) (events: SessionEvent seq) : SessionStatus =
     Seq.fold fold initial events
+
+/// The card's intent-line text: whichever of the reported intent (`assistant.intent`) or the rolling
+/// session title (`session.title_changed`) changed most recently. Both carry their own change-time, so
+/// "freshest wins" lets a newer title supersede a stale intent — and a live intent supersede an older
+/// title. `None` only when neither has ever been reported.
+let effectiveIntent (s: SessionStatus) : Message option =
+    match s.Intent, s.Title with
+    | Some i, Some t -> Some(if i.At >= t.At then i else t)
+    | Some i, None -> Some i
+    | None, t -> t
 
 // --- Freshness (crash safety-net) -------------------------------------------------------------
 

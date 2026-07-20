@@ -133,6 +133,11 @@ type ParseReportTests() =
         Assert.That((parseOk req).Event, Is.EqualTo(IntentReported(msg "investigating the fold" "2026-03-01T10:00:00Z")))
 
     [<Test>]
+    member _.``title_reported with a message maps to TitleReported carrying that message``() =
+        let req = { baseReq "title_reported" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
+        Assert.That((parseOk req).Event, Is.EqualTo(TitleReported(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")))
+
+    [<Test>]
     member _.``intent_reported without a message is rejected (never regresses to blank)``() =
         Assert.That(parseErr (baseReq "intent_reported"), Does.Contain "message")
 

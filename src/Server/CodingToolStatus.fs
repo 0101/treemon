@@ -168,7 +168,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       // Single push provider today (Copilot CLI); a future provider threads its own value here.
       Provider = footer |> Option.map (fun _ -> CopilotCli)
       CurrentSkill = footer |> Option.bind _.Skill
-      AgentIntent = footer |> Option.bind _.Intent |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+      AgentIntent = footer |> Option.bind SessionActivity.effectiveIntent |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
@@ -196,12 +196,12 @@ let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<
 /// this the durable `--resume <id>` path is UI-unreachable for exactly the sessions it was built for.
 let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
     let s = stored.Status
-    let hasFooter = s.Skill.IsSome || s.Intent.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
+    let hasFooter = s.Skill.IsSome || s.Intent.IsSome || s.Title.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
 
     { Status = NoSession
       Provider = if hasFooter then Some CopilotCli else None
       CurrentSkill = s.Skill
-      AgentIntent = s.Intent |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
+      AgentIntent = SessionActivity.effectiveIntent s |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastUserMessage = s.LastUserMessage |> Option.map (fun m -> FileUtils.truncateMessage 120 m.Text, m.At)
       LastAssistantMessage = s.LastAssistantMessage |> Option.map toLastAssistantEvent
       LastMessageProvider = s.LastAssistantMessage |> Option.map (fun _ -> CopilotCli)

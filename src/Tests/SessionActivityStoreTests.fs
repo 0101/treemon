@@ -132,12 +132,13 @@ type UpsertStatusTests() =
             Assert.That((find "s1" rows).Status.Status, Is.EqualTo(SessionLevelStatus.Working)))
 
     [<Test>]
-    member _.``Skill, intent, and both messages round-trip through the store``() =
+    member _.``Skill, intent, title, and both messages round-trip through the store``() =
         withStore (fun store ->
             let rich =
                 { Status = SessionLevelStatus.WaitingForUser
                   Skill = Some "review"
                   Intent = Some(msg "reviewing the auth changes" "2026-03-01T10:00:50Z")
+                  Title = Some(msg "Review the auth changes" "2026-03-01T10:00:55Z")
                   LastUserMessage = Some(msg "the auth module" "2026-03-01T10:01:00Z")
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z") }
 

@@ -562,7 +562,7 @@ let private messageLineView (source: string option) (msg: (string * System.DateT
     | None -> Html.none
     | Some (text, ts) ->
         Html.div [
-            prop.className "user-prompt"
+            prop.className (match source with Some _ -> "user-prompt assistant-line" | None -> "user-prompt")
             prop.children [
                 Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
                 match source with

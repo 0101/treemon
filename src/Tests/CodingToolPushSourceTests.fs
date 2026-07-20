@@ -34,6 +34,7 @@ let private stored
         { Status = status
           Skill = skill
           Intent = None
+          Title = None
           LastUserMessage = lastUser
           LastAssistantMessage = lastAsst }
       UpdatedAt = ts seen

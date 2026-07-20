@@ -109,6 +109,7 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
         { Status = parseStatus (r.GetString 3)
           Skill = readOptStr r 4
           Intent = readOptMsg r 9 10
+          Title = readOptMsg r 13 14
           LastUserMessage = readOptMsg r 5 6
           LastAssistantMessage = readOptMsg r 7 8 }
       UpdatedAt = parseIso (r.GetString 11)
@@ -140,6 +141,8 @@ CREATE TABLE IF NOT EXISTS session_status (
     last_asst_ts  TEXT,
     intent_text   TEXT,
     intent_ts     TEXT,
+    title_text    TEXT,
+    title_ts      TEXT,
     updated_at    TEXT NOT NULL,
     last_seen     TEXT NOT NULL
 );
@@ -175,8 +178,8 @@ let private upsertSql =
     """
 INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen)
-VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $it, $its, $upd, $seen)
+     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen, title_text, title_ts)
+VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $it, $its, $upd, $seen, $tt, $tts)
 ON CONFLICT(session_id) DO UPDATE SET
     worktree_path = excluded.worktree_path,
     provider      = excluded.provider,
@@ -188,6 +191,8 @@ ON CONFLICT(session_id) DO UPDATE SET
     last_asst_ts  = excluded.last_asst_ts,
     intent_text   = excluded.intent_text,
     intent_ts     = excluded.intent_ts,
+    title_text    = excluded.title_text,
+    title_ts      = excluded.title_ts,
     updated_at    = excluded.updated_at,
     last_seen     = excluded.last_seen
 WHERE excluded.updated_at >= session_status.updated_at;
@@ -214,7 +219,7 @@ UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_see
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen, title_text, title_ts
 FROM session_status
 WHERE last_seen >= $cutoff
 ORDER BY last_seen;
@@ -227,7 +232,7 @@ ORDER BY last_seen;
 let private worktreeStatusesSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen, title_text, title_ts
 FROM session_status
 WHERE worktree_path = $wt
 ORDER BY last_seen DESC;
@@ -255,7 +260,7 @@ DELETE FROM session_status WHERE last_seen < $cutoff;
 let private allStatusesSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, intent_text, intent_ts, updated_at, last_seen, title_text, title_ts
 FROM session_status
 ORDER BY last_seen;
 """
@@ -286,6 +291,7 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     let umText, umTs = msgToDb s.LastUserMessage
     let amText, amTs = msgToDb s.LastAssistantMessage
     let itText, itTs = msgToDb s.Intent
+    let ttText, ttTs = msgToDb s.Title
     cmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
     cmd.Parameters.AddWithValue("$wt", WorktreePath.value stored.WorktreePath) |> ignore
     cmd.Parameters.AddWithValue("$prov", providerText stored.Provider) |> ignore
@@ -297,6 +303,8 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$ats", amTs) |> ignore
     cmd.Parameters.AddWithValue("$it", itText) |> ignore
     cmd.Parameters.AddWithValue("$its", itTs) |> ignore
+    cmd.Parameters.AddWithValue("$tt", ttText) |> ignore
+    cmd.Parameters.AddWithValue("$tts", ttTs) |> ignore
     cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
     cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
 
@@ -356,10 +364,12 @@ type SessionActivityStore(dbPath: string) =
         (use cmd = c.CreateCommand()
          cmd.CommandText <- schemaSql + migrateSql
          cmd.ExecuteNonQuery() |> ignore)
-        // Additive migration for DBs created before the intent columns existed (schemaSql adds them
-        // only to a fresh table). Idempotent — a no-op once the columns are present.
+        // Additive migration for DBs created before the intent/title columns existed (schemaSql adds
+        // them only to a fresh table). Idempotent — a no-op once the columns are present.
         addColumnIfMissing c "session_status" "intent_text" "TEXT"
         addColumnIfMissing c "session_status" "intent_ts" "TEXT"
+        addColumnIfMissing c "session_status" "title_text" "TEXT"
+        addColumnIfMissing c "session_status" "title_ts" "TEXT"
         c
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
