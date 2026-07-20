@@ -428,6 +428,58 @@ type AttributeOwnershipTests() =
                         "getOwner must return the sessionId the authoring session declared"))
 
     [<Test>]
+    member _.``a stale versioned declaration cannot replace a newer owner``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-versioned"
+            let agent = agentKnowing worktree
+            let olderSession = uniqueSid "older"
+            let newerSession = uniqueSid "newer"
+
+            let newerOutcome =
+                runAsync (attributeOwnershipVersioned agent worktree "a.html" newerSession 2L)
+
+            let retriedOutcome =
+                runAsync (attributeOwnershipVersioned agent worktree "a.html" newerSession 2L)
+
+            let staleOutcome =
+                runAsync (attributeOwnershipVersioned agent worktree "a.html" olderSession 1L)
+
+            Assert.That(newerOutcome, Is.EqualTo(Attributed))
+            Assert.That(retriedOutcome, Is.EqualTo(Attributed),
+                        "Retrying the accepted version from the same session must be idempotent")
+            Assert.That(staleOutcome, Is.EqualTo(Stale))
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(Some newerSession),
+                        "An older retry must not replace the owner from a newer write"))
+
+    [<Test>]
+    member _.``a versioned removal clears only ownership that is not newer``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-remove"
+            let agent = agentKnowing worktree
+            let sessionId = uniqueSid "owner"
+
+            let attributed =
+                runAsync (attributeOwnershipVersioned agent worktree "a.html" sessionId 2L)
+
+            let staleRemoval =
+                runAsync (removeOwnershipVersioned agent worktree "a.html" sessionId 1L)
+
+            let ownerAfterStaleRemoval = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+
+            let currentRemoval =
+                runAsync (removeOwnershipVersioned agent worktree "a.html" sessionId 3L)
+
+            let ownerAfterCurrentRemoval = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+
+            Assert.That(attributed, Is.EqualTo(Attributed))
+            Assert.That(staleRemoval, Is.EqualTo(Stale))
+            Assert.That(ownerAfterStaleRemoval, Is.EqualTo(Some sessionId))
+            Assert.That(currentRemoval, Is.EqualTo(Removed))
+            Assert.That(ownerAfterCurrentRemoval, Is.EqualTo(None: string option)))
+
+    [<Test>]
     member _.``an unknown worktree is rejected and records no ownership``() =
         withTempCwd (fun () ->
             let unknown = uniquePath "attr-unknown"

@@ -1,12 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EOL } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
-  canvasFilenamesForTool,
+  canvasChangesForTool,
   createOwnershipDeclarer,
   isValidCanvasFilename,
-  replayOwnershipIfMonitored,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
 
@@ -28,7 +27,8 @@ function fakeSession() {
   };
 }
 
-test("extracts every unique canvas target from apply_patch headers", () => {
+test("extracts lifecycle-aware canvas changes from apply_patch headers", () => {
+  const worktreePath = resolve("worktree");
   const input = patch([
     "*** Begin Patch",
     "*** Add File: .agents/canvas/added.html",
@@ -50,31 +50,69 @@ test("extracts every unique canvas target from apply_patch headers", () => {
     "+content",
     "*** Add File: .agents/canvas/unsafe name.html",
     "+content",
+    "*** Delete File: .agents/canvas/deleted.html",
     "*** End Patch",
   ]);
 
   assert.deepEqual(
-    canvasFilenamesForTool("apply_patch", input),
-    ["added.html", "updated.html", "moved.html"],
+    canvasChangesForTool("apply_patch", input, worktreePath),
+    [
+      { kind: "remove", filename: "updated.html" },
+      { kind: "attribute", filename: "moved.html" },
+      { kind: "attribute", filename: "added.html" },
+      { kind: "remove", filename: "deleted.html" },
+    ],
   );
 });
 
 test("preserves create and edit canvas detection", () => {
+  const worktreePath = resolve("worktree");
   assert.deepEqual(
-    canvasFilenamesForTool("create", { path: join("repo", ".agents", "canvas", "created.html") }),
-    ["created.html"],
+    canvasChangesForTool(
+      "create",
+      { path: join(worktreePath, ".agents", "canvas", "created.html") },
+      worktreePath,
+    ),
+    [{ kind: "attribute", filename: "created.html" }],
   );
   assert.deepEqual(
-    canvasFilenamesForTool("edit", JSON.stringify({ file_path: ".agents/canvas/edited.html" })),
-    ["edited.html"],
+    canvasChangesForTool(
+      "edit",
+      JSON.stringify({ file_path: ".agents/canvas/edited.html" }),
+      worktreePath,
+    ),
+    [{ kind: "attribute", filename: "edited.html" }],
   );
-  assert.deepEqual(canvasFilenamesForTool("edit", { path: "src/ignored.html" }), []);
+  assert.deepEqual(canvasChangesForTool("edit", { path: "src/ignored.html" }, worktreePath), []);
   assert.equal(isValidCanvasFilename("unsafe name.html"), false);
 });
 
+test("ignores canvas-shaped paths outside the worktree root canvas directory", () => {
+  const worktreePath = resolve("worktree");
+  const nestedPath = join("fixtures", ".agents", "canvas", "report.html");
+
+  assert.deepEqual(
+    canvasChangesForTool(
+      "apply_patch",
+      patch(["*** Begin Patch", `*** Update File: ${nestedPath}`, "*** End Patch"]),
+      worktreePath,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    canvasChangesForTool(
+      "edit",
+      { path: join(worktreePath, nestedPath) },
+      worktreePath,
+    ),
+    [],
+  );
+});
+
 test("attributes all buffered apply_patch writes only after successful completion", () => {
+  const worktreePath = resolve("worktree");
   const session = fakeSession();
-  const watcher = watchCanvasWrites(session);
+  const watcher = watchCanvasWrites(session, worktreePath, () => 123);
   const writes = [];
 
   session.emit("tool.execution_start", {
@@ -106,7 +144,10 @@ test("attributes all buffered apply_patch writes only after successful completio
 
   watcher.activate((filename) => writes.push(filename));
 
-  assert.deepEqual(writes, ["one.html", "two.html"]);
+  assert.deepEqual(writes, [
+    { kind: "attribute", filename: "one.html", version: 123 },
+    { kind: "attribute", filename: "two.html", version: 123 },
+  ]);
   watcher.stop();
 });
 
@@ -121,11 +162,14 @@ test("replays failed declarations once and clears them after success", async () 
     return outcomes.shift();
   });
 
-  await declarations.declare("report.html");
+  await declarations.declare({ kind: "attribute", filename: "report.html", version: 1 });
   await declarations.replay();
   await declarations.replay();
 
-  assert.deepEqual(attempts, ["report.html", "report.html"]);
+  assert.deepEqual(attempts, [
+    { kind: "attribute", filename: "report.html", version: 1 },
+    { kind: "attribute", filename: "report.html", version: 1 },
+  ]);
 });
 
 test("does not retain an unmonitored ownership response", async () => {
@@ -135,10 +179,10 @@ test("does not retain an unmonitored ownership response", async () => {
     return { ok: true, attributed: false };
   });
 
-  await declarations.declare("report.html");
+  await declarations.declare({ kind: "attribute", filename: "report.html", version: 1 });
   await declarations.replay();
 
-  assert.deepEqual(attempts, ["report.html"]);
+  assert.deepEqual(attempts, [{ kind: "attribute", filename: "report.html", version: 1 }]);
 });
 
 test("does not retain a permanent ownership failure", async () => {
@@ -148,24 +192,31 @@ test("does not retain a permanent ownership failure", async () => {
     return { ok: false, retryable: false, error: "bad request" };
   });
 
-  await declarations.declare("report.html");
+  await declarations.declare({ kind: "attribute", filename: "report.html", version: 1 });
   await declarations.replay();
 
-  assert.deepEqual(attempts, ["report.html"]);
+  assert.deepEqual(attempts, [{ kind: "attribute", filename: "report.html", version: 1 }]);
 });
 
-test("replays pending ownership only after monitored registration", async () => {
-  const registrations = [
-    { reachable: false, monitored: false },
-    { reachable: true, monitored: false },
-    { reachable: true, monitored: true },
+test("a newer failed write replaces an older pending declaration for the same doc", async () => {
+  const attempts = [];
+  const outcomes = [
+    { ok: false, retryable: true, error: "offline" },
+    { ok: false, retryable: true, error: "offline" },
+    { ok: true, attributed: true },
   ];
-  const replayed = [];
+  const declarations = createOwnershipDeclarer(async (write) => {
+    attempts.push(write);
+    return outcomes.shift();
+  });
 
-  await Promise.all(
-    registrations.map((registration) =>
-      replayOwnershipIfMonitored(registration, async () => replayed.push(registration))),
-  );
+  await declarations.declare({ kind: "remove", filename: "report.html", version: 1 });
+  await declarations.declare({ kind: "attribute", filename: "report.html", version: 2 });
+  await declarations.replay();
 
-  assert.deepEqual(replayed, [{ reachable: true, monitored: true }]);
+  assert.deepEqual(attempts, [
+    { kind: "remove", filename: "report.html", version: 1 },
+    { kind: "attribute", filename: "report.html", version: 2 },
+    { kind: "attribute", filename: "report.html", version: 2 },
+  ]);
 });

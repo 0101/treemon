@@ -19,7 +19,9 @@ type CanvasRegisterRequest =
 type CanvasAttributeRequest =
     { worktreePath: string
       filename: string
-      sessionId: string }
+      sessionId: string
+      remove: bool
+      version: System.Nullable<int64> }
 
 /// Outcome of an ownership-attribution attempt, decoupled from HTTP so it is unit-testable
 /// (the same extraction the SSRF guard uses with isLoopbackInjectUrl). Ownership is recorded for
@@ -27,6 +29,8 @@ type CanvasAttributeRequest =
 /// unmonitored worktree records nothing, so a later getOwner stays None.
 type AttributeOutcome =
     | Attributed                  // ownership recorded + persisted
+    | Removed                     // ownership removed after a delete or move
+    | Stale                       // a newer ownership declaration is already recorded
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
@@ -109,11 +113,13 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
 /// CanvasDocOwnership.attribute. Returns the decision so canvasAttributeHandler can map it to an
 /// HTTP response and tests can assert it without HTTP plumbing. A missing field or an unmonitored
 /// worktree records nothing — the caller's getOwner stays None.
-let attributeOwnership
+let private attributeOwnershipCore
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (worktreePath: string)
     (filename: string)
     (sessionId: string)
+    (remove: bool)
+    (version: int64 option)
     : Async<AttributeOutcome> =
     async {
         if System.String.IsNullOrWhiteSpace worktreePath then
@@ -124,6 +130,10 @@ let attributeOwnership
             return Invalid "missing sessionId"
         elif not (isValidSessionId sessionId) then
             return Invalid "invalid sessionId format"
+        elif remove && Option.isNone version then
+            return Invalid "missing version"
+        elif version |> Option.exists (fun value -> value <= 0L) then
+            return Invalid "invalid version"
         else
             let worktreePath = worktreePath |> Server.PathUtils.normalizePath
             let! isKnown = isKnownWorktree agent worktreePath
@@ -131,18 +141,67 @@ let attributeOwnership
             if not isKnown then
                 return UnknownWorktree
             else
-                CanvasDocOwnership.attribute worktreePath filename sessionId
-                return Attributed
+                match remove, version with
+                | false, None ->
+                    CanvasDocOwnership.attribute worktreePath filename sessionId
+                    return Attributed
+                | false, Some value ->
+                    let! attributed =
+                        CanvasDocOwnership.attributeIfNewer worktreePath filename sessionId value
+
+                    return if attributed then Attributed else Stale
+                | true, Some value ->
+                    let! removed =
+                        CanvasDocOwnership.removeIfNewer worktreePath filename sessionId value
+
+                    return if removed then Removed else Stale
+                | true, None ->
+                    return Invalid "missing version"
     }
 
-/// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
-/// extension declares which session owns a canvas doc. Validates the body and known-worktree
-/// guard exactly like canvasRegisterHandler, then records ownership for a monitored worktree.
+let attributeOwnership
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreePath: string)
+    (filename: string)
+    (sessionId: string)
+    =
+    attributeOwnershipCore agent worktreePath filename sessionId false None
+
+let attributeOwnershipVersioned
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreePath: string)
+    (filename: string)
+    (sessionId: string)
+    (version: int64)
+    =
+    attributeOwnershipCore agent worktreePath filename sessionId false (Some version)
+
+let removeOwnershipVersioned
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (worktreePath: string)
+    (filename: string)
+    (sessionId: string)
+    (version: int64)
+    =
+    attributeOwnershipCore agent worktreePath filename sessionId true (Some version)
+
+/// POST /api/canvas/attribute: the authoring session attributes or removes a canvas filename.
+/// Automatic changes include a version so delayed retries cannot replace newer ownership.
 let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasAttributeRequest>()
-            let! outcome = attributeOwnership agent body.worktreePath body.filename body.sessionId |> Async.StartAsTask
+            let version = if body.version.HasValue then Some body.version.Value else None
+
+            let! outcome =
+                attributeOwnershipCore
+                    agent
+                    body.worktreePath
+                    body.filename
+                    body.sessionId
+                    body.remove
+                    version
+                |> Async.StartAsTask
 
             match outcome with
             | Invalid reason ->
@@ -151,6 +210,12 @@ let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) 
             | UnknownWorktree ->
                 Log.log "Canvas" $"Attribution: unmonitored worktree — {body.worktreePath} (nothing recorded)"
                 return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
+            | Stale ->
+                Log.log "Canvas" $"Attribution ignored: stale declaration for {body.filename} from {body.sessionId}"
+                return! Successful.ok (json {| attributed = false; monitored = true; stale = true |}) next ctx
+            | Removed ->
+                Log.log "Canvas" $"Attribution removed: {body.filename} for {body.worktreePath}"
+                return! Successful.ok (json {| attributed = false; monitored = true; removed = true |}) next ctx
             | Attributed ->
                 Log.log "Canvas" $"Attribution recorded: {body.filename} -> {body.sessionId} for {body.worktreePath}"
                 return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx

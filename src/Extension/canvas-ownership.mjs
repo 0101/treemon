@@ -1,6 +1,9 @@
-const CANVAS_WRITE_RE = /(^|\/)\.agents\/canvas\/[^/]+\.html$/;
+import { performance } from "node:perf_hooks";
+import { basename, dirname, relative, resolve } from "node:path";
+
 const CANVAS_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$/;
-const PATCH_FILE_HEADER_RE = /^\*\*\* (?:Add File|Update File|Move to):[ \t]*(.+?)[ \t]*\r?$/gm;
+const PATCH_FILE_HEADER_RE =
+  /^\*\*\* (Add File|Update File|Delete File|Move to):[ \t]*(.+?)[ \t]*\r?$/gm;
 
 function parseToolArgs(toolArgs) {
   if (typeof toolArgs === "string") {
@@ -9,10 +12,11 @@ function parseToolArgs(toolArgs) {
   return toolArgs ?? {};
 }
 
-function canvasFilename(filePath) {
-  const normalized = String(filePath ?? "").replace(/\\/g, "/");
-  if (!CANVAS_WRITE_RE.test(normalized)) return null;
-  const filename = normalized.split("/").pop();
+function canvasFilename(worktreePath, filePath) {
+  const resolvedPath = resolve(worktreePath, String(filePath ?? ""));
+  const canvasPath = relative(resolve(worktreePath, ".agents", "canvas"), resolvedPath);
+  if (dirname(canvasPath) !== ".") return null;
+  const filename = basename(resolvedPath);
   return isValidCanvasFilename(filename) ? filename : null;
 }
 
@@ -30,51 +34,87 @@ function patchText(toolArgs) {
   }
 }
 
-function patchCanvasFilenames(toolArgs) {
-  return [...patchText(toolArgs).matchAll(PATCH_FILE_HEADER_RE)]
-    .map(([, filePath]) => canvasFilename(filePath))
-    .filter(Boolean);
+function canvasChange(kind, worktreePath, filePath) {
+  const filename = canvasFilename(worktreePath, filePath);
+  return filename ? { kind, filename } : null;
 }
 
-function directCanvasFilenames(toolArgs) {
+function uniqueLatestChanges(changes) {
+  return changes.filter((change, index) =>
+    !changes.slice(index + 1).some((candidate) => candidate.filename === change.filename));
+}
+
+function patchCanvasChanges(worktreePath, toolArgs) {
+  const headers = [...patchText(toolArgs).matchAll(PATCH_FILE_HEADER_RE)]
+    .map(([, operation, filePath]) => ({ operation, filePath }));
+
+  return uniqueLatestChanges(
+    headers.flatMap((header, index) => {
+      const next = headers[index + 1];
+      if (header.operation === "Move to") return [];
+      if (header.operation === "Delete File") {
+        return [canvasChange("remove", worktreePath, header.filePath)];
+      }
+      if (header.operation === "Update File" && next?.operation === "Move to") {
+        return [
+          canvasChange("remove", worktreePath, header.filePath),
+          canvasChange("attribute", worktreePath, next.filePath),
+        ];
+      }
+      return [canvasChange("attribute", worktreePath, header.filePath)];
+    })
+    .filter(Boolean),
+  );
+}
+
+function directCanvasChanges(worktreePath, toolArgs) {
   const args = parseToolArgs(toolArgs);
-  return [canvasFilename(args?.path ?? args?.file_path)];
+  return [canvasChange("attribute", worktreePath, args?.path ?? args?.file_path)].filter(Boolean);
 }
 
 export function isValidCanvasFilename(filename) {
   return typeof filename === "string" && CANVAS_FILENAME_RE.test(filename);
 }
 
-export function canvasFilenamesForTool(toolName, toolArgs) {
-  const filenames =
+export function canvasChangesForTool(toolName, toolArgs, worktreePath = process.cwd()) {
+  return (
     toolName === "apply_patch"
-      ? patchCanvasFilenames(toolArgs)
+      ? patchCanvasChanges(worktreePath, toolArgs)
       : toolName === "create" || toolName === "edit"
-        ? directCanvasFilenames(toolArgs)
-        : [];
-  return [...new Set(filenames.filter(Boolean))];
+        ? directCanvasChanges(worktreePath, toolArgs)
+        : []
+  );
 }
 
-export function watchCanvasWrites(session) {
+export function currentOwnershipVersion() {
+  return Math.round((performance.timeOrigin + performance.now()) * 1000);
+}
+
+export function watchCanvasWrites(
+  session,
+  worktreePath = process.cwd(),
+  ownershipVersion = currentOwnershipVersion,
+) {
   const pendingByToolCallId = new Map();
   const bufferedWrites = [];
-  let onCanvasWrite = (filename) => bufferedWrites.push(filename);
+  let onCanvasWrite = (write) => bufferedWrites.push(write);
 
   const unsubscribeStart = session.on("tool.execution_start", (event) => {
     const data = event?.data;
     if (!data) return;
-    const filenames = canvasFilenamesForTool(data.toolName, data.arguments);
-    if (filenames.length > 0) pendingByToolCallId.set(data.toolCallId, filenames);
+    const changes = canvasChangesForTool(data.toolName, data.arguments, worktreePath);
+    if (changes.length > 0) pendingByToolCallId.set(data.toolCallId, changes);
   });
 
   const unsubscribeComplete = session.on("tool.execution_complete", (event) => {
     const data = event?.data;
     if (!data) return;
-    const filenames = pendingByToolCallId.get(data.toolCallId);
-    if (filenames === undefined) return;
+    const changes = pendingByToolCallId.get(data.toolCallId);
+    if (changes === undefined) return;
     pendingByToolCallId.delete(data.toolCallId);
     if (!data.success) return;
-    filenames.forEach(onCanvasWrite);
+    const version = ownershipVersion();
+    changes.map((change) => ({ ...change, version })).forEach(onCanvasWrite);
   });
 
   const stop = () => {
@@ -91,24 +131,18 @@ export function watchCanvasWrites(session) {
 }
 
 export function createOwnershipDeclarer(declareOwnership) {
-  const pending = new Set();
+  const pending = new Map();
 
-  const declare = async (filename) => {
-    const result = await declareOwnership(filename);
-    if (result.ok || !result.retryable) pending.delete(filename);
-    else pending.add(filename);
+  const declare = async (write) => {
+    const result = await declareOwnership(write);
+    if (result.ok || !result.retryable) pending.delete(write.filename);
+    else pending.set(write.filename, write);
     return result;
   };
 
   const replay = async () => {
-    await Promise.all([...pending].map(declare));
+    await Promise.all([...pending.values()].map(declare));
   };
 
   return { declare, replay };
-}
-
-export async function replayOwnershipIfMonitored(registration, replayOwnership) {
-  if (registration.reachable && registration.monitored) {
-    await replayOwnership();
-  }
 }

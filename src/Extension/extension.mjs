@@ -6,7 +6,6 @@ import { resolve, sep } from "node:path";
 import {
   createOwnershipDeclarer,
   isValidCanvasFilename,
-  replayOwnershipIfMonitored,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
 
@@ -240,21 +239,25 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
   }
 }
 
-// Declare this session as the owner of a canvas doc. Decision 1d: the write hook supplies only the
-// filename; the extension stamps in its own sessionId here and POSTs the triple to Treemon, which
-// records ownership for a monitored worktree and routes that doc's messages back to this session.
-// Best-effort — an unmonitored worktree (200 {attributed:false}) or an unreachable Treemon is a
-// benign no-op, never thrown.
-async function declareOwnership(worktreePath, filename, sessionId) {
+// Apply a versioned ownership change for an automatic write, or an unversioned explicit claim.
+// The extension stamps its own sessionId; Treemon rejects delayed automatic changes older than the
+// current owner. Unmonitored worktrees are completed no-ops, while retryable failures are retained.
+async function changeOwnership(worktreePath, change, sessionId) {
   try {
     const res = await fetch(TREEMON_ATTRIBUTE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worktreePath, filename, sessionId }),
+      body: JSON.stringify({
+        worktreePath,
+        filename: change.filename,
+        sessionId,
+        remove: change.kind === "remove",
+        ...(change.version === undefined ? {} : { version: change.version }),
+      }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
-      log(`ownership declaration failed for ${filename}: ${res.status} ${res.statusText}`);
+      log(`ownership change failed for ${change.filename}: ${res.status} ${res.statusText}`);
       return {
         ok: false,
         retryable: res.status === 408 || res.status === 429 || res.status >= 500,
@@ -263,10 +266,10 @@ async function declareOwnership(worktreePath, filename, sessionId) {
     }
     const outcome = await res.json().catch(() => ({}));
     const attributed = outcome?.attributed === true;
-    log(`declared ownership: ${filename} → ${sessionId} (attributed=${attributed})`);
+    log(`ownership change: ${change.kind} ${change.filename} → ${sessionId} (attributed=${attributed})`);
     return { ok: true, attributed };
   } catch (err) {
-    log(`could not declare ownership for ${filename}: ${err.message}`);
+    log(`could not change ownership for ${change.filename}: ${err.message}`);
     return { ok: false, retryable: true, error: err.message };
   }
 }
@@ -282,7 +285,9 @@ function startHeartbeat(worktreePath, injectUrl, sessionId, replayOwnership) {
 
   const tick = async () => {
     const registration = await registerWithTreemon(worktreePath, injectUrl, sessionId);
-    await replayOwnershipIfMonitored(registration, replayOwnership);
+    if (registration.reachable && registration.monitored) {
+      await replayOwnership();
+    }
     const { reachable } = registration;
     if (reachable) {
       if (wasDisconnected) {
@@ -313,19 +318,22 @@ function startHeartbeat(worktreePath, injectUrl, sessionId, replayOwnership) {
 // sessionId, the agent only supplied the filename. Browser mode (Treemon unreachable/unmonitored):
 // serve the doc locally and hand the session a clickable URL via session.send (events cannot inject
 // tool-result context the way the old onPostToolUse hook did).
-async function handleCanvasWrite(session, state, filename, declareOwner) {
+async function handleCanvasWrite(session, state, write, declareOwner) {
+  const { filename } = write;
   if (!isValidCanvasFilename(filename)) {
     log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
     return;
   }
   if (!state.browserMode) {
     if (state.sessionId) {
-      await declareOwner(filename);
+      await declareOwner(write);
     } else {
       log(`canvas write: sessionId not ready, skipping ownership declaration for ${filename}`);
     }
     return;
   }
+
+  if (write.kind === "remove") return;
 
   const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
@@ -337,8 +345,12 @@ async function handleCanvasWrite(session, state, filename, declareOwner) {
 
 const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
-const automaticOwnership = createOwnershipDeclarer((filename) =>
-  declareOwnership(extensionState.worktreePath, filename, extensionState.sessionId),
+const automaticOwnership = createOwnershipDeclarer((write) =>
+  changeOwnership(
+    extensionState.worktreePath,
+    write,
+    extensionState.sessionId,
+  ),
 );
 
 // Explicit ownership tool the agent can call on demand — for a doc produced by a script or
@@ -368,7 +380,12 @@ const takeOwnershipTool = {
     if (!extensionState.sessionId) {
       throw new Error("This session has no id yet; cannot declare ownership.");
     }
-    const result = await declareOwnership(extensionState.worktreePath, name, extensionState.sessionId);
+    const result =
+      await changeOwnership(
+        extensionState.worktreePath,
+        { kind: "attribute", filename: name },
+        extensionState.sessionId,
+      );
     if (!result.ok) {
       throw new Error(`Ownership declaration failed: ${result.error}`);
     }
@@ -398,7 +415,7 @@ try {
 // are queued rather than delivered (the server's single-session fallback is intentionally gone).
 const sessionId = session.sessionId ?? session.id;
 extensionState.sessionId = sessionId;
-const canvasWrites = watchCanvasWrites(session);
+const canvasWrites = watchCanvasWrites(session, worktreePath);
 
 const { server, port } = await startHttpServer(session, extensionState);
 extensionState.port = port;
@@ -409,8 +426,8 @@ extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 // State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
-canvasWrites.activate((filename) =>
-  handleCanvasWrite(session, extensionState, filename, automaticOwnership.declare),
+canvasWrites.activate((write) =>
+  handleCanvasWrite(session, extensionState, write, automaticOwnership.declare),
 );
 
 if (browserMode) {
