@@ -19,6 +19,7 @@ let baseWt: WorktreeStatus =
       CodingToolSince = None
       CurrentSkill = None
       AgentActivity = None
+      Sessions = []
       LastUserMessage = None
       LastAssistantMessage = None
       Pr = PrStatus.NoPr

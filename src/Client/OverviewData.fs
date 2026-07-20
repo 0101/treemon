@@ -42,8 +42,9 @@ type TaskBucketKind =
 /// stable RepoId (the identity the drill-down groups/counts/keys repo blocks on — two distinct repos
 /// that share a folder name stay distinct), the owning repo's RootFolderName (RepoName — display
 /// label only, preserved before the aggregate flattens repos away), and Contribution — how much this
-/// worktree adds to the group's Count (agent group: always 1; task bucket: this worktree's task count
-/// in the bucket). A worktree is a group member iff its Contribution > 0.
+/// worktree adds to the group's Count (agent group: the number of THIS worktree's sessions in the
+/// group, since grouping is per session; task bucket: this worktree's task count in the bucket). A
+/// worktree is a group member iff its Contribution > 0.
 type GroupMember =
     { ScopedKey: string
       Branch: string
@@ -54,6 +55,13 @@ type GroupMember =
       /// members; always None for task-bucket members (passed explicitly, so the contract holds by
       /// construction rather than convention).
       Since: System.DateTimeOffset option
+      /// The live sessions that place this agent member in THIS group — each carrying its own status,
+      /// skill and context usage. Since agent grouping is now per SESSION (not per worktree), a
+      /// worktree whose sessions span several groups appears once in each, carrying only the subset of
+      /// its sessions that belong to that group (the source of the per-session donuts drawn in the
+      /// Agents row and the drill-down chip). Always [] for task-bucket members (passed explicitly, so
+      /// the contract holds by construction rather than convention).
+      Sessions: SessionDot list
       Contribution: int }
 
 /// One non-empty task bucket: its kind, cross-worktree count, and the member worktrees that make it
@@ -72,9 +80,11 @@ type AgentGroupKind =
     | Waiting
     | Idle
 
-/// One non-empty agent group: its kind, how many agents belong to it, and the member worktrees
-/// (each contributing 1, so Count = Members.Length). Empty groups are dropped, so a present group
-/// always has Count > 0 and a non-empty Members list.
+/// One non-empty agent group: its kind, how many agent SESSIONS belong to it, and the member
+/// worktrees behind them (each contributing the count of ITS sessions in the group, so Count = Σ
+/// member Contribution = total sessions). Grouping is per session, so one worktree can be a member of
+/// several groups at once, once per group its sessions span. Empty groups are dropped, so a present
+/// group always has Count > 0 and a non-empty Members list.
 type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list }
 
 /// The Overview band's cross-worktree roll-up: non-empty task buckets and agent groups (both in
@@ -118,11 +128,19 @@ let private activityOrder =
 let private agentGroupOrder =
     (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting; AgentGroupKind.Idle ]
 
-/// The activity a WORKING worktree's current skill classifies to. An absent skill classifies to
-/// Working (classify normalizes "" -> Working), matching the spec's "red-dot agent, no recognized
-/// skill -> generic Working group".
-let private activityOf (wt: WorktreeStatus) =
-    Activity.classify (wt.CurrentSkill |> Option.defaultValue "")
+/// The agent group a single live session belongs to, from its OWN status and skill: a Working session
+/// is classified by the skill IT is running (Activity.classify — absent skill → Working, matching the
+/// spec's "red-dot agent, no recognized skill → generic Working group"), a WaitingForUser session
+/// joins the Waiting group, an Idle session the Idle group. NoSession is never a per-session status
+/// (the empty-session worktree collapse), so it maps to no group. This replaces the old per-worktree
+/// classification: grouping is now per session, so a worktree's sessions split across groups by what
+/// each is actually doing rather than clumping under the worktree's single collapsed skill.
+let private sessionGroupKind (s: SessionDot) : AgentGroupKind option =
+    match s.Status with
+    | CodingToolStatus.Working -> Some(AgentGroupKind.Activity(Activity.classify (s.Skill |> Option.defaultValue "")))
+    | CodingToolStatus.WaitingForUser -> Some AgentGroupKind.Waiting
+    | CodingToolStatus.Idle -> Some AgentGroupKind.Idle
+    | CodingToolStatus.NoSession -> None
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =
@@ -139,12 +157,13 @@ let aggregate (repos: RepoWorktrees list) : Overview =
             |> List.filter (fun w -> not w.IsArchived)
             |> List.map (fun w -> r.RepoId, r.RootFolderName, w))
 
-    let memberOf repoId repoName since (w: WorktreeStatus) contribution =
+    let memberOf repoId repoName since sessions (w: WorktreeStatus) contribution =
         { ScopedKey = WorktreePath.value w.Path
           Branch = w.Branch
           RepoId = repoId
           RepoName = repoName
           Since = since
+          Sessions = sessions
           Contribution = contribution }
 
     // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
@@ -172,7 +191,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
             match contributionFor kind w with
-            | c when c > 0 -> Some(memberOf repoId repoName None w c)
+            | c when c > 0 -> Some(memberOf repoId repoName None [] w c)
             | _ -> None)
 
     // Build members once per bucket, in canonical order; the count is Σ contribution over them.
@@ -191,29 +210,26 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     // are 0 and never raise the max, so this equals the max across the non-empty buckets.
     let scale = taskGroups |> List.map (fun (_, _, count) -> count) |> List.max
 
-    // Agent groups: red-dot WORKING agents (CodingTool = Working) grouped by their classified
-    // activity, a distinct Waiting group (CodingTool = WaitingForUser), and a distinct Idle group
-    // (CodingTool = Idle — the blue-dot agents with an open-but-idle session, each carrying
-    // CodingToolSince for the time-since-idle chip). HasActiveSession is NOT used — it also covers
-    // Idle terminals, which would inflate the counts with parked agents; NoSession (grey, no open
-    // session) is excluded entirely (not an agent). Each member contributes 1, so Count =
-    // Members.Length. Empty groups omitted; Waiting then Idle sort last.
+    // Agent groups, now split per SESSION (not per worktree): each open session lands in the group its
+    // OWN status/skill classifies to (sessionGroupKind) — a red-dot Working session by its running
+    // skill, a WaitingForUser session in Waiting, an Idle session in Idle. A worktree therefore
+    // appears in every group its sessions span, carrying only the matching subset, and contributes
+    // that subset's size (so Count = Σ Contribution = total sessions in the group). NoSession sessions
+    // never occur (empty session list ⇔ NoSession worktree), so a worktree with no live session joins
+    // no group. Empty groups omitted; Waiting then Idle sort last. Since carries the worktree's frozen
+    // CodingToolSince (one stamp per worktree — split sessions share it) for the time-in-category chip.
     let agentMembersFor kind =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
-            let isMember =
-                match kind with
-                | AgentGroupKind.Activity activity ->
-                    w.CodingTool = CodingToolStatus.Working && activityOf w = activity
-                | AgentGroupKind.Waiting -> w.CodingTool = CodingToolStatus.WaitingForUser
-                | AgentGroupKind.Idle -> w.CodingTool = CodingToolStatus.Idle
-            if isMember then Some(memberOf repoId repoName w.CodingToolSince w 1) else None)
+            match w.Sessions |> List.filter (fun s -> sessionGroupKind s = Some kind) with
+            | [] -> None
+            | matched -> Some(memberOf repoId repoName w.CodingToolSince matched w (List.length matched)))
 
     let agents =
         agentGroupOrder
         |> List.choose (fun kind ->
             match agentMembersFor kind with
             | [] -> None
-            | members -> Some { AgentGroup.Kind = kind; Count = List.length members; Members = members })
+            | members -> Some { AgentGroup.Kind = kind; Count = members |> List.sumBy _.Contribution; Members = members })
 
     { Tasks = tasks; Agents = agents; Scale = scale }

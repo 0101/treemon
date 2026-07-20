@@ -27,7 +27,8 @@ let private storedWt (sid: string) (wt: string) (status: SessionLevelStatus) (se
       Provider = CopilotCli
       Status = { emptyStatus with Status = status }
       UpdatedAt = seen
-      LastSeen = seen }
+      LastSeen = seen
+      ContextUsageAt = None }
 
 [<TestFixture>]
 [<Category("Unit")>]

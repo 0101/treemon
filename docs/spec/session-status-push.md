@@ -15,8 +15,9 @@ an open CLI session between turns), or **NoSession** (grey — no live session).
   `ClaudeDetector`, `VsCodeCopilotDetector`) are deleted; the build is push-only.
 - **Agent-unaware.** Reporting is passive: the extension only subscribes, never calls `session.send`
   or injects context. The transcript is identical with reporting on or off.
-- **Durable.** Live status survives a server restart (rebuilt from SQLite); the raw event stream is
-  persisted so the historical Overview can be aggregated from it.
+- **Durable.** Live status and footer data survive a server restart (rebuilt from SQLite); the
+  lifecycle/content event stream is persisted so the historical Overview can be aggregated from it.
+  Context-window usage is intentionally live-only; heartbeat reports are not appended to history.
 - **Simple.** Events are a closed union; the server logic is a tiny pure fold with no branching for
   sub-agents, injections, or bracket depth — all ambiguity is filtered at the source.
 - **Four-way status dot** driven purely by push state (below).
@@ -107,6 +108,7 @@ type SessionEvent =
     | AwaitingUserInput of question: Message option   // ask_user; carries the question to surface
     | TurnEnded
     | WentIdle
+    | UsageInfo of currentTokens: int * tokenLimit: int // live-only, status-preserving gauge
     | Heartbeat                              // liveness only; bumps last_seen, no status fold
 
 type SessionActivityReport =
@@ -121,17 +123,19 @@ is a worktree-level collapse result, made unrepresentable per session). The fold
 type SessionStatus =
     { Status: SessionLevelStatus; Skill: string option
       Intent: Message option; Title: Message option
-      LastUserMessage: Message option; LastAssistantMessage: Message option }
+      LastUserMessage: Message option; LastAssistantMessage: Message option
+      ContextUsage: ContextUsage option }
 ```
 
 `fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
 `IntentReported` / `TitleReported` update their status-neutral fields while preserving the original
 change time when identical text is re-emitted, `AwaitingUserInput` → WaitingForUser (question folded
-into `LastAssistantMessage`), `TurnEnded` / `WentIdle` → Idle, `Heartbeat` → no-op. A `UserPrompt`
-replying to an `ask_user` keeps the running skill; any other prompt starts fresh. `effectiveActivity`
-selects the newer intent/title and returns a source-tagged `AgentActivity` (`Intent` or
-`SessionTitle`) so the collapse boundary never mislabels a title as intent. The fold is pure and
-append-friendly — folding a later batch onto an earlier result equals folding the whole stream.
+into `LastAssistantMessage`), `TurnEnded` / `WentIdle` → Idle, `UsageInfo` updates only
+`ContextUsage`, and `Heartbeat` → no-op. A `UserPrompt` replying to an `ask_user` keeps the running
+skill; any other prompt starts fresh. `effectiveActivity` selects the newer intent/title and returns
+a source-tagged `AgentActivity` (`Intent` or `SessionTitle`) so the collapse boundary never mislabels
+a title as intent. The fold is pure and append-friendly — folding a later batch onto an earlier
+result equals folding the whole stream.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
@@ -145,25 +149,36 @@ server:
 2. **Skill-context injections** — a skill's `<skill-context>` injection arrives as a `user.message`;
    the extension drops it (source starts `skill-` AND content starts `<skill-context`). → every
    `UserPrompt` the server sees is genuine.
-3. **Irrelevant events** — only the 10 relevant wire kinds are mapped; all others are ignored. → the
+3. **Irrelevant events** — only events mapping to the ten SDK-backed wire kinds are forwarded; all
+   other SDK events are ignored. The eleventh accepted kind, `heartbeat`, is timer-generated. → the
    `SessionEvent` union has no catch-all.
 
 ### Ingestion: endpoint + single-writer mailbox
 
 - `POST /api/session/activity` mirrors `canvasRegisterHandler`: JSON DTO → domain
   `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
-- **Wire contract** — the one coupling point between `extension.mjs` (producer) and the handler
-  (consumer). The body is one report:
-  `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }`. `kind` is
-  one of `turn_started`, `user_prompt`, `assistant_message`, `skill_invoked`, `awaiting_user_input`,
-  `intent_reported`, `title_reported`, `turn_ended`, `went_idle`, `heartbeat`, mapping 1:1 onto
-  `SessionEvent`. `message` (`{ text; at }`) is mandatory for user, assistant, intent, and title
-  reports and optional for the ask_user question; `skillName` applies only to `skill_invoked`. An
-  unknown `kind` is a validation error, never silently dropped.
+- **Wire contract — the single coupling point between `extension.mjs` (producer) and the
+  handler (consumer).** The POST body is one report:
+  `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?,
+  currentTokens?, tokenLimit? }`. Exactly eleven `kind` strings are accepted:
+  `turn_started`→`TurnStarted`, `user_prompt`→`UserPrompt`, `assistant_message`→
+  `AssistantMessage`, `skill_invoked`→`SkillInvoked`, `awaiting_user_input`→`AwaitingUserInput`,
+  `intent_reported`→`IntentReported`, `title_reported`→`TitleReported`,
+  `turn_ended`→`TurnEnded`, `went_idle`→`WentIdle`, `usage_info`→`UsageInfo`, and
+  `heartbeat`→`Heartbeat`. `message` (`{ text; at }`) is mandatory for `user_prompt`,
+  `assistant_message`, `intent_reported`, and `title_reported`, and optional only for
+  `awaiting_user_input` (the ask_user question). `skillName` applies only to `skill_invoked`;
+  `currentTokens` and `tokenLimit` apply only to `usage_info`, with `tokenLimit > 0` and negative
+  `currentTokens` normalized to zero. All other kinds carry none of those event-specific fields.
+  An unknown `kind` is a validation error, never silently dropped.
 - A dedicated `SessionActivity` `MailboxProcessor` is the **single writer** (the only mutable
-  boundary). Per report: `fold` onto that session's state → update the in-memory
+  boundary). Lifecycle/content reports fold onto that session's state → update the in-memory
   `Map<SessionId, SessionStatus>` → persist (upsert + append) → feed `RefreshScheduler`
-  (`UpdateSessionStatus`). Live reads come from the map; SQLite is the durable mirror.
+  (`UpdateSessionStatus`). Live reads come from the map; SQLite is the durable status/footer mirror.
+- `heartbeat` is liveness-only: it advances `last_seen` for an existing session without folding,
+  changing `updated_at`, or appending history. `usage_info` is also live-only and status-preserving:
+  it updates `ContextUsage` and `last_seen` for an existing session using a separate usage
+  last-write-wins clock, without changing `updated_at`, appending history, or persisting the gauge.
 - **Ordering guard** (both map and store): upsert only when `OccurredAt >= updated_at`; an
   out-of-order (older) event is still appended to `activity_events` (history substrate) but does not
   regress the live fold or the shown card. `activity_events` dedupes on `EventId`.
@@ -193,6 +208,8 @@ PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; each op r
 short-lived connection (thread-safe against the single-writer mailbox and concurrent WAL readers).
 Construction applies a bounded, idempotent additive migration for the four intent/title columns so
 upgrading an existing durable database preserves retained footer and resume state.
+There are deliberately no context-usage columns: `ContextUsage` and its independent ordering clock
+rehydrate as `None` after a restart, and `usage_info` is not appended to `activity_events`.
 All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
 order — the `ts` / `last_seen` range filters depend on it. `upsertStatus` is last-write-wins;
 `appendEvent` is `INSERT OR IGNORE`; `pruneOld(now − 14d)` runs hourly and trims both tables.
@@ -203,6 +220,10 @@ started only in the real monitoring path — demo/fixture mode serves synthetic 
 
 `collapseByWorktree` groups the live session-statuses by worktree path; `fromPushSessions` collapses
 each group with the two decoupled picks (openness-driven status dot + most-recent-any footer, above).
+It also exposes every open session as its own status marker with that session's skill and optional
+`ContextUsage`; a reported gauge renders as a context-window donut, while `None` renders as a plain
+status dot. Because usage is live-only, donuts disappear after a server restart until the SDK emits
+fresh `session.usage_info` events.
 The footer exposes `AgentActivity` as a source-tagged union: the freshest intent/title value keeps
 its original source while the card may render both identically. Assistant footer messages use a
 direct `(text, timestamp)` value; the enclosing `CodingToolProvider` supplies the rendered provider
@@ -240,10 +261,11 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
   `assistant_message`, genuine `user.message` (non-blank)→`user_prompt`, `skill.invoked`→
   `skill_invoked`, `elicitation.requested` / `user_input.requested`→`awaiting_user_input`,
   `assistant.intent` (non-blank)→`intent_reported`, `session.title_changed` (non-blank)→
-  `title_reported`, `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`. (`ask_user` emits
+  `title_reported`, `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`,
+  `session.usage_info`→`usage_info` (`currentTokens` + `tokenLimit`). (`ask_user` emits
   `elicitation.requested` / `.completed` in Copilot CLI 1.0.71+ with the prompt in `data.message`;
   older builds used `user_input.*` with `data.question` — both are handled, question reads
-  `data.message ?? data.question`.) Blank-text messages are dropped.
+  `data.message ?? data.question`.) Blank-text messages and invalid usage gauges are dropped.
 - **ask_user exactness:** a live-only `pendingAskUser` flag (set on the request, cleared on the
   completion or a genuine `user_prompt`) suppresses `went_idle` while a prompt is unanswered, so the
   card stays WaitingForUser even though `session.idle` is ephemeral. Because the flag is not rebuilt on
@@ -286,6 +308,9 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
 - **Future timestamps are normalized, not trusted; free text is length-capped server-side** (see
   Technical Approach) — the loopback ingest endpoint clamps `occurredAt` and uses that normalized
   value for nested message timestamps before any fold or freshest-activity comparison.
+- **Context usage is a live-only gauge, not durable session state.** `usage_info` preserves status,
+  uses its own ordering clock, and stores neither gauge columns nor an `activity_events` row; after
+  restart each session shows a plain status dot until a fresh gauge arrives.
 - **`HasActiveSession` (tmux/window) stays distinct from push openness** — the coding-tool dot uses
   push openness only; no merge.
 - **Explicit session-closed event deferred.** None of the wire kinds signals "closed"; an instant-grey
@@ -307,7 +332,8 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |
 | `src/Server/WorktreeApi.fs` | Builds the card's coding-tool fields + `CodingToolSince` from push state. |
 | `src/Server/Program.fs` | Routes `/api/session/activity`; starts the service + rebuild. |
-| `src/Client/CardViews.fs`, `src/Client/index.html` | `ct-dot` classes/colours (idle blue, nosession grey); Overview Idle group. |
+| `src/Shared/Types.fs` | `ContextUsage` / per-session `SessionDot` wire types used by the card and Overview. |
+| `src/Client/CardViews.fs`, `src/Client/index.html` | Per-session status dots/context donuts; colours (idle blue, nosession grey); Overview Idle group. |
 | `src/Extension/reporting/` | Passive reporting-only extension (`extension.mjs` + `package.json`). |
 | `treemon.ps1` | `Install-ReportingExtension` — installs `treemon-reporting` alongside `canvas-bridge`. |
 

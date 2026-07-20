@@ -13,11 +13,11 @@ import { randomUUID } from "node:crypto";
 // pure state machine with no branches for sub-agents or skill injections:
 //   * sub-agent events (any event carrying `agentId`) are dropped;
 //   * a skill's own `<skill-context>` injection (a `user.message` tagged `source: skill-*`) is dropped;
-//   * only the ~7 relevant SDK event types are mapped — everything else is ignored.
+//   * only the ~8 relevant SDK event types are mapped — everything else is ignored.
 //
 // The wire contract (the single coupling point with the F# handler, Server/SessionActivityService.fs):
-//   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName? }
-// where `kind` is exactly one of the seven the fold consumes and maps 1:1 onto its SessionEvent union:
+//   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, currentTokens?, tokenLimit? }
+// where `kind` is exactly one of the eight the fold consumes and maps 1:1 onto its SessionEvent union:
 //   assistant.turn_start   -> turn_started
 //   user.message (genuine) -> user_prompt         (message required)
 //   assistant.message      -> assistant_message   (message required)
@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 //   session.title_changed  -> title_reported      (message = the session title, required)
 //   assistant.turn_end     -> turn_ended
 //   session.idle           -> went_idle
+//   session.usage_info     -> usage_info           (currentTokens + tokenLimit; a status-preserving context-window gauge)
 //   (timer, no SDK event)  -> heartbeat            (liveness only; bumps last_seen, never folded/stored)
 // `message` is { text, at }; the server truncates for display, so raw text is forwarded (bounded by
 // MAX_MESSAGE_CHARS only to keep the POST body sane). An unknown kind is rejected server-side, so
@@ -60,12 +61,13 @@ const HEARTBEAT_INTERVAL_MS = 60000;
 // truncation, keeping this extension a thin forwarder.
 const MAX_MESSAGE_CHARS = 2000;
 
-// The relevant SDK event types (the seven mapped kinds + the two ask_user "completed" events, which
+// The relevant SDK event types (the eight mapped kinds + the two ask_user "completed" events, which
 // are unmapped but close the ask_user window). ask_user in Copilot CLI 1.0.71+ emits
 // `elicitation.requested`/`elicitation.completed` (question in `data.message`); older builds emitted
 // `user_input.requested`/`user_input.completed` (question in `data.question`) — both shapes are
-// subscribed for forward/backward compat. Subscribing per-type avoids handling the high-volume
-// streaming/delta events at all.
+// subscribed for forward/backward compat. `session.usage_info` is the context-window gauge (ephemeral
+// upstream, so it only ever arrives live, never in the getEvents() replay). Subscribing per-type
+// avoids handling the high-volume streaming/delta events at all.
 const SUBSCRIBED_TYPES = [
   "assistant.turn_start",
   "assistant.turn_end",
@@ -75,6 +77,7 @@ const SUBSCRIBED_TYPES = [
   "skill.invoked",
   "assistant.message",
   "user.message",
+  "session.usage_info",
   "elicitation.requested",
   "elicitation.completed",
   "user_input.requested",
@@ -231,6 +234,16 @@ function mapEvent(event) {
       if (isSkillContextInjection(data)) return null;
       const text = String(data.content ?? "");
       return text.trim() ? { ...base(event, "user_prompt"), message: message(text, event.timestamp) } : null;
+    }
+    case "session.usage_info": {
+      // The context-window gauge: currentTokens of tokenLimit. Status-preserving (statusForKind
+      // returns null for "usage_info"), so it never perturbs the working/idle fold. A non-positive
+      // or non-finite limit is degenerate and dropped; a negative current is clamped to 0. Values
+      // are rounded to plain integers for the F# int DTO.
+      const cur = Number(data.currentTokens);
+      const lim = Number(data.tokenLimit);
+      if (!Number.isFinite(cur) || !Number.isFinite(lim) || lim <= 0) return null;
+      return { ...base(event, "usage_info"), currentTokens: Math.max(0, Math.round(cur)), tokenLimit: Math.round(lim) };
     }
     case "elicitation.requested":
     case "user_input.requested": {

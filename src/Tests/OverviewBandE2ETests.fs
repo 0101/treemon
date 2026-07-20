@@ -74,6 +74,10 @@ let private bandProbeJs =
       const itemByLabel = (sec, label) => Array.from(sec.querySelectorAll('.overview-item'))
         .find(it => { const l = it.querySelector('.overview-label'); return l && l.textContent.trim() === label; });
       const bg = el => el ? getComputedStyle(el).backgroundColor : null;
+      // Agent circles paint their accent through currentColor (a solid circle fills its background to
+      // it; a context donut sweeps a conic-gradient arc from it, leaving background-color transparent),
+      // so read the accent from `color` to cover both the solid and the donut render.
+      const fg = el => el ? getComputedStyle(el).color : null;
       const following = (a, b) => !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
 
       const firstAgent = agentsSec.querySelector('.overview-item');
@@ -107,15 +111,29 @@ let private bandProbeJs =
         agentGroupCount: agentsSec.querySelectorAll('.overview-item').length,
         bars,
         bandRight: bandRect.right,
+        donutCount: qa('.overview-band .overview-donut').length,
+        circleCount: qa('.overview-band .overview-circle').length,
+        donutCtxRemaining: (() => {
+          const d = agentsSec.querySelector('.overview-donut');
+          return d ? getComputedStyle(d).getPropertyValue('--ctx-remaining').trim() : '';
+        })(),
+        investigatingCircles: (() => {
+          const it = itemByLabel(agentsSec, 'Investigating');
+          return it ? it.querySelectorAll('.overview-circle').length : 0;
+        })(),
+        investigatingDonuts: (() => {
+          const it = itemByLabel(agentsSec, 'Investigating');
+          return it ? it.querySelectorAll('.overview-donut').length : 0;
+        })(),
         colors: {
           taskDone: bg(itemByLabel(tasksSec, 'Done') && itemByLabel(tasksSec, 'Done').querySelector('.overview-bar')),
           taskInProgress: bg(itemByLabel(tasksSec, 'In progress') && itemByLabel(tasksSec, 'In progress').querySelector('.overview-bar')),
           taskPlanned: bg(itemByLabel(tasksSec, 'Planned') && itemByLabel(tasksSec, 'Planned').querySelector('.overview-bar')),
-          agentPlanning: bg(itemByLabel(agentsSec, 'Planning') && itemByLabel(agentsSec, 'Planning').querySelector('.overview-circle')),
-          agentReviewing: bg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
-          agentPr: bg(itemByLabel(agentsSec, 'PR') && itemByLabel(agentsSec, 'PR').querySelector('.overview-circle')),
-          agentWaiting: bg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle')),
-          agentIdle: bg(itemByLabel(agentsSec, 'Idle') && itemByLabel(agentsSec, 'Idle').querySelector('.overview-circle'))
+          agentPlanning: fg(itemByLabel(agentsSec, 'Planning') && itemByLabel(agentsSec, 'Planning').querySelector('.overview-circle')),
+          agentReviewing: fg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
+          agentPr: fg(itemByLabel(agentsSec, 'PR') && itemByLabel(agentsSec, 'PR').querySelector('.overview-circle')),
+          agentWaiting: fg(itemByLabel(agentsSec, 'Waiting') && itemByLabel(agentsSec, 'Waiting').querySelector('.overview-circle')),
+          agentIdle: fg(itemByLabel(agentsSec, 'Idle') && itemByLabel(agentsSec, 'Idle').querySelector('.overview-circle'))
         },
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
         queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
@@ -309,3 +327,43 @@ type OverviewBandE2ETests() =
         Assert.That(cardProbe.Value<bool>("anyActClass"), Is.False, "no .wt-card carries an act-* activity-stripe modifier")
         Assert.That(cardProbe.Value<string>("beforeContent"), Is.EqualTo("none"), "no left ::before activity stripe is painted")
         Assert.That(cardProbe.Value<string>("redDotColor"), Is.EqualTo(rgb "#ff0000"), "the ct-dot working red dot is unchanged")
+
+    // The per-session context-donut render path. The fixture now carries Sessions with ContextUsage,
+    // so these bind to the arc + custom property, the multi-session cluster, and the drill-down chip
+    // fill — the core rendering path an empty-Sessions fixture never exercised (it only ever drew the
+    // fallback solid circle).
+    [<Test>]
+    member _.``Donuts - sessions with usage render a context-remaining arc, usage-less stay solid``() =
+        let probe = requireProbe ()
+        Assert.That(probe.Value<int>("donutCount"), Is.GreaterThanOrEqualTo(1), "sessions with usage render .overview-donut rings")
+        Assert.That(probe.Value<int>("circleCount"), Is.GreaterThan(probe.Value<int>("donutCount")), "usage-less sessions stay plain circles (mixed donut + solid)")
+        let remaining =
+            System.Double.Parse(probe.Value<string>("donutCtxRemaining"), System.Globalization.CultureInfo.InvariantCulture)
+        Assert.That(remaining, Is.GreaterThan(0.0).And.LessThanOrEqualTo(1.0), "--ctx-remaining is a fraction in (0,1]")
+
+    [<Test>]
+    member _.``Donuts - a multi-session worktree clusters its session circles in one group``() =
+        let probe = requireProbe ()
+        Assert.That(probe.Value<int>("investigatingCircles"), Is.EqualTo(4), "three investigate worktrees, one with two sessions -> four session circles")
+        Assert.That(probe.Value<int>("investigatingDonuts"), Is.EqualTo(3), "three of those sessions reported usage -> three donuts, one plain")
+
+    [<Test>]
+    member this.``Drill-down - agent breakdown chips carry a context-used fill``() =
+        task {
+            let investigating =
+                this.Page.Locator(".overview-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+            do! investigating.ClickAsync()
+            do! this.Page.Locator(".overview-breakdown .overview-chip").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! json =
+                this.Page.EvaluateAsync<string>(
+                    """() => {
+                      const chips = Array.from(document.querySelectorAll('.overview-breakdown .overview-chip'));
+                      const used = chips.map(c => parseFloat(getComputedStyle(c).getPropertyValue('--ctx-used')) || 0);
+                      return JSON.stringify({ chipCount: chips.length, maxUsed: used.length ? Math.max.apply(null, used) : 0 });
+                    }""")
+
+            let bd = JObject.Parse(json)
+            Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
+            Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
+        }

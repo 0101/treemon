@@ -62,6 +62,35 @@ type CodingToolProvider =
     | CopilotCli
     static member Default = CopilotCli
 
+/// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
+/// model's limit. Sourced from the SDK `session.usage_info` event, which is ephemeral upstream —
+/// so this is live-only (absent until the first event arrives, and not restored after a restart).
+type ContextUsage = { CurrentTokens: int; TokenLimit: int }
+
+module ContextUsage =
+    /// The fraction of the context window in use, clamped to [0, 1]. A non-positive limit (degenerate)
+    /// reads as 0 rather than dividing by zero.
+    let fraction (u: ContextUsage) : float =
+        if u.TokenLimit <= 0 then 0.0
+        else max 0.0 (min 1.0 (float u.CurrentTokens / float u.TokenLimit))
+
+    /// The fraction of the context window still free, clamped to [0, 1] — the complement of `fraction`.
+    /// The donut fills its accent arc to this, so a healthy low-usage agent reads as a nearly full
+    /// ring and one near its limit thins to a sliver.
+    let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
+
+/// One live (open) session's own status, the skill it is running, and its context-window occupancy —
+/// the unit behind the per-session donuts. `Skill` is the session's OWN running skill (None when it
+/// is running no recognized skill); the Overview band classifies each session's activity from it
+/// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
+/// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
+/// session reports usage (or after a restart, as it is not persisted), in which case the session
+/// renders as a plain status dot rather than a donut.
+type SessionDot =
+    { Status: CodingToolStatus
+      Skill: string option
+      ContextUsage: ContextUsage option }
+
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
 /// an active session with no recognized skill. Activity is always *derived* from CurrentSkill
@@ -274,6 +303,11 @@ type WorktreeStatus =
       /// The freshest activity signal for the card's "what it's doing" line, preserving whether it
       /// came from SDK `assistant.intent` or `session.title_changed`.
       AgentActivity: AgentActivity option
+      /// One entry per live (open) session for this worktree, each carrying that session's own status
+      /// and context-window occupancy — the source of the per-session status donuts. Empty ⇔
+      /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
+      /// CodingTool above still drives the card's overall accent/border.
+      Sessions: SessionDot list
       LastUserMessage: (string * DateTimeOffset) option
       /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
       /// footer line. `None` when the session has produced no assistant message yet.

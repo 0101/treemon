@@ -1312,7 +1312,8 @@ let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
       Provider = CopilotCli
       Status = { emptyStatus with Status = SessionLevelStatus.Working }
       UpdatedAt = seen
-      LastSeen = seen }
+      LastSeen = seen
+      ContextUsageAt = None }
 
 [<TestFixture>]
 [<Category("Unit")>]

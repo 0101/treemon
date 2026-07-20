@@ -144,6 +144,24 @@ type FoldStatusTests() =
         Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
         Assert.That(s.Skill, Is.EqualTo(Some "fix-build"))
 
+    [<Test>]
+    member _.``UsageInfo records context usage without changing status``() =
+        // A pure gauge: it sets ContextUsage and leaves the Working status the surrounding events set.
+        let s = foldMany emptyStatus [ TurnStarted; UsageInfo(120000, 200000) ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))
+
+    [<Test>]
+    member _.``UsageInfo does not disturb an idle status``() =
+        let s = foldMany emptyStatus [ TurnStarted; WentIdle; UsageInfo(5000, 200000) ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
+        Assert.That(s.ContextUsage |> Option.map ContextUsage.fraction, Is.EqualTo(Some 0.025))
+
+    [<Test>]
+    member _.``A later UsageInfo overwrites the earlier snapshot``() =
+        let s = foldMany emptyStatus [ UsageInfo(10000, 200000); UsageInfo(150000, 200000) ]
+        Assert.That(s.ContextUsage, Is.EqualTo(Some { CurrentTokens = 150000; TokenLimit = 200000 }))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -336,7 +354,8 @@ type FreshnessTests() =
               Intent = None
               Title = None
               LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
-              LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z") }
+              LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z")
+              ContextUsage = None }
         let lastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
         let adjusted = freshnessAdjusted now lastSeen rich
         Assert.That(adjusted.Status, Is.EqualTo(SessionLevelStatus.Idle))
@@ -392,7 +411,8 @@ type PickActiveTests() =
               Intent = None
               Title = None
               LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
-              LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z") }
+              LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z")
+              ContextUsage = None }
         let sessions =
             [ statusAt SessionLevelStatus.Idle (Some "stale-skill"), ts "2026-03-01T11:00:00Z"
               winner, ts "2026-03-01T10:30:00Z" ]

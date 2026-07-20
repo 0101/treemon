@@ -32,6 +32,9 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
                                         CanvasDocs =
                                             if obj.ReferenceEquals(wt.CanvasDocs, null) then []
                                             else wt.CanvasDocs
+                                        Sessions =
+                                            if obj.ReferenceEquals(wt.Sessions, null) then []
+                                            else wt.Sessions
                                         Planning =
                                             wt.Planning
                                             |> Option.ofObj
@@ -178,6 +181,7 @@ let internal assembleFromState
         | NoSession -> None
       CurrentSkill = codingToolData.CurrentSkill
       AgentActivity = codingToolData.AgentActivity
+      Sessions = codingToolData.SessionStatuses
       LastUserMessage = codingToolData.LastUserMessage
       LastAssistantMessage = codingToolData.LastAssistantMessage
       Pr = pr

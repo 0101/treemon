@@ -21,11 +21,10 @@ open Server.SessionActivityStore
 
 // --- Wire contract DTO ------------------------------------------------------------------------
 
-// The single coupling point with extension.mjs (producer). The POST body is one report; `kind` is one
-// of the seven status kinds the fold consumes (mapping 1:1 onto SessionEvent) or the liveness-only
-// `heartbeat`. An unknown `kind` is a validation error (rejected), never silently dropped. `message`
-// is present for user_prompt / assistant_message / awaiting_user_input (the ask_user question);
-// `skillName` only for skill_invoked; turn_started / turn_ended / went_idle / heartbeat carry neither.
+// The single coupling point with extension.mjs (producer). The POST body accepts ten fold,
+// status, or gauge kinds plus the liveness-only `heartbeat`. Unknown kinds are rejected. `message`
+// is present for user_prompt / assistant_message / intent_reported / title_reported and optionally
+// awaiting_user_input; `skillName` is only for skill_invoked, and usage counters only for usage_info.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -39,7 +38,9 @@ type SessionActivityRequest =
       occurredAt: string
       kind: string
       message: MessageDto
-      skillName: string }
+      skillName: string
+      currentTokens: int
+      tokenLimit: int }
 
 // --- DTO → domain (pure, HTTP-free so it is unit-testable) -------------------------------------
 
@@ -87,11 +88,11 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
-/// Map the wire `kind` (+ its optional message / skillName) onto a SessionEvent. The status/intent
-/// kinds plus the liveness-only `heartbeat` are the whole contract; anything else is rejected. message
-/// is mandatory for user_prompt / assistant_message / intent_reported / title_reported, optional for
-/// awaiting_user_input (the ask_user question), absent otherwise.
-let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) : Result<SessionEvent, string> =
+/// Map the wire `kind` (+ its optional message / skillName / usage counters) onto a SessionEvent. The
+/// ten fold, status, or gauge kinds plus the liveness-only `heartbeat` are the whole contract.
+/// message is mandatory for user_prompt / assistant_message / intent_reported / title_reported,
+/// optional for awaiting_user_input, and absent otherwise.
+let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) (currentTokens: int) (tokenLimit: int) : Result<SessionEvent, string> =
     match kind with
     | "turn_started" -> Ok TurnStarted
     | "turn_ended" -> Ok TurnEnded
@@ -111,6 +112,11 @@ let internal parseEvent (kind: string) (message: MessageDto) (skillName: string)
         else
             tryParseTimestamp message.at
             |> Result.map (fun at -> AwaitingUserInput(Some { Text = capText message.text; At = at }))
+    | "usage_info" ->
+        // A pure gauge. A non-positive limit is degenerate (no meaningful fraction), so reject it
+        // rather than store a divide-by-zero snapshot; a negative current is clamped to 0.
+        if tokenLimit <= 0 then Error "usage_info requires tokenLimit > 0"
+        else Ok(UsageInfo(max 0 currentTokens, tokenLimit))
     | other -> Error $"unknown kind '{other}'"
 
 /// The inverse of parseEvent for persistence: the wire `kind` string stored on the raw event row.
@@ -126,6 +132,7 @@ let internal kindText =
     | TurnEnded -> "turn_ended"
     | WentIdle -> "went_idle"
     | Heartbeat -> "heartbeat"
+    | UsageInfo _ -> "usage_info"
 
 let private withMessageTimestamp at =
     function
@@ -140,7 +147,7 @@ let private withMessageTimestamp at =
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
 /// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
 /// Message-bearing events use that same normalized timestamp. Pure (given `now`), so the whole
-/// contract (10 kinds, unknown rejected, per-kind message/skill rules, future-timestamp clamp) is
+/// contract (11 kinds, unknown rejected, per-kind payload rules, future-timestamp clamp) is
 /// unit-testable without HTTP plumbing.
 let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
@@ -155,7 +162,7 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
             tryParseTimestamp req.occurredAt
             |> Result.bind (fun rawOccurredAt ->
                 let occurredAt = clampFutureTimestamp now rawOccurredAt
-                parseEvent req.kind req.message req.skillName
+                parseEvent req.kind req.message req.skillName req.currentTokens req.tokenLimit
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
@@ -242,6 +249,36 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 store.TouchLastSeen(report.SessionId, bumped.LastSeen)
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
                 live |> Map.add report.SessionId bumped
+        | UsageInfo(currentTokens, tokenLimit) ->
+            // A pure context-window gauge on its OWN order path, DECOUPLED from the status
+            // last-write-wins clock (UpdatedAt). Sharing that clock let a usage report's timestamp
+            // block a slightly-earlier status transition (turn stuck Working), and in the reverse
+            // arrival order let the status out-of-order guard discard the usage snapshot. So, like a
+            // heartbeat, it never moves UpdatedAt and never appends a history row; it is ordered only
+            // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
+            // to — a usage report for a session with no prior status is dropped (nothing to gauge).
+            match live |> Map.tryFind report.SessionId with
+            | None -> live
+            | Some prior ->
+                // Usage LWW: a snapshot older than the one already held is ignored, so an out-of-order
+                // (delayed) older gauge can never clobber a fresher reading.
+                let isStaleUsage =
+                    match prior.ContextUsageAt with
+                    | Some at -> report.OccurredAt < at
+                    | None -> false
+
+                if isStaleUsage then
+                    live
+                else
+                    let usage = { CurrentTokens = currentTokens; TokenLimit = tokenLimit }
+                    let bumped =
+                        { prior with
+                            Status.ContextUsage = Some usage
+                            ContextUsageAt = Some report.OccurredAt
+                            LastSeen = max prior.LastSeen report.OccurredAt }
+                    store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                    scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
+                    live |> Map.add report.SessionId bumped
         | _ ->
             let prior = live |> Map.tryFind report.SessionId
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
@@ -285,7 +322,10 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   Provider = report.Provider
                   Status = newStatus
                   UpdatedAt = report.OccurredAt
-                  LastSeen = lastSeen }
+                  LastSeen = lastSeen
+                  // Carry the usage LWW clock forward: a status event neither carries nor reorders the
+                  // gauge, and `fold` already preserves ContextUsage, so its ordering stamp survives too.
+                  ContextUsageAt = prior |> Option.bind _.ContextUsageAt }
 
             // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
             // status can never diverge on a mid-pair failure. Returns false for a duplicate event_id

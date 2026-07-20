@@ -22,16 +22,22 @@ open Server.SessionActivity
 
 // --- Row shapes -------------------------------------------------------------------------------
 
-/// One session_status row: the per-session fold result plus the two timestamps the store needs —
-/// `UpdatedAt` (the OccurredAt of the last applied event; drives last-write-wins) and `LastSeen`
-/// (the last heartbeat; drives freshness + the live window on restart).
+/// One session_status row: the per-session fold result plus the timestamps the store needs —
+/// `UpdatedAt` (the OccurredAt of the last applied STATUS event; drives status last-write-wins) and
+/// `LastSeen` (the last heartbeat; drives freshness + the live window on restart). `ContextUsageAt`
+/// is the OccurredAt of the last applied `usage_info` gauge — a SEPARATE last-write-wins clock so the
+/// context donut is ordered independently of status and never shares the status LWW clock (a usage
+/// report must not block a slightly-earlier status transition, nor be discarded by one). It is
+/// server-internal ordering state only: never persisted (like `ContextUsage`, it rehydrates as None)
+/// and never on the wire.
 type StoredStatus =
     { SessionId: SessionId
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
       Status: SessionStatus
       UpdatedAt: DateTimeOffset
-      LastSeen: DateTimeOffset }
+      LastSeen: DateTimeOffset
+      ContextUsageAt: DateTimeOffset option }
 
 /// One activity_events row: a single pushed event, already classified. `Status`/`Skill` are the fold
 /// result *after* applying this event, so the Overview history can read a bucket's state without
@@ -111,9 +117,11 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
           Intent = readOptMsg r 9 10
           Title = readOptMsg r 13 14
           LastUserMessage = readOptMsg r 5 6
-          LastAssistantMessage = readOptMsg r 7 8 }
+          LastAssistantMessage = readOptMsg r 7 8
+          ContextUsage = None }
       UpdatedAt = parseIso (r.GetString 11)
-      LastSeen = parseIso (r.GetString 12) }
+      LastSeen = parseIso (r.GetString 12)
+      ContextUsageAt = None }
 
 let private readEventRow (r: SqliteDataReader) : ActivityEventRow =
     { EventId = EventId(r.GetString 0)
