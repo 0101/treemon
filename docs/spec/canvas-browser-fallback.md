@@ -62,10 +62,11 @@ The native runtime no longer supports SDK hook callbacks (`joinSession({ hooks }
 internal `session.resume`), so canvas writes are observed via **session events** instead of the old
 `onPostToolUse` hook. The extension calls `joinSession()` (no hooks) and subscribes with
 `session.on("tool.execution_start", …)` / `session.on("tool.execution_complete", …)`. The completion
-event carries neither the tool name nor its arguments, so a create/edit of a `.agents/canvas/*.html`
-path is captured from the **start** event (keyed by `toolCallId`) and acted on once the matching
-completion reports success. In browser mode the extension then sends the serving URL to the session
-via `session.send()`; in Treemon mode it declares ownership instead.
+event carries neither the tool name nor its arguments, so supported canvas targets are captured from
+the **start** event (keyed by `toolCallId`) and acted on once the matching completion reports success.
+Create/edit arguments contribute one path; `apply_patch` contributes every canvas HTML path in its
+Add/Update/Move headers. In browser mode the extension then sends the serving URL to the session via
+`session.send()`; in Treemon mode it declares ownership instead.
 
 ### Path Security
 
