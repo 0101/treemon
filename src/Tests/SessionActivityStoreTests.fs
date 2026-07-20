@@ -45,6 +45,11 @@ let private withDbPath (action: string -> unit) =
         with _ ->
             ()
 
+let private connStr (dbPath: string) =
+    SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+
+let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
+
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
     { SessionId = SessionId sid
       WorktreePath = WorktreePath wt
@@ -148,6 +153,43 @@ type UpsertStatusTests() =
             Assert.That(row.Status, Is.EqualTo(rich))
             Assert.That(row.WorktreePath, Is.EqualTo(WorktreePath "C:/wt/a"))
             Assert.That(row.Provider, Is.EqualTo(CopilotCli)))
+
+    [<Test>]
+    member _.``A status upsert preserves persisted context usage``() =
+        withStore (fun store ->
+            let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+            let working = { emptyStatus with Status = SessionLevelStatus.Working }
+            let idle = { emptyStatus with Status = SessionLevelStatus.Idle }
+
+            store.UpsertStatus(storedOf "s1" contextWorktree working "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
+            store.UpdateContextUsage(SessionId "s1", usage, ts "2026-03-01T10:00:05Z", ts "2026-03-01T10:00:05Z")
+            store.UpsertStatus(storedOf "s1" contextWorktree idle "2026-03-01T10:00:10Z" "2026-03-01T10:00:10Z")
+
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:10:00Z") |> find "s1"
+            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.Idle))
+            Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(row.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:05Z"))))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ContextUsagePersistenceTests() =
+
+    [<Test>]
+    member _.``An older usage update cannot replace a newer persisted snapshot``() =
+        withStore (fun store ->
+            let newer = { CurrentTokens = 150000; TokenLimit = 200000 }
+            let older = { CurrentTokens = 80000; TokenLimit = 200000 }
+
+            store.UpsertStatus(storedOf "s1" contextWorktree emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
+            store.UpdateContextUsage(SessionId "s1", newer, ts "2026-03-01T10:00:10Z", ts "2026-03-01T10:00:10Z")
+            store.UpdateContextUsage(SessionId "s1", older, ts "2026-03-01T10:00:05Z", ts "2026-03-01T10:00:05Z")
+
+            let row = store.LoadLiveStatuses(ts "2026-03-01T10:10:00Z") |> find "s1"
+            Assert.That(row.Status.ContextUsage, Is.EqualTo(Some newer))
+            Assert.That(row.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:10Z")))
+            Assert.That(row.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:10Z")))
 
 
 [<TestFixture>]
@@ -268,6 +310,29 @@ type LoadLiveStatusesTests() =
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
             Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
             Assert.That(row.Status.Skill, Is.EqualTo(Some "bd-execute")))
+
+    [<Test>]
+    member _.``Context usage survives a restart with its ordering timestamp``() =
+        withDbPath (fun dbPath ->
+            let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+            let usageAt = ts "2026-03-01T11:30:05Z"
+
+            (use store = new SessionActivityStore(dbPath)
+             store.UpsertStatus(
+                 storedOf
+                     "s1"
+                     contextWorktree
+                     { emptyStatus with Status = SessionLevelStatus.Working }
+                     "2026-03-01T11:30:00Z"
+                     "2026-03-01T11:30:00Z"
+             )
+             store.UpdateContextUsage(SessionId "s1", usage, usageAt, usageAt))
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
+            Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(row.ContextUsageAt, Is.EqualTo(Some usageAt))
+            Assert.That(row.LastSeen, Is.EqualTo(usageAt)))
 
     [<Test>]
     member _.``An empty store loads no sessions``() =
@@ -416,9 +481,6 @@ type LegacyDoneStatusTests() =
     // idempotent construction-time migration rewrites 'done' rows to 'idle' so the unguarded reads
     // (LoadLiveStatuses at startup, StatusesForWorktree on resume) never hit an unknown status.
 
-    let connStr (dbPath: string) =
-        SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
-
     /// Insert a raw session_status row with an arbitrary status text, bypassing the store's typed
     /// writers (which can only emit the live vocabulary) — the shape of a row a pre-idle-only build
     /// persisted with status='done'.
@@ -465,3 +527,78 @@ type LegacyDoneStatusTests() =
 
             use reopened = new SessionActivityStore(dbPath)
             Assert.That(readRawStatus dbPath "legacy", Is.EqualTo("idle"), "stored row should be rewritten to 'idle'"))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ContextUsageMigrationTests() =
+
+    let createLegacyDatabase (dbPath: string) =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+
+        cmd.CommandText <-
+            """
+CREATE TABLE session_status (
+    session_id    TEXT PRIMARY KEY,
+    worktree_path TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    current_skill TEXT,
+    last_user_msg TEXT,
+    last_user_ts  TEXT,
+    last_asst_msg TEXT,
+    last_asst_ts  TEXT,
+    updated_at    TEXT NOT NULL,
+    last_seen     TEXT NOT NULL
+);
+INSERT INTO session_status
+    (session_id, worktree_path, provider, status, updated_at, last_seen)
+VALUES
+    ('legacy', $wt, 'copilot_cli', 'working',
+     '2026-03-01T11:30:00.0000000+00:00', '2026-03-01T11:30:00.0000000+00:00');
+"""
+
+        cmd.Parameters.AddWithValue("$wt", contextWorktree) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
+
+    let rec readColumnNames (reader: SqliteDataReader) names =
+        if reader.Read() then
+            readColumnNames reader (Set.add (reader.GetString 1) names)
+        else
+            names
+
+    let statusColumns (dbPath: string) =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- "PRAGMA table_info(session_status);"
+        use reader = cmd.ExecuteReader()
+        readColumnNames reader Set.empty
+
+    [<Test>]
+    member _.``Construction adds context columns to an old database without losing rows``() =
+        withDbPath (fun dbPath ->
+            createLegacyDatabase dbPath
+
+            use store = new SessionActivityStore(dbPath)
+            let migrated = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+            let columns = statusColumns dbPath
+
+            Assert.That(
+                [ "context_current_tokens"; "context_token_limit"; "context_usage_at" ]
+                |> List.forall (fun column -> Set.contains column columns),
+                Is.True
+            )
+            Assert.That(migrated.Status.ContextUsage, Is.EqualTo(None))
+            Assert.That(migrated.ContextUsageAt, Is.EqualTo(None))
+
+            let usage = { CurrentTokens = 50000; TokenLimit = 200000 }
+            let usageAt = ts "2026-03-01T11:45:00Z"
+            store.UpdateContextUsage(SessionId "legacy", usage, usageAt, usageAt)
+
+            let updated = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+            Assert.That(updated.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(updated.ContextUsageAt, Is.EqualTo(Some usageAt)))

@@ -263,7 +263,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
-                    store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                    store.UpdateContextUsage(report.SessionId, usage, report.OccurredAt, bumped.LastSeen)
                     scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
                     live |> Map.add report.SessionId bumped
         | _ ->

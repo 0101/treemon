@@ -420,6 +420,9 @@ type IngestTests() =
             // No synthetic row appended (like a heartbeat) — only the one real status event is in history.
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 1, "a usage_info must not append to activity_events")
+            let persisted = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun row -> row.SessionId = SessionId "s1")
+            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))
+            Assert.That(persisted.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:05Z")))
             // The card path (scheduler) sees the gauge.
             match schedulerStatus agent "s1" with
             | Some fed -> Assert.That(fed.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))
@@ -476,30 +479,70 @@ type IngestTests() =
 type RestartRebuildTests() =
 
     [<Test>]
-    member _.``Start rebuilds live status from the store and feeds the scheduler``() =
+    member _.``Start rebuilds live status and context usage from the store and feeds the scheduler``() =
         let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
+        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+        let usageAt = now.AddSeconds(-30.0)
 
         let seed (store: SessionActivityStore) =
             store.UpsertStatus
                 { SessionId = SessionId "s1"
-                  WorktreePath = WorktreePath "C:/wt/a"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
                   Provider = CopilotCli
                   Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
                   UpdatedAt = now.AddMinutes(-1.0)
                   LastSeen = now.AddMinutes(-1.0)
                   ContextUsageAt = None }
+            store.UpdateContextUsage(SessionId "s1", usage, usageAt, usageAt)
 
-        withServiceSeeded "C:/wt/a" seed (fun (svc, agent, _) ->
+        withServiceSeeded worktree seed (fun (svc, agent, _) ->
             svc.Start()
             // The in-memory fold map is primed, so a subsequent event folds onto the rebuilt state.
             let live = svc.LiveSnapshot()
             let restored = live |> Map.find (SessionId "s1")
             Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(restored.Status.Skill, Is.EqualTo(Some "investigate"))
+            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt))
             // And the card path (scheduler) sees it immediately, before any new event.
             match schedulerStatus agent "s1" with
-            | Some stored -> Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
+            | Some stored ->
+                Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
+                Assert.That(stored.Status.ContextUsage, Is.EqualTo(Some usage))
             | None -> Assert.Fail "restart rebuild did not feed the scheduler")
+
+    [<Test>]
+    member _.``An older usage report after restart cannot replace the restored snapshot``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
+        let usage = { CurrentTokens = 150000; TokenLimit = 200000 }
+        let usageAt = now.AddMinutes(-1.0)
+
+        let seed (store: SessionActivityStore) =
+            store.UpsertStatus
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  Status = { emptyStatus with Status = SessionLevelStatus.Working }
+                  UpdatedAt = now.AddMinutes(-2.0)
+                  LastSeen = now.AddMinutes(-2.0)
+                  ContextUsageAt = None }
+            store.UpdateContextUsage(SessionId "s1", usage, usageAt, usageAt)
+
+        withServiceSeeded worktree seed (fun (svc, _, _) ->
+            svc.Start()
+            svc.Submit
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  EventId = EventId "older-usage"
+                  OccurredAt = usageAt.AddSeconds(-30.0)
+                  Event = UsageInfo(80000, 200000) }
+
+            let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt)))
 
     [<Test>]
     member _.``a session quiet longer than the idle window is not rebuilt as live``() =

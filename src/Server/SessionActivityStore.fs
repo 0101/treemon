@@ -28,8 +28,7 @@ open Server.SessionActivity
 /// is the OccurredAt of the last applied `usage_info` gauge — a SEPARATE last-write-wins clock so the
 /// context donut is ordered independently of status and never shares the status LWW clock (a usage
 /// report must not block a slightly-earlier status transition, nor be discarded by one). It is
-/// server-internal ordering state only: never persisted (like `ContextUsage`, it rehydrates as None)
-/// and never on the wire.
+/// server-internal ordering state persisted alongside `ContextUsage`, but never sent on the wire.
 type StoredStatus =
     { SessionId: SessionId
       WorktreePath: WorktreePath
@@ -100,6 +99,17 @@ let private msgToDb (m: Message option) : obj * obj =
 let private readOptStr (r: SqliteDataReader) (i: int) =
     if r.IsDBNull i then None else Some(r.GetString i)
 
+let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimitIndex usageAtIndex =
+    match r.IsDBNull currentTokensIndex, r.IsDBNull tokenLimitIndex, r.IsDBNull usageAtIndex with
+    | true, true, true -> None, None
+    | false, false, false ->
+        let usage =
+            { CurrentTokens = r.GetInt32 currentTokensIndex
+              TokenLimit = r.GetInt32 tokenLimitIndex }
+
+        Some usage, Some(parseIso (r.GetString usageAtIndex))
+    | _ -> failwith "SessionActivityStore: incomplete persisted context usage"
+
 /// Reconstruct a `Message option` from a text column + a timestamp column; present only when both
 /// are non-NULL (they are written together, so this is really an all-or-nothing pair).
 let private readOptMsg (r: SqliteDataReader) (iText: int) (iTs: int) : Message option =
@@ -108,6 +118,8 @@ let private readOptMsg (r: SqliteDataReader) (iText: int) (iTs: int) : Message o
     | _ -> None
 
 let private readStored (r: SqliteDataReader) : StoredStatus =
+    let contextUsage, contextUsageAt = readContextUsage r 11 12 13
+
     { SessionId = SessionId(r.GetString 0)
       WorktreePath = WorktreePath(r.GetString 1)
       Provider = parseProvider (r.GetString 2)
@@ -116,14 +128,10 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
           Skill = readOptStr r 4
           LastUserMessage = readOptMsg r 5 6
           LastAssistantMessage = readOptMsg r 7 8
-          // ContextUsage is not persisted (ephemeral upstream) — it rehydrates as None and the next
-          // live usage_info event repopulates it.
-          ContextUsage = None }
+          ContextUsage = contextUsage }
       UpdatedAt = parseIso (r.GetString 9)
       LastSeen = parseIso (r.GetString 10)
-      // The usage LWW clock is server-internal ordering state, never persisted — it rehydrates as
-      // None alongside ContextUsage and the next live usage_info event re-establishes it.
-      ContextUsageAt = None }
+      ContextUsageAt = contextUsageAt }
 
 let private readEventRow (r: SqliteDataReader) : ActivityEventRow =
     { EventId = EventId(r.GetString 0)
@@ -150,7 +158,10 @@ CREATE TABLE IF NOT EXISTS session_status (
     last_asst_msg TEXT,
     last_asst_ts  TEXT,
     updated_at    TEXT NOT NULL,
-    last_seen     TEXT NOT NULL
+    last_seen     TEXT NOT NULL,
+    context_current_tokens INTEGER,
+    context_token_limit     INTEGER,
+    context_usage_at        TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
 
@@ -166,6 +177,35 @@ CREATE TABLE IF NOT EXISTS activity_events (
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
 """
+
+let private contextUsageColumnMigrations =
+    [ "context_current_tokens", "ALTER TABLE session_status ADD COLUMN context_current_tokens INTEGER;"
+      "context_token_limit", "ALTER TABLE session_status ADD COLUMN context_token_limit INTEGER;"
+      "context_usage_at", "ALTER TABLE session_status ADD COLUMN context_usage_at TEXT;" ]
+
+let rec private readColumnNames (reader: SqliteDataReader) names =
+    if reader.Read() then
+        readColumnNames reader (Set.add (reader.GetString 1) names)
+    else
+        names
+
+let private ensureContextUsageColumns (conn: SqliteConnection) =
+    let existingColumns =
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- "PRAGMA table_info(session_status);"
+        use reader = cmd.ExecuteReader()
+        readColumnNames reader Set.empty
+
+    let migrationSql =
+        contextUsageColumnMigrations
+        |> List.choose (fun (columnName, sql) ->
+            if Set.contains columnName existingColumns then None else Some sql)
+        |> String.concat Environment.NewLine
+
+    if migrationSql <> "" then
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- migrationSql
+        cmd.ExecuteNonQuery() |> ignore
 
 // One-time normalisation of legacy rows: pre-idle-only builds persisted the retired "done" status, so
 // existing DBs still carry status='done' rows. Rewrite them to 'idle' (the value 'done' now folds to)
@@ -218,10 +258,22 @@ let private touchSql =
 UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
 """
 
+let private updateContextUsageSql =
+    """
+UPDATE session_status
+SET context_current_tokens = $current,
+    context_token_limit = $limit,
+    context_usage_at = $usageAt,
+    last_seen = CASE WHEN last_seen < $seen THEN $seen ELSE last_seen END
+WHERE session_id = $sid
+  AND (context_usage_at IS NULL OR context_usage_at <= $usageAt);
+"""
+
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 WHERE last_seen >= $cutoff
 ORDER BY last_seen;
@@ -234,7 +286,8 @@ ORDER BY last_seen;
 let private worktreeStatusesSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 WHERE worktree_path = $wt
 ORDER BY last_seen DESC;
@@ -262,7 +315,8 @@ DELETE FROM session_status WHERE last_seen < $cutoff;
 let private allStatusesSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 ORDER BY last_seen;
 """
@@ -339,9 +393,13 @@ type SessionActivityStore(dbPath: string) =
     // owns schema creation. Never used for queries (that would share one connection across threads).
     let keepAlive =
         let c = openConn ()
-        use cmd = c.CreateCommand()
-        cmd.CommandText <- schemaSql + migrateSql
-        cmd.ExecuteNonQuery() |> ignore
+        use schemaCmd = c.CreateCommand()
+        schemaCmd.CommandText <- schemaSql
+        schemaCmd.ExecuteNonQuery() |> ignore
+        ensureContextUsageColumns c
+        use migrateCmd = c.CreateCommand()
+        migrateCmd.CommandText <- migrateSql
+        migrateCmd.ExecuteNonQuery() |> ignore
         c
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
@@ -394,6 +452,23 @@ type SessionActivityStore(dbPath: string) =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- touchSql
         cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
+
+    /// Persist the latest accepted context-window gauge without touching status/updated_at or
+    /// activity history. The independent usage timestamp prevents an older delayed gauge from
+    /// replacing a newer snapshot, including after restart.
+    member _.UpdateContextUsage
+        (sessionId: SessionId, usage: ContextUsage, usageAt: DateTimeOffset, lastSeen: DateTimeOffset)
+        : unit
+        =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- updateContextUsageSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$current", usage.CurrentTokens) |> ignore
+        cmd.Parameters.AddWithValue("$limit", usage.TokenLimit) |> ignore
+        cmd.Parameters.AddWithValue("$usageAt", isoUtc usageAt) |> ignore
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 

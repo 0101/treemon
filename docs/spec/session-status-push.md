@@ -87,8 +87,10 @@ the durable store (so it survives a restart even for a session last active > 2 h
 
 ### Restart
 
-On server start, live per-session status is rebuilt from SQLite before serving, so cards are correct
-immediately without waiting for new events.
+On server start, live per-session status and its last known context usage are rebuilt from SQLite
+before serving, so cards and donuts are correct immediately without waiting for new events. A
+session that has never reported usage (including a row migrated from the old schema) still renders
+the plain status dot.
 
 ## Technical Approach
 
@@ -105,6 +107,7 @@ type SessionEvent =
     | AwaitingUserInput of question: Message option   // ask_user; carries the question to surface
     | TurnEnded
     | WentIdle
+    | UsageInfo of currentTokens: int * tokenLimit: int   // gauge only; preserves status
     | Heartbeat                              // liveness only; bumps last_seen, no status fold
 
 type SessionActivityReport =
@@ -118,14 +121,21 @@ is a worktree-level collapse result, made unrepresentable per session). The fold
 ```fsharp
 type SessionStatus =
     { Status: SessionLevelStatus; Skill: string option
-      LastUserMessage: Message option; LastAssistantMessage: Message option }
+      LastUserMessage: Message option; LastAssistantMessage: Message option
+      ContextUsage: ContextUsage option }
 ```
 
 `fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
 `AwaitingUserInput` → WaitingForUser (question folded into `LastAssistantMessage`), `TurnEnded` /
-`WentIdle` → Idle, `Heartbeat` → no-op. A `UserPrompt` replying to an `ask_user` keeps the running
-skill; any other prompt starts fresh. The fold is pure and append-friendly — folding a later batch
-onto an earlier result equals folding the whole stream.
+`WentIdle` → Idle, `UsageInfo` → replace `ContextUsage` without changing status, `Heartbeat` → no-op.
+A `UserPrompt` replying to an `ask_user` keeps the running skill; any other prompt starts fresh. The
+fold is pure and append-friendly — folding a later batch onto an earlier result equals folding the
+whole stream.
+
+The persisted `StoredStatus` also carries `ContextUsageAt`, the timestamp of the last accepted
+`UsageInfo`. This is an independent last-write-wins clock: usage ordering must not block a
+slightly-earlier status transition, and a newer status transition must not discard a slightly-older
+usage snapshot.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
@@ -160,12 +170,15 @@ server:
   `turn_started` / `turn_ended` / `went_idle` / `heartbeat` carry none of these. An unknown `kind` is a validation error (rejected),
   never silently dropped.
 - A dedicated `SessionActivity` `MailboxProcessor` is the **single writer** (the only mutable
-  boundary). Per report: `fold` onto that session's state → update the in-memory
-  `Map<SessionId, SessionStatus>` → persist (upsert + append) → feed `RefreshScheduler`
-  (`UpdateSessionStatus`). Live reads come from the map; SQLite is the durable mirror.
-- **Ordering guard** (both map and store): upsert only when `OccurredAt >= updated_at`; an
-  out-of-order (older) event is still appended to `activity_events` (history substrate) but does not
-  regress the live fold or the shown card. `activity_events` dedupes on `EventId`.
+  boundary). Status-bearing reports fold onto that session's state, append + upsert atomically, then
+  feed `RefreshScheduler`. Heartbeats only advance `last_seen`; usage reports update the persisted
+  gauge and its independent timestamp without appending history. Live reads come from the map;
+  SQLite is the durable mirror.
+- **Ordering guards** exist in both map and store. Status upserts apply only when
+  `OccurredAt >= updated_at`; an older status event is still appended to `activity_events` but does
+  not regress the live fold. Usage updates apply only when
+  `OccurredAt >= context_usage_at`, so delayed older gauges cannot replace a newer snapshot after a
+  restart. `activity_events` dedupes status-bearing events on `EventId`.
 - **Future timestamps are clamped, not trusted.** `last_seen` comes from `occurredAt`; a future value
   would make the freshness net never decay. `parseReport` clamps any `occurredAt` beyond `now + 5 min`
   down to `now`.
@@ -182,17 +195,23 @@ collides:
 
 ```sql
 session_status(session_id PK, worktree_path, provider, status, current_skill,
-  last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen);
+  last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+  context_current_tokens NULL, context_token_limit NULL, context_usage_at NULL);
 activity_events(event_id PK, session_id, worktree_path, provider, kind, status, skill, ts);
 ```
 
 PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; each op runs on its own
 short-lived connection (thread-safe against the single-writer mailbox and concurrent WAL readers).
 All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
-order — the `ts` / `last_seen` range filters depend on it. `upsertStatus` is last-write-wins;
-`appendEvent` is `INSERT OR IGNORE`; `pruneOld(now − 14d)` runs hourly and trims both tables.
-`loadLiveStatuses` rebuilds the live map on restart (rows within the idle window). The service is
-started only in the real monitoring path — demo/fixture mode serves synthetic data and takes no posts.
+order — the `ts` / `last_seen` range filters and both ordering clocks depend on it. Construction
+inspects `PRAGMA table_info(session_status)` and adds any missing context columns individually, so
+old or partially migrated databases upgrade idempotently with `NULL` usage. `upsertStatus` is
+last-write-wins and preserves existing context columns; `updateContextUsage` atomically replaces the
+three context fields and advances `last_seen` only for an equal-or-newer usage timestamp.
+`appendEvent` is `INSERT OR IGNORE`; usage remains a last-known gauge and is not appended to history.
+`pruneOld(now − 14d)` runs hourly and trims both tables. `loadLiveStatuses` rebuilds status, usage,
+and both ordering clocks on restart for rows within the idle window. The service is started only in
+the real monitoring path — demo/fixture mode serves synthetic data and takes no posts.
 
 ### Collapse to card fields (`CodingToolStatus.fs`)
 
@@ -276,6 +295,9 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
   most-recent-any (live); resume = most-recent-any (durable store, survives restart).
 - **Future `occurredAt` is clamped, not trusted; free text is length-capped server-side** (see
   Technical Approach) — the loopback ingest endpoint does not trust the producer's bounds.
+- **Context usage is a durable last-known gauge, not activity history.** Persist the token values and
+  their independent ordering timestamp on `session_status`; restore them on restart, but never append
+  usage snapshots to `activity_events`.
 - **`HasActiveSession` (tmux/window) stays distinct from push openness** — the coding-tool dot uses
   push openness only; no merge.
 - **Explicit session-closed event deferred.** None of the wire kinds signals "closed"; an instant-grey
@@ -291,7 +313,7 @@ to `~/.copilot/extensions/treemon-reporting` **alongside** the untouched `canvas
 | File | Role |
 |------|------|
 | `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
-| `src/Server/SessionActivityStore.fs` | SQLite (WAL) schema + `upsertStatus` / `appendEvent` / `loadLiveStatuses` / `pruneOld` / `queryWindow`. |
+| `src/Server/SessionActivityStore.fs` | SQLite (WAL) schema + additive migration + status/usage persistence + restart load / pruning / history queries. |
 | `src/Server/SessionActivityService.fs` | `SessionActivity` mailbox (single writer) + `POST /api/session/activity` handler + startup rebuild + retention timer. |
 | `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `getLastSessionId` (resume), `readConfiguredProvider`. |
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |

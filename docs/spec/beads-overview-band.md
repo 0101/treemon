@@ -44,8 +44,9 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
      circle is a **context-usage donut**: a ring filled to the fraction of context-window still
      **remaining** (`1 − currentTokens / tokenLimit`, from the SDK `session.usage_info` event) — a
      healthy low-usage session is a nearly full ring and one near its limit thins to a sliver. A
-     session that has not reported usage yet (or after a restart — the value is not persisted) falls
-     back to the solid circle. Idle is a second track sharing the Agents row.
+     session that has not reported usage yet (including a row migrated without a snapshot) falls back
+     to the solid circle. The last known usage survives a Treemon restart for sessions restored into
+     the live window. Idle is a second track sharing the Agents row.
   2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
@@ -271,8 +272,7 @@ band is chrome-less and dashboard-scoped; aggregate-only; agent **circles** + ta
 bars**; empty categories omitted; **Planned vs Queued** = open vs in_progress parent feature; Loose →
 Planned; **Done** = Σ closed; **archived worktrees excluded from the whole roll-up** (every task
 bucket and every agent group); static interactions; reuse the single `getBeadsData`
-call site; running skill from the existing session scan; per-session context usage (Extension C)
-parked.
+call site; running skill and persisted per-session context usage from the existing session scan.
 
 **Resolved during planning:**
 - (a) `BeadsPlanning` is a **sibling record** — a new `Planning` field on `WorktreeStatus`, not a
