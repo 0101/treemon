@@ -33,6 +33,23 @@ type CardActivityLineTests() =
         Assert.That(cardActivityLine wt, Is.EqualTo(CardActivityLine.Line(Some(AgentActivity.Intent("running the tests", ts)), None)))
 
     [<Test>]
+    member _.``An intent duplicating the user message is hidden while the skill remains``() =
+        let wt =
+            { baseWt with
+                AgentActivity = Some(AgentActivity.Intent("Use conflict skill to resolve conflicts", ts))
+                CurrentSkill = Some "conflict"
+                LastUserMessage = Some("  use conflict skill to resolve conflicts  ", ts) }
+        Assert.That(cardActivityLine wt, Is.EqualTo(CardActivityLine.Line(None, Some "conflict")))
+
+    [<Test>]
+    member _.``A session title duplicating the user message leaves no activity line``() =
+        let wt =
+            { baseWt with
+                AgentActivity = Some(AgentActivity.SessionTitle("use conflict skill to resolve conflicts", ts))
+                LastUserMessage = Some("use conflict skill to resolve conflicts", ts) }
+        Assert.That(cardActivityLine wt, Is.EqualTo CardActivityLine.Empty)
+
+    [<Test>]
     member _.``A skill with no intent surfaces the skill alone``() =
         let wt = { baseWt with AgentActivity = None; CurrentSkill = Some "bd-execute" }
         Assert.That(cardActivityLine wt, Is.EqualTo(CardActivityLine.Line(None, Some "bd-execute")))

@@ -562,12 +562,24 @@ type CardActivityLine =
     | Line of activity: AgentActivity option * skill: string option
     | Empty
 
+let private duplicatesLastUserMessage
+    (lastUserMessage: (string * System.DateTimeOffset) option)
+    (activity: AgentActivity)
+    =
+    let activityText, _ = AgentActivity.textAndTimestamp activity
+    lastUserMessage
+    |> Option.exists (fun (userText, _) ->
+        System.String.Equals(activityText.Trim(), userText.Trim(), System.StringComparison.OrdinalIgnoreCase))
+
 let cardActivityLine (wt: WorktreeStatus) : CardActivityLine =
+    let activity =
+        wt.AgentActivity
+        |> Option.filter (duplicatesLastUserMessage wt.LastUserMessage >> not)
     let skill =
         wt.CurrentSkill
         |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
         |> Option.map _.Trim()
-    match wt.AgentActivity, skill with
+    match activity, skill with
     | None, None -> CardActivityLine.Empty
     | activity, sk -> CardActivityLine.Line(activity, sk)
 
