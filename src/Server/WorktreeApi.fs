@@ -182,8 +182,10 @@ let internal assembleFromState
         | WaitingForUser
         | NoSession -> None
       CurrentSkill = codingToolData.CurrentSkill
+      AgentActivity = codingToolData.AgentActivity
       Sessions = codingToolData.SessionStatuses
       LastUserMessage = codingToolData.LastUserMessage
+      LastAssistantMessage = codingToolData.LastAssistantMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -521,57 +523,23 @@ let worktreeApi
 
                   let! syncEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
 
-                  let allKeys =
-                      [ yield! syncEvents |> Map.keys
-                        yield! syncKeyToPath |> Map.keys ]
-                      |> List.distinct
-
-                  // The card's last-assistant message per worktree now comes from the push live state
-                  // (collapsed via pickActive), not the log-parsing detectors — same repoint as the
-                  // worktree cards. Merged with sync events below to build each card's recent-message pair.
-                  // Retained fallback keeps the last-assistant message for worktrees aged out of the live
-                  // idle window (restart), matching the worktree-card assembly.
-                  let retainedByWorktree =
-                      activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
-
-                  let pushByWorktree =
-                      CodingToolStatus.collapseByWorktree DateTimeOffset.UtcNow (state.SessionStatuses |> Map.values)
-                      |> CodingToolStatus.withRetainedFallback retainedByWorktree
-
-                  let cachedLastMessages =
-                      pushByWorktree
-                      |> Map.toList
-                      |> List.choose (fun (path, data) ->
-                          data.LastAssistantMessage |> Option.map (fun msg -> path, msg))
-                      |> Map.ofList
-
+                  // The card's event log carries only sync/pipeline events. The last-assistant message
+                  // is now its own dedicated footer line (assistantMsgLineView, fed by
+                  // WorktreeStatus.LastAssistantMessage) — injecting it here too would render it twice.
                   return
-                      allKeys
-                      |> List.choose (fun syncKey ->
-                          let wtPath = syncKeyToPath |> Map.tryFind syncKey
-
-                          let syncEvts =
-                              syncEvents
-                              |> Map.tryFind syncKey
-                              |> Option.defaultValue []
-
-                          let claudeEvt =
-                              wtPath
-                              |> Option.bind (fun p -> cachedLastMessages |> Map.tryFind p)
-
-                          let merged = (claudeEvt |> Option.toList) @ syncEvts
-
-                          match merged, wtPath with
-                          | [], _ -> None
-                          | events, Some path ->
+                      syncEvents
+                      |> Map.toList
+                      |> List.choose (fun (syncKey, syncEvts) ->
+                          match syncKeyToPath |> Map.tryFind syncKey, syncEvts with
+                          | Some path, (_ :: _) ->
                               let recent =
-                                  events
+                                  syncEvts
                                   |> List.sortByDescending _.Timestamp
                                   |> List.truncate 2
                                   |> List.rev
 
                               Some(path, recent)
-                          | _, None -> None)
+                          | _ -> None)
                       |> Map.ofList
               }
           deleteWorktree = deleteWorktree agent rootPaths
