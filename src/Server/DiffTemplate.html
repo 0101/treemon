@@ -638,6 +638,9 @@ function loadHighlighter() {
         };
         script.onerror = function() { reject(new Error('Syntax highlighter failed to load')); };
         document.head.appendChild(script);
+    }).catch(function(error) {
+        highlighterPromise = null;
+        throw error;
     });
     return highlighterPromise;
 }

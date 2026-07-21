@@ -561,6 +561,44 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``syntax highlighting retries after a transient failure without reloading``() =
+        task {
+            // The asynchronous route callback must count requests across browser callbacks.
+            let mutable requests = 0
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RouteFiles()
+            do!
+                this.Page.RouteAsync(
+                    $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
+                    fun route ->
+                        requests <- requests + 1
+
+                        if requests = 1 then
+                            route.AbortAsync()
+                        else
+                            route.FulfillAsync(
+                                RouteFulfillOptions(
+                                    ContentType = "text/javascript",
+                                    Body = highlighter
+                                )
+                            )
+                )
+            do! this.Goto()
+            do!
+                this.Page.Locator("#patch[data-highlight-status='failed'] .d2h-wrapper").WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 15000.0f)
+                )
+
+            do! this.Page.Locator("#split-view").ClickAsync()
+            do!
+                this.Page.Locator("#patch[data-highlight-status='ready'] .d2h-files-diff").WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 15000.0f)
+                )
+
+            Assert.That(requests, Is.EqualTo(2))
+        }
+
+    [<Test>]
     member this.``diff selection metadata extracts exact ranges in unified and split views``() =
         task {
             do! this.RouteHighlighter()
