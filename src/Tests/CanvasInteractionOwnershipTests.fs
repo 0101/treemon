@@ -17,6 +17,11 @@ let private withOwnershipFile action =
         try Directory.Delete(dir, recursive = true)
         with _ -> ()
 
+let private startClaim (store: OwnershipStore) worktree filename =
+    match runAsync (store.BeginClaim(worktree, filename)) with
+    | ClaimStarted token -> token
+    | ExistingOwner owner -> failwith $"Expected a pending claim for {filename}, but it is owned by {owner}"
+
 let private createDeleteContext repoRoot worktree =
     let agent = Server.RefreshScheduler.createAgent ()
     let repoId = Server.PathUtils.toRepoId repoRoot
@@ -90,16 +95,34 @@ type PersistenceTests() =
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
 
-            Assert.That(runAsync (store.BeginClaim(worktree, "diff.html")), Is.EqualTo(None: string option))
-            Assert.That(store.ClaimPending(worktree, "session-a"), Is.EqualTo([ "diff.html" ]))
+            let token = startClaim store worktree "diff.html"
+            Assert.That(store.ClaimPending(worktree, token, "session-a"), Is.EqualTo(Some "diff.html"))
             Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
 
             Assert.That(
                 runAsync (store.BeginClaim(worktree, "diff.html")),
-                Is.EqualTo(Some "session-a"),
+                Is.EqualTo(ExistingOwner "session-a"),
                 "An owned view must not become pending again")
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.Empty)
+            Assert.That(store.ClaimPending(worktree, Guid.NewGuid(), "session-b"), Is.EqualTo(None: string option))
             Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a")))
+
+    [<Test>]
+    member _.``concurrent diff and beads claims are correlated by launch token``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            let diffToken = startClaim store worktree "diff.html"
+            let beadsToken = startClaim store worktree "beads.html"
+
+            Assert.That(store.ClaimPending(worktree, diffToken, "diff-session"), Is.EqualTo(Some "diff.html"))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "diff-session"))
+            Assert.That(
+                runAsync (store.GetOwner(worktree, "beads.html")),
+                Is.EqualTo(None: string option),
+                "Claiming diff.html must leave the concurrent beads.html claim pending")
+
+            Assert.That(store.ClaimPending(worktree, beadsToken, "beads-session"), Is.EqualTo(Some "beads.html"))
+            Assert.That(runAsync (store.GetOwner(worktree, "beads.html")), Is.EqualTo(Some "beads-session")))
 
     [<Test>]
     member _.``cancelled launch removes pending claim without assigning an owner``() =
@@ -107,10 +130,10 @@ type PersistenceTests() =
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
 
-            Assert.That(runAsync (store.BeginClaim(worktree, "diff.html")), Is.EqualTo(None: string option))
-            runAsync (store.CancelClaim(worktree, "diff.html"))
+            let token = startClaim store worktree "diff.html"
+            runAsync (store.CancelClaim(worktree, "diff.html", token))
 
-            Assert.That(store.ClaimPending(worktree, "unrelated-session"), Is.Empty)
+            Assert.That(store.ClaimPending(worktree, token, "unrelated-session"), Is.EqualTo(None: string option))
             Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option)))
 
     [<Test>]
@@ -130,7 +153,9 @@ type PersistenceTests() =
                 Is.EqualTo(Some "session-a"),
                 "Starting recovery must preserve affinity until the replacement registers")
 
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "diff.html" ]))
+            Assert.That(
+                store.ClaimPending(worktree, reassignment.Token, "session-b"),
+                Is.EqualTo(Some "diff.html"))
             Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-b"))
 
             runAsync (store.CancelReassignment(worktree, "diff.html", reassignment.Token))
@@ -206,7 +231,7 @@ type PersistenceTests() =
 
             let failed =
                 run
-                    (fun () -> async { return Error "terminal failed" })
+                    (fun _ -> async { return Error "terminal failed" })
                     (fun _ -> async { return None })
 
             match failed with
@@ -216,10 +241,15 @@ type PersistenceTests() =
 
             let succeeded =
                 run
-                    (fun () -> async { return Ok () })
+                    (fun token ->
+                        async {
+                            Assert.That(
+                                store.ClaimPending(worktree, token, "session-b"),
+                                Is.EqualTo(Some "diff.html"))
+                            return Ok ()
+                        })
                     (fun _ ->
                         async {
-                            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "diff.html" ]))
                             return! store.GetOwner(worktree, "diff.html")
                         })
 
@@ -258,7 +288,7 @@ type PersistenceTests() =
             let agent, repoId, _, rootPaths = createDeleteContext dir worktree
             let viewer, identity = seedDiffIdentity diffStore worktree
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
-            Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
+            let beadsToken = startClaim store worktree "beads.html"
 
             let removeWorktreeState path =
                 async {
@@ -280,7 +310,7 @@ type PersistenceTests() =
             Assert.That(state.Repos[repoId].WorktreeList, Is.Empty)
             let restarted = createStore filePath
             Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option))
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.Empty)
+            Assert.That(store.ClaimPending(worktree, beadsToken, "session-b"), Is.EqualTo(None: string option))
             Assert.That(
                 runAsync (diffStore.Resolve(worktree, viewer, identity)),
                 Is.EqualTo(
@@ -300,7 +330,7 @@ type PersistenceTests() =
             let agent, repoId, worktreeInfo, rootPaths = createDeleteContext dir worktree
             let viewer, identity = seedDiffIdentity diffStore worktree
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
-            Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
+            let beadsToken = startClaim store worktree "beads.html"
 
             let removeWorktreeState path =
                 async {
@@ -325,7 +355,9 @@ type PersistenceTests() =
             Assert.That(state.Repos[repoId].WorktreeList, Is.EqualTo([ worktreeInfo ]))
             let restarted = createStore filePath
             Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "beads.html" ]))
+            Assert.That(
+                store.ClaimPending(worktree, beadsToken, "session-b"),
+                Is.EqualTo(Some "beads.html"))
             Assert.That(
                 runAsync (diffStore.Resolve(worktree, viewer, identity))
                 |> Option.map (fun (mergeBase, file, entry) ->
@@ -368,12 +400,17 @@ type PersistenceTests() =
             let store = createStore filePath
 
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
-            Assert.That(Result.isOk (runAsync (store.BeginReassignment(worktree, "diff.html"))), Is.True)
+            let reassignment =
+                match runAsync (store.BeginReassignment(worktree, "diff.html")) with
+                | Ok value -> value
+                | Error err -> failwith err
 
             runAsync (store.Prune(Set.singleton worktree))
 
             Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "diff.html" ])))
+            Assert.That(
+                store.ClaimPending(worktree, reassignment.Token, "session-b"),
+                Is.EqualTo(Some "diff.html")))
 
     [<Test>]
     member _.``prune removes a pending claim when its view is missing``() =
@@ -381,7 +418,7 @@ type PersistenceTests() =
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
 
-            Assert.That(runAsync (store.BeginClaim(worktree, "diff.html")), Is.EqualTo(None: string option))
+            let token = startClaim store worktree "diff.html"
             runAsync (store.Prune(Set.singleton worktree))
 
-            Assert.That(store.ClaimPending(worktree, "session-a"), Is.Empty))
+            Assert.That(store.ClaimPending(worktree, token, "session-a"), Is.EqualTo(None: string option)))

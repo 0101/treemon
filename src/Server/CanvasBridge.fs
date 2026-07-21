@@ -168,7 +168,12 @@ let private registryKeyFor (normalizedWorktree: string) (sessionId: string optio
     | Some sid -> "sid:" + sid
     | None -> "wt:" + normalizedWorktree
 
-let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
+let private registerSessionCore
+    (worktreePath: string)
+    (injectUrl: string)
+    (sessionId: string option)
+    (claimToken: Guid option)
+    =
     // Defense-in-depth: a blank/whitespace sessionId from any caller collapses to None, so
     // entry.SessionId is never Some "" (see normalizeSessionId). The HTTP boundary normalizes
     // too, but every registration funnels through here.
@@ -177,14 +182,14 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
     let key = registryKeyFor worktreeKey sessionId
     let existing = sessionRegistry.TryGetValue(key)
 
-    match sessionId, existing with
-    | Some sid, (false, _) ->
-        // Only a newly seen session can be the one deliberately launched for a pending
-        // interaction. Re-registration of an existing session is a heartbeat refresh.
-        let claimed = CanvasInteractionOwnership.claimPending worktreeKey sid
-        if not (List.isEmpty claimed) then
-            let names = String.concat ", " claimed
-            Log.log "CanvasBridge" $"Session {sid} claimed SystemView interaction target(s): {names}"
+    match sessionId, claimToken with
+    | Some sid, Some token ->
+        // The launch token is inherited only by the session deliberately started for one
+        // SystemView. A normal heartbeat has no token and cannot consume any pending claim.
+        match CanvasInteractionOwnership.claimPending worktreeKey token sid with
+        | Some filename ->
+            Log.log "CanvasBridge" $"Session {sid} claimed SystemView interaction target: {filename}"
+        | None -> ()
     | _ -> ()
 
     let entry =
@@ -202,6 +207,17 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
     Log.log "CanvasBridge" $"Session registered {worktreeKey} (key={key}) -> {injectUrl} (session registry size: {sessionRegistry.Count})"
     // The message queue stays keyed by worktree path, so drain to the new entry by worktree key.
     drainQueue worktreeKey entry
+
+let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
+    registerSessionCore worktreePath injectUrl sessionId None
+
+let internal registerSessionForClaim
+    (worktreePath: string)
+    (injectUrl: string)
+    (sessionId: string option)
+    (claimToken: Guid)
+    =
+    registerSessionCore worktreePath injectUrl sessionId (Some claimToken)
 
 let registerPoll (worktreePath: string) =
     let key = normalizePath worktreePath

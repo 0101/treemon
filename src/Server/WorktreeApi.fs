@@ -14,6 +14,12 @@ open Server.GlobalConfig
 let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 let private canvasRegistrationTimeout = TimeSpan.FromSeconds 15.0
 
+let private canvasSpawnKey (worktreePath: string) (filename: string) =
+    $"{Server.PathUtils.normalizePath worktreePath}\u0000{filename.ToLowerInvariant()}"
+
+let private withCanvasClaimToken (token: Guid) command =
+    $"$env:TREEMON_CANVAS_CLAIM_TOKEN = '{token:N}'; {command}"
+
 let private ownerUnavailable filename reason =
     CanvasMessageResult.OwnerUnavailable(
         $"Could not resume the interaction session for {filename}: {reason}. "
@@ -60,7 +66,7 @@ let internal waitForInteractionOwnerChange
 let internal startFreshSystemViewWith
     (beginReassignment: unit -> Async<Result<CanvasInteractionOwnership.Reassignment, string>>)
     (cancelReassignment: Guid -> Async<unit>)
-    (launch: unit -> Async<Result<unit, string>>)
+    (launch: Guid -> Async<Result<unit, string>>)
     (waitForReplacement: string option -> Async<string option>)
     (filename: string)
     =
@@ -68,7 +74,7 @@ let internal startFreshSystemViewWith
         match! beginReassignment () with
         | Error err -> return Error err
         | Ok reassignment ->
-            match! launch () |> Async.Catch with
+            match! launch reassignment.Token |> Async.Catch with
             | Choice2Of2 ex ->
                 do! cancelReassignment reassignment.Token
                 return Error $"Could not start a fresh interaction session for {filename}: {ex.Message}"
@@ -788,29 +794,41 @@ let worktreeApi
                   | CanvasMessageResult.Queued ->
                       let path = WorktreePath.value request.WorktreePath
                       let kind = CanvasDocKinds.classify request.Filename
-                      let! owner =
-                          match kind with
-                          | AgentDoc -> CanvasBridge.getTargetOwner path request.Filename
-                          | SystemView ->
-                              // Mark an unclaimed generated view before launching. The first
-                              // identified bridge registration claims this exact view before
-                              // CanvasBridge drains its queued interaction.
-                              CanvasInteractionOwnership.beginClaim path request.Filename
-                      let guardKey = path
+                      let guardKey = canvasSpawnKey path request.Filename
                       if canvasSpawnInFlight.TryAdd(guardKey, true) then
                           let launchFlow =
                               async {
+                                  let! owner, initialClaimToken =
+                                      match kind with
+                                      | AgentDoc ->
+                                          async {
+                                              let! owner = CanvasBridge.getTargetOwner path request.Filename
+                                              return owner, None
+                                          }
+                                      | SystemView ->
+                                          async {
+                                              match! CanvasInteractionOwnership.beginClaim path request.Filename with
+                                              | CanvasInteractionOwnership.ExistingOwner owner ->
+                                                  return Some owner, None
+                                              | CanvasInteractionOwnership.ClaimStarted token ->
+                                                  return None, Some token
+                                          }
+
                                   let provider = CodingToolStatus.readConfiguredProvider path
                                   // Open a new tab in the live session window when one is tracked, and
                                   // spawn only when none exists (launchAction semantics). This path is
                                   // reached automatically by a canvas-iframe postMessage and has no
                                   // resume identity to preserve, so it must never kill a live session
                                   // window by path the way spawnSession (via spawnAndTrack) does.
-                                  let startOrContinueSession () =
+                                  let startOrContinueSession claimToken =
                                       async {
                                           let prompt = CanvasPrompt.continueWorking path request.Filename
-                                          let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-                                          return! SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString
+                                          let baseCommand = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                                          let command =
+                                              claimToken
+                                              |> Option.map (fun token -> withCanvasClaimToken token baseCommand.AsShellString)
+                                              |> Option.defaultValue baseCommand.AsShellString
+                                          return! SessionManager.launchAction sessionAgent request.WorktreePath command
                                       }
                                   match owner with
                                   | Some ownerSessionId ->
@@ -828,7 +846,7 @@ let worktreeApi
                                               Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
                                           | Error err ->
                                               Log.log "API" $"sendCanvasMessage: resume failed ({err}), starting/continuing session for {request.Filename}"
-                                              let! _ = startOrContinueSession ()
+                                              let! _ = startOrContinueSession None
                                               ()
                                           return result
                                       | SystemView ->
@@ -857,10 +875,13 @@ let worktreeApi
                                           return resumeOutcome
                                   | None ->
                                       Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, starting/continuing session"
-                                      let! launchResult = startOrContinueSession ()
+                                      let! launchResult = startOrContinueSession initialClaimToken
                                       match kind, launchResult with
                                       | SystemView, Error err ->
-                                          do! CanvasInteractionOwnership.cancelClaim path request.Filename
+                                          match initialClaimToken with
+                                          | Some token ->
+                                              do! CanvasInteractionOwnership.cancelClaim path request.Filename token
+                                          | None -> ()
                                           Log.log "API" $"sendCanvasMessage: launch failed ({err}); cancelled pending claim for {request.Filename}"
                                           return CanvasMessageResult.Error $"Could not start an interaction session for {request.Filename}: {err}"
                                       | SystemView, Ok () ->
@@ -873,7 +894,10 @@ let worktreeApi
                                           match claimedOwner with
                                           | Some _ -> return result
                                           | None ->
-                                              do! CanvasInteractionOwnership.cancelClaim path request.Filename
+                                              match initialClaimToken with
+                                              | Some token ->
+                                                  do! CanvasInteractionOwnership.cancelClaim path request.Filename token
+                                              | None -> ()
                                               return CanvasMessageResult.Error $"The interaction session for {request.Filename} did not register with Treemon before the timeout"
                                       | _ -> return result
                               }
@@ -883,7 +907,7 @@ let worktreeApi
                           finally
                               canvasSpawnInFlight.TryRemove(guardKey) |> ignore
                       else
-                          Log.log "API" $"sendCanvasMessage: resume/spawn already in flight for {path}, skipping"
+                          Log.log "API" $"sendCanvasMessage: resume/spawn already in flight for {request.Filename} in {path}, skipping"
                           return result
                   | _ -> return result
               }
@@ -899,7 +923,7 @@ let worktreeApi
                               return Error $"Invalid canvas filename: {request.Filename}"
                           | Ok viewPath when not (File.Exists viewPath) ->
                               return Error $"Canvas view not found: {request.Filename}"
-                          | Ok _ when canvasSpawnInFlight.TryAdd(path, true) ->
+                          | Ok _ when canvasSpawnInFlight.TryAdd(canvasSpawnKey path request.Filename, true) ->
                               try
                                   let provider = CodingToolStatus.readConfiguredProvider path
                                   let prompt = CanvasPrompt.continueWorking path request.Filename
@@ -929,11 +953,15 @@ let worktreeApi
                                       startFreshSystemViewWith
                                           (fun () -> CanvasInteractionOwnership.beginReassignment path request.Filename)
                                           (fun token -> CanvasInteractionOwnership.cancelReassignment path request.Filename token)
-                                          (fun () -> SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString)
+                                          (fun token ->
+                                              SessionManager.launchAction
+                                                  sessionAgent
+                                                  request.WorktreePath
+                                                  (withCanvasClaimToken token command.AsShellString))
                                           waitForReplacement
                                           request.Filename
                               finally
-                                  canvasSpawnInFlight.TryRemove(path) |> ignore
+                                  canvasSpawnInFlight.TryRemove(canvasSpawnKey path request.Filename) |> ignore
                           | Ok _ ->
                               return Error $"A canvas session start is already in progress for {path}"
                   })

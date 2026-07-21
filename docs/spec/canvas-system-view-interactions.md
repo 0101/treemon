@@ -28,18 +28,20 @@ Interaction ownership is stored separately from `CanvasDocOwnership` because gen
 For an owned SystemView whose bridge is offline, Treemon resumes the persisted owner and waits for
 a newer registration from that exact session. Spawn failure or registration timeout returns a
 recoverable owner-unavailable result to the pane. The user-approved start-fresh path records an
-in-memory reassignment claim without deleting the durable owner; a newly seen identified session
-atomically replaces and persists that owner before queue draining. Cancelling or timing out the
+in-memory reassignment claim without deleting the durable owner; the identified session registering
+with that reassignment's launch token atomically replaces and persists the owner before queue
+draining. Cancelling or timing out the
 claim leaves the previous owner unchanged. While the reassignment claim is pending, owner resolution
 for delivery returns no target so a late heartbeat from the old session cannot consume the queued
 interaction before the replacement claims it.
 
-The pending claim is in-memory and keyed by normalized worktree plus SystemView filename; the
-durable owner is persisted in `data/canvas-interaction-owners.json`. An identified bridge
-registration for the session deliberately started or continued for the interaction atomically claims
-all pending views for its worktree before queue draining. Periodic heartbeat re-registration from an
-already-running co-located session must not steal a pending claim; only a newly seen identified
-session registration may consume one. SystemView queue entries re-resolve
+The pending claim is in-memory and keyed by normalized worktree plus SystemView filename, with an
+opaque launch token; the durable owner is persisted in `data/canvas-interaction-owners.json`.
+Treemon passes that token only to the deliberately launched or continued session, whose bridge
+returns it in `/api/canvas/register`. Registration atomically claims only the matching pending view
+before queue draining. Tokenless periodic heartbeat registrations cannot steal a pending claim, and
+concurrent launches for `diff.html` and `beads.html` remain independently correlated. SystemView
+queue entries re-resolve
 the current interaction owner when drained, never drain anonymously while unclaimed, and therefore
 honor an explicit reassignment made after enqueue. Scheduler reconciliation prunes owners whose
 worktree is no longer known or whose generated view file no longer exists. Explicit worktree-removal
@@ -64,9 +66,9 @@ The shared transport treats `window.parent === window` as unavailable unless a t
 - Ownership persists until explicit reassignment or view/worktree removal; session termination alone does not release it.
 - Conversation affinity wins over automatic availability: an unavailable owner is never reassigned automatically. The pane surfaces the failure and requires the user to choose **Start fresh and reassign**.
 - Reassignment is committed only by a new identified bridge registration. Until then the old durable owner remains authoritative, so failed launches and registration timeouts are safe to retry.
-- The session deliberately started or continued for an unclaimed interaction claims the view before
-  draining; heartbeat refreshes from other sessions cannot claim it, and later registrations cannot
-  overwrite it.
+- The session deliberately started or continued for an unclaimed interaction receives an opaque
+  launch token and claims only that token's view before draining; tokenless heartbeat refreshes
+  cannot claim it, and later registrations cannot overwrite it.
 - Explicit assignment uses the existing ownership endpoint/tool, but dispatches to the separate
   interaction store for SystemViews.
 - All SystemViews receive the generic runtime. View-specific behavior is limited to structured metadata enrichment.

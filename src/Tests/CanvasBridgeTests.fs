@@ -25,6 +25,12 @@ let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
 
+let private startSystemViewClaim path filename =
+    match runAsync (Server.CanvasInteractionOwnership.beginClaim path filename) with
+    | Server.CanvasInteractionOwnership.ClaimStarted token -> token
+    | Server.CanvasInteractionOwnership.ExistingOwner owner ->
+        failwith $"Expected a pending claim for {filename}, but it is owned by {owner}"
+
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
 // It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
 // admin rights are needed on Windows. Each received request body is recorded and a
@@ -741,7 +747,7 @@ type SystemViewInteractionRoutingTests() =
                 Is.Empty,
                 "A pending explicit reassignment must freeze delivery to the old owner")
 
-            registerSession path replacementSink.Url (Some replacementSid)
+            registerSessionForClaim path replacementSink.Url (Some replacementSid) reassignment.Token
 
             Assert.That(
                 SpinWait.SpinUntil((fun () -> replacementSink.Bodies = [ "recover-me" ]), TimeSpan.FromSeconds 5.0),
@@ -787,9 +793,7 @@ type SystemViewInteractionRoutingTests() =
             registerSession path sinkB.Url (Some sidB)
             Assert.That(sinkB.Bodies, Is.Empty)
 
-            Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.beginClaim path "diff.html"),
-                Is.EqualTo(None: string option))
+            let claimToken = startSystemViewClaim path "diff.html"
 
             // B was already registered when the interaction launch began, so its periodic
             // re-registration is only a heartbeat: it cannot claim or drain the pending view.
@@ -800,7 +804,7 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(sinkB.Bodies, Is.Empty)
 
             // Registration claims the target synchronously before drainQueue runs.
-            registerSession path sinkA.Url (Some sidA)
+            registerSessionForClaim path sinkA.Url (Some sidA) claimToken
             Assert.That(
                 SpinWait.SpinUntil((fun () -> List.length sinkA.Bodies = 1), TimeSpan.FromSeconds 5.0),
                 Is.True,
@@ -836,6 +840,64 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(third, Is.EqualTo(CanvasMessageResult.Ok))
             Assert.That(sinkA.Bodies, Is.EqualTo([ "p1"; "p2" ]))
             Assert.That(sinkB.Bodies, Is.EqualTo([ "p3" ])))
+
+    [<Test>]
+    member _.``concurrent diff and beads launches claim and drain only their matching view``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use diffSink = new HttpSink(ports[0])
+            use beadsSink = new HttpSink(ports[1])
+            diffSink.Start()
+            beadsSink.Start()
+
+            let path = Path.Combine(Environment.CurrentDirectory, $"system-concurrent-{Guid.NewGuid():N}")
+            let diffSid = uniqueSid "diff"
+            let beadsSid = uniqueSid "beads"
+
+            let diffQueued =
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "diff.html"
+                          Payload = "diff-payload" })
+
+            let beadsQueued =
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "beads.html"
+                          Payload = "beads-payload" })
+
+            Assert.That(diffQueued, Is.EqualTo(CanvasMessageResult.Queued))
+            Assert.That(beadsQueued, Is.EqualTo(CanvasMessageResult.Queued))
+
+            let diffToken = startSystemViewClaim path "diff.html"
+            let beadsToken = startSystemViewClaim path "beads.html"
+
+            registerSessionForClaim path diffSink.Url (Some diffSid) diffToken
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> diffSink.Bodies = [ "diff-payload" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The diff launch must drain only diff.html")
+            Assert.That(beadsSink.Bodies, Is.Empty)
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "beads.html"),
+                Is.EqualTo(None: string option))
+
+            registerSessionForClaim path beadsSink.Url (Some beadsSid) beadsToken
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> beadsSink.Bodies = [ "beads-payload" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The beads launch must drain the independently correlated beads.html interaction")
+            Assert.That(diffSink.Bodies, Is.EqualTo([ "diff-payload" ]))
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some diffSid))
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "beads.html"),
+                Is.EqualTo(Some beadsSid)))
 
 
 // ── scanner fallback-only attribution (RefreshScheduler.CanvasWatchers) ──────

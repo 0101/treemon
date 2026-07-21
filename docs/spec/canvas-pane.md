@@ -125,7 +125,8 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 ### Bridge Protocol
 
 - The session bridge is the extension process started inside a coding session.
-- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, and `sessionId`.
+- It calls `POST /api/canvas/register` with `worktreePath`, `injectUrl`, `sessionId`, and an optional
+  `claimToken` inherited only by a deliberately launched SystemView interaction session.
 - Registration is loopback-only: `/api/canvas/register` accepts an `injectUrl` only when it is an absolute `http(s)` URL whose host is a loopback IP (`IPAddress.IsLoopback`) or the literal `localhost` (rejected `400` otherwise), and only for a known worktree (`isKnownWorktree`, mirroring the heartbeat and doc routes; unknown worktree → `404`). The route is wired with the scheduler agent, so demo mode (no agent) omits it entirely.
 - After startup it re-registers every 30 seconds as a heartbeat.
 - Failed extension heartbeats back off exponentially up to 120 seconds, then reset after reconnect.
