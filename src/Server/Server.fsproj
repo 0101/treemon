@@ -43,6 +43,7 @@
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="IdiomorphScript.fs" />
+    <Compile Include="CanvasSelectionScript.fs" />
     <Compile Include="CanvasDocServer.fs" />
     <Compile Include="SessionActivityService.fs" />
     <Compile Include="HttpSecurity.fs" />
@@ -55,6 +56,9 @@
          from disk; the two cannot drift. -->
     <EmbeddedResource Include="BeadspaceTemplate.html">
       <LogicalName>BeadspaceTemplate.html</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-selection-context.js">
+      <LogicalName>CanvasSelectionContext.js</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 

@@ -561,8 +561,10 @@ function Install-Skill {
 function Install-CopilotExtension([string]$SrcDir, [string]$DestName, [string]$FriendlyName) {
     $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $SrcDir "extension.mjs") $dest -Force
-    Copy-Item (Join-Path $SrcDir "package.json") $dest -Force
+    @("extension.mjs", "package.json", "canvas-selection-context.js") | ForEach-Object {
+        $source = Join-Path $SrcDir $_
+        if (Test-Path $source) { Copy-Item $source $dest -Force }
+    }
     Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
 }
 

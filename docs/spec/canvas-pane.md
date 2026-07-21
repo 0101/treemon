@@ -29,6 +29,7 @@ The session-document machinery exists for an interactive document authored and o
 | Liveness dot | yes | no |
 | `▶ Start session` button | yes | no |
 | Message bridge (heartbeat + session routing) | yes | no |
+| Selected-text Explain / Remove / Comment actions | yes | no |
 | DOM morph (idiomorph runtime + controller + signal) | yes | no |
 | Content-hash awareness (unviewed badge, auto-display, card notification) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
 | Archive button | yes | no (server-regenerated, not user-owned) |
@@ -98,7 +99,11 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 
 ### Message Flow
 
-- A canvas doc sends interaction data with `window.parent.postMessage(...)`.
+- A canvas doc normally sends interaction data with injected `window.canvasSend(...)`; raw
+  `window.parent.postMessage(...)` remains the underlying contract.
+- Selecting AgentDoc text emits `canvas-selection` with Explain/Remove/Comment intent and ordered
+  surrounding context. The selected range pulses until the document updates or another selection
+  starts.
 - The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
@@ -127,7 +132,11 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
 - Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
-- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds receive scrollbar CSS, the canvas link interceptor, and the Escape focus-reclaim bridge (`reclaimFocusScript`, which posts `reclaim-focus` to the pane); an `AgentDoc` additionally receives the bridge heartbeat script, the idiomorph runtime, and the morph controller, whereas a `SystemView` receives none of those three.
+- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
+  receive the shared base style, link interceptor, and Escape focus-reclaim bridge. An `AgentDoc`
+  additionally receives the bridge heartbeat, `canvasSend`, `canvasExpand`, selected-text actions,
+  JS error reporting, idiomorph, and the morph controller. A `SystemView` receives none of that
+  owner-session machinery.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.

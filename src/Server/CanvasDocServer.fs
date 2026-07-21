@@ -232,14 +232,14 @@ let private linkInterceptor = "<script>document.addEventListener('click',functio
 /// Bridge Escape from a cross-origin canvas doc back to the dashboard's focus reclaim. The doc is a
 /// separate origin, so its keydown never reaches the pane's document-level focus-reclaim listener;
 /// this injected listener posts {action:'reclaim-focus'} on Escape (unless the key originated in an
-/// editable field — checked via e.target, which owns its own Escape). The pane routes it to the same
-/// Escape reclaim. Injected into both doc kinds — reclaim should work from any doc the user looks at.
+/// editable field — checked across the composed event path so inputs inside an injected shadow root
+/// keep their own Escape). The pane routes it to the same Escape reclaim. Injected into both doc kinds.
 let private reclaimFocusScript =
     [ "<script>document.addEventListener('keydown',function(e){"
       "if(e.key!=='Escape')return;"
-      "var t=e.target;"
-      "if(t){var n=(t.tagName||'').toUpperCase();"
-      "if(n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable)return}"
+      "var p=e.composedPath?e.composedPath():[e.target];"
+      "if(p.some(function(t){if(!t)return false;var n=(t.tagName||'').toUpperCase();"
+      "return n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable}))return;"
       "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
     |> String.concat ""
 
@@ -360,13 +360,10 @@ let private errorOverlayScript (filename: string) =
     |> String.concat ""
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
-/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper and
-/// its spinner style (canvasExpandStyle), the JS error overlay, and the idiomorph runtime +
-/// morph controller. `filename` is the doc being served: it is embedded into the error overlay
-/// so a doc-side error carries its own identity (the emitter), letting the pane attribute it
-/// correctly even when other docs are mounted as hidden iframes. It is unused for SystemViews
-/// (no overlay).
+/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally
+/// get the message-bridge heartbeat, canvasSend/canvasExpand helpers, the generic selected-text
+/// contextual actions, the JS error overlay, and the idiomorph runtime + morph controller.
+/// `filename` is embedded into the error overlay so a doc-side error carries its own identity.
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
@@ -375,7 +372,18 @@ let private errorOverlayScript (filename: string) =
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript
-    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript + bridgeScript + canvasSendScript + canvasExpandStyle + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc ->
+        CanvasExport.baseStyle
+        + linkInterceptor
+        + reclaimFocusScript
+        + bridgeScript
+        + canvasSendScript
+        + canvasExpandStyle
+        + canvasExpandScript
+        + CanvasSelectionScript.script
+        + errorOverlayScript filename
+        + IdiomorphScript.idiomorphJs
+        + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string

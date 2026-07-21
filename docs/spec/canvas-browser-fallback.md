@@ -11,7 +11,10 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
    - Serves `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
    - After the agent writes a canvas file, sends the serving URL to the session via `session.send()` (the native runtime no longer supports SDK hook callbacks, so `additionalContext` can't be injected from a tool event).
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
-3. **Same HTML, same API**: Canvas docs use `window.parent.postMessage(...)` in both modes. The transport shim intercepts self-posted messages in top-level browser windows and forwards via HTTP. Zero agent-side changes.
+3. **Same HTML, same API**: `canvasSend` is the primary authoring API and raw
+   `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
+   transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
+   changes.
 4. **Agent controls UX**: The agent decides whether to open the browser or output a ctrl+clickable URL.
 
 ## Technical Approach
@@ -51,9 +54,14 @@ same-origin transport shim posts `/_message` as `application/json`.
 
 ### Injected Scripts
 
-Browser-mode docs receive two scripts injected before `</head>`:
+Browser-mode AgentDocs receive three scripts injected before `</head>`:
 
 - **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
+- **Selected-text contextual actions** — the same canonical runtime the Treemon doc server embeds,
+  using the raw size-checked `postMessage` fallback because browser mode has no pane-injected
+  `canvasSend`. Fallback HTML is unframeable (`frame-ancestors 'none'`), and the raw sender also
+  refuses to post when framed, so selected text cannot leak to an embedding page. `beads.html` is
+  excluded, matching its ownerless `SystemView` classification.
 - **Content-polling reload** — polls `/canvas/:filename/hash` every 3s and reloads the page when the hash changes.
 
 ### Canvas-write detection (session events)
@@ -80,6 +88,7 @@ via `session.send()`; in Treemon mode it declares ownership instead.
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — mode detection, HTTP serving, session-event canvas-write watcher, message endpoint
+- `src/Extension/extension.mjs` — mode detection, HTTP serving, runtime injection, session-event canvas-write watcher, message endpoint
+- `src/Extension/canvas-selection-context.js` — canonical selected-text interaction runtime shared with the server
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

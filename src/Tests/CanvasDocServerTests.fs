@@ -47,6 +47,11 @@ let private canvasExpandMarker = "window.canvasExpand=" // unique to canvasExpan
 let private expandActionMarker = "'expand-section'"     // the action canvasExpand posts (skill + client contract)
 let private spinnerMarker = "canvas-spinner"            // the themed spinner the helper swaps the button for
 
+// ── Injected selected-text contextual actions markers ────────────────────────
+let private selectionContextMarker = "__canvasSelectionContextInstalled"
+let private selectionActionMarker = "'canvas-selection'"
+let private selectionProcessingMarker = "canvas-selection-processing-pulse"
+
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
 
@@ -224,6 +229,51 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(canvasExpandMarker),
                     "A system view has no owner session to expand into, so canvasExpand is omitted")
+
+    [<Test>]
+    member _.``AgentDoc injection includes selected-text contextual actions and processing highlight``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionProcessingMarker))
+
+    [<Test>]
+    member _.``SystemView injection omits selected-text contextual actions``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Not.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Not.Contain(selectionActionMarker))
+
+    [<Test>]
+    member _.``selection payload keeps surrounding context in reading order and comments are not duplicated``() =
+        let source = CanvasSelectionScript.source
+        let before = source.IndexOf("contextBefore: state.contextBefore")
+        let selected = source.IndexOf("selectedText: state.selectedText")
+        let after = source.IndexOf("contextAfter: state.contextAfter")
+
+        Assert.That(before, Is.GreaterThanOrEqualTo(0))
+        Assert.That(selected, Is.GreaterThan(before))
+        Assert.That(after, Is.GreaterThan(selected))
+        Assert.That(source, Does.Not.Contain("payload.comment"))
+        Assert.That(source, Does.Contain("return 'User commented: ' + comment"))
+
+    [<Test>]
+    member _.``server embeds the canonical extension selection runtime without drift``() =
+        let runtimePath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-selection-context.js"))
+        let runtime = File.ReadAllText(runtimePath)
+        Assert.That(CanvasSelectionScript.source, Is.EqualTo(runtime))
+
+    [<Test>]
+    member _.``browser fallback loads the canonical selection runtime and skips beads``() =
+        let extensionPath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "extension.mjs"))
+        let extension = File.ReadAllText(extensionPath)
+
+        Assert.That(extension, Does.Contain("canvas-selection-context.js"))
+        Assert.That(extension, Does.Contain("filename.toLowerCase() === \"beads.html\" ? \"\""))
+        Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
+        Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
+        Assert.That(CanvasSelectionScript.source, Does.Contain("if (window.parent !== window)"))
 
     [<Test>]
     member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =
