@@ -166,6 +166,91 @@ type FoldStatusTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type FoldIntentTests() =
+
+    [<Test>]
+    member _.``IntentReported records the intent without changing status``() =
+        let i = msg "investigating the fold" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ TurnStarted; IntentReported i ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.Intent, Is.EqualTo(Some i))
+
+    [<Test>]
+    member _.``A re-reported identical intent keeps the original change-time``() =
+        let first = msg "running the tests" "2026-03-01T10:00:00Z"
+        let again = msg "running the tests" "2026-03-01T10:05:00Z"
+        // Same text -> the timestamp must reflect when the intent last CHANGED (first), not the re-report.
+        let s = foldMany emptyStatus [ IntentReported first; IntentReported again ]
+        Assert.That(s.Intent, Is.EqualTo(Some first))
+
+    [<Test>]
+    member _.``A changed intent updates both text and change-time``() =
+        let first = msg "planning" "2026-03-01T10:00:00Z"
+        let second = msg "executing" "2026-03-01T10:05:00Z"
+        let s = foldMany emptyStatus [ IntentReported first; IntentReported second ]
+        Assert.That(s.Intent, Is.EqualTo(Some second))
+
+    [<Test>]
+    member _.``Intent is retained across going Idle``() =
+        let i = msg "wrapping up" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ IntentReported i; WentIdle ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
+        Assert.That(s.Intent, Is.EqualTo(Some i))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FoldTitleTests() =
+
+    [<Test>]
+    member _.``TitleReported records the title without changing status``() =
+        let t = msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ TurnStarted; TitleReported t ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.Title, Is.EqualTo(Some t))
+
+    [<Test>]
+    member _.``TitleBootstrap records the title without changing status``() =
+        let t = msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z"
+        let s = foldMany emptyStatus [ TurnStarted; TitleBootstrap t ]
+        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Working))
+        Assert.That(s.Title, Is.EqualTo(Some t))
+
+    [<Test>]
+    member _.``A re-reported identical title keeps the original change-time``() =
+        let first = msg "Fix the auth bug" "2026-03-01T10:00:00Z"
+        let again = msg "Fix the auth bug" "2026-03-01T10:05:00Z"
+        let s = foldMany emptyStatus [ TitleReported first; TitleReported again ]
+        Assert.That(s.Title, Is.EqualTo(Some first))
+
+    [<Test>]
+    member _.``An older bootstrap cannot overwrite a newer live title``() =
+        let older = msg "Older snapshot" "2026-03-01T10:00:00Z"
+        let newer = msg "New live title" "2026-03-01T10:05:00Z"
+        let s = foldMany emptyStatus [ TitleReported newer; TitleBootstrap older ]
+        Assert.That(s.Title, Is.EqualTo(Some newer))
+
+    [<Test>]
+    member _.``effectiveActivity prefers whichever of intent or title changed most recently``() =
+        let older = msg "older intent" "2026-03-01T10:00:00Z"
+        let newer = msg "newer title" "2026-03-01T10:05:00Z"
+        let intentFresher = { emptyStatus with Intent = Some newer; Title = Some older }
+        let titleFresher = { emptyStatus with Intent = Some older; Title = Some newer }
+        Assert.That(effectiveActivity intentFresher, Is.EqualTo(Some(AgentActivity.Intent(newer.Text, newer.At))))
+        Assert.That(effectiveActivity titleFresher, Is.EqualTo(Some(AgentActivity.SessionTitle(newer.Text, newer.At))))
+
+    [<Test>]
+    member _.``effectiveActivity falls back to whichever single value is present``() =
+        let only = msg "only one set" "2026-03-01T10:00:00Z"
+        Assert.That(effectiveActivity { emptyStatus with Intent = Some only }, Is.EqualTo(Some(AgentActivity.Intent(only.Text, only.At))))
+        Assert.That(effectiveActivity { emptyStatus with Title = Some only }, Is.EqualTo(Some(AgentActivity.SessionTitle(only.Text, only.At))))
+        Assert.That(effectiveActivity emptyStatus, Is.EqualTo(None))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type FoldSkillTests() =
 
     [<Test>]
@@ -280,6 +365,8 @@ type FreshnessTests() =
         let rich =
             { Status = SessionLevelStatus.WaitingForUser
               Skill = Some "review"
+              Intent = None
+              Title = None
               LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z")
               ContextUsage = None }
@@ -335,6 +422,8 @@ type PickActiveTests() =
         let winner =
             { Status = SessionLevelStatus.Working
               Skill = Some "bd-execute"
+              Intent = None
+              Title = None
               LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
               LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z")
               ContextUsage = None }

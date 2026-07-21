@@ -2,7 +2,9 @@
   "private": true,
   "scripts": {
     "start": "dotnet fable src/Client --outDir src/Client/output --watch --run npx vite",
-    "build": "dotnet fable src/Client --outDir src/Client/output --noCache && npx vite build"
+    "build": "dotnet fable src/Client --outDir src/Client/output --noCache && npx vite build",
+    "test:extension": "node --test src/Extension/*.test.mjs src/Extension/reporting/*.test.mjs",
+    "test:reporting": "node --test src/Extension/reporting/*.test.mjs"
   },
   "devDependencies": {
     "gifsicle": "^7.0.1",

@@ -1,5 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
+import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
@@ -13,16 +14,19 @@ import { randomUUID } from "node:crypto";
 // pure state machine with no branches for sub-agents or skill injections:
 //   * sub-agent events (any event carrying `agentId`) are dropped;
 //   * a skill's own `<skill-context>` injection (a `user.message` tagged `source: skill-*`) is dropped;
-//   * only the ~8 relevant SDK event types are mapped — everything else is ignored.
+//   * only the relevant SDK event types are mapped — everything else is ignored.
 //
 // The wire contract (the single coupling point with the F# handler, Server/SessionActivityService.fs):
 //   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, currentTokens?, tokenLimit? }
-// where `kind` is exactly one of the eight the fold consumes and maps 1:1 onto its SessionEvent union:
+// where `kind` is one of the closed set mapped 1:1 onto the server's SessionEvent union:
 //   assistant.turn_start   -> turn_started
 //   user.message (genuine) -> user_prompt         (message required)
 //   assistant.message      -> assistant_message   (message required)
 //   skill.invoked          -> skill_invoked        (skillName required)
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
+//   assistant.intent       -> intent_reported     (message = the intent text, required)
+//   session.title_changed  -> title_reported      (message = the session title, required)
+//   metadata.snapshot      -> title_bootstrap     (message = the persisted session summary, required)
 //   assistant.turn_end     -> turn_ended
 //   session.idle           -> went_idle
 //   session.usage_info     -> usage_info           (currentTokens + tokenLimit; a status-preserving context-window gauge)
@@ -54,13 +58,8 @@ const TREEMON_FETCH_TIMEOUT_MS = 5000;
 // is not wrongly decayed to Idle. Within the spec's ~30–120s band.
 const HEARTBEAT_INTERVAL_MS = 60000;
 
-// Only ever displayed as <=120 chars server-side; this cap only bounds the wire payload for a runaway
-// multi-KB message. The raw (untruncated within the cap) text is forwarded — the server owns display
-// truncation, keeping this extension a thin forwarder.
-const MAX_MESSAGE_CHARS = 2000;
-
-// The relevant SDK event types (the eight mapped kinds + the two ask_user "completed" events, which
-// are unmapped but close the ask_user window). ask_user in Copilot CLI 1.0.71+ emits
+// The relevant SDK event types plus the two ask_user "completed" events, which are unmapped but
+// close the ask_user window. ask_user in Copilot CLI 1.0.71+ emits
 // `elicitation.requested`/`elicitation.completed` (question in `data.message`); older builds emitted
 // `user_input.requested`/`user_input.completed` (question in `data.question`) — both shapes are
 // subscribed for forward/backward compat. `session.usage_info` is the context-window gauge (ephemeral
@@ -69,6 +68,8 @@ const MAX_MESSAGE_CHARS = 2000;
 const SUBSCRIBED_TYPES = [
   "assistant.turn_start",
   "assistant.turn_end",
+  "assistant.intent",
+  "session.title_changed",
   "session.idle",
   "skill.invoked",
   "assistant.message",
@@ -113,7 +114,7 @@ function statusForKind(kind) {
     case "went_idle":
       return "idle";
     default:
-      return null; // skill_invoked sets the skill, not the status
+      return null; // skill/activity/bootstrap/gauge reports do not change status
   }
 }
 
@@ -162,24 +163,31 @@ function postReport(report) {
 
 // --- Event mapping -----------------------------------------------------------------------------
 
-function cap(text) {
-  const s = String(text ?? "");
-  return s.length > MAX_MESSAGE_CHARS ? s.slice(0, MAX_MESSAGE_CHARS) : s;
-}
-
 function base(event, kind) {
-  return {
-    sessionId,
-    worktreePath,
-    provider: PROVIDER,
-    eventId: event.id,
-    occurredAt: event.timestamp,
+  return buildReport(
+    {
+      sessionId,
+      worktreePath,
+      provider: PROVIDER,
+      eventId: event.id,
+      occurredAt: event.timestamp,
+    },
     kind,
-  };
+  );
 }
 
-function message(text, at) {
-  return { text: cap(text), at };
+function messageReport(event, kind, text) {
+  return buildNonBlankMessageReport(
+    {
+      sessionId,
+      worktreePath,
+      provider: PROVIDER,
+      eventId: event.id,
+      occurredAt: event.timestamp,
+    },
+    kind,
+    text,
+  );
 }
 
 // A skill's own context injection arrives as a `user.message` tagged with BOTH a `source` of
@@ -210,13 +218,22 @@ function mapEvent(event) {
       return name ? { ...base(event, "skill_invoked"), skillName: name } : null;
     }
     case "assistant.message": {
-      const text = String(data.content ?? "");
-      return text.trim() ? { ...base(event, "assistant_message"), message: message(text, event.timestamp) } : null;
+      return messageReport(event, "assistant_message", data.content);
+    }
+    case "assistant.intent": {
+      // The agent's short description of what it's currently doing/planning. Blank is dropped so a
+      // "cleared" intent never regresses the card — the last non-empty intent is retained.
+      return messageReport(event, "intent_reported", data.intent);
+    }
+    case "session.title_changed": {
+      // The session's rolling title/summary — the same text the CLI shows in its tab. The server
+      // combines it with the intent (freshest of the two wins), so a fresh title supersedes a stale
+      // intent. Blank is dropped (nothing to show).
+      return messageReport(event, "title_reported", data.title);
     }
     case "user.message": {
       if (isSkillContextInjection(data)) return null;
-      const text = String(data.content ?? "");
-      return text.trim() ? { ...base(event, "user_prompt"), message: message(text, event.timestamp) } : null;
+      return messageReport(event, "user_prompt", data.content);
     }
     case "session.usage_info": {
       // The context-window gauge: currentTokens of tokenLimit. Status-preserving (statusForKind
@@ -233,10 +250,8 @@ function mapEvent(event) {
       // ask_user in Copilot CLI 1.0.71+ emits elicitation.requested carrying the prompt in
       // `data.message`; older builds emitted user_input.requested carrying it in `data.question`.
       // Accept either shape so the ask_user question surfaces as LastAssistantMessage.
-      const question = String(data.message ?? data.question ?? "");
-      return question.trim()
-        ? { ...base(event, "awaiting_user_input"), message: message(question, event.timestamp) }
-        : base(event, "awaiting_user_input");
+      return messageReport(event, "awaiting_user_input", data.message ?? data.question)
+        ?? base(event, "awaiting_user_input");
     }
     default:
       return null;
@@ -326,7 +341,19 @@ if (!sessionId) {
 // Subscribe to the live stream first so no event is missed, then replay history. Overlap between the
 // two is harmless: the server dedupes on eventId, and the newest-wins status guard keeps live status
 // from being rewound by older replayed events.
-const unsubscribes = SUBSCRIBED_TYPES.map((type) => session.on(type, (event) => handle(event)));
+let liveTitleSeen = false;
+const unsubscribes = SUBSCRIBED_TYPES.map((type) =>
+  session.on(type, (event) => {
+    if (
+      event.type === "session.title_changed" &&
+      !event.agentId &&
+      String(event.data?.title ?? "").trim()
+    ) {
+      liveTitleSeen = true;
+    }
+    handle(event);
+  }),
+);
 
 try {
   const history = await session.getEvents();
@@ -369,3 +396,23 @@ const cleanup = () => {
 };
 process.on("SIGTERM", cleanup);
 process.on("SIGINT", cleanup);
+
+void (async () => {
+  try {
+    const snapshot = await session.rpc.metadata.snapshot();
+    const report = buildNonBlankMessageReport(
+      {
+        sessionId,
+        worktreePath,
+        provider: PROVIDER,
+        eventId: randomUUID(),
+        occurredAt: new Date().toISOString(),
+      },
+      "title_bootstrap",
+      snapshot?.summary,
+    );
+    if (!liveTitleSeen && report) postReport(report);
+  } catch (err) {
+    log(`metadata title bootstrap failed: ${err?.message ?? err}`);
+  }
+})();
