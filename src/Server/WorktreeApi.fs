@@ -447,9 +447,15 @@ let internal deleteWorktreeWith
     }
 
 let private deleteWorktree agent rootPaths wtPath =
+    let removeWorktreeState path =
+        async {
+            do! CanvasInteractionOwnership.removeWorktree path
+            do! WorktreeDiffApi.removeWorktree path
+        }
+
     deleteWorktreeWith
         GitWorktree.removeWorktree
-        CanvasInteractionOwnership.removeWorktree
+        removeWorktreeState
         agent
         rootPaths
         wtPath

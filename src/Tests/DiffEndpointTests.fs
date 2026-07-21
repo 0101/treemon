@@ -108,6 +108,10 @@ let private withDiffServer
 
     try
         use client = new HttpClient()
+        client.DefaultRequestHeaders.Add(
+            WorktreeDiffApi.viewerHeaderName,
+            Guid.NewGuid().ToString("D")
+        )
         action client $"http://127.0.0.1:{port}"
     finally
         host.StopAsync(CancellationToken.None)
@@ -169,6 +173,154 @@ let private fileSummary
       DisplayPath = path
       OldDisplayPath = oldPath
       Change = change }
+
+let private replaceIdentity
+    (store: WorktreeDiffApi.DiffIdentityStore)
+    worktree
+    viewer
+    mergeBase
+    identity
+    =
+    let changed =
+        entry
+            "changed.txt"
+            None
+            WorktreeDiff.Modified
+
+    store.Replace(
+        worktree,
+        viewer,
+        mergeBase,
+        [ fileSummary
+              identity
+              changed.Path
+              changed.OldPath
+              DiffChangeKind.Modified,
+          changed ]
+    )
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffIdentityStoreTests() =
+
+    [<Test>]
+    member _.``viewer snapshots use a per-worktree LRU bound``() =
+        let store = WorktreeDiffApi.createIdentityStore ()
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-diff-store-{Guid.NewGuid():N}")
+
+        let viewers =
+            [ 1..WorktreeDiffApi.maxViewerSnapshotsPerWorktree ]
+            |> List.map (fun index ->
+                Guid.NewGuid(),
+                $"identity-{index}")
+
+        viewers
+        |> List.iter (fun (viewer, identity) ->
+            replaceIdentity
+                store
+                worktree
+                viewer
+                "merge-base"
+                identity
+            |> TestUtils.runAsync)
+
+        let firstViewer, firstIdentity = List.head viewers
+        let secondViewer, secondIdentity = viewers[1]
+        let newestViewer = Guid.NewGuid()
+        let newestIdentity = "identity-newest"
+
+        store.Resolve(worktree, firstViewer, firstIdentity)
+        |> TestUtils.runAsync
+        |> ignore
+
+        replaceIdentity
+            store
+            worktree
+            newestViewer
+            "merge-base"
+            newestIdentity
+        |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                store.Resolve(worktree, secondViewer, secondIdentity)
+                |> TestUtils.runAsync,
+                Is.EqualTo(
+                    None:
+                        (string
+                         * DiffFileSummary
+                         * WorktreeDiff.WorktreeDiffEntry) option
+                )
+            )
+            Assert.That(
+                store.Resolve(worktree, firstViewer, firstIdentity)
+                |> TestUtils.runAsync
+                |> Option.map (fun (mergeBase, file, _) ->
+                    mergeBase, file.Identity),
+                Is.EqualTo(Some("merge-base", firstIdentity))
+            )
+            Assert.That(
+                store.Resolve(worktree, newestViewer, newestIdentity)
+                |> TestUtils.runAsync
+                |> Option.map (fun (mergeBase, file, _) ->
+                    mergeBase, file.Identity),
+                Is.EqualTo(Some("merge-base", newestIdentity))
+            ))
+
+    [<Test>]
+    member _.``remove and prune prevent stale identities from surviving path reuse``() =
+        let store = WorktreeDiffApi.createIdentityStore ()
+        let retained = Path.Combine(Path.GetTempPath(), $"treemon-diff-retained-{Guid.NewGuid():N}")
+        let reused = Path.Combine(Path.GetTempPath(), $"treemon-diff-reused-{Guid.NewGuid():N}")
+        let viewer = Guid.NewGuid()
+
+        replaceIdentity store retained viewer "retained-base" "retained-id"
+        |> TestUtils.runAsync
+
+        replaceIdentity store reused viewer "old-base" "old-id"
+        |> TestUtils.runAsync
+
+        store.Prune(Set.ofList [ retained; reused ])
+        |> TestUtils.runAsync
+
+        store.RemoveWorktree(reused)
+        |> TestUtils.runAsync
+
+        replaceIdentity store reused viewer "new-base" "new-id"
+        |> TestUtils.runAsync
+
+        store.Prune(Set.singleton reused)
+        |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                store.Resolve(reused, viewer, "old-id")
+                |> TestUtils.runAsync,
+                Is.EqualTo(
+                    None:
+                        (string
+                         * DiffFileSummary
+                         * WorktreeDiff.WorktreeDiffEntry) option
+                )
+            )
+            Assert.That(
+                store.Resolve(reused, viewer, "new-id")
+                |> TestUtils.runAsync
+                |> Option.map (fun (mergeBase, file, _) ->
+                    mergeBase, file.Identity),
+                Is.EqualTo(Some("new-base", "new-id"))
+            )
+            Assert.That(
+                store.Resolve(retained, viewer, "retained-id")
+                |> TestUtils.runAsync,
+                Is.EqualTo(
+                    None:
+                        (string
+                         * DiffFileSummary
+                         * WorktreeDiff.WorktreeDiffEntry) option
+                )
+            ))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -692,6 +844,128 @@ type DiffEndpointHttpTests() =
                     )
                     |> WorktreeDiffApi.serializeFileResult
                 ))
+
+    [<Test>]
+    member _.``interleaved viewer instances retain independent identity snapshots``() =
+        let worktree = fakePath "interleaved-viewers"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+
+        let service =
+            fakeService
+                (Ok(summary [ changed ]))
+                (fun _ -> Ok(WorktreeDiff.Text "patch"))
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun firstClient baseUrl ->
+                use secondClient = new HttpClient()
+                secondClient.DefaultRequestHeaders.Add(
+                    WorktreeDiffApi.viewerHeaderName,
+                    Guid.NewGuid().ToString("D")
+                )
+
+                let summaryUrl =
+                    worktreeUrl baseUrl worktree "diff-summary"
+
+                let fileUrl =
+                    worktreeUrl baseUrl worktree "diff-file"
+
+                use firstSummary = get firstClient summaryUrl
+                let firstIdentity =
+                    firstSummary
+                    |> getResponseBody
+                    |> summaryIdentity "changed.txt"
+
+                use secondSummary = get secondClient summaryUrl
+                let secondIdentity =
+                    secondSummary
+                    |> getResponseBody
+                    |> summaryIdentity "changed.txt"
+
+                use firstFile =
+                    get
+                        firstClient
+                        $"{fileUrl}?identity={firstIdentity}"
+
+                use secondFile =
+                    get
+                        secondClient
+                        $"{fileUrl}?identity={secondIdentity}"
+
+                Assert.That(firstFile.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                Assert.That(secondFile.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+
+                use refreshedFirstSummary = get firstClient summaryUrl
+                let refreshedFirstIdentity =
+                    refreshedFirstSummary
+                    |> getResponseBody
+                    |> summaryIdentity "changed.txt"
+
+                use staleFirstFile =
+                    get
+                        firstClient
+                        $"{fileUrl}?identity={firstIdentity}"
+
+                use retainedSecondFile =
+                    get
+                        secondClient
+                        $"{fileUrl}?identity={secondIdentity}"
+
+                use currentFirstFile =
+                    get
+                        firstClient
+                        $"{fileUrl}?identity={refreshedFirstIdentity}"
+
+                Assert.Multiple(fun () ->
+                    Assert.That(firstIdentity, Is.Not.EqualTo(secondIdentity))
+                    Assert.That(refreshedFirstIdentity, Is.Not.EqualTo(firstIdentity))
+                    Assert.That(staleFirstFile.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody staleFirstFile, Is.EqualTo("Unknown diff identity"))
+                    Assert.That(retainedSecondFile.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(currentFirstFile.StatusCode, Is.EqualTo(HttpStatusCode.OK))))
+
+    [<Test>]
+    member _.``diff endpoints require one opaque viewer instance header``() =
+        let worktree = fakePath "viewer-header"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+
+        let service =
+            fakeService
+                (Ok(summary [ changed ]))
+                (fun _ -> Ok(WorktreeDiff.Text "patch"))
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> "issued-id")
+            (fun _ baseUrl ->
+                let summaryUrl =
+                    worktreeUrl baseUrl worktree "diff-summary"
+
+                let fileUrl =
+                    worktreeUrl baseUrl worktree "diff-file?identity=issued-id"
+
+                use missingClient = new HttpClient()
+                use missingSummary = get missingClient summaryUrl
+                use missingFile = get missingClient fileUrl
+
+                use invalidClient = new HttpClient()
+                invalidClient.DefaultRequestHeaders.Add(
+                    WorktreeDiffApi.viewerHeaderName,
+                    "not-a-viewer"
+                )
+
+                use invalidSummary = get invalidClient summaryUrl
+
+                Assert.Multiple(fun () ->
+                    Assert.That(missingSummary.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody missingSummary, Is.EqualTo("Invalid diff viewer"))
+                    Assert.That(missingFile.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody missingFile, Is.EqualTo("Invalid diff-file query"))
+                    Assert.That(invalidSummary.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(getResponseBody invalidSummary, Is.EqualTo("Invalid diff viewer"))))
 
     [<Test>]
     member _.``unknown worktrees and arbitrary roots refs paths or identities never reach Git``() =

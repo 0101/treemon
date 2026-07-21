@@ -36,6 +36,12 @@ type internal Handlers =
             -> HttpContext
             -> System.Threading.Tasks.Task<unit> }
 
+[<Literal>]
+let internal viewerHeaderName = "X-Treemon-Diff-Viewer"
+
+[<Literal>]
+let internal maxViewerSnapshotsPerWorktree = 8
+
 type private DiffIdentitySnapshot =
     { MergeBase: string
       Files:
@@ -44,55 +50,218 @@ type private DiffIdentitySnapshot =
             DiffFileSummary * WorktreeDiff.WorktreeDiffEntry
          > }
 
+type private StoredSnapshot =
+    { Snapshot: DiffIdentitySnapshot
+      LastUsedAt: int64 }
+
+type private DiffIdentityState =
+    { Snapshots: Map<string, Map<System.Guid, StoredSnapshot>>
+      NextSequence: int64 }
+
 type private DiffIdentityMessage =
     | ReplaceSnapshot of
         worktreePath: string
+        * viewerInstance: System.Guid
         * snapshot: DiffIdentitySnapshot
         * AsyncReplyChannel<unit>
-    | ClearSnapshot of worktreePath: string * AsyncReplyChannel<unit>
+    | ClearSnapshot of
+        worktreePath: string
+        * viewerInstance: System.Guid
+        * AsyncReplyChannel<unit>
     | ResolveIdentity of
         worktreePath: string
+        * viewerInstance: System.Guid
         * identity: string
         * AsyncReplyChannel<
             (string
              * DiffFileSummary
              * WorktreeDiff.WorktreeDiffEntry) option
          >
+    | RemoveWorktree of worktreePath: string * AsyncReplyChannel<unit>
+    | Prune of knownWorktrees: Set<string> * AsyncReplyChannel<unit>
 
-let private createIdentityStore () =
+let private removeViewer worktreePath viewerInstance snapshots =
+    match snapshots |> Map.tryFind worktreePath with
+    | None -> snapshots
+    | Some viewers ->
+        let remaining = viewers |> Map.remove viewerInstance
+
+        if Map.isEmpty remaining then
+            snapshots |> Map.remove worktreePath
+        else
+            snapshots |> Map.add worktreePath remaining
+
+let private boundViewers viewers =
+    let excess =
+        Map.count viewers - maxViewerSnapshotsPerWorktree
+
+    if excess <= 0 then
+        viewers
+    else
+        viewers
+        |> Map.toSeq
+        |> Seq.sortBy (fun (_, stored) -> stored.LastUsedAt)
+        |> Seq.skip excess
+        |> Map.ofSeq
+
+let private createIdentityAgent () =
     MailboxProcessor.Start(fun inbox ->
-        let rec loop snapshots =
+        let rec loop state =
             async {
                 let! message = inbox.Receive()
 
                 match message with
-                | ReplaceSnapshot (worktreePath, snapshot, reply) ->
-                    let next =
-                        snapshots |> Map.add worktreePath snapshot
+                | ReplaceSnapshot (worktreePath, viewerInstance, snapshot, reply) ->
+                    let sequence = state.NextSequence + 1L
 
-                    reply.Reply()
-                    return! loop next
-                | ClearSnapshot (worktreePath, reply) ->
-                    let next =
-                        snapshots |> Map.remove worktreePath
-
-                    reply.Reply()
-                    return! loop next
-                | ResolveIdentity (worktreePath, identity, reply) ->
-                    let resolved =
-                        snapshots
+                    let viewers =
+                        state.Snapshots
                         |> Map.tryFind worktreePath
-                        |> Option.bind (fun snapshot ->
-                            snapshot.Files
+                        |> Option.defaultValue Map.empty
+                        |> Map.add
+                            viewerInstance
+                            { Snapshot = snapshot
+                              LastUsedAt = sequence }
+                        |> boundViewers
+
+                    reply.Reply()
+                    return!
+                        loop
+                            { Snapshots =
+                                state.Snapshots
+                                |> Map.add worktreePath viewers
+                              NextSequence = sequence }
+                | ClearSnapshot (worktreePath, viewerInstance, reply) ->
+                    let snapshots =
+                        state.Snapshots
+                        |> removeViewer worktreePath viewerInstance
+
+                    reply.Reply()
+                    return! loop { state with Snapshots = snapshots }
+                | ResolveIdentity (worktreePath, viewerInstance, identity, reply) ->
+                    match
+                        state.Snapshots
+                        |> Map.tryFind worktreePath
+                        |> Option.bind (fun viewers ->
+                            viewers
+                            |> Map.tryFind viewerInstance
+                            |> Option.map (fun stored ->
+                                viewers, stored))
+                    with
+                    | None ->
+                        reply.Reply(None)
+                        return! loop state
+                    | Some (viewers, stored) ->
+                        let resolved =
+                            stored.Snapshot.Files
                             |> Map.tryFind identity
                             |> Option.map (fun (file, entry) ->
-                                snapshot.MergeBase, file, entry))
+                                stored.Snapshot.MergeBase, file, entry)
 
-                    reply.Reply(resolved)
-                    return! loop snapshots
+                        let sequence = state.NextSequence + 1L
+                        let touched =
+                            { stored with
+                                LastUsedAt = sequence }
+
+                        reply.Reply(resolved)
+
+                        return!
+                            loop
+                                { Snapshots =
+                                    state.Snapshots
+                                    |> Map.add
+                                        worktreePath
+                                        (viewers
+                                         |> Map.add
+                                             viewerInstance
+                                             touched)
+                                  NextSequence = sequence }
+                | RemoveWorktree (worktreePath, reply) ->
+                    reply.Reply()
+
+                    return!
+                        loop
+                            { state with
+                                Snapshots =
+                                    state.Snapshots
+                                    |> Map.remove worktreePath }
+                | Prune (knownWorktrees, reply) ->
+                    reply.Reply()
+
+                    return!
+                        loop
+                            { state with
+                                Snapshots =
+                                    state.Snapshots
+                                    |> Map.filter (fun worktreePath _ ->
+                                        knownWorktrees
+                                        |> Set.contains worktreePath) }
             }
 
-        loop Map.empty)
+        loop
+            { Snapshots = Map.empty
+              NextSequence = 0L })
+
+type internal DiffIdentityStore() =
+    let agent = createIdentityAgent ()
+
+    member _.Replace(worktreePath, viewerInstance, mergeBase, files) =
+        agent.PostAndAsyncReply(fun reply ->
+            ReplaceSnapshot(
+                PathUtils.normalizePath worktreePath,
+                viewerInstance,
+                { MergeBase = mergeBase
+                  Files =
+                    files
+                    |> List.map (fun (file, entry) ->
+                        file.Identity, (file, entry))
+                    |> Map.ofList },
+                reply
+            ))
+
+    member _.Clear(worktreePath, viewerInstance) =
+        agent.PostAndAsyncReply(fun reply ->
+            ClearSnapshot(
+                PathUtils.normalizePath worktreePath,
+                viewerInstance,
+                reply
+            ))
+
+    member _.Resolve(worktreePath, viewerInstance, identity) =
+        agent.PostAndAsyncReply(fun reply ->
+            ResolveIdentity(
+                PathUtils.normalizePath worktreePath,
+                viewerInstance,
+                identity,
+                reply
+            ))
+
+    member _.RemoveWorktree(worktreePath) =
+        agent.PostAndAsyncReply(fun reply ->
+            RemoveWorktree(
+                PathUtils.normalizePath worktreePath,
+                reply
+            ))
+
+    member _.Prune(knownWorktrees) =
+        let normalized =
+            knownWorktrees
+            |> Set.map PathUtils.normalizePath
+
+        agent.PostAndAsyncReply(fun reply ->
+            Prune(normalized, reply))
+
+let internal createIdentityStore () =
+    DiffIdentityStore()
+
+let private defaultIdentityStore =
+    lazy (createIdentityStore ())
+
+let removeWorktree worktreePath =
+    defaultIdentityStore.Value.RemoveWorktree(worktreePath)
+
+let prune knownWorktrees =
+    defaultIdentityStore.Value.Prune(knownWorktrees)
 
 let internal liveService =
     { GetSummary = WorktreeDiff.getWorktreeDiffSummary
@@ -211,39 +380,6 @@ let private issueFile
       OldDisplayPath = entry.OldPath
       Change = diffChangeKind entry.Status }
 
-let private replaceSnapshot
-    (store: MailboxProcessor<DiffIdentityMessage>)
-    worktreePath
-    mergeBase
-    files
-    =
-    store.PostAndAsyncReply(fun reply ->
-        ReplaceSnapshot(
-            worktreePath,
-            { MergeBase = mergeBase
-              Files =
-                files
-                |> List.map (fun (file, entry) ->
-                    file.Identity, (file, entry))
-                |> Map.ofList },
-            reply
-        ))
-
-let private clearSnapshot
-    (store: MailboxProcessor<DiffIdentityMessage>)
-    worktreePath
-    =
-    store.PostAndAsyncReply(fun reply ->
-        ClearSnapshot(worktreePath, reply))
-
-let private resolveIdentity
-    (store: MailboxProcessor<DiffIdentityMessage>)
-    worktreePath
-    identity
-    =
-    store.PostAndAsyncReply(fun reply ->
-        ResolveIdentity(worktreePath, identity, reply))
-
 let private summaryErrorResult =
     function
     | WorktreeDiff.BaseNotFound _ -> DiffSummaryResult.BaseError
@@ -303,9 +439,19 @@ let private identityQuery (ctx: HttpContext) =
         else
             Some(values[0])
 
+let private viewerInstance (ctx: HttpContext) =
+    let values = ctx.Request.Headers[viewerHeaderName]
+
+    if values.Count <> 1 then
+        None
+    else
+        match System.Guid.TryParseExact(values[0], "D") with
+        | true, viewer -> Some viewer
+        | false, _ -> None
+
 let private handleSummary
     (service: Service)
-    (store: MailboxProcessor<DiffIdentityMessage>)
+    (store: DiffIdentityStore)
     newIdentity
     worktreePath
     isKnown
@@ -314,62 +460,67 @@ let private handleSummary
     task {
         if not isKnown then
             do! writeError ctx 404 "Unknown worktree"
-        elif ctx.Request.Query.Count <> 0 then
-            do! writeError ctx 400 "Unexpected query parameters"
         else
-            let! result =
-                service.GetSummary worktreePath
-                |> Async.StartAsTask
+            match viewerInstance ctx with
+            | None ->
+                do! writeError ctx 400 "Invalid diff viewer"
+            | Some _ when ctx.Request.Query.Count <> 0 ->
+                do! writeError ctx 400 "Unexpected query parameters"
+            | Some viewer ->
+                let! result =
+                    service.GetSummary worktreePath
+                    |> Async.StartAsTask
 
-            let! response =
-                async {
-                    match result with
-                    | Ok summary
-                        when summary.Files.Length
-                             > WorktreeDiff.maxWorktreeDiffFiles ->
-                        do! clearSnapshot store worktreePath
+                let! response =
+                    async {
+                        match result with
+                        | Ok summary
+                            when summary.Files.Length
+                                 > WorktreeDiff.maxWorktreeDiffFiles ->
+                            do! store.Clear(worktreePath, viewer)
 
-                        return
-                            DiffSummaryResult.TooManyFiles
-                                summary.Files.Length
-                    | Ok summary ->
-                        let issued =
-                            summary.Files
-                            |> List.map (fun entry ->
-                                issueFile newIdentity entry, entry)
+                            return
+                                DiffSummaryResult.TooManyFiles
+                                    summary.Files.Length
+                        | Ok summary when summary.Files.IsEmpty ->
+                            do! store.Clear(worktreePath, viewer)
+                            return DiffSummaryResult.Clean summary.BaseRef
+                        | Ok summary ->
+                            let issued =
+                                summary.Files
+                                |> List.map (fun entry ->
+                                    issueFile newIdentity entry, entry)
 
-                        do!
-                            replaceSnapshot
-                                store
-                                worktreePath
-                                summary.MergeBase
-                                issued
+                            do!
+                                store.Replace(
+                                    worktreePath,
+                                    viewer,
+                                    summary.MergeBase,
+                                    issued
+                                )
 
-                        let files = issued |> List.map fst
+                            let files = issued |> List.map fst
 
-                        return
-                            if files.IsEmpty then
-                                DiffSummaryResult.Clean summary.BaseRef
-                            else
+                            return
                                 DiffSummaryResult.Ready
                                     { BaseRef = summary.BaseRef
                                       FileCount = files.Length
                                       Files = files }
-                    | Error error ->
-                        do! clearSnapshot store worktreePath
-                        return summaryErrorResult error
-                }
-                |> Async.StartAsTask
+                        | Error error ->
+                            do! store.Clear(worktreePath, viewer)
+                            return summaryErrorResult error
+                    }
+                    |> Async.StartAsTask
 
-            do!
-                response
-                |> serializeSummaryResult
-                |> writeJson ctx
+                do!
+                    response
+                    |> serializeSummaryResult
+                    |> writeJson ctx
     }
 
 let private handleFile
     (service: Service)
-    (store: MailboxProcessor<DiffIdentityMessage>)
+    (store: DiffIdentityStore)
     worktreePath
     isKnown
     (ctx: HttpContext)
@@ -378,12 +529,14 @@ let private handleFile
         if not isKnown then
             do! writeError ctx 404 "Unknown worktree"
         else
-            match identityQuery ctx with
-            | None ->
-                do! writeError ctx 400 "Invalid diff-file query"
-            | Some identity ->
+            match viewerInstance ctx, identityQuery ctx with
+            | Some viewer, Some identity ->
                 let! resolved =
-                    resolveIdentity store worktreePath identity
+                    store.Resolve(
+                        worktreePath,
+                        viewer,
+                        identity
+                    )
                     |> Async.StartAsTask
 
                 match resolved with
@@ -399,13 +552,23 @@ let private handleFile
                         |> fileResult file
                         |> serializeFileResult
                         |> writeJson ctx
+            | _ ->
+                do! writeError ctx 400 "Invalid diff-file query"
     }
+
+let internal createHandlersWithStore
+    (store: DiffIdentityStore)
+    (service: Service)
+    newIdentity
+    =
+    { Summary = handleSummary service store newIdentity
+      File = handleFile service store }
 
 let internal createHandlers
     (service: Service)
     newIdentity
     =
-    let store = createIdentityStore ()
-
-    { Summary = handleSummary service store newIdentity
-      File = handleFile service store }
+    createHandlersWithStore
+        defaultIdentityStore.Value
+        service
+        newIdentity

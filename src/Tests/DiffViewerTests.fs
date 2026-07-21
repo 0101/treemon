@@ -286,11 +286,16 @@ type DiffViewerE2ETests() =
                 this.Page.AddInitScriptAsync(
                     """(() => {
                         window.__diffFetches = [];
+                        window.__diffViewerHeaders = [];
                         const originalFetch = window.fetch;
                         window.fetch = function(input) {
                             const url = typeof input === 'string' ? input : input.url;
                             if (url.includes('diff-summary') || url.includes('diff-file')) {
                                 window.__diffFetches.push(new URL(url, location.href).href);
+                                const options = arguments[1] || {};
+                                window.__diffViewerHeaders.push(
+                                    new Headers(options.headers || {}).get('X-Treemon-Diff-Viewer')
+                                );
                             }
                             return originalFetch.apply(this, arguments);
                         };
@@ -329,6 +334,8 @@ type DiffViewerE2ETests() =
                 plainBeforeHighlighter.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
             let! requests =
                 this.Page.EvaluateAsync<string array>("() => window.__diffFetches")
+            let! viewerHeaders =
+                this.Page.EvaluateAsync<string array>("() => window.__diffViewerHeaders")
             let requestPaths = requests |> Array.map (fun url -> Uri(url).PathAndQuery)
             let! isStandalone =
                 this.Page.EvaluateAsync<bool>("() => window.top === window")
@@ -344,6 +351,9 @@ type DiffViewerE2ETests() =
                            "/e2e-diff-worktree/diff-file?identity=id-1" |]
                     )
                 )
+                Assert.That(viewerHeaders.Length, Is.EqualTo(2))
+                Assert.That(viewerHeaders[1], Is.EqualTo(viewerHeaders[0]))
+                Assert.That(Guid.TryParseExact(viewerHeaders[0], "D") |> fst, Is.True)
                 Assert.That(isStandalone, Is.True)
                 Assert.That(selected, Is.EqualTo("id-1")))
         }

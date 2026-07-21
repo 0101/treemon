@@ -356,6 +356,7 @@ button { font: inherit; }
 var VIEW_KEY = 'treemon.diff.view';
 var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/diff\.html$/, '');
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
+var VIEWER_ID = crypto.randomUUID();
 var state = {
     summary: null,
     selected: null,
@@ -683,7 +684,13 @@ function renderPatch(patchText) {
 }
 
 async function fetchJson(url, options) {
-    var response = await fetch(url, options);
+    options = options || {};
+    var requestOptions = Object.assign({}, options, {
+        headers: Object.assign({}, options.headers || {}, {
+            'X-Treemon-Diff-Viewer': VIEWER_ID
+        })
+    });
+    var response = await fetch(url, requestOptions);
     if (!response.ok) throw new Error('HTTP ' + response.status);
     return response.json();
 }

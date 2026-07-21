@@ -752,6 +752,7 @@ module CanvasWatchers =
 
             if repos |> Map.forall (fun _ repo -> repo.IsReady) then
                 do! CanvasInteractionOwnership.prune allPaths
+                do! WorktreeDiffApi.prune allPaths
 
             let removed =
                 current

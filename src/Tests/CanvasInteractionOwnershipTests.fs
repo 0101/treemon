@@ -27,6 +27,35 @@ let private createDeleteContext repoRoot worktree =
     agent.Post(Server.RefreshScheduler.UpdateWorktreeList(repoId, [ worktreeInfo ]))
     agent, repoId, worktreeInfo, Server.RefreshScheduler.buildRootPaths [ repoRoot ]
 
+let private seedDiffIdentity
+    (store: Server.WorktreeDiffApi.DiffIdentityStore)
+    worktree
+    =
+    let viewer = Guid.NewGuid()
+    let identity = "issued-before-delete"
+
+    let entry: Server.WorktreeDiff.WorktreeDiffEntry =
+        { Path = "changed.txt"
+          OldPath = None
+          Status = Server.WorktreeDiff.Modified }
+
+    let file: DiffFileSummary =
+        { Identity = identity
+          DisplayPath = entry.Path
+          OldDisplayPath = None
+          Change = DiffChangeKind.Modified }
+
+    runAsync (
+        store.Replace(
+            worktree,
+            viewer,
+            "merge-base",
+            [ file, entry ]
+        )
+    )
+
+    viewer, identity
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -221,18 +250,26 @@ type PersistenceTests() =
             Assert.That(runAsync (restarted.GetOwner(secondWorktree, "diff.html")), Is.EqualTo(Some "session-b")))
 
     [<Test>]
-    member _.``successful worktree deletion removes scheduler state, persisted owners, and pending claims``() =
+    member _.``successful worktree deletion removes scheduler ownership and diff identity state``() =
         withOwnershipFile (fun dir filePath ->
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
+            let diffStore = Server.WorktreeDiffApi.createIdentityStore ()
             let agent, repoId, _, rootPaths = createDeleteContext dir worktree
+            let viewer, identity = seedDiffIdentity diffStore worktree
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
             Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
+
+            let removeWorktreeState path =
+                async {
+                    do! store.RemoveWorktree path
+                    do! diffStore.RemoveWorktree path
+                }
 
             let result =
                 Server.WorktreeApi.deleteWorktreeWith
                     (fun _ _ _ -> async { return Ok () })
-                    store.RemoveWorktree
+                    removeWorktreeState
                     agent
                     rootPaths
                     (Server.PathUtils.toWorktreePath worktree)
@@ -243,21 +280,38 @@ type PersistenceTests() =
             Assert.That(state.Repos[repoId].WorktreeList, Is.Empty)
             let restarted = createStore filePath
             Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option))
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.Empty))
+            Assert.That(store.ClaimPending(worktree, "session-b"), Is.Empty)
+            Assert.That(
+                runAsync (diffStore.Resolve(worktree, viewer, identity)),
+                Is.EqualTo(
+                    None:
+                        (string
+                         * DiffFileSummary
+                         * Server.WorktreeDiff.WorktreeDiffEntry) option
+                )
+            ))
 
     [<Test>]
-    member _.``failed worktree deletion preserves scheduler state, persisted owners, and pending claims``() =
+    member _.``failed worktree deletion preserves scheduler ownership and diff identity state``() =
         withOwnershipFile (fun dir filePath ->
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
+            let diffStore = Server.WorktreeDiffApi.createIdentityStore ()
             let agent, repoId, worktreeInfo, rootPaths = createDeleteContext dir worktree
+            let viewer, identity = seedDiffIdentity diffStore worktree
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
             Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
+
+            let removeWorktreeState path =
+                async {
+                    do! store.RemoveWorktree path
+                    do! diffStore.RemoveWorktree path
+                }
 
             let result =
                 Server.WorktreeApi.deleteWorktreeWith
                     (fun _ _ _ -> async { return Error "remove failed" })
-                    store.RemoveWorktree
+                    removeWorktreeState
                     agent
                     rootPaths
                     (Server.PathUtils.toWorktreePath worktree)
@@ -271,7 +325,15 @@ type PersistenceTests() =
             Assert.That(state.Repos[repoId].WorktreeList, Is.EqualTo([ worktreeInfo ]))
             let restarted = createStore filePath
             Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
-            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "beads.html" ])))
+            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "beads.html" ]))
+            Assert.That(
+                runAsync (diffStore.Resolve(worktree, viewer, identity))
+                |> Option.map (fun (mergeBase, file, entry) ->
+                    mergeBase,
+                    file.Identity,
+                    entry.Path),
+                Is.EqualTo(Some("merge-base", identity, "changed.txt"))
+            ))
 
     [<Test>]
     member _.``startup prune removes missing views and worktrees while preserving existing views``() =
