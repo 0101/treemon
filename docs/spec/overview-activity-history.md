@@ -44,6 +44,8 @@ server-side sample anchor with the resulting `OverviewSnapshot` timeline.
 - Task reads include the latest snapshot before the requested window and carry it to the left edge.
   For each session observed in the window or lookback, agent reads include its latest pre-window
   status event plus liveness from one `openWindow` before the edge.
+- Task, status, and liveness inputs for one response are read from one SQLite snapshot, so a
+  concurrent write cannot return liveness without the corresponding status baseline.
 - Each window is divided into 288 equal buckets: 2.5 minutes for 12 hours, 5 minutes for 24 hours,
   and 15 minutes for 72 hours. The response contains the left-edge baseline plus at most one
   right-edge sample per bucket, with consecutive equal snapshots collapsed.
@@ -108,8 +110,9 @@ immutable sweep updates only the affected session between samples. At each sampl
 `CodingToolStatus.collapseByWorktree` and `OverviewData.agentCountsOf` to the current open-session
 state, while task counts carry forward from the latest task snapshot.
 
-`WorktreeApi.getOverviewHistory` queries only the requested window plus its edge lookback, obtains
-the anchored sampled timeline through the per-window cache, and returns the shared response.
+`WorktreeApi.getOverviewHistory` queries only the requested window plus its edge lookback from one
+SQLite read snapshot, obtains the anchored sampled timeline through the per-window cache, and
+returns the shared response.
 
 ### Client rendering
 
@@ -129,6 +132,7 @@ corresponding live section.
 | Window | Request 12h, 24h, or 72h explicitly; divide every window into 288 equal buckets. |
 | Quantization | Sample the complete state at each bucket's right edge; brief sub-bucket states may be omitted. |
 | Openness sweep | Coalesce dense observations into actual session-close boundaries; ignore a stale close after later liveness extends `LastSeen`. |
+| History read consistency | Read task, status, and liveness inputs in one SQLite transaction per uncached computation. |
 | Response anchor | Use the server computation anchor so cached callers render the same timeline edges. |
 | Client refresh gate | Track client request time separately from the server response anchor. |
 | Cache | Cache one in-flight/completed response per window until 30 seconds after its server anchor. |
