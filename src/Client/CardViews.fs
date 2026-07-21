@@ -12,15 +12,54 @@ let ctClassName =
     function
     | Working        -> "working"
     | WaitingForUser -> "waiting"
-    | Done           -> "done"
     | Idle           -> "idle"
+    | NoSession      -> "nosession"
 
 let ctTooltip =
     function
     | Working        -> "Working"
     | WaitingForUser -> "Waiting for user"
-    | Done           -> "Done"
     | Idle           -> "Idle"
+    | NoSession      -> "No session"
+
+let private ctDot (status: CodingToolStatus) =
+    Html.span [ prop.className ($"ct-dot {ctClassName status}"); prop.title (ctTooltip status) ]
+
+/// A per-session marker: a context-usage donut (arc = remaining context) when the session has
+/// reported usage, else a plain status dot. Colour comes from the session's OWN status.
+let private sessionMarker (i: int) (s: SessionDot) =
+    match s.ContextUsage with
+    | Some usage ->
+        Html.span
+            [ prop.key i
+              prop.className $"ct-dot ct-donut {ctClassName s.Status}"
+              prop.title (ctTooltip s.Status)
+              prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
+    | None ->
+        Html.span [ prop.key i; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ]
+
+/// Per-session donuts for a worktree card: one marker per live session (donut when it has usage,
+/// else a plain status dot). Falls back to the single collapsed CodingTool dot when there are no
+/// live sessions (a NoSession worktree → grey), reproducing the pre-per-session single-dot behaviour.
+let sessionDots (wt: WorktreeStatus) =
+    Html.span
+        [ prop.className "ct-dots"
+          prop.children (
+              match wt.Sessions with
+              | [] -> [ ctDot wt.CodingTool ]
+              | sessions -> sessions |> List.mapi sessionMarker) ]
+
+/// Plain per-session status dots for ONE worktree (never a donut — the header is too dense for arcs),
+/// returned as a flat, keyed list so the repo header can `List.collect` every worktree's dots into a
+/// single row with one uniform gap. A worktree with no live session contributes its single collapsed
+/// dot.
+let sessionDotsPlain (wt: WorktreeStatus) =
+    let key = WorktreePath.value wt.Path
+    match wt.Sessions with
+    | [] -> [ Html.span [ prop.key key; prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ] ]
+    | sessions ->
+        sessions
+        |> List.mapi (fun i s -> Html.span [ prop.key $"{key}-{i}"; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ])
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
@@ -132,12 +171,18 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
         ]
 
 let isBranchSyncing (events: CardEvent list) =
-    events |> List.exists (fun e -> e.Status = Some StepStatus.Running)
+    events |> List.exists (fun e -> e.Status = Some StepStatus.Running && e.Source <> EventSource.PostFork)
+
+/// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
+/// card — only its failures (including timeouts) are worth surfacing. Events from every other
+/// source always show.
+let isVisibleCardEvent (evt: CardEvent) =
+    evt.Source <> EventSource.PostFork
+    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
-    | Some Claude -> "Claude"
-    | Some Copilot -> "Copilot"
+    | Some CopilotCli -> "Copilot"
     | None -> "Coding tool"
 
 let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
@@ -510,6 +555,75 @@ let canResumeSession (wt: WorktreeStatus) =
     && wt.CodingTool <> Working
     && wt.CodingTool <> WaitingForUser
 
+/// The card's activity line: the freshest source-tagged intent or session title plus, when a skill is
+/// running, that skill as a pill. Kept as a pure decision so presence logic is independently testable.
+[<RequireQualifiedAccess>]
+type CardActivityLine =
+    | Line of activity: AgentActivity option * skill: string option
+    | Empty
+
+let private duplicatesLastUserMessage
+    (lastUserMessage: (string * System.DateTimeOffset) option)
+    (activity: AgentActivity)
+    =
+    let activityText, _ = AgentActivity.textAndTimestamp activity
+    lastUserMessage
+    |> Option.exists (fun (userText, _) ->
+        System.String.Equals(activityText.Trim(), userText.Trim(), System.StringComparison.OrdinalIgnoreCase))
+
+let cardActivityLine (wt: WorktreeStatus) : CardActivityLine =
+    let activity =
+        wt.AgentActivity
+        |> Option.filter (duplicatesLastUserMessage wt.LastUserMessage >> not)
+    let skill =
+        wt.CurrentSkill
+        |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
+        |> Option.map _.Trim()
+    match activity, skill with
+    | None, None -> CardActivityLine.Empty
+    | activity, sk -> CardActivityLine.Line(activity, sk)
+
+/// Line 1 of the footer: the activity text and running skill as a right-aligned pill.
+let activityLineView (wt: WorktreeStatus) =
+    match cardActivityLine wt with
+    | CardActivityLine.Empty -> Html.none
+    | CardActivityLine.Line (activity, skill) ->
+        Html.div [
+            prop.className "user-prompt activity-line"
+            prop.children [
+                match activity |> Option.map AgentActivity.textAndTimestamp with
+                | Some (text, changedAt) ->
+                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime changedAt) ]
+                    Html.span [ prop.className "activity-text"; prop.text text ]
+                | None -> ()
+                match skill with
+                | Some name -> Html.span [ prop.className "skill-pill"; prop.text $"▶ {name}" ]
+                | None -> ()
+            ]
+        ]
+
+/// A footer message line: `[time-ago] <source?> <text>`. Shared by the last-user-message and
+/// last-assistant-message lines; the assistant line tags its provider, the user line does not.
+let private messageLineView (source: string option) (msg: (string * System.DateTimeOffset) option) =
+    match msg with
+    | None -> Html.none
+    | Some (text, ts) ->
+        Html.div [
+            prop.className (match source with Some _ -> "user-prompt assistant-line" | None -> "user-prompt")
+            prop.children [
+                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
+                match source with
+                | Some s -> Html.span [ prop.className "event-source"; prop.text s ]
+                | None -> ()
+                Html.span [ prop.text text ]
+            ]
+        ]
+
+/// Line 2 (last user message) and line 3 (last assistant message, tagged by provider) of the footer.
+let userMsgLineView (wt: WorktreeStatus) = messageLineView None wt.LastUserMessage
+let assistantMsgLineView (wt: WorktreeStatus) =
+    messageLineView (Some(providerDisplayName wt.CodingToolProvider)) wt.LastAssistantMessage
+
 let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
     let className = if isFocused then baseClass + " focused" else baseClass
@@ -524,7 +638,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     Html.div [
                         prop.className "header-info"
                         prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                            sessionDots wt
                             Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
@@ -552,7 +666,12 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
 let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
-    let hasContent = wt.LastUserMessage.IsSome || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
+    let hasFooterLines =
+        (match cardActivityLine wt with CardActivityLine.Empty -> false | _ -> true)
+        || wt.LastUserMessage.IsSome
+        || wt.LastAssistantMessage.IsSome
+    let visibleBranchEvents = branchEvents |> List.filter isVisibleCardEvent
+    let hasContent = hasFooterLines || (not (List.isEmpty visibleBranchEvents)) || (not (List.isEmpty canvasEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key (WorktreePath.value wt.Path)
@@ -568,7 +687,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             Html.div [
                                 prop.className "header-info"
                                 prop.children [
-                                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                                    sessionDots wt
                                     Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
@@ -600,19 +719,11 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
             Html.div [
                 prop.className footerClass
                 prop.children [
-                    if List.isEmpty canvasEvents then
-                        match wt.LastUserMessage with
-                        | Some (prompt, ts) ->
-                            Html.div [
-                                prop.className "user-prompt"
-                                prop.children [
-                                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                                    Html.span [ prop.text prompt ]
-                                ]
-                            ]
-                        | None -> ()
+                    activityLineView wt
+                    userMsgLineView wt
+                    assistantMsgLineView wt
 
-                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
+                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog visibleBranchEvents
                     canvasEventLog callbacks scopedKey canvasEvents
                 ]
             ]
@@ -702,10 +813,7 @@ let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget op
             if repo.IsCollapsed then
                 Html.span [
                     prop.className "repo-ct-dots"
-                    prop.children (
-                        repo.Worktrees
-                        |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
+                    prop.children (repo.Worktrees |> List.collect sessionDotsPlain)
                 ]
             Html.button [
                 prop.className "create-wt-btn"

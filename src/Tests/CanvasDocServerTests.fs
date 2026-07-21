@@ -14,6 +14,7 @@ open Tests.TestUtils
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
+let private reclaimMarker = "reclaim-focus"               // unique to reclaimFocusScript (Escape bridge)
 
 // ── Item 1: dark-theme base reset markers ─────────────────────────────────────
 let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wrapped (zero specificity)
@@ -21,7 +22,7 @@ let private resetDarkBgMarker = "#1e1e2e"      // the dark background the reset 
 // The base also steers plain docs toward typography over boxes (grounded, not invented):
 let private resetTokenMarker = "--text-muted:#9399b2"          // app design tokens, via :where(:root)
 let private resetTypeScaleMarker = ":where(h1){font-size:1.85rem"  // serif heading scale
-let private resetMeasureMarker = "max-width:70ch"               // Bringhurst ~45–75ch measure
+let private resetPageWidthMarker = "--page-max:800px"           // ~800px single column; text + figures share one width
 
 // Element-name selectors that, if they appeared *bare* (name directly followed by `{`), would carry
 // non-zero specificity and could beat a doc's own rule via the source-order tiebreak (the reset is
@@ -40,6 +41,11 @@ let private styleBlock (injection: string) =
 
 // ── Item 2: injected window.canvasSend helper markers ─────────────────────────
 let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
+
+// ── Injected window.canvasExpand expand-in-place helper markers ───────────────
+let private canvasExpandMarker = "window.canvasExpand=" // unique to canvasExpandScript
+let private expandActionMarker = "'expand-section'"     // the action canvasExpand posts (skill + client contract)
+let private spinnerMarker = "canvas-spinner"            // the themed spinner the helper swaps the button for
 
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
@@ -86,6 +92,14 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(baseStyleMarker), "Both kinds keep the scrollbar base style")
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
 
+    [<Test>]
+    member _.``both doc kinds inject the Escape focus-reclaim bridge``() =
+        [ SystemView; AgentDoc ]
+        |> List.iter (fun kind ->
+            let injection = buildInjection kind "status.html"
+            Assert.That(injection, Does.Contain(reclaimMarker),
+                        $"{kind}: Escape inside a cross-origin canvas doc must post a reclaim-focus message so the pane can refocus the dashboard"))
+
     // ── Item 1: dark-theme base reset, injected for BOTH kinds, zero specificity ──
 
     [<Test>]
@@ -99,10 +113,10 @@ type BuildInjectionTests() =
                         $"{kind}: the reset must set the dark theme background so a plain doc renders dark"))
 
     [<Test>]
-    member _.``the base reset bakes in design tokens, a type scale, and a readable measure``() =
+    member _.``the base reset bakes in design tokens, a type scale, and a single-column page``() =
         // Beyond dark colours the base steers plain docs toward typography over boxes: a :where(:root)
         // token palette (so docs stop reinventing one), a serif heading scale (h1 1.85rem / h2 1.35rem
-        // / h3 1.12rem — hierarchy from size, not borders), and a ~70ch measure on text elements (readable line length).
+        // / h3 1.12rem — hierarchy from size, not borders), and a ~800px single-column page so text and figures share one width.
         [ SystemView; AgentDoc ]
         |> List.iter (fun kind ->
             let injection = buildInjection kind "status.html"
@@ -110,8 +124,8 @@ type BuildInjectionTests() =
                         $"{kind}: the base must expose the app design tokens so docs reuse the palette")
             Assert.That(injection, Does.Contain(resetTypeScaleMarker),
                         $"{kind}: the base must bake in the heading type scale")
-            Assert.That(injection, Does.Contain(resetMeasureMarker),
-                        $"{kind}: the base must cap the text measure (~70ch) for readability"))
+            Assert.That(injection, Does.Contain(resetPageWidthMarker),
+                        $"{kind}: the base must cap the page to a ~800px single column"))
 
     [<Test>]
     member _.``the base reset carries zero specificity (no bare element selectors, no !important)``() =
@@ -164,6 +178,52 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(canvasSendMarker),
                     "A system view is server-generated and posts nothing, so canvasSend is omitted")
+
+    // ── Injected window.canvasExpand(button, sectionId) helper ────────────────
+    // canvasExpand swaps the clicked button for a themed spinner and posts the flat
+    // {action:'expand-section', section, doc} request to the owning session, so the agent rewrites
+    // the doc in place. It calls canvasSend, so like canvasSend it is AgentDoc-only — a SystemView
+    // has no owner session to receive the request and posts nothing.
+
+    [<Test>]
+    member _.``AgentDoc injection includes the canvasExpand helper and its spinner``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(canvasExpandMarker),
+                    "Agent docs get the window.canvasExpand(button,sectionId) expand-in-place helper")
+        Assert.That(injection, Does.Contain(spinnerMarker),
+                    "canvasExpand ships the .canvas-spinner style it swaps the clicked button for")
+
+    [<Test>]
+    member _.``the canvasExpand helper posts the expand-section action``() =
+        // The action string is the contract shared with the client forwarder (CanvasPane.fs forwards
+        // any non-built-in action to the owning session) and the authoring skill (SKILL.md). If this
+        // marker changes, the skill's documented {action:'expand-section'} message must change too.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(expandActionMarker),
+                    "canvasExpand must post action 'expand-section' (the doc→agent expand contract)")
+
+    [<Test>]
+    member _.``the canvasExpand helper swaps the button only after canvasSend posts``() =
+        // The button→spinner swap is guarded on canvasSend returning true, so a dropped message never
+        // strands a spinner with no agent on the other end.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain("if(!window.canvasSend('expand-section'"),
+                    "canvasExpand must call canvasSend and bail (no spinner swap) when it returns false")
+
+    [<Test>]
+    member _.``the canvasExpand helper rejects a sectionId outside [A-Za-z0-9_-]``() =
+        // Hardening: doc content may embed untrusted external data (branch names, PR titles, command
+        // output). Constraining `section` to a slug charset before posting stops a crafted sectionId
+        // from smuggling instruction-shaped text into the owning agent's forwarded [canvas] turn.
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain("/^[A-Za-z0-9_-]+$/.test(section)"),
+                    "canvasExpand must validate section against [A-Za-z0-9_-] and drop anything else")
+
+    [<Test>]
+    member _.``SystemView injection omits the canvasExpand helper``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Not.Contain(canvasExpandMarker),
+                    "A system view has no owner session to expand into, so canvasExpand is omitted")
 
     [<Test>]
     member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =
@@ -409,3 +469,42 @@ type AttributeOwnershipTests() =
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
             Assert.That(owner, Is.EqualTo(None: string option),
                         "A rejected declaration must record no ownership"))
+
+    // F9 (security, defense-in-depth): a sessionId carrying shell/PowerShell metacharacters must be
+    // rejected before it is stored, because a stored owner id is later interpolated into a launched
+    // `--resume {id}` command. The worktree IS known, so only the hostile sessionId can reject.
+    [<TestCase("abc'; rm -rf ~ #")>]
+    [<TestCase("$(calc)")>]
+    [<TestCase("a b")>]
+    [<TestCase("id\nnewline")>]
+    [<TestCase("semi;colon")>]
+    member _.``a sessionId with unsafe characters is rejected and records no ownership``(hostileSid: string) =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-unsafe-sid"
+            let agent = agentKnowing worktree
+
+            let outcome = runAsync (attributeOwnership agent worktree "a.html" hostileSid)
+
+            match outcome with
+            | Invalid _ -> ()
+            | other -> Assert.Fail($"An unsafe sessionId must be Invalid, got {other}")
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(None: string option),
+                        "A rejected sessionId must record no ownership"))
+
+    // A realistic provider session id (GUID-like: alphanumerics + hyphens) must still be accepted,
+    // so the charset guard does not regress the normal resume flow.
+    [<Test>]
+    member _.``a GUID-like sessionId is accepted``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-guid-sid"
+            let agent = agentKnowing worktree
+            let sessionId = System.Guid.NewGuid().ToString()
+
+            let outcome = runAsync (attributeOwnership agent worktree "a.html" sessionId)
+            Assert.That(outcome, Is.EqualTo(Attributed), "A GUID sessionId must be accepted")
+
+            let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
+            Assert.That(owner, Is.EqualTo(Some sessionId),
+                        "An accepted declaration must record the owner"))

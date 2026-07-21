@@ -75,14 +75,15 @@ type DashboardTests() =
 
     [<TestCase("working", "rgb(255, 0, 0)")>]
     [<TestCase("waiting", "rgb(249, 226, 175)")>]
-    [<TestCase("idle", "rgb(88, 91, 112)")>]
+    [<TestCase("idle", "rgb(137, 180, 250)")>]
+    [<TestCase("nosession", "rgb(88, 91, 112)")>]
     [<Category("Fast")>]
     member this.``CT dot has correct background color``(status: string, expectedColor: string) =
         task {
-            let dots = this.Page.Locator($".ct-dot.{status}")
+            let dots = this.Page.Locator($".ct-dot.{status}:not(.ct-donut)")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} Claude worktrees; {status} dots should be present")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} worktrees; {status} dots should be present")
 
             let! bg = dots.First |> computedStyle "backgroundColor"
             Assert.That(bg, Is.EqualTo(expectedColor), $"CT dot .{status} background color")
@@ -152,7 +153,7 @@ type DashboardTests() =
                 cssClass,
                 Does.Contain("working")
                     .Or.Contain("waiting")
-                    .Or.Contain("done")
+                    .Or.Contain("nosession")
                     .Or.Contain("idle")
             )
         }
@@ -169,8 +170,8 @@ type DashboardTests() =
                 cardClass,
                 Does.Contain("ct-working")
                     .Or.Contain("ct-waiting")
-                    .Or.Contain("ct-done")
                     .Or.Contain("ct-idle")
+                    .Or.Contain("ct-nosession")
             )
         }
 
@@ -678,52 +679,52 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync button disabled when Claude is Working``() =
+    member this.``Sync button disabled when Copilot is Working``() =
         task {
             let workingCards = this.Page.Locator(".wt-card.ct-working:not(.compact)")
             do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! workingCount = workingCards.CountAsync()
-            Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Claude worktrees")
+            Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Copilot worktrees")
 
             let behindRow = workingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture Working Claude worktree is behind main")
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture Working Copilot worktree is behind main")
 
             let syncBtn = behindRow.Locator(".sync-btn")
             let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Working Claude card behind main")
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Working Copilot card behind main")
 
             let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is Working")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Copilot is Working")
 
             let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is Working")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Copilot is Working")
 
             let! title = syncBtn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Claude is active"), "Disabled sync button should show 'Claude is active' tooltip")
+            Assert.That(title, Is.EqualTo("Copilot is active"), "Disabled sync button should show 'Copilot is active' tooltip")
         }
 
     [<Test>]
-    member this.``Sync button disabled when Claude is WaitingForUser``() =
+    member this.``Sync button disabled when Copilot is WaitingForUser``() =
         task {
             let waitingCards = this.Page.Locator(".wt-card.ct-waiting:not(.compact)")
             do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! waitingCount = waitingCards.CountAsync()
-            Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Claude worktrees")
+            Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Copilot worktrees")
 
             let behindRow = waitingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
             let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture WaitingForUser Claude worktree is behind main")
+            Assert.That(behindCount, Is.EqualTo(1), "Fixture WaitingForUser Copilot worktree is behind main")
 
             let syncBtn = behindRow.Locator(".sync-btn")
             let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on WaitingForUser Claude card behind main")
+            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on WaitingForUser Copilot card behind main")
 
             let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Claude is WaitingForUser")
+            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Copilot is WaitingForUser")
 
             let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Claude is WaitingForUser")
+            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Copilot is WaitingForUser")
         }
 
     [<Test>]
@@ -1217,7 +1218,7 @@ type DashboardTests() =
     [<Test>]
     member this.``No commit grid on branches with zero commits``() =
         task {
-            let idleCard = this.Page.Locator(".wt-card.ct-idle")
+            let idleCard = this.Page.Locator(".wt-card.ct-nosession")
             do! idleCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let grids = idleCard.First.Locator(".commit-grid")
             let! count = grids.CountAsync()
@@ -1467,7 +1468,7 @@ type DashboardTests() =
     [<Category("Fast")>]
     member this.``Working dot has pulse animation``() =
         task {
-            let workingDots = this.Page.Locator(".ct-dot.working")
+            let workingDots = this.Page.Locator(".ct-dot.working:not(.ct-donut)")
             do! workingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! animationName = workingDots.First |> computedStyle "animationName"
@@ -1486,13 +1487,13 @@ type DashboardTests() =
     [<Test>]
     member this.``Non-working dots have no pulse animation``() =
         task {
-            let waitingDots = this.Page.Locator(".ct-dot.waiting")
+            let waitingDots = this.Page.Locator(".ct-dot.waiting:not(.ct-donut)")
             do! waitingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! animName = waitingDots.First |> computedStyle "animationName"
             Assert.That(animName, Is.EqualTo("none"), "Waiting dot should have no animation")
 
-            let idleDots = this.Page.Locator(".ct-dot.idle")
+            let idleDots = this.Page.Locator(".ct-dot.idle:not(.ct-donut)")
             do! idleDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! idleAnimName = idleDots.First |> computedStyle "animationName"
@@ -1500,18 +1501,18 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``All ct-dots are circles with 10px size``() =
+    member this.``Context-less card dots are centered 10px circles``() =
         task {
-            let dots = this.Page.Locator(".wt-card .ct-dot")
+            let dots = this.Page.Locator(".wt-card .ct-dot:not(.ct-donut)")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
             let! width = dots.First |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("10px"), "CT dot width should be 10px")
+            Assert.That(width, Is.EqualTo("10px"), "Context-less CT dot width should be 10px")
 
             let! height = dots.First |> computedStyle "height"
-            Assert.That(height, Is.EqualTo("10px"), "CT dot height should be 10px")
+            Assert.That(height, Is.EqualTo("10px"), "Context-less CT dot height should be 10px")
 
             let! borderRadius = dots.First |> computedStyle "borderRadius"
             Assert.That(borderRadius, Is.EqualTo("50%"), "CT dot should be circular (border-radius: 50%)")
@@ -1541,7 +1542,7 @@ type DashboardTests() =
             let! categoryTexts =
                 overview.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "Agent \u21BB"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
+            let expected = [ "Agent \u2191"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
             Assert.That(
                 categoryTexts |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1626,7 +1627,7 @@ type DashboardTests() =
             let! nonPendingCategories =
                 nonPendingRows.Locator(".status-category").EvaluateAllAsync<string[]>(
                     "els => els.map(el => el.textContent.trim())")
-            let expected = [ "Agent \u21BB"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
+            let expected = [ "Agent \u2191"; "Beads \u21BB"; "Git \u21BB"; "Git \u2913"; "PR \u2913"; "Worktree \u2630" ]
             Assert.That(
                 nonPendingCategories |> Array.toList |> List.sort,
                 Is.EqualTo(expected),
@@ -1661,7 +1662,7 @@ type DashboardTests() =
                     "els => els.map(el => el.textContent.trim())")
             Assert.That(
                 categoryOrder |> Array.toList,
-                Is.EqualTo([ "Worktree \u2630"; "Git \u21BB"; "Beads \u21BB"; "Agent \u21BB"; "PR \u2913"; "Git \u2913" ]),
+                Is.EqualTo([ "Worktree \u2630"; "Git \u21BB"; "Beads \u21BB"; "Agent \u2191"; "PR \u2913"; "Git \u2913" ]),
                 "Categories should render in known order")
 
             do! page.CloseAsync()
@@ -3432,20 +3433,20 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Idle cards have no user-prompt but have git-commit-msg``() =
+    member this.``No-session cards have no user-prompt but have git-commit-msg``() =
         task {
-            let idleCard = this.Page.Locator(".wt-card.ct-idle").First
+            let idleCard = this.Page.Locator(".wt-card.ct-nosession").First
             do! idleCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let userPrompt = idleCard.Locator(".user-prompt")
             let! promptCount = userPrompt.CountAsync()
             Assert.That(promptCount, Is.EqualTo(0),
-                "Idle card without LastUserMessage should not have user-prompt")
+                "No-session card without LastUserMessage should not have user-prompt")
 
             let gitCommitMsg = idleCard.Locator(".git-commit-msg")
             let! msgCount = gitCommitMsg.CountAsync()
             Assert.That(msgCount, Is.EqualTo(1),
-                "Idle card should still have git-commit-msg in main-behind-row")
+                "No-session card should still have git-commit-msg in main-behind-row")
         }
 
     [<Test>]
@@ -3903,6 +3904,58 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Escape from outside the dashboard reclaims focus and restores arrow nav``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focused = this.Page.Locator(".focused")
+            do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! _ = this.Page.EvaluateAsync("() => document.querySelector('.dashboard').blur()")
+            let! left =
+                this.Page.EvaluateAsync<bool>("() => document.activeElement.closest('.dashboard') === null")
+            Assert.That(left, Is.True, "Focus should have left the dashboard subtree")
+
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            let! reclaimed =
+                this.Page.EvaluateAsync<bool>("() => document.activeElement === document.querySelector('.dashboard')")
+            Assert.That(reclaimed, Is.True, "Escape from outside the dashboard should reclaim focus to it")
+
+            let focusedAfter = this.Page.Locator(".focused")
+            do! focusedAfter.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            let focusedNav = this.Page.Locator(".focused")
+            do! focusedNav.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+            let! navClass = focusedNav.GetAttributeAsync("class")
+            Assert.That(navClass, Does.Contain("wt-card"),
+                "Arrow navigation should work after Escape reclaim without a manual refocus")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Escape does not reclaim focus while an editable field has focus``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { const i = document.createElement('input'); i.id = 'e2e-editable-probe'; document.body.appendChild(i); i.focus(); }")
+            do! this.Page.Keyboard.PressAsync("Escape")
+
+            let! keptFocus =
+                this.Page.EvaluateAsync<bool>("() => document.activeElement.id === 'e2e-editable-probe'")
+            let! _ = this.Page.EvaluateAsync("() => document.getElementById('e2e-editable-probe').remove()")
+            Assert.That(keptFocus, Is.True,
+                "The global Escape reclaim must skip editable fields and leave their focus intact")
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Cancel button closes modal and restores focus for arrow key nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")
@@ -4011,5 +4064,4 @@ type DashboardTests() =
             Assert.That(afterClass, Does.Contain("repo-header"),
                 "Focus should remain on repo header (arrow keys while modal open should not have changed it)")
         }
-
 

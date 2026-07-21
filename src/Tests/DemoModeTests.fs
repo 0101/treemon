@@ -186,9 +186,9 @@ type DemoModeTests() =
         }
 
     [<Test>]
-    member this.``Demo mode shows both Claude and Copilot providers``() =
+    member this.``Demo mode shows the Copilot provider``() =
         task {
-            // Verify via API that both providers are present across worktrees
+            // Verify via API that the Copilot provider is present across worktrees
             use client = new HttpClient()
             let content = new StringContent("[]", Encoding.UTF8, "application/json")
             let! response = client.PostAsync($"{demoServerUrl}/IWorktreeApi/getWorktrees", content)
@@ -201,21 +201,20 @@ type DemoModeTests() =
                 |> List.choose _.CodingToolProvider
                 |> List.distinct
 
-            Assert.That(allProviders, Does.Contain(Claude), "Claude provider should appear on at least one worktree")
-            Assert.That(allProviders, Does.Contain(Copilot), "Copilot provider should appear on at least one worktree")
+            Assert.That(allProviders, Does.Contain(CopilotCli), "Copilot provider should appear on at least one worktree")
 
-            // Also verify Claude appears in UI sync button titles (Claude has non-dirty Working cards behind main)
-            let claudeIndicators = this.Page.Locator("[title*='Claude is active']")
+            // Also verify the provider appears in UI sync button titles (a non-dirty Working card behind main)
+            let copilotIndicators = this.Page.Locator("[title*='Copilot is active']")
             let deadline = DateTime.UtcNow.AddSeconds(12.0)
-            let mutable claudeFound = false
+            let mutable copilotFound = false
 
-            while DateTime.UtcNow < deadline && not claudeFound do
-                let! claudeCount = claudeIndicators.CountAsync()
-                if claudeCount > 0 then claudeFound <- true
-                if not claudeFound then
+            while DateTime.UtcNow < deadline && not copilotFound do
+                let! copilotCount = copilotIndicators.CountAsync()
+                if copilotCount > 0 then copilotFound <- true
+                if not copilotFound then
                     do! System.Threading.Tasks.Task.Delay(500)
 
-            Assert.That(claudeFound, Is.True, "Claude provider indicator should appear in sync button title")
+            Assert.That(copilotFound, Is.True, "Copilot provider indicator should appear in sync button title")
         }
 
     [<Test>]
@@ -224,18 +223,18 @@ type DemoModeTests() =
             // Capture initial state of coding tool dots
             let workingDots = this.Page.Locator(".ct-dot.working")
             let waitingDots = this.Page.Locator(".ct-dot.waiting")
-            let doneDots = this.Page.Locator(".ct-dot.done")
+            let idleDots = this.Page.Locator(".ct-dot.idle")
 
             let! initialWorking = workingDots.CountAsync()
             let! initialWaiting = waitingDots.CountAsync()
-            let! initialDone = doneDots.CountAsync()
-            let initialState = (initialWorking, initialWaiting, initialDone)
+            let! initialIdle = idleDots.CountAsync()
+            let initialState = (initialWorking, initialWaiting, initialIdle)
 
             TestContext.Out.WriteLine(
-                $"Initial state - working: {initialWorking}, waiting: {initialWaiting}, done: {initialDone}")
+                $"Initial state - working: {initialWorking}, waiting: {initialWaiting}, idle: {initialIdle}")
 
             // The demo loops every 24s (12 frames x 2s); the only coding-tool dot that toggles is
-            // the auth card (Done <-> Working), which stays in one state for up to 14s across the
+            // the auth card (Idle <-> Working), which stays in one state for up to 14s across the
             // cycle wrap. Wait a full cycle plus buffer so the opposite state is observed no matter
             // which phase the page loaded in.
             let deadline = DateTime.UtcNow.AddSeconds(26.0)
@@ -245,11 +244,11 @@ type DemoModeTests() =
                 do! System.Threading.Tasks.Task.Delay(1000)
                 let! currentWorking = workingDots.CountAsync()
                 let! currentWaiting = waitingDots.CountAsync()
-                let! currentDone = doneDots.CountAsync()
-                let currentState = (currentWorking, currentWaiting, currentDone)
+                let! currentIdle = idleDots.CountAsync()
+                let currentState = (currentWorking, currentWaiting, currentIdle)
 
                 TestContext.Out.WriteLine(
-                    $"Current state - working: {currentWorking}, waiting: {currentWaiting}, done: {currentDone}")
+                    $"Current state - working: {currentWorking}, waiting: {currentWaiting}, idle: {currentIdle}")
 
                 if currentState <> initialState then
                     transitioned <- true

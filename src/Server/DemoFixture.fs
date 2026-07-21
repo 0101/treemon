@@ -37,8 +37,7 @@ let private updateWorktree repoId branch transform repos =
 
 // Fixture-level transforms for chaining frames
 let private withRepos f (fix: FixtureData) =
-    { fix with
-        Worktrees = { fix.Worktrees with Repos = f fix.Worktrees.Repos } }
+    { fix with Worktrees.Repos = f fix.Worktrees.Repos }
 
 let private withRetry f = withRepos (updateWorktree azDoRepoId "feature/retry-logic" f)
 let private withConfig f = withRepos (updateWorktree azDoRepoId "refactor/config-loading" f)
@@ -47,9 +46,7 @@ let private withStream f = withRepos (updateWorktree githubRepoId "feature/strea
 
 let private withCpu cpu mem (fix: FixtureData) =
     { fix with
-        Worktrees =
-            { fix.Worktrees with
-                SystemMetrics = Some { CpuPercent = cpu; MemoryUsedMb = mem; MemoryTotalMb = 32768 } } }
+        Worktrees.SystemMetrics = Some { CpuPercent = cpu; MemoryUsedMb = mem; MemoryTotalMb = 32768 } }
 
 let private withCardEvt branch cardEvt (fix: FixtureData) =
     { fix with SyncStatus = fix.SyncStatus |> Map.add branch [ cardEvt ] }
@@ -155,11 +152,17 @@ let private wtAzDoMain: WorktreeStatus =
     { Path = azDoPath "main"
       Branch = "main"
       LastCommitMessage = "Merge PR #4198: Update dependencies to latest stable"
+      Sessions = []
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
-      CodingTool = Idle
+      Planning = BeadsPlanning.zero
+      CodingTool = NoSession
       CodingToolProvider = None
+      CodingToolSince = None
+      CurrentSkill = None
       LastUserMessage = None
+      AgentActivity = None
+      LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 0
       IsDirty = false
@@ -174,11 +177,19 @@ let private wtRetryLogic: WorktreeStatus =
     { Path = azDoPath "feature-retry"
       Branch = "feature/retry-logic"
       LastCommitMessage = "Add exponential backoff to blob storage retries"
+      Sessions =
+        [ { Status = Working; Skill = Some "pr"; ContextUsage = Some { CurrentTokens = 142000; TokenLimit = 200000 } }
+          { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 47000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
+      Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
+      CurrentSkill = None
       LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
+      AgentActivity = Some(AgentActivity.Intent("Adding jitter to the backoff delays", baseTimestamp.AddMinutes(-1.0)))
+      LastAssistantMessage = Some("Updating the retry helper to spread out retries with jitter…", baseTimestamp.AddSeconds(-40.0))
       Pr = HasPr prRetryBuilding
       MainBehindCount = 2
       IsDirty = true
@@ -193,11 +204,17 @@ let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
       Branch = "refactor/config-loading"
       LastCommitMessage = "Extract config validation into separate module"
+      Sessions = [ { Status = Working; Skill = Some "refactor"; ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
+      Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Claude
+      CodingToolProvider = Some CopilotCli
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
+      CurrentSkill = None
       LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
+      AgentActivity = Some(AgentActivity.Intent("Extracting env overrides into a typed loader", baseTimestamp.AddMinutes(-2.0)))
+      LastAssistantMessage = Some("Splitting config validation into its own module", baseTimestamp.AddMinutes(-1.0))
       Pr = NoPr
       MainBehindCount = 5
       IsDirty = false
@@ -212,11 +229,17 @@ let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
       Branch = "feature/auth-middleware"
       LastCommitMessage = "Add JWT validation and claims extraction"
+      Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
-      CodingTool = Done
-      CodingToolProvider = Some Copilot
+      Planning = BeadsPlanning.zero
+      CodingTool = Idle
+      CodingToolProvider = Some CopilotCli
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
+      CurrentSkill = None
       LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
+      AgentActivity = Some(AgentActivity.Intent("Verifying the admin-role check on the delete endpoint", baseTimestamp.AddMinutes(-8.0)))
+      LastAssistantMessage = Some("Added the admin role guard — let me know if that covers it", baseTimestamp.AddMinutes(-8.0))
       Pr = HasPr prAuth
       MainBehindCount = 1
       IsDirty = false
@@ -231,11 +254,17 @@ let private wtArchived: WorktreeStatus =
     { Path = azDoPath "old-migration"
       Branch = "feature/db-migration"
       LastCommitMessage = "Complete database migration script v2"
+      Sessions = []
       LastCommitTime = baseTimestamp.AddHours(-48.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
-      CodingTool = Done
-      CodingToolProvider = Some Claude
+      Planning = BeadsPlanning.zero
+      CodingTool = Idle
+      CodingToolProvider = Some CopilotCli
+      CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
+      CurrentSkill = None
       LastUserMessage = None
+      AgentActivity = None
+      LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 12
       IsDirty = false
@@ -250,11 +279,17 @@ let private wtGithubMain: WorktreeStatus =
     { Path = githubPath "main"
       Branch = "main"
       LastCommitMessage = "Merge pull request #308: Fix CSV parser edge case"
+      Sessions = []
       LastCommitTime = baseTimestamp.AddMinutes(-15.0)
       Beads = BeadsSummary.zero
-      CodingTool = Idle
+      Planning = BeadsPlanning.zero
+      CodingTool = NoSession
       CodingToolProvider = None
+      CodingToolSince = None
+      CurrentSkill = None
       LastUserMessage = None
+      AgentActivity = None
+      LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 0
       IsDirty = false
@@ -269,11 +304,20 @@ let private wtStreaming: WorktreeStatus =
     { Path = githubPath "streaming"
       Branch = "feature/streaming-agg"
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
+      Sessions =
+        [ { Status = Working; Skill = Some "bd-execute"; ContextUsage = Some { CurrentTokens = 92000; TokenLimit = 200000 } }
+          { Status = Working; Skill = Some "review"; ContextUsage = Some { CurrentTokens = 150000; TokenLimit = 200000 } }
+          { Status = Idle; Skill = None; ContextUsage = None } ]
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
+      Planning = BeadsPlanning.zero
       CodingTool = Working
-      CodingToolProvider = Some Copilot
+      CodingToolProvider = Some CopilotCli
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
+      CurrentSkill = None
       LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
+      AgentActivity = Some(AgentActivity.Intent("Wiring tumbling windows into the aggregator", baseTimestamp.AddSeconds(-30.0)))
+      LastAssistantMessage = Some("Windowed aggregation added; running the tests now", baseTimestamp.AddSeconds(-20.0))
       Pr = HasPr prStreaming
       MainBehindCount = 1
       IsDirty = false
@@ -288,11 +332,17 @@ let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
       Branch = "fix/csv-parser"
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
+      Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
-      CodingTool = Done
-      CodingToolProvider = Some Copilot
+      Planning = BeadsPlanning.zero
+      CodingTool = Idle
+      CodingToolProvider = Some CopilotCli
+      CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
+      CurrentSkill = None
       LastUserMessage = None
+      AgentActivity = None
+      LastAssistantMessage = None
       Pr = HasPr prCsvMerged
       MainBehindCount = 0
       IsDirty = false
@@ -309,7 +359,7 @@ let private baseLatestByCategory: Map<string, CardEvent> =
     [ "WorktreeList", evt "WorktreeList" $"{azDoEvt}" 18 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.3))
       "GitRefresh", evt "GitRefresh" $"{azDoEvt}/feature-retry (3 files)" 10 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.8))
       "BeadsRefresh", evt "BeadsRefresh" $"{azDoEvt}/feature-retry" 6 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.4))
-      "CodingToolRefresh", evt "CodingToolRefresh" "4 agents checked" 4 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.2))
+      "CodingToolRefresh", evt "CodingToolRefresh" $"{azDoEvt}/feature-retry" 4 (Some StepStatus.Succeeded) None
       "PrFetch", evt "PrFetch" $"{azDoEvt}" 8 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.8))
       "GitFetch", evt "GitFetch" $"{azDoEvt} (2 new commits)" 12 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 2.1)) ]
     |> Map.ofList
@@ -356,8 +406,10 @@ let private baseDashboard: DashboardResponse =
       DeployBranch = None
       SystemMetrics = Some { CpuPercent = 42.0; MemoryUsedMb = 14200; MemoryTotalMb = 32768 }
       EditorName = "VS Code"
+      WorktreeSkills = [ "investigate"; "review" ]
       CollapsedRepos = Set.empty
       CanvasPaneOpen = false
+      OverviewPanelOpen = false
       CanvasPosition = CanvasPosition.Right
       CanvasSize = CanvasSize.Ratio1To1 }
 
@@ -368,13 +420,13 @@ let private baseFixture: FixtureData =
 // ============================================================
 // FRAME SEQUENCE — 12 frames, 24s total
 //
-// Starting state: 3 Working (retry, config, streaming) + 1 Done (auth)
+// Starting state: 3 Working (retry, config, streaming) + 1 Idle (auth)
 // Each frame changes ONE card. Distributed over time.
 //
 // Story arcs:
 //   retry-logic: Building → Failed → fix → Rebuilding → Succeeded
 //   config:      working steadily, commits accumulate
-//   auth:        Done → user prompt → Working → Copilot events → Done (loops)
+//   auth:        Idle → user prompt → Working → Copilot events → Idle (loops)
 //   streaming:   steady background work
 // ============================================================
 
@@ -392,7 +444,11 @@ let private f2 =
 // F3 (4-6s): Auth — Copilot starts working (dot changes, event updates)
 let private f3 =
     f2
-    |> withAuth (fun wt -> { wt with CodingTool = Working })
+    |> withAuth (fun wt ->
+        { wt with
+            CodingTool = Working
+            CodingToolSince = Some baseTimestamp
+            Sessions = [ { Status = Working; Skill = Some "investigate"; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCardEvt authKey
         (evt "copilot" "Reading authorization middleware" 1 None None)
     |> withCpu 45.0 14800
@@ -432,10 +488,14 @@ let private f7 =
             WorkMetrics = Some { CommitCount = 13; LinesAdded = 612; LinesRemoved = 131 } })
     |> withCpu 68.0 16800
 
-// F8 (14-16s): Auth — Copilot finishes, back to Done (matches base)
+// F8 (14-16s): Auth — Copilot finishes, back to Idle (matches base)
 let private f8 =
     f7
-    |> withAuth (fun wt -> { wt with CodingTool = Done })
+    |> withAuth (fun wt ->
+        { wt with
+            CodingTool = Idle
+            CodingToolSince = Some baseTimestamp
+            Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCardEvt authKey
         (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800
@@ -498,6 +558,7 @@ let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) 
     let shift = now - baseTimestamp
     { wt with
         LastCommitTime = wt.LastCommitTime + shift
+        CodingToolSince = wt.CodingToolSince |> Option.map (fun ts -> ts + shift)
         LastUserMessage =
             wt.LastUserMessage
             |> Option.map (fun (msg, ts) -> msg, ts + shift) }

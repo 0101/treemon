@@ -13,33 +13,25 @@ type CliInvocation =
 
     member this.AsShellString = $"{this.Executable} {this.Args}"
 
+// Injection-safety chokepoint: every value interpolated into an Args string MUST be wrapped in
+// single quotes with embedded single quotes doubled, so a hostile value (';', newline, '$(...)')
+// cannot break out of the quoted literal once the shell string is embedded into the pwsh
+// -EncodedCommand script by SessionManager.buildScript.
 let private escape (s: string) = s.Replace("'", "''")
 
 let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvocation =
     let p = provider |> Option.defaultValue CodingToolProvider.Default
 
     match p, mode with
-    | CodingToolProvider.Claude, Interactive prompt ->
-        { Executable = "claude"
-          Args = $"--dangerously-skip-permissions '{escape prompt}'" }
-    | CodingToolProvider.Claude, Resume (Some id) ->
-        { Executable = "claude"
-          Args = $"--dangerously-skip-permissions --resume {id}" }
-    | CodingToolProvider.Claude, Resume None ->
-        { Executable = "claude"
-          Args = "--dangerously-skip-permissions --continue" }
-    | CodingToolProvider.Claude, NonInteractive prompt ->
-        { Executable = "claude"
-          Args = $"-p \"{escape prompt}\" --dangerously-skip-permissions" }
-    | CodingToolProvider.Copilot, Interactive prompt ->
+    | CodingToolProvider.CopilotCli, Interactive prompt ->
         { Executable = "copilot"
           Args = $"--yolo -i '{escape prompt}'" }
-    | CodingToolProvider.Copilot, Resume (Some id) ->
+    | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
-          Args = $"--yolo --resume {id}" }
-    | CodingToolProvider.Copilot, Resume None ->
+          Args = $"--yolo --resume '{escape id}'" }
+    | CodingToolProvider.CopilotCli, Resume None ->
         { Executable = "copilot"
           Args = "--yolo --continue" }
-    | CodingToolProvider.Copilot, NonInteractive prompt ->
+    | CodingToolProvider.CopilotCli, NonInteractive prompt ->
         { Executable = "copilot"
           Args = $"-p \"{escape prompt}\" --allow-all --no-ask-user -s --autopilot" }

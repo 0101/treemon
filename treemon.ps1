@@ -221,6 +221,21 @@ function Remove-OldRunLogs([int]$Keep) {
     }
 }
 
+function Set-CanvasShareEnv {
+    # Canvas sharing reads its Azure credential ONLY from the AZURE_STORAGE_CONNECTION_STRING env var
+    # (docs/spec/canvas-sharing.md). The server inherits THIS shell's environment block via
+    # Start-Process, and Windows only loads a persisted User/Machine env var into a process at launch
+    # — so deploying from a terminal opened before the var was set would start the server without it.
+    # Read the persisted value straight from the registry-backed store and propagate it, so
+    # start/restart/deploy work from any shell. The secret is only ever read from the env var, never
+    # written to a file or config.
+    if (-not $env:AZURE_STORAGE_CONNECTION_STRING) {
+        $persisted = [Environment]::GetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', 'User')
+        if (-not $persisted) { $persisted = [Environment]::GetEnvironmentVariable('AZURE_STORAGE_CONNECTION_STRING', 'Machine') }
+        if ($persisted) { $env:AZURE_STORAGE_CONNECTION_STRING = $persisted }
+    }
+}
+
 function Start-ProductionServer([string[]]$Roots) {
     $runningPid = Get-RunningPid
     if ($runningPid) {
@@ -269,6 +284,8 @@ function Start-ProductionServer([string[]]$Roots) {
             }
         }
     }
+
+    Set-CanvasShareEnv
 
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
     $process = Start-Process -FilePath $serverExe `
@@ -413,6 +430,7 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
 
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
+    Set-CanvasShareEnv
 
     $serverProcess = $null
     $viteProcess = $null
@@ -540,13 +558,19 @@ function Install-Skill {
     }
 }
 
+function Install-CopilotExtension([string]$SrcDir, [string]$DestName, [string]$FriendlyName) {
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
+        Where-Object { $_.Name -notlike "*.test.mjs" } |
+        Copy-Item -Destination $dest -Force
+    Copy-Item (Join-Path $SrcDir "package.json") $dest -Force
+    Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
+}
+
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "canvas-bridge"
-    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
-    Copy-Item (Join-Path $src "package.json") $dest -Force
-    Write-Host "Canvas bridge extension installed to $dest" -ForegroundColor Green
+    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension"
 
     # Install canvas authoring skill
     $skillSource = Join-Path $src "skill" "SKILL.md"
@@ -571,6 +595,16 @@ function Install-Extension {
             $installed | ForEach-Object { Write-Host "  Canvas skill installed for $_" -ForegroundColor Green }
         }
     }
+}
+
+function Install-ReportingExtension {
+    # Phase 1 of the push status model: the passive, reporting-only extension. Installed ALONGSIDE
+    # canvas-bridge (a separate extension dir), never replacing it — reporting registers no canvas
+    # and no tools, so both load per session with no canvas_take_ownership collision. It forwards
+    # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
+    # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
+    $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
+    Install-CopilotExtension $src "treemon-reporting" "Reporting extension"
 }
 
 function Test-WorktreeRootPaths([string[]]$Roots) {
@@ -615,6 +649,7 @@ function Deploy-Frontend {
     try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
     try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
+    try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
 
     Restart-ServerIfRunning -Message "Restarting production server..." -NotRunningMessage "Production server is not running, skipping restart"
 }

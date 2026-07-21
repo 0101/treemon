@@ -3,7 +3,6 @@ module Tests.ServerFixture
 open System
 open System.Diagnostics
 open System.IO
-open System.Net.Http
 open System.Threading.Tasks
 open NUnit.Framework
 
@@ -21,8 +20,20 @@ let private worktreeRoots = [ repoRoot ]
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
 
-let serverUrl = "http://localhost:5001"
-let viteUrl = "http://localhost:5174"
+// Pick three distinct free loopback ports up front (TestUtils.getFreeTcpPorts binds :0, reads the
+// assigned ports, then releases them) for the API server, the canvas-doc server, and Vite — so the
+// E2E stack avoids a running production Treemon (which owns 5000/5002) or a previous test run, and
+// never has to kill another process to free a port.
+// The canvas port is threaded into the client build via CANVAS_PORT -> Vite `define` so the client's
+// iframe origin (CanvasPane.CanvasOrigin) matches this fixture's canvas-doc server.
+let private apiPort, canvasPort, vitePort =
+    match TestUtils.getFreeTcpPorts 3 with
+    | [ a; c; v ] -> a, c, v
+    | other -> failwith $"Expected 3 free ports, got {List.length other}"
+
+let serverUrl = $"http://localhost:{apiPort}"
+let viteUrl = $"http://localhost:{vitePort}"
+let canvasUrl = $"http://127.0.0.1:{canvasPort}"
 
 let private memoryThreshold = 2L * 1024L * 1024L * 1024L
 
@@ -47,57 +58,18 @@ let getMemoryStats () =
       readMemoryStats "Vite" viteProcess.Value ]
     |> List.choose id
 
-let private tryGet (client: HttpClient) (url: string) =
-    async {
-        try
-            let! response = client.GetAsync(url) |> Async.AwaitTask
-            return int response.StatusCode < 500
-        with
-        | _ -> return false
-    }
-
-let rec private pollUntilReady (client: HttpClient) (url: string) (deadline: DateTime) =
-    async {
-        if DateTime.UtcNow > deadline then
-            failwithf "Timed out waiting for %s" url
-        else
-            let! ok = tryGet client url
-
-            if not ok then
-                do! Async.Sleep(500)
-                return! pollUntilReady client url deadline
-    }
-
-let private waitForUrl (url: string) (timeoutMs: int) : Task =
-    let work =
-        async {
-            use client = new HttpClient()
-            let deadline = DateTime.UtcNow.AddMilliseconds(float timeoutMs)
-            do! pollUntilReady client url deadline
-        }
-
-    work |> Async.StartAsTask :> Task
-
 let private startProcess fileName args workingDir envVars redirectOutput =
     TestUtils.startProcess fileName args workingDir envVars redirectOutput
-
-let private killOrphansOnPort port =
-    TestUtils.killOrphansOnPort port
 
 let startServer () =
     task {
         let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
 
         let proc =
-            startProcess
-                "dotnet"
-                $"""run --project "{serverProjectPath}" -- {rootArgs} --port 5001 --test-fixtures "{fixturesPath}" """
-                repoRoot
-                []
-                false
+            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath
 
         serverProcess.Value <- Some proc
-        do! waitForUrl serverUrl 30000
+        do! TestUtils.waitForUrl serverUrl 30000
     }
 
 let compileFable () =
@@ -125,17 +97,10 @@ let compileFable () =
 let startVite () =
     task {
         let proc =
-            startProcess
-                "npx"
-                "vite --host"
-                repoRoot
-                [ "VITE_PORT", "5174"
-                  "API_PORT", "5001"
-                  "NODE_OPTIONS", "--max-old-space-size=512" ]
-                false
+            TestUtils.startViteProcess repoRoot vitePort apiPort canvasPort
 
         viteProcess.Value <- Some proc
-        do! waitForUrl viteUrl 15000
+        do! TestUtils.waitForUrl viteUrl 15000
     }
 
 let private killProc procOpt =
@@ -163,12 +128,11 @@ type GlobalSetup() =
     [<OneTimeSetUp>]
     member _.Setup() =
         task {
-            killOrphansOnPort 5001
-            killOrphansOnPort 5174
             do! startServer ()
             do! compileFable ()
             do! startVite ()
-            TestContext.Out.WriteLine("Server, Fable, and Vite started successfully")
+            TestContext.Out.WriteLine(
+                $"Server ({serverUrl}), canvas-doc ({canvasUrl}), Fable, and Vite ({viteUrl}) started successfully")
         }
 
     [<OneTimeTearDown>]

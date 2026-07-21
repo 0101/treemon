@@ -43,23 +43,12 @@ let private readGlobalConfig () =
             else None)
         |> Map.ofSeq)
 
-let internal readCollapsedRepos () : Set<RepoId> =
-    withConfigDocument Set.empty (fun root ->
-        match root.TryGetProperty("collapsedRepos") with
-        | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
-            prop.EnumerateArray()
-            |> Seq.choose (fun el ->
-                if el.ValueKind = System.Text.Json.JsonValueKind.String then Some (RepoId (el.GetString()))
-                else None)
-            |> Set.ofSeq
-        | _ -> Set.empty)
-
-/// Reads `ignoreWorktreePatterns` from the machine-level config — the regexes for worktrees the
-/// dashboard should hide. Lives here so all global-config reads share the one
-/// `TREEMON_CONFIG_DIR`-aware path.
-let readIgnoreWorktreePatterns () : string list =
+/// Reads a JSON string array from the machine-level config by key, returning `[]` when the key is
+/// absent or not an array. Shared by the config readers that each pull a list of strings and then
+/// apply their own post-processing (element wrapping, trimming, filtering, container choice).
+let private readStringArray (key: string) : string list =
     withConfigDocument [] (fun root ->
-        match root.TryGetProperty("ignoreWorktreePatterns") with
+        match root.TryGetProperty(key) with
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.Array ->
             prop.EnumerateArray()
             |> Seq.choose (fun el ->
@@ -67,6 +56,24 @@ let readIgnoreWorktreePatterns () : string list =
                 else None)
             |> Seq.toList
         | _ -> [])
+
+let internal readCollapsedRepos () : Set<RepoId> =
+    readStringArray "collapsedRepos" |> List.map RepoId |> Set.ofList
+
+/// Reads `ignoreWorktreePatterns` from the machine-level config — the regexes for worktrees the
+/// dashboard should hide. Lives here so all global-config reads share the one
+/// `TREEMON_CONFIG_DIR`-aware path.
+let readIgnoreWorktreePatterns () : string list =
+    readStringArray "ignoreWorktreePatterns"
+
+/// Reads the machine-level `worktreeSkills` — the skills offered in the create-worktree modal's
+/// radio group. Entries are trimmed and blanks dropped. Absent or empty yields `[]`, which the modal renders
+/// as "None only" plus an onboarding hint pointing here. Order is preserved; the first entry is
+/// the modal's default selection.
+let readWorktreeSkills () : string list =
+    readStringArray "worktreeSkills"
+    |> List.map _.Trim()
+    |> List.filter (fun s -> s <> "")
 
 let buildIgnorePredicate (patterns: string list) : string -> bool =
     let regexes =
@@ -221,15 +228,22 @@ let internal removeRootFromConfig (path: string) : Result<unit, string> =
         else
             writeWorktreeRoots remaining)
 
-let internal readCanvasPaneOpen () : bool =
+let private readBoolProperty (name: string) : bool =
     withConfigDocument false (fun root ->
-        match root.TryGetProperty("canvasPaneOpen") with
+        match root.TryGetProperty(name) with
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.True -> true
         | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.False -> false
         | _ -> false)
 
+let internal readCanvasPaneOpen () : bool = readBoolProperty "canvasPaneOpen"
+
 let internal writeCanvasPaneOpen (isOpen: bool) =
     updateGlobalConfig "canvas pane open state" [ "canvasPaneOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
+
+let internal readOverviewPanelOpen () : bool = readBoolProperty "overviewPanelOpen"
+
+let internal writeOverviewPanelOpen (isOpen: bool) =
+    updateGlobalConfig "overview panel open state" [ "overviewPanelOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
 
 let internal readCanvasPosition () : CanvasPosition =
     withConfigDocument CanvasPosition.Right (fun root ->
@@ -265,6 +279,51 @@ let internal writeCanvasSize (size: CanvasSize) =
         | CanvasSize.Ratio1To1 -> "1to1"
         | CanvasSize.Ratio2To1 -> "2to1"
     updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
+
+/// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):
+/// which PRIVATE blob container published docs land in, and the default per-doc SAS expiry. The
+/// Azure credential is deliberately NOT here — it is the `AZURE_STORAGE_CONNECTION_STRING` secret,
+/// read by `CanvasShare` straight from the environment, so no account key is ever written to the
+/// JSON file (spec docs/spec/canvas-sharing.md, Configuration).
+type CanvasShareConfig =
+    { Container: string
+      DefaultExpiryDays: int }
+
+/// Defaults for a missing `canvasShare` section or field: a conventional private-container name and
+/// the spec's 90-day SAS lifetime. With these, setting only `AZURE_STORAGE_CONNECTION_STRING` is
+/// enough to share — matching the spec's framing that the connection string is the one thing an
+/// operator must supply.
+let defaultCanvasShareConfig = { Container = "canvas-shared"; DefaultExpiryDays = 90 }
+
+/// Upper bound (10 years) on a configured `defaultExpiryDays`. A larger — or non-positive — value is
+/// treated as absent and falls back to the default, keeping the SAS expiry *bounded* (spec Decision
+/// #3) and guaranteeing `DateTimeOffset.UtcNow.AddDays(DefaultExpiryDays)` at publish can never
+/// overflow `DateTimeOffset` (year 9999 is ~2.9M days out) and orphan an already-uploaded blob.
+let internal maxCanvasShareExpiryDays = 3650
+
+/// Reads the `canvasShare` config section, falling back to `defaultCanvasShareConfig` for a missing
+/// section or field. A blank `container`, or a `defaultExpiryDays` outside `1 .. maxCanvasShareExpiryDays`,
+/// is treated as absent (a non-positive expiry would mint an already-dead link; an unbounded one would
+/// overflow `AddDays` at publish and orphan the blob), so a partial or typo'd section still yields a
+/// working config rather than a broken one.
+let internal readCanvasShareConfig () : CanvasShareConfig =
+    withConfigDocument defaultCanvasShareConfig (fun root ->
+        match root.TryGetProperty("canvasShare") with
+        | true, section when section.ValueKind = System.Text.Json.JsonValueKind.Object ->
+            let container =
+                match section.TryGetProperty("container") with
+                | true, c when c.ValueKind = System.Text.Json.JsonValueKind.String && c.GetString().Trim() <> "" ->
+                    c.GetString().Trim()
+                | _ -> defaultCanvasShareConfig.Container
+            let expiryDays =
+                match section.TryGetProperty("defaultExpiryDays") with
+                | true, e when e.ValueKind = System.Text.Json.JsonValueKind.Number ->
+                    match e.TryGetInt32() with
+                    | true, n when n > 0 && n <= maxCanvasShareExpiryDays -> n
+                    | _ -> defaultCanvasShareConfig.DefaultExpiryDays
+                | _ -> defaultCanvasShareConfig.DefaultExpiryDays
+            { Container = container; DefaultExpiryDays = expiryDays }
+        | _ -> defaultCanvasShareConfig)
 
 let internal readLastViewedHashes () : Map<string, Map<string, string>> =
     withConfigDocument Map.empty (fun root ->

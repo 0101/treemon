@@ -10,6 +10,7 @@ module AppTypes
 open Shared
 open Shared.EventUtils
 open Navigation
+open OverviewData
 open Elmish
 open Fable.Remoting.Client
 
@@ -25,6 +26,7 @@ type Model =
       SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
+      WorktreeSkills: string list
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
@@ -34,7 +36,9 @@ type Model =
       ActionCooldowns: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
-      Canvas: CanvasState.CanvasState }
+      Canvas: CanvasState.CanvasState
+      OverviewPanelOpen: bool
+      SelectedOverviewGroup: OverviewSelection option }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -61,6 +65,7 @@ type Msg =
     | SessionResult of Result<unit, string>
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
+    | SetFocusNoRetarget of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * action: ActionKind
     | LaunchActionResult of Result<unit, string>
@@ -69,6 +74,13 @@ type Msg =
     | ModalMsg of CreateWorktreeModal.Msg
     | UserActivity of now: float
     | ToggleCanvasPane
+    | ToggleOverviewPanel
+    // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
+    // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
+    // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT
+    // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
+    | SelectOverviewGroup of OverviewSelection
+    | SelectOverviewWorktree of scopedKey: string
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string
@@ -76,6 +88,18 @@ type Msg =
     | OpenCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
+    // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
+    // doc title) then write a rich clipboard link. ShareCanvasDocResult carries the CanvasShareResult
+    // on Ok (→ dual-format clipboard write, deferring the banner to ClipboardWriteResult) or an error
+    // message on failure (→ the existing error banner). ClipboardWriteResult reports whether the async
+    // navigator.clipboard.write actually landed — Ok raises "Shared — link copied", Error raises a
+    // "copy it manually: <url>" banner — so the success notice never claims a copy that a rejected
+    // write (lost transient activation / defocused document across the share round-trip, a revoked
+    // permission, or an unsupported clipboard API) never made. DismissShareNotice clears the banner.
+    | ShareCanvasDoc of scopedKey: string * filename: string
+    | ShareCanvasDocResult of scopedKey: string * filename: string * Result<CanvasShareResult, string>
+    | ClipboardWriteResult of url: string * Result<unit, string>
+    | DismissShareNotice
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
     | CanvasSendResult of CanvasMessageResult * scopedKey: string

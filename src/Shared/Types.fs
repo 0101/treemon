@@ -34,16 +34,104 @@ type BeadsSummary =
 module BeadsSummary =
     let zero = { Open = 0; InProgress = 0; Blocked = 0; Closed = 0 }
 
+/// Server-side split of a worktree's OPEN beads tasks by their direct parent-feature status,
+/// the source of the band's started-vs-awaiting signal:
+///   - Planned: open task under an OPEN feature (planning done, awaiting go-ahead)
+///   - Queued:  open task under an IN_PROGRESS feature (execution underway, next-up)
+///   - Loose:   open task with no/closed/blocked feature parent, or a non-feature parent
+/// Loose is kept distinct server-side for fidelity but folds into Planned for display.
+/// (FeaturesOpen/FeaturesWip were deliberately dropped — the v1 band shows no feature counts.)
+type BeadsPlanning =
+    { Planned: int
+      Queued: int
+      Loose: int }
+
+module BeadsPlanning =
+    let zero = { Planned = 0; Queued = 0; Loose = 0 }
+
 type CodingToolStatus =
     | Working
     | WaitingForUser
-    | Done
     | Idle
+    | NoSession
 
+/// The coding tool driving a worktree — its launcher, prompt format, and push-status source. A DU of
+/// one today: only the Copilot CLI can push its live status. Adding a provider (e.g. a future GitHub
+/// App) is a new case; the compiler then flags every provider-specific branch that must handle it.
 type CodingToolProvider =
-    | Claude
-    | Copilot
-    static member Default = Copilot
+    | CopilotCli
+    static member Default = CopilotCli
+
+/// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
+/// model's limit. Sourced from the SDK `session.usage_info` event, which is ephemeral upstream —
+/// so this is live-only (absent until the first event arrives, and not restored after a restart).
+type ContextUsage = { CurrentTokens: int; TokenLimit: int }
+
+module ContextUsage =
+    /// The fraction of the context window in use, clamped to [0, 1]. A non-positive limit (degenerate)
+    /// reads as 0 rather than dividing by zero.
+    let fraction (u: ContextUsage) : float =
+        if u.TokenLimit <= 0 then 0.0
+        else max 0.0 (min 1.0 (float u.CurrentTokens / float u.TokenLimit))
+
+    /// The fraction of the context window still free, clamped to [0, 1] — the complement of `fraction`.
+    /// The donut fills its accent arc to this, so a healthy low-usage agent reads as a nearly full
+    /// ring and one near its limit thins to a sliver.
+    let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
+
+/// One live (open) session's own status, the skill it is running, and its context-window occupancy —
+/// the unit behind the per-session donuts. `Skill` is the session's OWN running skill (None when it
+/// is running no recognized skill); the Overview band classifies each session's activity from it
+/// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
+/// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
+/// session reports usage (or after a restart, as it is not persisted), in which case the session
+/// renders as a plain status dot rather than a donut.
+type SessionDot =
+    { Status: CodingToolStatus
+      Skill: string option
+      ContextUsage: ContextUsage option }
+
+/// Live-agent activity buckets derived from the skill/command an agent is running,
+/// surfaced by the same session scan that drives the red dot. Working is the fallback for
+/// an active session with no recognized skill. Activity is always *derived* from CurrentSkill
+/// via Activity.classify — never stored separately — so the overview band derives it from one
+/// source of truth.
+[<RequireQualifiedAccess>]
+type CurrentActivity =
+    | Investigating
+    | Planning
+    | Executing
+    | Reviewing
+    | PR
+    | Working
+
+module Activity =
+    // First whitespace-delimited token — a Claude slash command can carry args
+    // (ClaudeDetector surfaces "<cmd> <args>", e.g. "pr https://..."), so only the command
+    // itself is significant. Split never yields an empty array.
+    let private firstToken (s: string) =
+        s.Split([| ' '; '\t'; '\n'; '\r' |])[0]
+
+    /// Classify a running skill/command name into an activity bucket, per the
+    /// beads-overview-band spec table. The name is normalized first — trimmed, reduced to its
+    /// first token, stripped of a leading '/' (Claude slash commands), and lower-cased — so a
+    /// CLI event name, a Claude slash command and a VS Code tool-call name all map uniformly.
+    /// Unknown or empty/whitespace input falls back to Working.
+    /// Lives in Shared so server (card stripe) and client (band) classify identically.
+    let classify (skill: string) : CurrentActivity =
+        let normalized =
+            if String.IsNullOrWhiteSpace skill then ""
+            else (firstToken (skill.Trim())).TrimStart('/').ToLowerInvariant()
+
+        match normalized with
+        | "investigate" | "research" -> CurrentActivity.Investigating
+        | "bd-plan" | "bd-improve" | "bd-autoimprove" -> CurrentActivity.Planning
+        | "execute" | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
+        | "review-branch" | "reviewing-tests" | "comprehensive-review"
+        | "code-review" | "bd-review" | "contribution"
+        | "review" | "focused-review:review" -> CurrentActivity.Reviewing
+        | "babysit-pr" | "pr" | "github" | "fix-build" -> CurrentActivity.PR
+        | _ -> CurrentActivity.Working
 
 [<RequireQualifiedAccess>]
 type ActivityLevel =
@@ -172,11 +260,31 @@ type LaunchRequest =
 type CreateWorktreeRequest =
     { RepoId: string
       BranchName: BranchName
-      BaseBranch: BranchName }
+      BaseBranch: BranchName
+      Prompt: string option
+      /// Which skill wraps the prompt on launch. `None` sends the prompt verbatim
+      /// (no skill); `Some name` wraps it via a provider-aware skill invocation.
+      Skill: string option }
 
 /// Non-fatal advisories surfaced after a worktree is created (e.g. a legacy fork
 /// script is present, or the post-fork setup hook failed). Empty means a clean create.
 type CreateWorktreeWarnings = string list
+
+[<RequireQualifiedAccess>]
+type AgentActivity =
+    | Intent of text: string * changedAt: DateTimeOffset
+    | SessionTitle of text: string * changedAt: DateTimeOffset
+
+module AgentActivity =
+    let textAndTimestamp =
+        function
+        | AgentActivity.Intent (text, changedAt)
+        | AgentActivity.SessionTitle (text, changedAt) -> text, changedAt
+
+    let mapText transform =
+        function
+        | AgentActivity.Intent (text, changedAt) -> AgentActivity.Intent(transform text, changedAt)
+        | AgentActivity.SessionTitle (text, changedAt) -> AgentActivity.SessionTitle(transform text, changedAt)
 
 type WorktreeStatus =
     { Path: WorktreePath
@@ -184,9 +292,26 @@ type WorktreeStatus =
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
       Beads: BeadsSummary
+      Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      /// When the agent entered its current Overview category — its classified activity while Working
+      /// (Investigating/Executing/…), else its status (WaitingForUser/Idle). Recorded at the transition
+      /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
+      CodingToolSince: DateTimeOffset option
+      CurrentSkill: string option
+      /// The freshest activity signal for the card's "what it's doing" line, preserving whether it
+      /// came from SDK `assistant.intent` or `session.title_changed`.
+      AgentActivity: AgentActivity option
+      /// One entry per live (open) session for this worktree, each carrying that session's own status
+      /// and context-window occupancy — the source of the per-session status donuts. Empty ⇔
+      /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
+      /// CodingTool above still drives the card's overall accent/border.
+      Sessions: SessionDot list
       LastUserMessage: (string * DateTimeOffset) option
+      /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
+      /// footer line. `None` when the session has produced no assistant message yet.
+      LastAssistantMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool
@@ -211,6 +336,8 @@ type StepStatus =
 
 module EventSource =
     let [<Literal>] Test = "Test"
+    let [<Literal>] Sync = "sync"
+    let [<Literal>] PostFork = "post-fork"
 
 type CardEvent =
     { Source: string
@@ -245,8 +372,12 @@ type DashboardResponse =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       EditorName: string
+      /// Skills offered in the create-worktree modal (machine-level `worktreeSkills`
+      /// config). Empty means only the built-in "None" option is available.
+      WorktreeSkills: string list
       CollapsedRepos: Set<RepoId>
       CanvasPaneOpen: bool
+      OverviewPanelOpen: bool
       CanvasPosition: CanvasPosition
       CanvasSize: CanvasSize }
 
@@ -257,6 +388,17 @@ type FixtureData =
 type ArchiveCanvasDocRequest =
     { WorktreePath: WorktreePath
       Filename: string }
+
+type ShareCanvasDocRequest =
+    { WorktreePath: WorktreePath
+      Filename: string }
+
+/// Result of publishing a canvas doc: the per-doc read-only SAS URL plus the doc's title
+/// (extracted server-side from the HTML) so the client can build the rich clipboard link
+/// without re-parsing.
+type CanvasShareResult =
+    { Url: string
+      Title: string }
 
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
@@ -278,11 +420,13 @@ type IWorktreeApi =
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
       saveCanvasPaneOpen: bool -> Async<unit>
+      saveOverviewPanelOpen: bool -> Async<unit>
       saveCanvasPosition: CanvasPosition -> Async<unit>
       saveCanvasSize: CanvasSize -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
+      shareCanvasDoc: ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>
       saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
       loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>>
       getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>>

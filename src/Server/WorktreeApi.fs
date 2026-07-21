@@ -21,19 +21,24 @@ let loadFixtures (path: string) : Result<FixtureData, string> =
         // Sanitize null lists — Fable.Remoting client can't deserialize null as F# list
         let sanitized =
             { data with
-                Worktrees =
-                    { data.Worktrees with
-                        Repos =
-                            data.Worktrees.Repos
-                            |> List.map (fun r ->
-                                { r with
-                                    Worktrees =
-                                        r.Worktrees
-                                        |> List.map (fun wt ->
-                                            { wt with
-                                                CanvasDocs =
-                                                    if obj.ReferenceEquals(wt.CanvasDocs, null) then []
-                                                    else wt.CanvasDocs }) }) } }
+                Worktrees.Repos =
+                    data.Worktrees.Repos
+                    |> List.map (fun r ->
+                        { r with
+                            Worktrees =
+                                r.Worktrees
+                                |> List.map (fun wt ->
+                                    { wt with
+                                        CanvasDocs =
+                                            if obj.ReferenceEquals(wt.CanvasDocs, null) then []
+                                            else wt.CanvasDocs
+                                        Sessions =
+                                            if obj.ReferenceEquals(wt.Sessions, null) then []
+                                            else wt.Sessions
+                                        Planning =
+                                            wt.Planning
+                                            |> Option.ofObj
+                                            |> Option.defaultValue BeadsPlanning.zero }) }) }
         Ok sanitized
     with ex ->
         Error $"Failed to load fixture file '{path}': {ex.Message}"
@@ -62,11 +67,13 @@ let readOnlyApi
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
       saveCanvasPaneOpen = fun _ -> async { return () }
+      saveOverviewPanelOpen = fun _ -> async { return () }
       saveCanvasPosition = fun _ -> async { return () }
       saveCanvasSize = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
+      shareCanvasDoc = fun _ -> async { return Error $"Share canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
       loadLastViewedHashes = fun () -> async { return Map.empty }
       getBridgeLiveness = fun _ -> async { return Map.empty }
@@ -92,24 +99,65 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
         File.Move(sourcePath, destPath, overwrite = true)
     }
 
-let private assembleFromState
+/// Share a canvas doc: validate the path → read the on-disk file → static-export it
+/// (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish to Azure Blob and
+/// mint a per-doc read-only SAS (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the
+/// SAS URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
+/// `CanvasExport.resolveTitle` (the doc's `<title>`, falling back to a prettified filename) because
+/// `CanvasShareResult.Title` is a plain string, not an option; the title is read from the original
+/// HTML (`buildStaticHtml` injects only at `</head>`, so it never alters the doc's `<title>`).
+let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
+    let path = WorktreePath.value request.WorktreePath
+    asyncResult {
+        let! sourcePath =
+            Server.PathUtils.validateCanvasPath path request.Filename
+            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
+
+        // Sharing is AgentDoc-only per spec (a SystemView like beads.html is server-generated,
+        // data-driven, and not shareable). The client only shows the Share button for AgentDocs;
+        // this gate enforces the same contract when the endpoint is called directly.
+        if CanvasDocKind.classify request.Filename <> AgentDoc then
+            return! Error $"Cannot share system view: {request.Filename}"
+
+        if not (File.Exists sourcePath) then
+            return! Error $"File not found: {request.Filename}"
+
+        let html = File.ReadAllText sourcePath
+        let! sasUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
+        return
+            { Url = sasUrl
+              Title = Server.CanvasExport.resolveTitle html request.Filename }
+    }
+
+let internal assembleFromState
+    (now: DateTimeOffset)
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
     (hasTestFailureLog: bool)
+    (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
+    (codingToolSince: Map<string, DateTimeOffset>)
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
     let gitData = repo.GitData |> Map.tryFind wt.Path
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
+    let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
+    // Card coding-tool fields now come from the push live state (SessionActivity), collapsed per
+    // worktree via pickActive — NOT the log-parsing detectors (repointed here; detectors deleted next
+    // task). An unknown/quiet worktree falls back to the same blank Idle card as before.
     let codingToolData =
-        repo.CodingToolData
+        pushByWorktree
         |> Map.tryFind wt.Path
-        |> Option.defaultValue
-            { CodingToolStatus.CodingToolResult.Status = CodingToolStatus.Idle
-              Provider = None
-              LastUserMessage = None
-              LastAssistantMessage = None
-              LastMessageProvider = None }
+        |> Option.defaultValue CodingToolStatus.noSessionPushResult
+    // Debounce the Working→Idle edge so a brief inter-turn idle doesn't flicker the dot blue: hold
+    // Working until the worktree has been Idle for idleDebounceWindow (per the frozen entered-Idle
+    // stamp). The classified activity is unaffected — it derives from the retained skill below.
+    let displayStatus =
+        SessionActivity.debounceIdle
+            SessionActivity.idleDebounceWindow
+            now
+            (codingToolSince |> Map.tryFind wt.Path)
+            codingToolData.Status
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -118,9 +166,24 @@ let private assembleFromState
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
       Beads = beads
-      CodingTool = codingToolData.Status
+      Planning = planning
+      CodingTool = displayStatus
       CodingToolProvider = codingToolData.Provider
+      // Time-since-idle: the frozen "entered Idle" timestamp for this worktree, surfaced ONLY while
+      // its DISPLAYED status is still Idle (past the debounce window). A stale stamp for a worktree
+      // that has since decayed to NoSession/Working — or is still inside the debounce hold — is not
+      // surfaced.
+      CodingToolSince =
+        match displayStatus with
+        | Idle -> codingToolSince |> Map.tryFind wt.Path
+        | Working
+        | WaitingForUser
+        | NoSession -> None
+      CurrentSkill = codingToolData.CurrentSkill
+      AgentActivity = codingToolData.AgentActivity
+      Sessions = codingToolData.SessionStatuses
       LastUserMessage = codingToolData.LastUserMessage
+      LastAssistantMessage = codingToolData.LastAssistantMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -169,17 +232,10 @@ let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value
 
 let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 
-let private resolveProvider (state: RefreshScheduler.DashboardState) (path: string) =
-    state.Repos
-    |> Map.values
-    |> Seq.tryPick (fun repo ->
-        repo.CodingToolData
-        |> Map.tryFind path
-        |> Option.bind (fun data -> data.Provider |> Option.orElse data.LastMessageProvider))
-
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (appVersion: string)
     (deployBranch: string option)
@@ -190,6 +246,24 @@ let getWorktrees
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
         let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+
+        // Collapse the push live state (all live sessions, keyed by SessionId) to one coding-tool
+        // result per worktree once, up front: each worktree's sessions → openness-driven status +
+        // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
+        // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
+        // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
+        // live idle window (after a restart), so their footer + resume button survive (keeping the dot
+        // NoSession).
+        // One `now` for the whole assembly so the collapse and the idle-display debounce agree.
+        let now = DateTimeOffset.UtcNow
+        let retainedByWorktree =
+            activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
+
+        let pushByWorktree =
+            CodingToolStatus.collapseByWorktree now (state.SessionStatuses |> Map.values)
+            |> CodingToolStatus.withRetainedFallback retainedByWorktree
+
+        let codingToolSince = state.CodingToolSinceByWorktree
 
         let repos =
             state.Repos
@@ -205,7 +279,7 @@ let getWorktrees
                     |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState activeSessionPaths archivedBranches hasLog repo wt)
+                        assembleFromState now activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
 
                 let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -224,8 +298,10 @@ let getWorktrees
               DeployBranch = deployBranch
               SystemMetrics = SystemMetrics.getSystemMetrics ()
               EditorName = getEditorConfig () |> snd
+              WorktreeSkills = readWorktreeSkills ()
               CollapsedRepos = readCollapsedRepos ()
               CanvasPaneOpen = readCanvasPaneOpen ()
+              OverviewPanelOpen = readOverviewPanelOpen ()
               CanvasPosition = readCanvasPosition ()
               CanvasSize = readCanvasSize () }
     }
@@ -328,7 +404,9 @@ let private updateArchivedBranches
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
+    (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -345,7 +423,7 @@ let worktreeApi
             return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
 
-    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<unit, string>>) =
+    let withValidatedPath (wtPath: WorktreePath) opName (action: unit -> Async<Result<'a, string>>) =
         let path = WorktreePath.value wtPath
         async {
             let! isValid = validatePath path
@@ -361,13 +439,13 @@ let worktreeApi
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; WorktreeSkills = readWorktreeSkills (); CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; OverviewPanelOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
             createWorktree = fun _ -> async { return Ok [] } }
     | None ->
-        { getWorktrees = fun () -> getWorktrees agent sessionAgent rootPaths appVersion deployBranch
+        { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
           startSync = fun wtPath ->
@@ -381,15 +459,21 @@ let worktreeApi
                       | Some { Branch = None } -> Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
                       | Some ({ Branch = Some branch } as ctx) -> Ok (ctx, branch)
                   let syncKey = scopedBranchKey ctx.RepoId branch
-                  let provider = resolveProvider state ctx.Worktree.Path
+                  let provider = CodingToolStatus.readConfiguredProvider ctx.Worktree.Path
 
                   let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
+                  cardLog.Post(CardEventLog.SyncStarted syncKey)
 
-                  let post = syncAgent.Post
+                  let sinks : SyncEngine.PipelineSinks =
+                      { PushEvent = fun key event -> cardLog.Post(CardEventLog.SyncStep (key, event))
+                        SetProcessState = fun key state -> syncAgent.Post(SyncEngine.UpdateProcessState (key, state))
+                        Complete = fun key ->
+                            syncAgent.Post(SyncEngine.CompleteSync key)
+                            cardLog.Post(CardEventLog.SyncEnded key) }
                   let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
                   let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
                   let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline post syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
+                  Async.Start(SyncEngine.executeSyncPipeline sinks syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
               }
           cancelSync = fun wtPath ->
               let path = WorktreePath.value wtPath
@@ -403,7 +487,9 @@ let worktreeApi
                       Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
                   | Some ({ Branch = Some branch } as ctx) ->
                       let syncKey = scopedBranchKey ctx.RepoId branch
-                      syncAgent.Post(SyncEngine.CancelSync syncKey)
+                      let! wasRunning = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.CancelSync (syncKey, reply))
+                      if wasRunning then
+                          cardLog.Post(CardEventLog.SyncCancelled syncKey)
               }
           getSyncStatus = fun () ->
               async {
@@ -420,50 +506,25 @@ let worktreeApi
                               syncKey, wt.Path))
                       |> Map.ofList
 
-                  let! syncEvents = syncAgent.PostAndAsyncReply(SyncEngine.GetAllEvents)
+                  let! syncEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
 
-                  let allKeys =
-                      [ yield! syncEvents |> Map.keys
-                        yield! syncKeyToPath |> Map.keys ]
-                      |> List.distinct
-
-                  let cachedLastMessages =
-                      state.Repos
-                      |> Map.toList
-                      |> List.collect (fun (_, repo) ->
-                          repo.CodingToolData
-                          |> Map.toList
-                          |> List.choose (fun (path, data) ->
-                              data.LastAssistantMessage |> Option.map (fun msg -> path, msg)))
-                      |> Map.ofList
-
+                  // The card's event log carries only sync/pipeline events. The last-assistant message
+                  // is now its own dedicated footer line (assistantMsgLineView, fed by
+                  // WorktreeStatus.LastAssistantMessage) — injecting it here too would render it twice.
                   return
-                      allKeys
-                      |> List.choose (fun syncKey ->
-                          let wtPath = syncKeyToPath |> Map.tryFind syncKey
-
-                          let syncEvts =
-                              syncEvents
-                              |> Map.tryFind syncKey
-                              |> Option.defaultValue []
-
-                          let claudeEvt =
-                              wtPath
-                              |> Option.bind (fun p -> cachedLastMessages |> Map.tryFind p)
-
-                          let merged = (claudeEvt |> Option.toList) @ syncEvts
-
-                          match merged, wtPath with
-                          | [], _ -> None
-                          | events, Some path ->
+                      syncEvents
+                      |> Map.toList
+                      |> List.choose (fun (syncKey, syncEvts) ->
+                          match syncKeyToPath |> Map.tryFind syncKey, syncEvts with
+                          | Some path, (_ :: _) ->
                               let recent =
-                                  events
+                                  syncEvts
                                   |> List.sortByDescending _.Timestamp
                                   |> List.truncate 2
                                   |> List.rev
 
                               Some(path, recent)
-                          | _, None -> None)
+                          | _ -> None)
                       |> Map.ofList
               }
           deleteWorktree = deleteWorktree agent rootPaths
@@ -471,8 +532,7 @@ let worktreeApi
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       let inv = CodingToolCli.build provider (CodingToolCli.Interactive req.Prompt)
                       return! SessionManager.spawnSession sessionAgent req.Path inv.AsShellString
                   })
@@ -507,9 +567,78 @@ let worktreeApi
                       |> Map.tryFind repoId
                       |> Result.requireSome $"Unknown repo: {req.RepoId}"
 
-                  let! warnings = GitWorktree.createWorktree root (BranchName.value req.BaseBranch) (BranchName.value req.BranchName)
+                  let branchName = BranchName.value req.BranchName
+                  let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
-                  return warnings
+
+                  // Fire-and-forget: when a prompt was supplied, spawn a tracked coding-agent
+                  // window in the new worktree seeded with the config-driven skill invocation.
+                  // Reuses SessionManager.launchAction (spawns+tracks when no window exists yet).
+                  // A blank prompt is a no-op. Deferred until post-fork finishes below so the
+                  // session starts with dependencies already installed.
+                  let launchPromptSession () =
+                      match req.Prompt with
+                      | Some prompt when not (String.IsNullOrWhiteSpace prompt) ->
+                          let newPath = fork.WorktreePath
+                          // Provider is read directly from .treemon.json — the new worktree first (its
+                          // config exists once create returns and can differ from the root working
+                          // copy), then the root as fallback. A just-created worktree needs the root
+                          // fallback because its own config may not exist yet; the other launch sites
+                          // read the (already-present) per-worktree config directly.
+                          let provider =
+                              CodingToolStatus.readConfiguredProvider newPath
+                              |> Option.orElse (CodingToolStatus.readConfiguredProvider root)
+                          // The chosen skill wraps the prompt; "None" (req.Skill = None) launches
+                          // the prompt verbatim, with no skill invocation.
+                          let wrapped =
+                              match req.Skill with
+                              | Some skill -> CodingToolStatus.skillInvocation provider skill prompt
+                              | None -> prompt
+                          let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
+                          // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
+                          // throws on timeout, and Async.Ignore would swallow the Error case — an
+                          // unguarded Async.Start could fault silently.
+                          async {
+                              try
+                                  match! SessionManager.launchAction sessionAgent (WorktreePath newPath) cmd with
+                                  | Ok () -> ()
+                                  | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
+                              with ex ->
+                                  Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
+                          }
+                          |> Async.Start
+                      | _ -> ()
+
+                  // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
+                  // the background and surface its lifecycle on the worktree card via the sync event
+                  // log — the create call returns as soon as `git worktree add` succeeds, closing the
+                  // modal promptly. The prompt auto-launch waits for deps, so it runs once post-fork
+                  // finishes (success or failure); with no post-fork script there is nothing to wait
+                  // for, so launch immediately.
+                  match GitWorktree.postForkScriptPath root with
+                  | None -> launchPromptSession ()
+                  | Some _ ->
+                      let syncKey = scopedBranchKey repoId branchName
+                      Async.Start(
+                          async {
+                              try
+                                  cardLog.Post(CardEventLog.PostForkStarted syncKey)
+                                  let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
+                                  let status =
+                                      match result with
+                                      | Ok () -> StepStatus.Succeeded
+                                      | Error msg ->
+                                          Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
+                                          StepStatus.Failed msg
+                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, status))
+                                  agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                              with ex ->
+                                  Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
+                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, StepStatus.Failed ex.Message))
+                              launchPromptSession ()
+                          })
+
+                  return fork.Warnings
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
@@ -519,7 +648,7 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value req.Path
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
+                      let provider = CodingToolStatus.readConfiguredProvider path
                       let prompt =
                           match req.Action with
                           | ConfigureTests ->
@@ -532,15 +661,32 @@ let worktreeApi
           reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
+          saveOverviewPanelOpen = fun isOpen -> async { writeOverviewPanelOpen isOpen }
           saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
           saveCanvasSize = fun size -> async { writeCanvasSize size }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {
                       let path = WorktreePath.value wtPath
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                      let provider = resolveProvider state path
-                      let sessionId = CodingToolStatus.getLastSessionId provider path
+                      let provider = CodingToolStatus.readConfiguredProvider path
+                      // Resume pick is the most-recent session for this worktree regardless of
+                      // active/idle (distinct from the display pick). Read from the DURABLE store,
+                      // not the idle-window live cache (state.SessionStatuses): after a restart a
+                      // session last active >2h ago is absent from that cache, so the pick returned
+                      // None and resume wrongly fell back to `--continue` instead of `--resume <id>`
+                      // (F10/C-02). session_status keeps the row until the 14d retention prune, so
+                      // the resume identity survives a restart.
+                      let sessions =
+                          activityStore
+                          |> Option.map _.StatusesForWorktree(PathUtils.toWorktreePath path)
+                          |> Option.defaultValue []
+                      // Only resume by stored ID when it belongs to the configured provider. Push
+                      // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
+                      // future provider that resumes differently (or can't) gets its own arm — the
+                      // compiler flags this match when a new provider case is added.
+                      let sessionId =
+                          match provider |> Option.defaultValue CodingToolProvider.Default with
+                          | CodingToolProvider.CopilotCli -> CodingToolStatus.getLastSessionId sessions
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
@@ -554,8 +700,7 @@ let worktreeApi
                       if canvasSpawnInFlight.TryAdd(guardKey, true) then
                           try
                               let! owner = CanvasDocOwnership.getOwner path request.Filename
-                              let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-                              let provider = resolveProvider state path
+                              let provider = CodingToolStatus.readConfiguredProvider path
                               // Open a new tab in the live session window when one is tracked, and
                               // spawn only when none exists (launchAction semantics). This path is
                               // reached automatically by a canvas-iframe postMessage and has no
@@ -596,6 +741,9 @@ let worktreeApi
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)
+          shareCanvasDoc = fun req ->
+              withValidatedPath req.WorktreePath "shareCanvasDoc" (fun () ->
+                  shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
           getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }

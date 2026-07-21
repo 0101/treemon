@@ -21,7 +21,7 @@ Every served canvas doc is rewritten at the `</head>` injection point in
 
 | Doc kind | Injected today |
 |---|---|
-| `SystemView` (e.g. beads) | `baseStyle` (scrollbar + dark-theme typographic base: 15px/1.55 body, serif heading scale (h1 1.85rem), ~70ch measure, `:where(:root)` design tokens, quiet table/blockquote/form-control defaults) + link interceptor |
+| `SystemView` (e.g. beads) | `baseStyle` (scrollbar + dark-theme typographic base: 15px/1.55 body, serif heading scale (h1 1.85rem), ~800px single-column page, `:where(:root)` design tokens, quiet table/blockquote/form-control defaults) + link interceptor + Escape focus-reclaim bridge |
 | `AgentDoc` | the above + bridge heartbeat + `canvasSend` helper + JS error overlay + idiomorph runtime + morph controller |
 
 Phases 6 and 8 below have shipped (the table already reflects them); Phase 7 (the authoring
@@ -38,7 +38,7 @@ shipped; their descriptions are retained as historical context.
 
 **Shipped**, then extended by the canvas **style-guidance** work into an opinionated, *grounded*
 typographic base (not just a reset): 15px / line-height 1.55 (WCAG 1.4.12), a serif heading scale
-(h1 1.85rem / h2 1.35rem / h3 1.12rem), a ~70ch reading measure (Bringhurst), `:where(:root)` design tokens mirroring
+(h1 1.85rem / h2 1.35rem / h3 1.12rem), a ~800px single-column page cap, `:where(:root)` design tokens mirroring
 `BeadspaceTemplate.html`, and box-averse defaults (quiet tables, a semantic `blockquote` callout,
 themed form controls). Paired with `SKILL.md` guidance steering authors toward whitespace + type
 over boxes. Everything is `:where()`-wrapped (zero specificity) so a doc's own rules still win.

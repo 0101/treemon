@@ -180,8 +180,8 @@ type CanvasPhase4Tests() =
             let! count = launchBtn.CountAsync()
             Assert.That(count, Is.EqualTo(1), "Start session button should be visible when no bridge is alive")
 
-            let! text = launchBtn.TextContentAsync()
-            Assert.That(text, Does.Contain("Start session"), "Button should say 'Start session'")
+            let! title = launchBtn.GetAttributeAsync("title")
+            Assert.That(title, Does.Contain("Start a session"), "Button tooltip should describe starting a session")
         }
 
     [<Test>]
@@ -214,7 +214,7 @@ type CanvasPhase4Tests() =
 
             // Send a postMessage to trigger sendCanvasMessage — with no bridge,
             // the server returns Queued, and the client should show the waiting banner
-            let canvasOrigin = "http://127.0.0.1:5002"
+            let canvasOrigin = ServerFixture.canvasUrl
             let! _ = this.Page.EvaluateAsync(
                 $"() => {{
                     window.dispatchEvent(new MessageEvent('message', {{

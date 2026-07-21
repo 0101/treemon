@@ -13,11 +13,19 @@
 
 ### Ownership Attribution
 
-When an agent creates or updates a canvas doc, the **authoring session declares ownership explicitly**: the extension — which holds that session's own `sessionId` — POSTs `{worktreePath, filename, sessionId}` to Treemon's `/api/canvas/attribute` endpoint. This is authoritative because the declaration comes from the one process that actually wrote the file.
+When an agent creates, updates, or moves a canvas doc, the **authoring session declares ownership
+explicitly**: the extension — which holds that session's own `sessionId` — POSTs
+`{worktreePath, filename, sessionId}` to Treemon's `/api/canvas/attribute` endpoint. This is
+authoritative because the declaration comes from the process that performed the file operation.
+
+The extension recognizes successful `create`, `edit`, and `apply_patch` tool completions. For
+`apply_patch`, Add/Update targets and Move destinations are attributed. Declarations are single-shot
+and best-effort; the existing explicit claim remains the recovery path for a failed request.
 
 This **replaces** the previous `FileSystemWatcher` inference, which credited whichever session was *registered last* for the worktree and therefore misattributed (and misrouted) docs whenever two sessions shared a worktree. The watcher path is kept only as a best-effort fallback for docs with **no** declared owner: if exactly one session is registered for the worktree it may be attributed; otherwise the doc is left unowned.
 
-Ownership is stored as `Map<worktreePath, Map<filename, string>>` (worktree → filename → sessionId), persisted to `data/canvas-owners.json` on every change. Loaded on server startup.
+Ownership is stored as `Map<worktreePath, Map<filename, string>>` (worktree → filename → sessionId),
+persisted to `data/canvas-owners.json` on every change, and loaded on server startup.
 
 `CanvasDoc.OwnerSessionId` is populated from this ownership map during canvas scans, so the client always receives the current owner.
 
@@ -87,7 +95,7 @@ enqueue and drain is not reconciled.)
 
 ## Technical Approach
 
-- **Authorship declaration** — the agent pings the local bridge with just the filename; the extension stamps its own `sessionId` and POSTs `{worktreePath, filename, sessionId}` to `/api/canvas/attribute`. The handler validates body + worktree like `canvasRegisterHandler`: malformed/blank → `400`; well-formed but **unmonitored** worktree → `200` with nothing recorded (benign no-op — the extension still serves the doc in-browser); **monitored** → records ownership. The extension also exposes a `canvas_take_ownership` tool (registered via `joinSession({ tools })`) that drives the same `/api/canvas/attribute` path on demand — for a doc written by a script/other tool (no create/edit event) or one misrouted to the wrong session.
+- **Authorship declaration** — successful `create`, `edit`, and `apply_patch` events provide canvas destination filenames. The extension stamps its own `sessionId` and POSTs `{worktreePath, filename, sessionId}` to `/api/canvas/attribute`. Patch parsing accepts Add/Update/Move headers and acts only after successful completion. Declarations are single-shot: a failed request remains a best-effort no-op rather than starting a retry protocol. The handler validates body + worktree like `canvasRegisterHandler`: malformed/blank → `400` (including a sessionId containing characters outside `[A-Za-z0-9_-]`, since a stored owner id is later interpolated into a `--resume {id}` launch); well-formed but **unmonitored** worktree → `200` with nothing recorded (benign no-op — the extension still serves the doc in-browser); **monitored** → records ownership. The extension also exposes a `canvas_take_ownership` tool (registered via `joinSession({ tools })`) as an escape hatch for a doc written by a script/unsupported tool or one misrouted to the wrong session.
 - **Ownership store** — `CanvasDocOwnership.fs` is a `MailboxProcessor` serializing an immutable `Map<worktreePath, Map<filename, sessionId>>`, persisted to `data/canvas-owners.json` on every change and loaded at startup; reads are async.
 - **Scanner attribution is fallback-only** — `RefreshScheduler` populates `CanvasDoc.OwnerSessionId` from the ownership map on each scan and auto-attributes a no-owner changed doc only when exactly one session is registered for the worktree. Explicit declarations are primary and are never overwritten.
 - **Send / resume flow** — `WorktreeApi.sendCanvasMessage` calls `CanvasBridge.sendMessage`; on `Queued` it resumes the doc's owner via `SessionManager.spawnSession` (or starts a fresh session when the owner is unknown or resume fails) and leaves the message queued for delivery when the bridge re-registers.
@@ -101,7 +109,8 @@ enqueue and drain is not reconciled.)
 | 1b-i | `None`/blank sessionId | A blank/whitespace sessionId is normalized to `None`, so it can't become a sticky, unroutable owner; `None`-sessionId registrations share one per-worktree fallback slot and never clobber an identified session. |
 | 1c | Delivery routing | Route by doc **owner** sessionId; with no declared owner, queue (the single-session fallback is removed — never deliver to a co-located non-author); never cross-route to a non-owner |
 | 1c-i | Queue/drain ownership | Each `QueuedMessage` carries its resolved owner; `drainQueue` (on register) and `drainPending` (anonymous poll) deliver only when the owner is unknown or matches the drainer, re-queuing the rest (TTL preserved) |
-| 1d | sessionId source | Extension **stamps its own** sessionId; the agent only sends the filename |
+| 1d | sessionId source | Extension **stamps its own** sessionId; the agent only sends the filename. Extract it defensively as `session.sessionId ?? session.id` — the `@github/copilot-sdk` dep is floating (`"*"`) with no version guard, and an id-only runtime shape yields `undefined` from `session.sessionId` alone, silently collapsing the whole ownership model to anonymous registration + skipped `declareOwnership` (unowned docs whose replies queue but never deliver). |
+| 1e | sessionId injection defense | Reject a sessionId outside the safe charset (`[A-Za-z0-9_-]`, which still covers GUIDs and provider UUIDs) at `/api/canvas/attribute` (`isValidSessionId`) **and** single-quote-escape the id at the `CodingToolCli` resume sink — defense-in-depth so a hostile owner id planted via the attribute route can't inject PowerShell into the auto-resume `--resume {id}` launch. |
 | 2 | Persistence format | JSON file `data/canvas-owners.json` — matches `data/sessions.json` pattern |
 | 3 | Resume mechanism | `SessionManager.spawnSession` using a targeted resume command |
 | 4 | Resume command | `CodingToolCli.build provider (Resume (Some ownerSessionId))` — same as `resumeSession` but targeted |
@@ -117,8 +126,8 @@ enqueue and drain is not reconciled.)
 | `src/Server/CanvasDocOwnership.fs` | Stores per-doc ownership and persists it to `data/canvas-owners.json` |
 | `src/Server/RefreshScheduler.fs` | Fallback-only scanner attribution: credits a no-owner changed doc to the worktree's bridge session **only when exactly one is registered** (`CanvasWatchers.fallbackOwner`/`attributeChangedDocs`); never overwrites a declared owner |
 | `src/Server/CanvasBridge.fs` | sessionId-keyed registry; owner-based delivery routing; liveness |
-| `src/Extension/extension.mjs` | Declares doc ownership — stamps its `sessionId`, forwards to `/api/canvas/attribute`; also exposes the `canvas_take_ownership` tool for explicit on-demand claims |
-| `src/Extension/skill/SKILL.md` | Instructs the agent to declare ownership when writing a canvas doc, and to call `canvas_take_ownership` for script/tool-generated or misrouted docs |
+| `src/Extension/extension.mjs`, `src/Extension/canvas-ownership.mjs` | Detect canvas write destinations, stamp the session ID, and forward single-shot declarations to `/api/canvas/attribute`; also expose the `canvas_take_ownership` escape hatch |
+| `src/Extension/skill/SKILL.md` | Instructs the agent to use ownership-aware write tools and claim script/unsupported writes explicitly |
 | `src/Server/WorktreeApi.fs` | Queues canvas messages, resumes owner sessions, and falls back to new sessions |
 | `src/Server/Program.fs` | Calls `CanvasDocOwnership.load()` during startup |
 | `src/Client/CanvasPane.fs` | Shows per-doc liveness based on the owning session |

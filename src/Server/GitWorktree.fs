@@ -27,6 +27,13 @@ type GitData =
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
+/// Result of a successful worktree creation: the path of the new worktree (so
+/// callers can act on the exact location — e.g. launch a session there) alongside
+/// any non-fatal warnings surfaced during creation.
+type CreateWorktreeResult =
+    { WorktreePath: string
+      Warnings: CreateWorktreeWarnings }
+
 let private runGit (workingDir: string) (arguments: string) =
     ProcessRunner.run "Git" "git" $"-C \"{workingDir}\" {arguments}"
 
@@ -61,15 +68,17 @@ let parseWorktreeList (porcelainOutput: string) =
         | _ -> None)
     |> Array.toList
 
-let listWorktrees (repoRoot: string) =
+/// Discovers the repo's worktrees. Returns `None` when the underlying git command
+/// failed (timeout / non-zero exit / failed-to-start), so callers can distinguish a
+/// transient git failure from a repo that genuinely has zero worktrees (`Some []`)
+/// and retain last-known-good instead of blanking the list on a git hiccup.
+let listWorktrees (repoRoot: string) : Async<WorktreeInfo list option> =
     async {
         let! output = runGit repoRoot "worktree list --porcelain"
 
         return
             output
-            |> Option.map parseWorktreeList
-            |> Option.defaultValue []
-            |> List.filter (fun wt -> Directory.Exists(wt.Path))
+            |> Option.map (parseWorktreeList >> List.filter (fun wt -> Directory.Exists(wt.Path)))
     }
 
 let parseCommitOutput (worktreePath: string) (output: string option) =
@@ -379,10 +388,15 @@ let private worktreeDir (repoRoot: string) (branchName: string) =
 
 /// Builds the git command that forks `branchName` from `baseRef` into a
 /// `tm-`prefixed sibling of the repo root. Returns the command and the new
-/// worktree path.
+/// worktree path. `--no-track` stops git's default `autoSetupMerge` from making
+/// the new branch inherit `baseRef`'s upstream: when `baseRef` is a remote-tracking
+/// ref like `origin/feature`, a tracking branch would point `@{u}` at the base's
+/// remote branch, and Treemon — which keys PR detection off `@{u}` — would then
+/// show the base branch's PR on the new worktree until it is first pushed. A freshly
+/// forked branch has no remote of its own yet, so it correctly starts with no upstream.
 let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: string) =
     let worktreePath = worktreeDir repoRoot branchName
-    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" \"{worktreePath}\" \"{baseRef}\""
+    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" --no-track \"{worktreePath}\" \"{baseRef}\""
     "git", arguments, worktreePath
 
 let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
@@ -391,40 +405,62 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
     else
         None
 
-/// Generous timeout for the post-fork setup hook — it runs `npm install` and
-/// `bd init`, which can far exceed the short default used for quick git probes.
-let private postForkTimeoutMs = 10 * 60 * 1000
+/// Timeout for the post-fork setup hook — it runs `npm install` and `bd init`,
+/// which exceed the short default used for quick git probes, but a run dragging
+/// past this cap is treated as a failure (surfaced on the card) rather than
+/// blocking the auto-launch indefinitely.
+let private postForkTimeoutMs = 5 * 60 * 1000
 
-/// Runs an optional `post-fork` setup script inside the freshly created worktree,
+/// Card label for the post-fork setup hook. Single source of truth for the
+/// OS-specific script name so file resolution always tracks the hook.
+let postForkScriptName =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "post-fork.ps1" else "post-fork.sh"
+
+/// Absolute path to the OS-appropriate `post-fork` setup hook when one exists in
+/// the repo root, otherwise None. Callers use this to decide whether to run — and
+/// surface a card lifecycle for — a post-fork step at all.
+let postForkScriptPath (repoRoot: string) : string option =
+    let scriptPath = Path.Combine(repoRoot, postForkScriptName)
+    if File.Exists scriptPath then Some scriptPath else None
+
+/// Runs the optional `post-fork` setup script inside a freshly created worktree,
 /// passing the worktree path, the source repo root, the base ref and the branch
-/// name. A failure is reported as a warning, never a hard error — the worktree
-/// already exists at this point.
-let private runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) =
+/// name, capped at `timeoutMs` (a run that exceeds it is killed and returns a
+/// timeout Error). Returns Ok when the script succeeds or is absent, and Error
+/// with the process failure when it exits non-zero — the worktree already
+/// exists, so a failure is never fatal, only surfaced on the card.
+let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
     async {
-        let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-        let scriptName = if isWindows then "post-fork.ps1" else "post-fork.sh"
-        let scriptPath = Path.Combine(repoRoot, scriptName)
-
-        if not (File.Exists scriptPath) then
-            return None
-        else
+        match postForkScriptPath repoRoot with
+        | None -> return Ok ()
+        | Some scriptPath ->
             let fileName, arguments =
-                if isWindows then "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
-                else "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                    "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                else
+                    "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
 
-            let! result = ProcessRunner.runResultWithTimeout postForkTimeoutMs "PostFork" fileName arguments (Some worktreePath)
-
-            return
-                match result with
-                | Ok _ -> None
-                | Error msg -> Some $"Worktree created, but '{scriptName}' setup failed: {msg}. Dependencies may be incomplete — re-run setup in the worktree."
+            let! result = ProcessRunner.runResultWithTimeout timeoutMs "PostFork" fileName arguments (Some worktreePath)
+            return result |> Result.map ignore
     }
 
-/// Creates a new worktree, forking `branchName` from `baseBranch`. Treemon owns
-/// the forking: it fetches the base from upstream, forks from the remote-tracking
-/// ref when available, then runs an optional `post-fork` setup script. Returns any
-/// non-fatal warnings (a legacy fork script is present, or post-fork failed).
-let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) =
+/// Runs the post-fork hook with the production 5-minute cap (see
+/// `runPostForkWithTimeout`).
+let runPostFork (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
+    runPostForkWithTimeout postForkTimeoutMs repoRoot worktreePath baseRef branchName
+
+type ForkResult =
+    { WorktreePath: string
+      BaseRef: string
+      Warnings: string list }
+
+/// Forks `branchName` from `baseBranch` into a `tm-`prefixed sibling of the repo
+/// root and returns as soon as `git worktree add` succeeds. Treemon owns the
+/// forking: it fetches the base from upstream and forks from the remote-tracking
+/// ref when available. The `post-fork` setup hook is intentionally NOT run here
+/// (see `runPostFork`) so callers can run it in the background without blocking.
+/// `Warnings` carries only the synchronous legacy-fork-script advisory.
+let forkWorktree (repoRoot: string) (baseBranch: string) (branchName: string) : Async<Result<ForkResult, string>> =
     asyncResult {
         let! name = validateBranchName branchName
         let! validBase = validateBranchName baseBranch
@@ -438,10 +474,11 @@ let createWorktree (repoRoot: string) (baseBranch: string) (branchName: string) 
             ProcessRunner.runResult "CreateWorktree" fileName arguments None
             |> AsyncResult.ignore
 
-        let! postForkWarning = runPostFork repoRoot worktreePath baseRef name
-
         let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
         let legacyScriptExists = File.Exists(Path.Combine(repoRoot, legacyScriptName))
 
-        return List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists; postForkWarning ]
+        return
+            { WorktreePath = worktreePath
+              BaseRef = baseRef
+              Warnings = List.choose id [ legacyForkScriptWarning legacyScriptName legacyScriptExists ] }
     }

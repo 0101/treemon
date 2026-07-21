@@ -4,6 +4,8 @@ open System
 open NUnit.Framework
 open Server.GitWorktree
 open Server.RefreshScheduler
+open Server.SessionActivity
+open Server.SessionActivityStore
 open Shared
 
 let private testRepoId = RepoId "TestRepo"
@@ -248,7 +250,8 @@ type StateAgentTests() =
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 2; Blocked = 0; Closed = 3 }
-            agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads))
+            let planning : Shared.BeadsPlanning = { Planned = 1; Queued = 1; Loose = 0 }
+            agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads, planning))
             do! waitForAgent agent
 
             agent.Post(RemoveWorktree(testRepoId, "/repo/feature"))
@@ -260,6 +263,33 @@ type StateAgentTests() =
             Assert.That(repo.WorktreeList[0].Path, Is.EqualTo("/repo/main"))
             Assert.That(repo.GitData.ContainsKey("/repo/feature"), Is.False)
             Assert.That(repo.BeadsData.ContainsKey("/repo/feature"), Is.False)
+            Assert.That(repo.PlanningData.ContainsKey("/repo/feature"), Is.False)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Failed worktree discovery retains the existing list``() =
+        async {
+            let agent = createAgent ()
+
+            let worktrees =
+                [ makeWorktree "/repo/main" "main"
+                  makeWorktree "/repo/feature" "feature" ]
+
+            agent.Post(UpdateWorktreeList(testRepoId, worktrees))
+            do! waitForAgent agent
+
+            // A git failure surfaces as None from listWorktrees, so executeTask posts
+            // nothing — driving the exact skip-on-None decision used in production.
+            worktreeListUpdate testRepoId None |> Option.iter agent.Post
+            do! waitForAgent agent
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
+
+            Assert.That(repo.WorktreeList.Length, Is.EqualTo(2), "a failed discovery must not blank the last-known-good list")
+            Assert.That(repo.WorktreeList |> List.map _.Path, Is.EquivalentTo([ "/repo/main"; "/repo/feature" ]))
+            Assert.That(repo.IsReady, Is.True)
         }
         |> Async.RunSynchronously
 
@@ -335,12 +365,13 @@ type StateAgentTests() =
             do! waitForAgent agent
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 0; Blocked = 0; Closed = 0 }
-            agent.Post(UpdateBeads(testRepoId, "/repo/unknown", beads))
+            agent.Post(UpdateBeads(testRepoId, "/repo/unknown", beads, Shared.BeadsPlanning.zero))
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
 
             Assert.That(repo.BeadsData.ContainsKey("/repo/unknown"), Is.False)
+            Assert.That(repo.PlanningData.ContainsKey("/repo/unknown"), Is.False)
         }
         |> Async.RunSynchronously
 
@@ -432,6 +463,35 @@ type StateAgentTests() =
             Assert.That(r2.WorktreeList[0].Path, Is.EqualTo("/repo2/main"))
         }
         |> Async.RunSynchronously
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type WorktreeListUpdateTests() =
+
+    [<Test>]
+    member _.``Successful discovery produces an UpdateWorktreeList message``() =
+        let worktrees = [ makeWorktree "/repo/main" "main" ]
+
+        match worktreeListUpdate testRepoId (Some worktrees) with
+        | Some(UpdateWorktreeList(repoId, wts)) ->
+            Assert.That(repoId, Is.EqualTo(testRepoId))
+            Assert.That(wts, Is.EqualTo(worktrees))
+        | other -> Assert.Fail($"Expected Some(UpdateWorktreeList ...) but got {other}")
+
+    [<Test>]
+    member _.``Empty-but-successful discovery still produces an update``() =
+        match worktreeListUpdate testRepoId (Some []) with
+        | Some(UpdateWorktreeList(repoId, wts)) ->
+            Assert.That(repoId, Is.EqualTo(testRepoId))
+            Assert.That(wts, Is.Empty)
+        | other -> Assert.Fail($"Expected Some(UpdateWorktreeList ...) but got {other}")
+
+    [<Test>]
+    member _.``Failed discovery (None) produces no message``() =
+        let result = worktreeListUpdate testRepoId None
+        Assert.That(result, Is.EqualTo(None))
 
 
 [<TestFixture>]
@@ -573,7 +633,7 @@ type BuildTaskListTests() =
         let tasks = buildTaskList noFilters repos
 
         let isWorktreeList = function RefreshWorktreeList _ -> true | _ -> false
-        let isPerWorktree = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
+        let isPerWorktree = function RefreshGit _ | RefreshBeads _ -> true | _ -> false
 
         let lastWorktreeListIdx =
             tasks
@@ -590,7 +650,7 @@ type BuildTaskListTests() =
             |> List.min
 
         Assert.That(lastWorktreeListIdx, Is.LessThan(firstPerWorktreeIdx),
-            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads/CodingTool tasks")
+            "All RefreshWorktreeList tasks must appear before any RefreshGit/Beads tasks")
 
     [<Test>]
     member _.``All local tasks come before any network tasks``() =
@@ -601,7 +661,7 @@ type BuildTaskListTests() =
 
         let tasks = buildTaskList noFilters repos
 
-        let isLocal = function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false
+        let isLocal = function RefreshGit _ | RefreshBeads _ -> true | _ -> false
         let isNetwork = function RefreshPr _ | RefreshFetch _ -> true | _ -> false
 
         let lastLocalIdx =
@@ -630,8 +690,8 @@ type BuildTaskListTests() =
 
         let tasks = buildTaskList noFilters repos
 
-        // 2 worktree lists + 3 worktrees * 3 task types + 2 repos * 2 network tasks = 2 + 9 + 4 = 15
-        Assert.That(tasks.Length, Is.EqualTo(15))
+        // 2 worktree lists + 3 worktrees * 2 task types + 2 repos * 2 network tasks = 2 + 6 + 4 = 12
+        Assert.That(tasks.Length, Is.EqualTo(12))
 
     [<Test>]
     member _.``Local tasks are interleaved across repos not grouped by repo``() =
@@ -644,18 +704,17 @@ type BuildTaskListTests() =
 
         let localTasks =
             tasks
-            |> List.filter (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+            |> List.filter (function RefreshGit _ | RefreshBeads _ -> true | _ -> false)
 
         let repoIds =
             localTasks
             |> List.map (function
                 | RefreshGit(r, _) -> r
                 | RefreshBeads(r, _) -> r
-                | RefreshCodingTool(r, _) -> r
                 | _ -> RepoId "")
 
-        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(3))
-        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(3))
+        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo1")) |> List.length, Is.EqualTo(2))
+        Assert.That(repoIds |> List.filter ((=) (RepoId "Repo2")) |> List.length, Is.EqualTo(2))
 
     [<Test>]
     member _.``Archived worktree excluded from per-worktree tasks``() =
@@ -670,13 +729,13 @@ type BuildTaskListTests() =
         let perWorktreePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
 
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"),
             "Archived worktree should not appear in per-worktree tasks")
-        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
-            "Non-archived worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(2),
+            "Non-archived worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``Repo-level tasks unaffected by archived paths``() =
@@ -719,7 +778,7 @@ type BuildTaskListTests() =
         let tasks = buildTaskList { Archived = archivedPaths; Ignored = Map.empty } repos
 
         let hasPerWorktree =
-            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ -> true | _ -> false)
 
         Assert.That(hasPerWorktree, Is.False, "No per-worktree tasks when all worktrees archived")
         Assert.That(tasks.Length, Is.EqualTo(3), "Should have WorktreeList + Pr + Fetch")
@@ -761,7 +820,7 @@ type BuildPhase1TasksTests() =
 type BuildPhase2TasksTests() =
 
     [<Test>]
-    member _.``Contains Git, Beads, CodingTool per worktree plus Fetch per repo``() =
+    member _.``Contains Git, Beads per worktree plus Fetch per repo``() =
         let repos =
             [ RepoId "Repo1", makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ]
               RepoId "Repo2", makeRepo [ makeWorktree "/r2/main" "main" ] ]
@@ -771,12 +830,10 @@ type BuildPhase2TasksTests() =
 
         let gitCount = tasks |> List.filter (function RefreshGit _ -> true | _ -> false) |> List.length
         let beadsCount = tasks |> List.filter (function RefreshBeads _ -> true | _ -> false) |> List.length
-        let claudeCount = tasks |> List.filter (function RefreshCodingTool _ -> true | _ -> false) |> List.length
         let fetchCount = tasks |> List.filter (function RefreshFetch _ -> true | _ -> false) |> List.length
 
         Assert.That(gitCount, Is.EqualTo(3), "One RefreshGit per worktree")
         Assert.That(beadsCount, Is.EqualTo(3), "One RefreshBeads per worktree")
-        Assert.That(claudeCount, Is.EqualTo(3), "One RefreshCodingTool per worktree")
         Assert.That(fetchCount, Is.EqualTo(2), "One RefreshFetch per repo")
 
     [<Test>]
@@ -810,7 +867,7 @@ type BuildPhase2TasksTests() =
         Assert.That(tasks, Is.EqualTo([ RefreshFetch (RepoId "Repo1") ]))
 
     [<Test>]
-    member _.``Archived worktree gets Git but not Beads or CodingTool``() =
+    member _.``Archived worktree gets Git but not Beads``() =
         let repo1 = RepoId "Repo1"
         let repos =
             [ repo1, makeRepo [ makeWorktree "/r1/main" "main"; makeWorktree "/r1/feat" "feat" ] ]
@@ -821,24 +878,21 @@ type BuildPhase2TasksTests() =
 
         let archivedGit = tasks |> List.filter (function RefreshGit(_, p) -> p = "/r1/feat" | _ -> false)
         let archivedBeads = tasks |> List.filter (function RefreshBeads(_, p) -> p = "/r1/feat" | _ -> false)
-        let archivedCoding = tasks |> List.filter (function RefreshCodingTool(_, p) -> p = "/r1/feat" | _ -> false)
 
         Assert.That(archivedGit.Length, Is.EqualTo(1),
             "Archived worktree should still get RefreshGit for commit data")
         Assert.That(archivedBeads.Length, Is.EqualTo(0),
             "Archived worktree should not get RefreshBeads")
-        Assert.That(archivedCoding.Length, Is.EqualTo(0),
-            "Archived worktree should not get RefreshCodingTool")
 
         let activePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/main")
 
-        Assert.That(activePaths.Length, Is.EqualTo(3),
-            "Non-archived worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(activePaths.Length, Is.EqualTo(2),
+            "Non-archived worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``RefreshFetch unaffected by archived paths``() =
@@ -882,7 +936,7 @@ type BuildPhase2TasksTests() =
         let ignoredTaskPaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/feat")
 
@@ -892,12 +946,12 @@ type BuildPhase2TasksTests() =
         let activePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/main")
 
-        Assert.That(activePaths.Length, Is.EqualTo(3),
-            "Non-ignored worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(activePaths.Length, Is.EqualTo(2),
+            "Non-ignored worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``RefreshFetch unaffected by ignored paths``() =
@@ -927,7 +981,7 @@ type BuildPhase2TasksTests() =
         let featTasks =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
             |> List.filter ((=) "/r1/feat")
 
@@ -953,13 +1007,13 @@ type BuildTaskListIgnoredTests() =
         let perWorktreePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
 
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"),
             "Ignored worktree should not appear in per-worktree tasks")
-        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
-            "Non-ignored worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(2),
+            "Non-ignored worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``Repo-level tasks unaffected by ignored paths``() =
@@ -990,7 +1044,7 @@ type BuildTaskListIgnoredTests() =
         let tasks = buildTaskList { Archived = Map.empty; Ignored = ignoredPaths } repos
 
         let hasPerWorktree =
-            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ | RefreshCodingTool _ -> true | _ -> false)
+            tasks |> List.exists (function RefreshGit _ | RefreshBeads _ -> true | _ -> false)
 
         Assert.That(hasPerWorktree, Is.False, "No per-worktree tasks when all worktrees ignored")
         Assert.That(tasks.Length, Is.EqualTo(3), "Should have WorktreeList + Pr + Fetch")
@@ -1009,13 +1063,13 @@ type BuildTaskListIgnoredTests() =
         let perWorktreePaths =
             tasks
             |> List.choose (function
-                | RefreshGit(_, p) | RefreshBeads(_, p) | RefreshCodingTool(_, p) -> Some p
+                | RefreshGit(_, p) | RefreshBeads(_, p) -> Some p
                 | _ -> None)
 
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/feat"), "Archived excluded")
         Assert.That(perWorktreePaths, Does.Not.Contain("/r1/dev"), "Ignored excluded")
-        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(3),
-            "Active worktree should have Git, Beads, CodingTool tasks")
+        Assert.That(perWorktreePaths |> List.filter ((=) "/r1/main") |> List.length, Is.EqualTo(2),
+            "Active worktree should have Git, Beads tasks")
 
     [<Test>]
     member _.``Empty ignored set produces same results as no filtering``() =
@@ -1243,5 +1297,81 @@ type ExpediteRefreshTests() =
             Assert.That(state2.ExpeditedRepos |> Set.count, Is.EqualTo(1))
             Assert.That(state2.ExpeditedRepos |> Set.contains repo1, Is.False)
             Assert.That(state2.ExpeditedRepos |> Set.contains repo2, Is.True)
+        }
+        |> Async.RunSynchronously
+
+
+// F5/C-07: the push live map (SessionStatuses) is bounded to the idle window. Without eviction it was
+// append-only, so long-dead sessions lingered in memory forever and drifted from the store's live
+// cache. evictStaleStatuses drops entries older than idleWindow, measured against the NEWEST LastSeen
+// in the map, on every UpdateSessionStatus.
+
+let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
+    { SessionId = SessionId sid
+      WorktreePath = WorktreePath "C:/wt/a"
+      Provider = CopilotCli
+      Status = { emptyStatus with Status = SessionLevelStatus.Working }
+      UpdatedAt = seen
+      LastSeen = seen
+      ContextUsageAt = None }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SessionStatusEvictionTests() =
+
+    let now = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+
+    let statusMap (entries: (string * DateTimeOffset) list) =
+        entries
+        |> List.map (fun (sid, seen) -> SessionId sid, storedSeen sid seen)
+        |> Map.ofList
+
+    let keptIds (m: Map<SessionId, StoredStatus>) =
+        m |> Map.keys |> Seq.map SessionId.value |> List.ofSeq |> List.sort
+
+    [<Test>]
+    member _.``evictStaleStatuses drops entries older than the idle window before the newest session``() =
+        // newest = "fresh" at `now`; "stale" is just past the idle window behind it.
+        let statuses =
+            statusMap
+                [ "fresh", now
+                  "stale", now - (idleWindow + TimeSpan.FromMinutes 1.0) ]
+
+        Assert.That(evictStaleStatuses statuses |> keptIds, Is.EqualTo([ "fresh" ]))
+
+    [<Test>]
+    member _.``evictStaleStatuses keeps an entry exactly at the idle-window cutoff``() =
+        // "edge" sits exactly idleWindow behind the newest ("fresh") — the >= cutoff keeps it.
+        let atCutoff = statusMap [ "fresh", now; "edge", now - idleWindow ]
+
+        Assert.That(evictStaleStatuses atCutoff |> keptIds, Is.EqualTo([ "edge"; "fresh" ]))
+
+    [<Test>]
+    member _.``evictStaleStatuses leaves a fully-live map untouched``() =
+        let live = statusMap [ "a", now; "b", now - TimeSpan.FromHours 1.0 ]
+
+        Assert.That(evictStaleStatuses live, Is.EqualTo(live))
+
+    [<Test>]
+    member _.``evictStaleStatuses never drops the single newest session even if its LastSeen is historical``() =
+        // A lone entry (or the newest one) is always its own reference, so it can never evict itself —
+        // this is what keeps a freshly-ingested report (with a possibly-historical timestamp) in place.
+        let lone = statusMap [ "only", now - TimeSpan.FromDays 400.0 ]
+
+        Assert.That(evictStaleStatuses lone |> keptIds, Is.EqualTo([ "only" ]))
+
+    [<Test>]
+    member _.``UpdateSessionStatus evicts a now-stale sibling when a fresher session arrives``() =
+        async {
+            let agent = createAgent ()
+            let t0 = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+            // "old" first (kept as the lone newest), then "fresh" 5h later pushes "old" past the window.
+            agent.Post(UpdateSessionStatus(storedSeen "old" t0))
+            agent.Post(UpdateSessionStatus(storedSeen "fresh" (t0 + TimeSpan.FromHours 5.0)))
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            let ids = state.SessionStatuses |> Map.keys |> Seq.map SessionId.value |> Set.ofSeq
+            Assert.That(ids, Is.EqualTo(Set.ofList [ "fresh" ]))
         }
         |> Async.RunSynchronously

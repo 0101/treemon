@@ -22,14 +22,13 @@
     <Compile Include="GlobalConfig.fs" />
     <Compile Include="TreemonConfig.fs" />
     <Compile Include="GitWorktree.fs" />
+    <Compile Include="JsonHelpers.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
-    <Compile Include="ClaudeDetector.fs" />
-    <Compile Include="CopilotDetector.fs" />
-    <Compile Include="VsCodeCopilotDetector.fs" />
+    <Compile Include="SessionActivity.fs" />
+    <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
-    <Compile Include="JsonHelpers.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
@@ -38,12 +37,17 @@
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />
     <Compile Include="CanvasScanner.fs" />
+    <Compile Include="CanvasExport.fs" />
+    <Compile Include="CanvasShare.fs" />
     <Compile Include="RefreshScheduler.fs" />
+    <Compile Include="CardEventLog.fs" />
     <Compile Include="SyncEngine.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="IdiomorphScript.fs" />
     <Compile Include="CanvasDocServer.fs" />
+    <Compile Include="SessionActivityService.fs" />
+    <Compile Include="HttpSecurity.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -64,6 +68,8 @@
     <PackageReference Include="FsToolkit.ErrorHandling" Version="5.2.0" />
     <PackageReference Include="Saturn" Version="0.17.0" />
     <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.29.1" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11" />
   </ItemGroup>
 
   <ItemGroup>

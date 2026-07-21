@@ -6,7 +6,16 @@ open CanvasTypes
 open Feliz
 open Browser
 
+// The canvas-doc server origin for THIS build, injected by Vite's `define` (see vite.config.js).
+// Prod/dev default to 127.0.0.1:5002; the E2E test stack overrides CANVAS_PORT so its iframe origin
+// matches its own (dynamically chosen) canvas-doc port and never collides with a running production
+// instance on 5002. The .NET fallback keeps the module loadable from the (Fable-referencing) test
+// assembly, where the value is never exercised (that happens only in the browser).
+#if FABLE_COMPILER
+let CanvasOrigin: string = Fable.Core.JsInterop.emitJsExpr () "__CANVAS_ORIGIN__"
+#else
 let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
+#endif
 // Doc→pane message size cap, in UTF-16 code units (JS String.length): the listener below drops a
 // message when JSON.stringify(me.data).length exceeds this. The injected window.canvasSend helper
 // enforces the SAME cap doc-side (var MAX=64000 in canvasSendScript, src/Server/CanvasDocServer.fs)
@@ -26,6 +35,32 @@ let private livenessDot (isAlive: bool) =
     Html.span [
         prop.className (if isAlive then "canvas-liveness-dot alive" else "canvas-liveness-dot")
         prop.title (if isAlive then "Session alive" else "No active session")
+    ]
+
+/// The Share-button glyph (the standard three-node share icon), styled like `ArchiveViews.archiveIcon`
+/// (`btn-icon`, 24×24, `currentColor`) so the Share and Archive buttons sit uniformly in the header.
+let private shareIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [
+                svg.d "M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"
+            ]
+        ]
+    ]
+
+/// The Start-session glyph (a filled play triangle), styled like `shareIcon` (`btn-icon`, 24×24,
+/// `currentColor`) so the icon-only launch button matches the Share and Archive buttons.
+let private playIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [ svg.d "M8 5v14l11-7z" ]
+        ]
     ]
 
 /// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
@@ -79,7 +114,7 @@ let private latestDocModified (wt: WorktreeStatus) =
     |> List.sortDescending
     |> List.tryHead
 
-let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, BridgeLiveness>) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
+let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedByScopedKey: Map<string, Set<string>>) (onClickEntry: string -> unit) (onClickDoc: string -> string -> unit) =
     let entries =
         repos
         |> List.collect (fun repo ->
@@ -113,6 +148,8 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                             prop.text repoName
                         ]
                         yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
+                            // From the badge-source map (`unviewedDocsByScopedKey`), so overview highlights and the badge count agree.
+                            let unviewedSet = unviewedByScopedKey |> Map.tryFind scopedKey |> Option.defaultValue Set.empty
                             Html.div [
                                 prop.className "canvas-overview-entry"
                                 prop.children [
@@ -127,8 +164,14 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                         prop.className "canvas-overview-docs"
                                         prop.children (
                                             wt.CanvasDocs |> List.map (fun doc ->
+                                                // Unviewed docs render white (`canvas-overview-doc-unviewed`);
+                                                // viewed docs keep the muted base color. SystemView docs are
+                                                // never in `unviewedSet` (excluded at the awareness source).
+                                                let docClass =
+                                                    if Set.contains doc.Filename unviewedSet then "canvas-overview-doc canvas-overview-doc-unviewed"
+                                                    else "canvas-overview-doc"
                                                 Html.span [
-                                                    prop.className "canvas-overview-doc"
+                                                    prop.className docClass
                                                     prop.onClick (fun e ->
                                                         e.stopPropagation ()
                                                         onClickDoc scopedKey doc.Filename)
@@ -149,9 +192,10 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the seven
-/// handlers are passed by name: three share the type `string -> unit`, so positional passing let a
-/// silent argument transposition compile and surface only at runtime.
+/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the handlers
+/// are passed by name: several share the type `string -> unit` (`SelectDoc`, `OnOverviewClick`,
+/// `ArchiveDoc`, `ShareDoc`), so positional passing let a silent argument transposition compile and
+/// surface only at runtime.
 type CanvasPaneCallbacks =
     { SetPosition: CanvasPosition -> unit
       SetSize: CanvasSize -> unit
@@ -159,20 +203,61 @@ type CanvasPaneCallbacks =
       OnOverviewClick: string -> unit
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
+      ShareDoc: string -> unit
       DismissError: unit -> unit
       DismissDocError: unit -> unit
+      DismissShareNotice: unit -> unit
       LaunchSession: unit -> unit }
 
-let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (sendState: CanvasSendState) (docError: DocJsError option) (bridgeLiveness: Map<string, BridgeLiveness>) (unviewedFilenames: Set<string>) (visitedDocs: string list) (callbacks: CanvasPaneCallbacks) =
+/// The subset of the canvas `CanvasState` that `view` renders from, bundled into one record so the
+/// pane takes a single state value instead of a long, order-dependent positional list. Grouped for
+/// the same reason as `CanvasPaneCallbacks`: the signature had been growing one positional param
+/// per feature (`docError` → `size` → `shareNotice`), which invited a silent argument
+/// transposition that would compile and only surface at runtime. Built by `CanvasView.fs` from
+/// `model.Canvas.*`, mirroring how `canvasCallbacks` is assembled. Deliberately a subset record
+/// rather than `CanvasState` itself: `CanvasPane.fs` compiles before `CanvasState.fs` in
+/// `Client.fsproj`, so that type isn't nameable here.
+type CanvasPaneState =
+    { IsOpen: bool
+      Position: CanvasPosition
+      Size: CanvasSize
+      SendState: CanvasSendState
+      DocError: DocJsError option
+      ShareNotice: string option
+      BridgeLiveness: Map<string, BridgeLiveness> }
+
+/// The awareness/doc slices `view` renders from, bundled into one record for the same reason as
+/// `CanvasPaneState`/`CanvasPaneCallbacks`: to stop `view`'s signature growing a fresh positional
+/// param per awareness feature (several are collection-typed, which invited a silent argument
+/// transposition that would compile and surface only at runtime). Built by `CanvasView.fs`
+/// alongside `canvasState`/`canvasCallbacks`.
+type CanvasPaneAwareness =
+    { UnviewedByScopedKey: Map<string, Set<string>>
+      UnviewedFilenames: Set<string>
+      VisitedDocs: string list }
+
+let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) option) (allRepos: RepoModel list) (awareness: CanvasPaneAwareness) (callbacks: CanvasPaneCallbacks) =
+    let { IsOpen = isOpen
+          Position = position
+          Size = size
+          SendState = sendState
+          DocError = docError
+          ShareNotice = shareNotice
+          BridgeLiveness = bridgeLiveness } = state
     let { SetPosition = setPosition
           SetSize = setSize
           SelectDoc = selectDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
+          ShareDoc = shareDoc
           DismissError = dismissError
           DismissDocError = dismissDocError
+          DismissShareNotice = dismissShareNotice
           LaunchSession = launchSession } = callbacks
+    let { UnviewedByScopedKey = unviewedByScopedKey
+          UnviewedFilenames = unviewedFilenames
+          VisitedDocs = visitedDocs } = awareness
     let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
             prop.className (if isActive then $"{baseClass} active" else baseClass)
@@ -223,8 +308,17 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                                 prop.className "canvas-launch-btn"
                                 prop.onClick (fun _ -> launchSession ())
                                 prop.title "Start a session to work on the selected canvas doc"
-                                prop.text "▶ Start session"
+                                prop.children [ playIcon ]
                             ]
+                        match activeDoc with
+                        | Some d when d.Kind = AgentDoc ->
+                            Html.button [
+                                prop.className "canvas-share-btn"
+                                prop.onClick (fun _ -> shareDoc d.Filename)
+                                prop.title "Share this doc — copies a rich link to the clipboard"
+                                prop.children [ shareIcon ]
+                            ]
+                        | _ -> ()
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
                             Html.button [
@@ -299,6 +393,25 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
             ]
         | _ -> Html.none
 
+    // Success banner shown after a doc is shared and its rich link copied to the clipboard. A share
+    // *failure* reuses the red errorBanner (CanvasSendState.Failed) above; this green notice is the
+    // Ok path and is dismissible like the others.
+    let shareBanner =
+        match shareNotice with
+        | Some msg ->
+            Html.div [
+                prop.className "canvas-share-banner"
+                prop.children [
+                    Html.span [ prop.text msg ]
+                    Html.button [
+                        prop.className "canvas-share-dismiss"
+                        prop.onClick (fun _ -> dismissShareNotice ())
+                        prop.text "✕"
+                    ]
+                ]
+            ]
+        | None -> Html.none
+
     let content =
         match focusedDoc with
         | Some (wt, doc) ->
@@ -367,6 +480,7 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 errorBanner
                 docErrorBanner
                 waitingBanner
+                shareBanner
                 yield! iframes
             ]
         | None ->
@@ -375,7 +489,8 @@ let view (isOpen: bool) (position: CanvasPosition) (size: CanvasSize) (focusedDo
                 errorBanner
                 docErrorBanner
                 waitingBanner
-                overviewView allRepos bridgeLiveness onOverviewClick onOverviewDocClick
+                shareBanner
+                overviewView allRepos bridgeLiveness unviewedByScopedKey onOverviewClick onOverviewDocClick
             ]
 
     let paneClass =
@@ -403,14 +518,19 @@ type MessageListenerCallbacks =
       OnDocError: string -> string -> string -> unit
       /// A canvas-origin object message arrived with no usable top-level string `action`, from the
       /// active (non-hidden) doc — surfaced instead of silently dropped.
-      OnMalformedMessage: unit -> unit }
+      OnMalformedMessage: unit -> unit
+      /// Escape was pressed inside a canvas doc (reclaim-focus): a cross-origin doc's keydown can't
+      /// reach the dashboard's global focus-reclaim listener, so pull keyboard focus back to the
+      /// dashboard and revive navigation.
+      OnReclaimFocus: unit -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
           SelectDoc = selectDoc
           OnMorphComplete = onMorphComplete
           OnDocError = onDocError
-          OnMalformedMessage = onMalformedMessage } = callbacks
+          OnMalformedMessage = onMalformedMessage
+          OnReclaimFocus = onReclaimFocus } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -426,6 +546,12 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                 // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
                 let isFromHiddenCanvasIframe () =
                     Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe:not(.canvas-iframe-active)'), function(f){return f.contentWindow === $0.source})"
+                // Positively identify the ACTIVE doc as sender: me.source must equal the active iframe's
+                // window. Unlike the negative hidden-iframe filter, this rejects any canvas-origin sender
+                // that isn't the active doc — a detached/stale iframe, or a synthetic message with no
+                // source — rather than treating "not hidden" as "active".
+                let isFromActiveCanvasIframe () =
+                    Fable.Core.JsInterop.emitJsExpr<bool> me "(function(f){return !!f && f.contentWindow === $0.source})(document.querySelector('.canvas-iframe-active'))"
                 if Fable.Core.JsInterop.emitJsExpr<bool> me.data "typeof $0.action === 'string'" then
                     let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                     if action = "navigate-canvas-doc" then
@@ -440,6 +566,16 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                     elif action = "morph-complete" then
                         Fable.Core.JS.console.log "[canvas] morph-complete received"
                         onMorphComplete ()
+                    elif action = "reclaim-focus" then
+                        // Escape inside a cross-origin canvas doc can't reach the dashboard's global
+                        // focus-reclaim listener, so the doc posts this instead (reclaimFocusScript).
+                        // Positively require the ACTIVE doc's window as sender — a hidden background,
+                        // stale/detached, or sourceless sender must never yank the dashboard.
+                        if isFromActiveCanvasIframe () then
+                            Fable.Core.JS.console.log "[canvas] reclaim-focus received"
+                            onReclaimFocus ()
+                        else
+                            Fable.Core.JS.console.warn "[canvas] reclaim-focus DROPPED: not from the active canvas doc iframe"
                     elif action = "canvas-doc-error" then
                         // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                         // in the doc-error banner, never forwarded to the session like a normal payload.

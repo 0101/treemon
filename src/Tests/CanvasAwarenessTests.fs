@@ -18,9 +18,15 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
       Beads = BeadsSummary.zero
+      Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
+      CodingToolSince = None
+      CurrentSkill = None
+      AgentActivity = None
+      Sessions = []
       LastUserMessage = None
+      LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
       IsDirty = false
@@ -73,10 +79,13 @@ let private defaultModel : Model =
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
+      WorktreeSkills = []
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty }
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false
+      SelectedOverviewGroup = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a
@@ -104,7 +113,7 @@ let private tryUpdateModel msg model =
                         |> Map.tryFind scopedKey
                         |> Option.defaultValue Map.empty
                         |> Map.add filename hash
-                    { model with Canvas = { model.Canvas with LastViewedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap } }
+                    { model with Canvas.LastViewedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap }
                 | None -> model
             | None -> model
         | _ -> reraise ()
@@ -122,7 +131,7 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -134,7 +143,7 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "report.html" "abc123" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -146,7 +155,7 @@ type UnviewedDocsByScopedKeyTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "hash-v1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -171,7 +180,7 @@ type UnviewedDocsByScopedKeyTests() =
                     makeDoc "a.html" "h1"
                     makeDoc "b.html" "h2"
                     makeDoc "c.html" "h3" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "myrepo/feat", Map.ofList [ "b.html", "h2" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -187,7 +196,7 @@ type UnviewedDocsByScopedKeyTests() =
                 Repos = [
                     makeRepo "repo1" [ makeWorktree "repo1" "main" [ makeDoc "x.html" "h1" ] ]
                     makeRepo "repo2" [ makeWorktree "repo2" "dev" [ makeDoc "y.html" "h2" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "repo1/main", Map.ofList [ "x.html", "h1" ] ] }
 
         let result = unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
 
@@ -271,6 +280,87 @@ type DetectCanvasEventsTests() =
         Assert.That(result |> Map.containsKey "r2/dev", Is.True, "r2/dev is new")
 
 
+// ── Freshness gate (phantom "published" suppression on restart) ──────
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasEventFreshnessGateTests() =
+
+    let event filename kind : CanvasEvent =
+        { Filename = filename; Timestamp = DateTimeOffset.UtcNow; Kind = kind }
+
+    [<Test>]
+    member _.``gate drops a phantom event whose doc mtime is stale``() =
+        let now = DateTimeOffset.UtcNow
+        let events = Map.ofList [ "r/feat", [ event "old.html" NewDoc ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "old.html", now.AddHours(-3.0) ] ]
+
+        let result = gateCanvasEventsByFreshness now modified events
+
+        Assert.That(result, Is.Empty, "A pre-existing doc (stale mtime) must not surface as a canvas event")
+
+    [<Test>]
+    member _.``gate keeps a fresh event and restamps it with the real mtime``() =
+        let now = DateTimeOffset.UtcNow
+        let mtime = now.AddMinutes(-1.0)
+        let events = Map.ofList [ "r/feat", [ event "new.html" NewDoc ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "new.html", mtime ] ]
+
+        let result = gateCanvasEventsByFreshness now modified events
+
+        let evts = result["r/feat"]
+        Assert.That(evts.Length, Is.EqualTo(1))
+        Assert.That(evts[0].Filename, Is.EqualTo("new.html"))
+        Assert.That(evts[0].Timestamp, Is.EqualTo(mtime), "Event is restamped with the file's real mtime")
+
+    [<Test>]
+    member _.``gate drops events for a doc missing from the modified map``() =
+        let now = DateTimeOffset.UtcNow
+        let events = Map.ofList [ "r/feat", [ event "ghost.html" UpdatedDoc ] ]
+
+        let result = gateCanvasEventsByFreshness now Map.empty events
+
+        Assert.That(result, Is.Empty)
+
+    [<Test>]
+    member _.``detect + gate suppresses a pre-existing doc reappearing after a restart``() =
+        // Baseline was momentarily empty (restart scan gap); the doc reappears as absent->present,
+        // which detectCanvasEvents alone reports as NewDoc — but its mtime is old, so the gate drops it.
+        let now = DateTimeOffset.UtcNow
+        let prev = Map.empty
+        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddDays(-2.0) ] ]
+
+        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+
+        Assert.That(result, Is.Empty, "A pre-existing doc reappearing after restart must not show as published")
+
+    [<Test>]
+    member _.``detect + gate still reports a genuinely fresh new doc``() =
+        let now = DateTimeOffset.UtcNow
+        let prev = Map.empty
+        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddSeconds(-2.0) ] ]
+
+        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+
+        let evts = result["r/feat"]
+        Assert.That(evts[0].Kind, Is.EqualTo(NewDoc), "A truly recent publish still surfaces")
+
+    [<Test>]
+    member _.``isCanvasDocFresh is true within the window and false outside it or when missing``() =
+        let now = DateTimeOffset.UtcNow
+        let modified = Map.ofList [ "r/feat", Map.ofList [
+            "fresh.html", now.AddMinutes(-1.0)
+            "stale.html", now.AddHours(-2.0) ] ]
+
+        Assert.That(isCanvasDocFresh now modified "r/feat" "fresh.html", Is.True)
+        Assert.That(isCanvasDocFresh now modified "r/feat" "stale.html", Is.False)
+        Assert.That(isCanvasDocFresh now modified "r/feat" "missing.html", Is.False)
+        Assert.That(isCanvasDocFresh now modified "r/ghost" "fresh.html", Is.False)
+
+
 // ── Auto-display idle logic ──────────────────────────────────────────
 
 [<TestFixture>]
@@ -330,8 +420,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty; CanvasPaneOpen = false } }
+                Activity.LastActivityTime = 0.0
+                Canvas.PreviousCanvasHashes = Map.empty; Canvas.CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
@@ -353,8 +443,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = previousHashes; CanvasPaneOpen = false } }
+                Activity.LastActivityTime = 0.0
+                Canvas.PreviousCanvasHashes = previousHashes; Canvas.CanvasPaneOpen = false }
 
         let currentHashes = canvasHashesByScopedKey repos
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
@@ -377,8 +467,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = jsNow - 10_000.0 } // 10s ago, well within 60s threshold
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = Map.empty } }
+                Activity.LastActivityTime = jsNow - 10_000.0 // 10s ago, well within 60s threshold
+                Canvas.PreviousCanvasHashes = Map.empty }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let isIdle = jsNow - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
@@ -397,8 +487,8 @@ type AutoDisplayIdleLogicTests() =
         let model =
             { defaultModel with
                 Repos = repos
-                Activity = { defaultModel.Activity with LastActivityTime = 0.0 }
-                Canvas = { defaultModel.Canvas with PreviousCanvasHashes = currentHashes } }
+                Activity.LastActivityTime = 0.0
+                Canvas.PreviousCanvasHashes = currentHashes }
 
         let changedDocs = detectChangedCanvasDocs DateTimeOffset.UtcNow model.Canvas.PreviousCanvasHashes currentHashes
         let jsNow = 120_000.0
@@ -481,7 +571,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "status.html")) model
 
@@ -496,7 +586,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "new.html" "hash1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "new.html")) model
 
@@ -514,7 +604,7 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
                     makeDoc "a.html" "ha"
                     makeDoc "b.html" "hb" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] } }
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "b.html")) model
 
@@ -527,7 +617,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("unknown/key", "a.html")) model
 
@@ -538,7 +628,7 @@ type MarkDocViewedTests() =
         let model =
             { defaultModel with
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
-                Canvas = { defaultModel.Canvas with LastViewedHashes = Map.empty } }
+                Canvas.LastViewedHashes = Map.empty }
 
         let updated = tryUpdateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
 
@@ -826,7 +916,7 @@ type DocErrorTests() =
     [<Test>]
     member _.``CanvasDocError does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
+        let model = { baseModel with Canvas.CanvasSendState = CanvasSendState.Waiting "r/feat" }
         let updated = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "boom")) model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Doc JS errors and message-delivery state are independent and must not overwrite each other")
@@ -843,13 +933,13 @@ type DocErrorTests() =
     [<Test>]
     member _.``DismissCanvasDocError clears the doc error``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" } } }
+        let model = { baseModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" } }
         let updated = tryUpdateModel DismissCanvasDocError model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None), "Dismiss must clear the banner")
 
     [<Test>]
     member _.``DismissCanvasDocError leaves CanvasSendState untouched``() =
-        let model = { defaultModel with Canvas = { defaultModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" }; CanvasSendState = CanvasSendState.Failed "send failed" } }
+        let model = { defaultModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" }; Canvas.CanvasSendState = CanvasSendState.Failed "send failed" }
         let updated = tryUpdateModel DismissCanvasDocError model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Failed "send failed"),
             "Dismissing the doc-error banner must not clear an unrelated send failure")
@@ -857,10 +947,247 @@ type DocErrorTests() =
     [<Test>]
     member _.``SelectCanvasDoc clears a stale doc error (so a tab switch back never re-shows it)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "stale" } } }
+        let model = { baseModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "stale" } }
         let updated = tryUpdateModel (SelectCanvasDoc ("r/feat", "b.html")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "Switching tabs clears the stored error so it can never re-show when you switch back")
+
+
+// ── ShareCanvasDocResult + ClipboardWriteResult banner state (client share feature) ─────────
+// A successful share does NOT immediately claim "link copied": the Ok arm clears a stale Failed
+// send-state (so the red delivery-error and green success banners never stack) plus any stale notice,
+// then defers the banner to the async clipboard write. ClipboardWriteResult routes that write's real
+// outcome back in — Ok → "Shared — link copied", Error → a "copy it manually: <url>" correction (F6)
+// — and is pure, so both outcomes drive straight through `update`. The share Error arm calls
+// Fable.Core.JS.console.error (dummy code that throws under .NET), so its send-state transition is
+// extracted into the pure preserveWaitingOnShareFailure helper and locked here instead. A live Waiting
+// banner is independent and survives both a share success and a share failure.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ShareCanvasDocResultTests() =
+
+    let shareResult : CanvasShareResult =
+        { Url = "https://acct.blob.core.windows.net/canvas/x/status.html?sig=s"; Title = "Status" }
+
+    let modelWithSendState state =
+        { defaultModel with Canvas = { defaultModel.Canvas with CanvasSendState = state } }
+
+    [<Test>]
+    member _.``Ok defers the banner — it does not claim a copy before the write settles (F6)``() =
+        // The share succeeded but the async clipboard write hasn't settled, so the Ok arm must NOT
+        // pre-emptively claim "link copied" (that would lie if the write is later rejected). It clears
+        // any stale notice and defers the banner to ClipboardWriteResult.
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState CanvasSendState.Idle)
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
+            "The 'link copied' banner must wait for the clipboard write's actual outcome (F6)")
+
+    [<Test>]
+    member _.``Ok clears a stale Failed send-state so the error and success banners never stack``() =
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Failed "earlier failure"))
+        Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle),
+            "A prior delivery error must be cleared on a successful share (no red + green banner at once)")
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
+            "The success banner is deferred to the clipboard write; nothing is claimed yet")
+
+    [<Test>]
+    member _.``Ok preserves an independent Waiting send-state``() =
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Waiting "r/feat"))
+        Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
+            "A live 'waiting for session' banner is an independent fact and must survive a share")
+
+    // F6: the "link copied" banner reflects the async clipboard write's ACTUAL outcome, routed back
+    // through ClipboardWriteResult. A landed write confirms the copy; a rejected write (transient
+    // activation / focus lost across the share round-trip, revoked permission, or an unsupported
+    // clipboard API) drops the false claim and surfaces the raw URL for a manual copy. This arm is pure
+    // (the rejection is logged in writeClipboardCmd's .catch), so — unlike the share Error arm — both
+    // outcomes can be driven straight through `update`.
+    [<Test>]
+    member _.``ClipboardWriteResult Ok raises the 'link copied' banner``() =
+        let updated, _ = update (ClipboardWriteResult (shareResult.Url, Ok ())) defaultModel
+        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+
+    [<Test>]
+    member _.``ClipboardWriteResult Error corrects the claim and surfaces the link for a manual copy (F6)``() =
+        let updated, _ = update (ClipboardWriteResult (shareResult.Url, Error "NotAllowedError")) defaultModel
+        match updated.Canvas.ShareNotice with
+        | Some notice ->
+            Assert.That(notice, Does.Not.Contain("link copied"),
+                "A rejected clipboard write must NOT claim the link was copied (F6)")
+            Assert.That(notice, Does.Contain(shareResult.Url),
+                "The raw SAS URL must be surfaced so the user can copy it manually")
+        | None -> Assert.Fail("A settled clipboard write must still raise the share banner")
+
+    // The Error arm can't be driven through `update` (its direct Fable.Core.JS.console.error throws
+    // under .NET), so its send-state transition lives in the pure preserveWaitingOnShareFailure helper
+    // and is locked below. F7 regression: a share failure must NOT clobber a live "Waiting for
+    // session" banner — a queued message may still be delivered, so Waiting is never a failure.
+    [<Test>]
+    member _.``Error preserves an independent Waiting send-state (F7 regression)``() =
+        Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Waiting "r/feat") "share boom",
+            Is.EqualTo(CanvasSendState.Waiting "r/feat"),
+            "A live 'waiting for session' banner is independent and must survive a share failure")
+
+    [<Test>]
+    member _.``Error raises the delivery-error banner from Idle``() =
+        Assert.That(preserveWaitingOnShareFailure CanvasSendState.Idle "share boom",
+            Is.EqualTo(CanvasSendState.Failed "share boom"))
+
+    [<Test>]
+    member _.``Error replaces a stale Failed with the latest message``() =
+        Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Failed "old failure") "share boom",
+            Is.EqualTo(CanvasSendState.Failed "share boom"),
+            "A retried share that fails again surfaces the latest error, not a stale one")
+// ── mostRecentUnviewedDoc (focus-retarget target picker) ─────────────
+// Picks the worktree's most recently modified *unviewed* AgentDoc — the doc that "selecting the
+// worktree" should surface. Viewed docs (hash matches LastViewedHashes) and SystemView docs are
+// excluded, so an already-seen doc or the beads dashboard never wins.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MostRecentUnviewedDocTests() =
+
+    let docAt filename hash (time: DateTimeOffset) kind =
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = kind }
+
+    [<Test>]
+    member _.``picks the most recently modified unviewed AgentDoc``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "old.html" "h1" (now.AddMinutes(-10.0)) AgentDoc
+            docAt "new.html" "h2" now AgentDoc
+            docAt "mid.html" "h3" (now.AddMinutes(-5.0)) AgentDoc ] ] ]
+        Assert.That(mostRecentUnviewedDoc repos Map.empty "r/feat", Is.EqualTo(Some "new.html"))
+
+    [<Test>]
+    member _.``ignores a doc whose hash matches the last viewed hash``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "old.html" "h1" (now.AddMinutes(-10.0)) AgentDoc
+            docAt "new.html" "h2" now AgentDoc ] ] ]
+        let viewed = Map.ofList [ "r/feat", Map.ofList [ "new.html", "h2" ] ]
+        Assert.That(mostRecentUnviewedDoc repos viewed "r/feat", Is.EqualTo(Some "old.html"),
+            "the most-recent doc is already viewed, so the older unviewed doc wins")
+
+    [<Test>]
+    member _.``ignores a SystemView doc even when it is the most recent``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "status.html" "a1" (now.AddMinutes(-5.0)) AgentDoc
+            docAt "beads.html" "b1" now SystemView ] ] ]
+        Assert.That(mostRecentUnviewedDoc repos Map.empty "r/feat", Is.EqualTo(Some "status.html"),
+            "a SystemView must never be treated as newly published")
+
+    [<Test>]
+    member _.``returns None when every AgentDoc is viewed``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docAt "a.html" "h1" now AgentDoc ] ] ]
+        let viewed = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ]
+        Assert.That(mostRecentUnviewedDoc repos viewed "r/feat", Is.EqualTo(None))
+
+    [<Test>]
+    member _.``returns None for a scoped key that names no worktree``() =
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
+        Assert.That(mostRecentUnviewedDoc repos Map.empty "r/ghost", Is.EqualTo(None))
+
+
+// ── Focus-transition retarget (select-the-worktree surfaces THAT doc) ─
+// When focus transitions ONTO a worktree card that has an unviewed (newly published/updated) doc,
+// its ActiveCanvasDoc is retargeted to that doc — via update(SetFocus …), the message every
+// "select the worktree" entry point funnels through. No retarget when the card is already focused
+// (manual tab choice preserved) or nothing is unviewed. The doc is marked viewed only when the pane
+// is open (it is actually shown).
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FocusRetargetTests() =
+
+    // Run the Cmd's effects and collect the messages they dispatch. The retarget Cmds are only
+    // Cmd.ofMsg/Cmd.none, so this forces neither the (lazy) Remoting proxy nor Fable.Core.JS.
+    let dispatchedMsgs cmd : Msg list =
+        let captured = ResizeArray<Msg>()
+        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
+        List.ofSeq captured
+
+    let docAt filename hash (time: DateTimeOffset) =
+        { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = AgentDoc }
+
+    // Worktree "r/feat" with a.html (older, viewed) and b.html (newer, unviewed). ActiveCanvasDoc
+    // sticks on a.html (a prior manual/last-open selection).
+    let modelWithUnviewed paneOpen focused =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [
+            docAt "a.html" "h1" (now.AddMinutes(-10.0))
+            docAt "b.html" "h2" now ] ] ]
+        { defaultModel with
+            Repos = repos
+            FocusedElement = focused
+            Canvas.CanvasPaneOpen = paneOpen
+            Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
+            Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
+
+    [<Test>]
+    member _.``focusing a card with an unviewed doc retargets ActiveCanvasDoc to that doc``() =
+        let model = modelWithUnviewed false None
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "b.html"),
+            "selecting the worktree surfaces the newly published/updated doc, not the sticky last-open one")
+
+    [<Test>]
+    member _.``no retarget when the card is already the focused element``() =
+        let model = modelWithUnviewed false (Some (Card "r/feat"))
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "re-focusing the already-focused card must preserve a manual in-worktree tab choice")
+
+    [<Test>]
+    member _.``no retarget when there are no unviewed docs``() =
+        let now = DateTimeOffset.UtcNow
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ docAt "a.html" "h1" now ] ] ]
+        let model =
+            { defaultModel with
+                Repos = repos
+                FocusedElement = None
+                Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "a.html" ]
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "with nothing unviewed the sticky last-open selection stays")
+
+    [<Test>]
+    member _.``retarget marks the doc viewed when the pane is open``() =
+        let model = modelWithUnviewed true None
+        let updated, cmd = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "b.html"))
+        Assert.That(dispatchedMsgs cmd |> List.contains (MarkDocViewed ("r/feat", "b.html")), Is.True,
+            "an open pane shows the doc, so it is marked viewed")
+
+    [<Test>]
+    member _.``retarget does NOT mark viewed when the pane is closed``() =
+        let model = modelWithUnviewed false None
+        let updated, cmd = update (SetFocus (Some (Card "r/feat"))) model
+        Assert.That(dispatchedMsgs cmd, Is.Empty,
+            "a closed pane does not display the doc, so nothing is marked viewed")
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
+            "the doc stays unviewed (badge preserved) until the pane actually shows it")
+
+    [<Test>]
+    member _.``SetFocusNoRetarget focuses the card without retargeting or marking viewed (idle path)``() =
+        // The idle auto-display path opens the pane, focuses the card, then selects its OWN target
+        // doc. It must use the no-retarget focus set so it never re-enters the active-user retarget —
+        // otherwise (pane already open) the retarget would mark mostRecentUnviewedDoc viewed before
+        // the intended doc is shown (finding F1). Pane open + b.html unviewed is exactly that state.
+        let model = modelWithUnviewed true None
+        let updated, cmd = update (SetFocusNoRetarget (Some (Card "r/feat"))) model
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "r/feat")),
+            "the focus is still applied")
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
+            "the sticky active doc is untouched — the idle path selects its own target via SelectCanvasDoc")
+        Assert.That(dispatchedMsgs cmd, Is.Empty,
+            "no MarkDocViewed/morph — SetFocusNoRetarget must not re-enter the retarget")
 
 
 // A canvas doc that posts a message with no top-level string `action` cannot be routed by
@@ -902,7 +1229,7 @@ type MalformedDocMessageTests() =
         // With b.html selected, activeVisibleDoc resolves to b.html (not the worktree's first doc),
         // so the banner is stamped with the doc the user is actually looking at.
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with ActiveCanvasDoc = Map.ofList [ "r/feat", "b.html" ] } }
+        let model = { baseModel with Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "b.html" ] }
         let updated = tryUpdateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.DocError |> Option.map _.Filename, Is.EqualTo(Some "b.html"),
             "The banner is attributed to the active doc (b.html), not the worktree's first doc (a.html)")
@@ -917,9 +1244,76 @@ type MalformedDocMessageTests() =
     [<Test>]
     member _.``CanvasMalformedDocMessage does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
-        let model = { baseModel with Canvas = { baseModel.Canvas with CanvasSendState = CanvasSendState.Waiting "r/feat" } }
+        let model = { baseModel with Canvas.CanvasSendState = CanvasSendState.Waiting "r/feat" }
         let updated = tryUpdateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Surfacing a malformed message must not overwrite unrelated message-delivery state")
         Assert.That(updated.Canvas.DocError |> Option.isSome, Is.True,
             "The banner is still raised alongside the untouched send state")
+
+
+// ── LoadLastViewedHashes merge (init-race safety) ────────────────────
+// loadLastViewedHashes races the first DataLoaded seeding in init. The handler must MERGE the
+// server hashes with a seed of the currently-known docs, not overwrite — otherwise an empty/partial
+// server map arriving last wipes the seed, making already-present docs look unviewed (which the
+// focus retarget would then act on). These guard that already-present docs stay viewed while genuine
+// server-recorded updates still register as unviewed.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type LoadLastViewedHashesTests() =
+
+    [<Test>]
+    member _.``an empty server map does not wipe the seed for already-present docs``() =
+        // Simulates LoadLastViewedHashes arriving AFTER DataLoaded seeded the docs, with a fresh
+        // server that has no saved hashes. The docs must stay viewed, not become unviewed.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
+        let seeded = { defaultModel with Repos = repos; Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
+        let updated = tryUpdateModel (LoadLastViewedHashes Map.empty) seeded
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes, Is.Empty,
+            "an empty server map must not make a seeded, already-present doc look unviewed")
+
+    [<Test>]
+    member _.``a server-recorded stale hash still registers the doc as unviewed``() =
+        // The doc is now at h2 but the server last saw h1 (updated while away) → stays unviewed.
+        let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h2" ] ] ]
+        let model = { defaultModel with Repos = repos }
+        let updated = tryUpdateModel (LoadLastViewedHashes (Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ])) model
+        Assert.That(updated.Canvas.LastViewedHashes["r/feat"]["a.html"], Is.EqualTo("h1"),
+            "the server value is kept (not overwritten by the current hash), so the update still registers")
+        Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
+            "a doc updated since the server last saw it must remain unviewed")
+
+
+// ── SelectOverviewWorktree archived-row guard (finding F4) ───────────────────
+// A task-bucket breakdown can list ARCHIVED worktrees as clickable rows (only the Done bucket filters
+// archived; other buckets keep them). Archived worktrees have no focusable card (visibleFocusTargets
+// scans only repo.Worktrees; archived entries render in the separate archive section, never .focused).
+// So SelectOverviewWorktree must treat a scopedKey that resolves to no focusable card as a no-op
+// rather than setting an invalid FocusedElement that produces no visible focus/scroll and gets reset.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SelectOverviewWorktreeGuardTests() =
+
+    // A repo whose "feat" worktree is live and whose "old" worktree is archived (lives in
+    // ArchivedWorktrees, so it has no focusable card even though its scopedKey looks routable).
+    let repoWithArchived () =
+        let live = makeWorktree "r" "feat" []
+        let archived = { makeWorktree "r" "old" [] with IsArchived = true }
+        { makeRepo "r" [ live ] with ArchivedWorktrees = [ archived ] }
+
+    [<Test>]
+    member _.``an archived worktree scopedKey does not set FocusedElement (F4)``() =
+        let model = { defaultModel with Repos = [ repoWithArchived () ]; FocusedElement = None }
+        let updated, _ = update (SelectOverviewWorktree "r/old") model
+        Assert.That(updated.FocusedElement, Is.EqualTo(None),
+            "clicking an archived breakdown row must be a no-op, not an invalid Card focus (F4)")
+
+    [<Test>]
+    member _.``an archived scopedKey leaves an existing focus untouched (F4)``() =
+        let model = { defaultModel with Repos = [ repoWithArchived () ]; FocusedElement = Some (Card "r/feat") }
+        let updated, _ = update (SelectOverviewWorktree "r/old") model
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "r/feat")),
+            "a dead archived-row click must not clobber the current focus target (F4)")

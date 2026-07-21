@@ -14,7 +14,7 @@ let categoryDisplayName =
     | "WorktreeList"   -> "Worktree \u2630"
     | "GitRefresh"     -> "Git \u21BB"
     | "BeadsRefresh"   -> "Beads \u21BB"
-    | "CodingToolRefresh" -> "Agent \u21BB"
+    | "CodingToolRefresh" -> "Agent \u2191"
     | "PrFetch"        -> "PR \u2913"
     | "GitFetch"       -> "Git \u2913"
     | other            -> other
@@ -117,6 +117,13 @@ let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCa
             Html.div [
                 prop.className "status-overview"
                 prop.children (knownCategories |> List.map (statusOverviewRow prefix latestByCategory))
+            ]
+            Html.div [
+                prop.className "nav-hint"
+                prop.children [
+                    Html.kbd "Esc"
+                    Html.span " to refocus worktree navigation"
+                ]
             ]
         ]
     ]
