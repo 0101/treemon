@@ -13,10 +13,10 @@ open Elmish
 open CanvasAwareness
 open AppTypes
 
-/// Resolve the focused worktree and its active CanvasDoc (the doc the pane renders). Returns
-/// `None` when there is no focused card, no active doc, or the active filename no longer names a
-/// real doc of the worktree.
-let focusedWorktreeCanvasDoc (model: Model) =
+/// Resolve the canvas-target worktree and its active CanvasDoc (the doc the pane renders). Returns
+/// `None` when there is no target/focused card, no active doc, or the active filename no longer
+/// names a real doc of the worktree.
+let activeWorktreeCanvasDoc (model: Model) =
     CanvasUpdate.activeVisibleDoc model
     |> Option.bind (fun (scopedKey, filename) ->
         findWorktree scopedKey model
@@ -28,9 +28,12 @@ let focusedWorktreeCanvasDoc (model: Model) =
 /// from the model, assemble the `CanvasPaneCallbacks` from `dispatch`, and hand them to
 /// `CanvasPane.view`. `App.fs`'s `view` calls this for its `canvasEl`.
 let view (model: Model) (dispatch: Dispatch<Msg>) =
+    let activeCanvasScopedKey =
+        CanvasState.activeCanvasWorktree model.FocusedElement model.Canvas.TargetWorktree
+
     let selectCanvasDoc filename =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (SelectCanvasDoc (scopedKey, filename))
+        match activeCanvasScopedKey with
+        | Some scopedKey -> dispatch (SelectCanvasDoc (scopedKey, filename))
         | _ -> ()
 
     let onOverviewClick scopedKey =
@@ -40,18 +43,18 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
         dispatch (OpenCanvasDoc (scopedKey, filename))
 
     let archiveCanvasDoc filename =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
+        match activeCanvasScopedKey with
+        | Some scopedKey -> dispatch (ArchiveCanvasDoc (scopedKey, filename))
         | _ -> ()
 
     let shareCanvasDoc filename =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (ShareCanvasDoc (scopedKey, filename))
+        match activeCanvasScopedKey with
+        | Some scopedKey -> dispatch (ShareCanvasDoc (scopedKey, filename))
         | _ -> ()
 
     let launchCanvasSession () =
-        match model.FocusedElement with
-        | Some (Card scopedKey) -> dispatch (LaunchCanvasSession scopedKey)
+        match activeCanvasScopedKey with
+        | Some scopedKey -> dispatch (LaunchCanvasSession scopedKey)
         | _ -> ()
 
     // The single unviewed input: the same badge-source map (`unviewedDocsByScopedKey`), computed
@@ -65,17 +68,17 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
             |> Map.map (fun _ filenames -> Set.ofList filenames)
         else Map.empty
 
-    let focusedUnviewedFilenames =
-        match model.FocusedElement with
-        | Some (Card scopedKey) ->
+    let activeUnviewedFilenames =
+        match activeCanvasScopedKey with
+        | Some scopedKey ->
             unviewedByScopedKey
             |> Map.tryFind scopedKey
             |> Option.defaultValue Set.empty
         | _ -> Set.empty
 
-    let focusedVisitedDocs =
-        match model.FocusedElement with
-        | Some (Card scopedKey) ->
+    let activeVisitedDocs =
+        match activeCanvasScopedKey with
+        | Some scopedKey ->
             model.Canvas.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
         | _ -> []
 
@@ -103,7 +106,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
 
     let canvasAwareness: CanvasPane.CanvasPaneAwareness =
         { UnviewedByScopedKey = unviewedByScopedKey
-          UnviewedFilenames = focusedUnviewedFilenames
-          VisitedDocs = focusedVisitedDocs }
+          UnviewedFilenames = activeUnviewedFilenames
+          VisitedDocs = activeVisitedDocs }
 
-    CanvasPane.view canvasState (focusedWorktreeCanvasDoc model) model.Repos canvasAwareness canvasCallbacks
+    CanvasPane.view canvasState (activeWorktreeCanvasDoc model) model.Repos canvasAwareness canvasCallbacks

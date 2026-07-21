@@ -59,7 +59,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - Open or closed state persists in global config.
 - Position selector supports left, right, top, and bottom docking, and the selected position persists.
 - Size selector supports 1:1 (default) and 2:1 — at 2:1 the open pane takes two-thirds of the layout instead of half — and the selected size persists in global config.
-- The pane is scoped to the focused worktree. If that worktree has docs, the pane shows its active doc.
+- The pane normally follows the focused worktree. An explicit card-level SystemView action may target another worktree without moving dashboard card focus; the next explicit card selection clears that override.
 - Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` now gets a labeled tab (with a compact last-modified age) instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. (See also `docs/spec/canvas-authoring-dx.md`.)
 - Selecting a tab marks that doc viewed.
 - Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.

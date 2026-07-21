@@ -86,6 +86,7 @@ type Msg =
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
     | OpenCanvasDoc of scopedKey: string * filename: string
+    | OpenWorktreeDiff of scopedKey: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the

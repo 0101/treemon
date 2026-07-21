@@ -75,26 +75,6 @@ let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: C
 let private beadsTotal (b: BeadsSummary) =
     b.Open + b.InProgress + b.Blocked + b.Closed
 
-/// Render the SystemView (e.g. the beads dashboard) entry for the tab strip. It is deliberately NOT
-/// a normal agent-doc tab: it uses a distinct CSS class, carries no liveness dot, and labels itself
-/// with the worktree's beads issue count shown as a badge next to a "BD" glyph.
-let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
-    Html.button [
-        prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
-        prop.onClick (fun _ -> selectDoc doc.Filename)
-        prop.title "Beads issues"
-        prop.children [
-            Html.span [
-                prop.className "canvas-system-tab-glyph"
-                prop.text "BD"
-            ]
-            Html.span [
-                prop.className "canvas-system-tab-count"
-                prop.text (string (beadsTotal wt.Beads))
-            ]
-        ]
-    ]
-
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
     let encodedFilename = Fable.Core.JS.encodeURIComponent doc.Filename
@@ -107,6 +87,36 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
 /// default browser, which is exactly where the screenshot tooling works.
 let openDocInBrowserTab (wt: WorktreeStatus) (doc: CanvasDoc) : unit =
     Fable.Core.JsInterop.emitJsExpr (iframeSrc wt doc) "window.open($0,'_blank','noopener')"
+
+/// Render a SystemView entry for the tab strip. SystemViews are deliberately not normal AgentDoc
+/// tabs: they use a distinct class, carry no liveness dot, and retain the shared double-click
+/// affordance for opening the exact iframe URL in a standalone browser tab.
+let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
+    let glyph, count, label =
+        match doc.Filename.ToLowerInvariant() with
+        | "beads.html" -> "BD", Some(string (beadsTotal wt.Beads)), "Beads issues"
+        | "diff.html" -> "Diff", None, "Worktree diff"
+        | _ -> doc.Filename.Replace(".html", ""), None, doc.Filename
+
+    Html.button [
+        prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
+        prop.onClick (fun _ -> selectDoc doc.Filename)
+        prop.onDoubleClick (fun _ -> openDocInBrowserTab wt doc)
+        prop.title $"{label} — double-click to open in a browser tab"
+        prop.children [
+            Html.span [
+                prop.className "canvas-system-tab-glyph"
+                prop.text glyph
+            ]
+            match count with
+            | Some value ->
+                Html.span [
+                    prop.className "canvas-system-tab-count"
+                    prop.text value
+                ]
+            | None -> ()
+        ]
+    ]
 
 let private latestDocModified (wt: WorktreeStatus) =
     wt.CanvasDocs

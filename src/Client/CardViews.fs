@@ -156,6 +156,7 @@ type CardCallbacks =
       CancelSync: WorktreePath -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
       OpenCanvasDoc: string -> string -> unit
+      OpenDiff: string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
 
 let mainBehindIndicator (baseBranch: string) (count: int) =
@@ -214,6 +215,19 @@ let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStat
                 prop.text "Sync"
             ]
 
+let diffButton (callbacks: CardCallbacks) (scopedKey: string) =
+    Html.button [
+        prop.className "diff-btn"
+        prop.onKeyDown (fun e ->
+            if e.key = "Enter" || e.key = " " then
+                e.stopPropagation())
+        prop.onClick (fun e ->
+            e.stopPropagation()
+            callbacks.OpenDiff scopedKey)
+        prop.title "Open worktree diff"
+        prop.text "Diff"
+    ]
+
 let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     Html.div [
         prop.className "main-behind-row"
@@ -226,6 +240,7 @@ let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: Work
                         prop.text "uncommitted changes"
                     ]
                 else syncButton callbacks baseBranch wt branchEvents isPending scopedKey
+            if not wt.IsArchived then diffButton callbacks scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -657,6 +672,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
+                    if not wt.IsArchived then diffButton callbacks scopedKey
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
             ]

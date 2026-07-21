@@ -15,7 +15,7 @@ open Browser
 open AppTypes
 
 let activeVisibleDoc (model: Model) : (string * string) option =
-    CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
+    CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.TargetWorktree model.Canvas.ActiveCanvasDoc
 
 /// True when `filename` names a real CanvasDoc of the worktree `scopedKey`. Gates in-doc link
 /// navigation (NavigateCanvasDoc), whose filename arrives via an untrusted in-iframe postMessage:
@@ -28,7 +28,7 @@ let isKnownCanvasDoc (model: Model) (scopedKey: string) (filename: string) : boo
     |> Option.defaultValue false
 
 let markVisibleDocCmd (model: Model) : Cmd<Msg> =
-    CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
+    CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.TargetWorktree model.Canvas.ActiveCanvasDoc
 
 let launchCanvasSession (scopedKey: string) (model: Model) =
     match findWorktree scopedKey model with
@@ -70,6 +70,9 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         // leaving into the one we're showing, so clear it here (it reappears only if the new
         // doc throws again).
         Canvas.DocError = None
+        Canvas.TargetWorktree =
+            if model.Canvas.TargetWorktree.IsSome then Some scopedKey
+            else None
         Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
         Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
     Cmd.batch [
@@ -88,7 +91,10 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
 /// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
-    let focused = { model with FocusedElement = newFocus }
+    let focused =
+        { model with
+            FocusedElement = newFocus
+            Canvas.TargetWorktree = None }
     match retarget, newFocus with
     | true, Some (Card scopedKey) when previousFocus <> Some (Card scopedKey) ->
         match CanvasAwareness.mostRecentUnviewedDoc focused.Repos focused.Canvas.LastViewedHashes scopedKey, focused.Canvas.CanvasPaneOpen with
@@ -108,11 +114,26 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         Repos = repos
         FocusedElement = Some (Card scopedKey)
         Canvas.CanvasPaneOpen = true
+        Canvas.TargetWorktree = None
         Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
         Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
     Cmd.batch [
         if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
         if expanded then saveCollapsedReposCmd repos
+        Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+    ]
+
+let openWorktreeDiff (scopedKey: string) (model: Model) =
+    let filename = "diff.html"
+    let openPane = not model.Canvas.CanvasPaneOpen
+    { model with
+        Canvas.CanvasPaneOpen = true
+        Canvas.DocError = None
+        Canvas.TargetWorktree = Some scopedKey
+        Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
+    Cmd.batch [
+        if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
         Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
     ]
 

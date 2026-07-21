@@ -547,6 +547,8 @@ let update msg model =
 
     | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
 
+    | OpenWorktreeDiff scopedKey -> CanvasUpdate.openWorktreeDiff scopedKey model
+
     | ArchiveCanvasDoc (scopedKey, filename) -> CanvasUpdate.archiveCanvasDoc scopedKey filename model
 
     | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
@@ -857,6 +859,7 @@ let view model dispatch =
           CancelSync = fun path -> dispatch (CancelSync path)
           LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
           OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
+          OpenDiff = OpenWorktreeDiff >> dispatch
           DispatchArchive = ArchiveMsg >> dispatch }
 
     let dashboardEl =

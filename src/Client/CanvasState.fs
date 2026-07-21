@@ -13,6 +13,9 @@ type CanvasState =
     { CanvasPaneOpen: bool
       CanvasPosition: CanvasPosition
       CanvasSize: CanvasSize
+      // An explicit pane target used by card-level SystemView actions such as Diff. None keeps the
+      // normal behavior where the pane follows FocusedElement; selecting a card clears the override.
+      TargetWorktree: string option
       ActiveCanvasDoc: Map<string, string>
       VisitedCanvasDocs: Map<string, string list>
       LastViewedHashes: Map<string, Map<string, string>>
@@ -42,6 +45,7 @@ let empty : CanvasState =
     { CanvasPaneOpen = false
       CanvasPosition = CanvasPosition.Right
       CanvasSize = CanvasSize.Ratio1To1
+      TargetWorktree = None
       ActiveCanvasDoc = Map.empty
       VisitedCanvasDocs = Map.empty
       LastViewedHashes = Map.empty
@@ -70,25 +74,36 @@ let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string)
     |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
     |> Option.map _.Kind
 
-/// The (scopedKey, filename) of the doc currently shown for the focused card: the card's
+/// The worktree currently driving the canvas pane. Explicit SystemView actions can temporarily
+/// target a worktree without changing card focus; otherwise the pane follows the focused card.
+let activeCanvasWorktree (focused: FocusTarget option) (targetWorktree: string option) =
+    targetWorktree
+    |> Option.orElseWith (fun () ->
+        match focused with
+        | Some (Card scopedKey) -> Some scopedKey
+        | _ -> None)
+
+/// The (scopedKey, filename) of the doc currently shown for the active canvas worktree: its
 /// ActiveCanvasDoc selection if it still names a real doc, else the worktree's first doc.
-/// Pure over the slices it reads (repos, focused element, active-doc map) rather than the whole Model.
-let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (activeCanvasDoc: Map<string, string>) : (string * string) option =
-    match focused with
-    | Some (Card scopedKey) ->
+/// Pure over the slices it reads rather than the whole Model.
+let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (targetWorktree: string option) (activeCanvasDoc: Map<string, string>) : (string * string) option =
+    activeCanvasWorktree focused targetWorktree
+    |> Option.bind (fun scopedKey ->
         findWorktreeByScopedKey repos scopedKey
         |> Option.bind (fun wt ->
             let doc =
-                activeCanvasDoc
-                |> Map.tryFind scopedKey
-                |> Option.bind (fun name -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name))
-                |> Option.orElseWith (fun () -> wt.CanvasDocs |> List.tryHead)
-            doc |> Option.map (fun d -> scopedKey, d.Filename))
-    | _ -> None
+                match activeCanvasDoc |> Map.tryFind scopedKey with
+                | Some name ->
+                    match wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name) with
+                    | Some selected -> Some selected
+                    | None when targetWorktree.IsSome -> None
+                    | None -> wt.CanvasDocs |> List.tryHead
+                | None -> wt.CanvasDocs |> List.tryHead
+            doc |> Option.map (fun d -> scopedKey, d.Filename)))
 
 /// Command to mark the currently visible doc as viewed. `markViewed` builds the host app's
 /// message from (scopedKey, filename), keeping this module free of any concrete Msg type.
-let markVisibleDocCmd (markViewed: string * string -> 'msg) (repos: RepoModel list) (focused: FocusTarget option) (activeCanvasDoc: Map<string, string>) : Cmd<'msg> =
-    activeVisibleDoc repos focused activeCanvasDoc
+let markVisibleDocCmd (markViewed: string * string -> 'msg) (repos: RepoModel list) (focused: FocusTarget option) (targetWorktree: string option) (activeCanvasDoc: Map<string, string>) : Cmd<'msg> =
+    activeVisibleDoc repos focused targetWorktree activeCanvasDoc
     |> Option.map (fun (sk, fn) -> Cmd.ofMsg (markViewed (sk, fn)))
     |> Option.defaultValue Cmd.none

@@ -201,3 +201,194 @@ type VisibleCardEventTests() =
     [<Test>]
     member _.``A succeeded sync event is always kept``() =
         Assert.That(isVisibleCardEvent (event EventSource.Sync (Some StepStatus.Succeeded)), Is.True)
+
+let private diffCanvasDoc =
+    { Filename = "diff.html"
+      ContentHash = "fixture-diff"
+      LastModified = DateTimeOffset(2026, 7, 21, 12, 0, 0, TimeSpan.Zero)
+      OwnerSessionId = None
+      Kind = CanvasDocKind.SystemView }
+
+let private withDiffDocs (response: DashboardResponse) =
+    let addDiff wt =
+        if wt.CanvasDocs |> List.exists (fun doc -> doc.Filename = diffCanvasDoc.Filename) then wt
+        else { wt with CanvasDocs = wt.CanvasDocs @ [ diffCanvasDoc ] }
+
+    { response with
+        Repos =
+            response.Repos
+            |> List.mapi (fun index repo ->
+                let worktrees = repo.Worktrees |> List.map addDiff
+                let withArchivedFixture =
+                    if index <> 0 || worktrees |> List.exists _.IsArchived then worktrees
+                    else
+                        worktrees
+                        |> List.tryHead
+                        |> Option.map (fun wt ->
+                            { wt with
+                                Path = WorktreePath $"{WorktreePath.value wt.Path}-archived-fixture"
+                                Branch = "archived-fixture"
+                                IsArchived = true })
+                        |> Option.map (fun archived -> worktrees @ [ archived ])
+                        |> Option.defaultValue worktrees
+                { repo with
+                    Worktrees = withArchivedFixture }) }
+
+let private routeDashboardWithDiffDocs (page: IPage) =
+    let routeHandler =
+        Func<IRoute, System.Threading.Tasks.Task>(fun route ->
+            (task {
+                let! upstream = route.FetchAsync()
+                let! json = upstream.TextAsync()
+                let response = JsonConvert.DeserializeObject<DashboardResponse>(json, dashboardConverter)
+                let body = JsonConvert.SerializeObject(withDiffDocs response, dashboardConverter)
+                do! route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = body))
+            } :> System.Threading.Tasks.Task))
+    page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler)
+
+let private cardByBranch (page: IPage) branch =
+    page.Locator(
+        ".wt-card",
+        PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
+
+[<TestFixture>]
+[<Category("E2E")>]
+type WorktreeDiffActionTests() =
+    inherit PageTest()
+
+    override this.ContextOptions() =
+        let options = base.ContextOptions()
+        options.IgnoreHTTPSErrors <- true
+        options
+
+    member private this.NavigateWithDiffDocs() =
+        task {
+            do! routeDashboardWithDiffDocs this.Page
+            let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
+            do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+        }
+
+    [<Test>]
+    member this.``Pointer Diff opens and switches the scoped view without changing card focus``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let focusedCard = cardByBranch this.Page "feature-active"
+            let firstTarget = cardByBranch this.Page "feature-recent"
+            let secondTarget = cardByBranch this.Page "feature-idle"
+            do! focusedCard.ClickAsync()
+
+            let! closedCount = this.Page.Locator(".canvas-pane.open").CountAsync()
+            Assert.That(closedCount, Is.EqualTo(0), "Canvas pane should start closed")
+
+            do! firstTarget.Locator(".diff-btn").ClickAsync()
+            do! this.Page.Locator(".canvas-pane.open").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
+            do! activeIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! firstSrc = activeIframe.GetAttributeAsync("src")
+
+            let! focusedAfterFirst = focusedCard.GetAttributeAsync("class")
+            let! targetAfterFirst = firstTarget.GetAttributeAsync("class")
+            Assert.Multiple(fun () ->
+                Assert.That(firstSrc, Does.Contain("feature-recent").And.EndWith("/diff.html"))
+                Assert.That(focusedAfterFirst, Does.Contain("focused"), "Diff click must not move card focus")
+                Assert.That(targetAfterFirst, Does.Not.Contain("focused"), "Stopped click propagation must keep the target card unfocused"))
+
+            do! secondTarget.Locator(".diff-btn").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "src => document.querySelector('.canvas-iframe-active')?.getAttribute('src') !== src",
+                    firstSrc,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            let! secondSrc = activeIframe.GetAttributeAsync("src")
+            let! focusedAfterSecond = focusedCard.GetAttributeAsync("class")
+
+            Assert.Multiple(fun () ->
+                Assert.That(secondSrc, Does.Contain("feature-idle").And.EndWith("/diff.html"))
+                Assert.That(secondSrc, Is.Not.EqualTo(firstSrc), "An already-open pane should switch worktree scope")
+                Assert.That(focusedAfterSecond, Does.Contain("focused"), "Switching diff targets must preserve the focused card"))
+        }
+
+    [<TestCase("Enter")>]
+    [<TestCase("Space")>]
+    member this.``Keyboard Diff activation opens the intended worktree without selecting its card``(key: string) =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let focusedCard = cardByBranch this.Page "feature-active"
+            let targetCard = cardByBranch this.Page "feature-stale"
+            do! focusedCard.ClickAsync()
+
+            let diffButton = targetCard.Locator(".diff-btn")
+            do! diffButton.FocusAsync()
+            do! this.Page.Keyboard.PressAsync(key)
+
+            let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
+            do! activeIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! src = activeIframe.GetAttributeAsync("src")
+            let! focusedClass = focusedCard.GetAttributeAsync("class")
+            let! targetClass = targetCard.GetAttributeAsync("class")
+
+            Assert.Multiple(fun () ->
+                Assert.That(src, Does.Contain("feature-stale").And.EndWith("/diff.html"))
+                Assert.That(focusedClass, Does.Contain("focused"))
+                Assert.That(targetClass, Does.Not.Contain("focused")))
+        }
+
+    [<Test>]
+    member this.``Diff action is present on normal and compact worktree cards but absent from archived cards``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let normalCards = this.Page.Locator(".wt-card:not(.compact)")
+            let! normalCount = normalCards.CountAsync()
+            let! normalDiffCount = normalCards.Locator(".diff-btn").CountAsync()
+            let! archivedCount = this.Page.Locator(".archive-card").CountAsync()
+            let! archivedDiffCount = this.Page.Locator(".archive-card .diff-btn").CountAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(archivedCount, Is.GreaterThan(0), "Fixture must exercise an archived card")
+                Assert.That(normalDiffCount, Is.EqualTo(normalCount))
+                Assert.That(archivedDiffCount, Is.EqualTo(0)))
+
+            let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+            do! compactButton.ClickAsync()
+            let compactCards = this.Page.Locator(".wt-card.compact")
+            do! compactCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! compactCount = compactCards.CountAsync()
+            let! compactDiffCount = compactCards.Locator(".diff-btn").CountAsync()
+            Assert.That(compactDiffCount, Is.EqualTo(compactCount))
+        }
+
+    [<Test>]
+    member this.``Diff SystemView opens its exact iframe URL in a standalone tab``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let targetCard = cardByBranch this.Page "feature-active"
+            do! targetCard.Locator(".diff-btn").ClickAsync()
+
+            let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
+            do! activeIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! expectedUrl = activeIframe.GetAttributeAsync("src")
+            let diffTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-system-tab",
+                    PageLocatorOptions(HasText = "Diff"))
+            do! diffTab.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let popupReady =
+                System.Threading.Tasks.TaskCompletionSource<IPage>(
+                    System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+            this.Page.Popup.Add(fun popup -> popupReady.TrySetResult(popup) |> ignore)
+
+            do! diffTab.DblClickAsync()
+            let! popup = popupReady.Task.WaitAsync(TimeSpan.FromSeconds(5.0))
+            let! _ =
+                popup.WaitForFunctionAsync(
+                    "() => location.pathname.endsWith('/diff.html')",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            Assert.That(popup.Url, Is.EqualTo(expectedUrl))
+            do! popup.CloseAsync()
+        }
