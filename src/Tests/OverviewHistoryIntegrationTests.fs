@@ -33,6 +33,24 @@ type OverviewHistoryIntegrationTests() =
             with _ ->
                 ()
 
+    let withStores (action: SessionActivityStore -> SessionActivityStore -> unit) =
+        let directory = Path.Combine(Path.GetTempPath(), $"treemon-overview-history-{Guid.NewGuid()}")
+        Directory.CreateDirectory directory |> ignore
+        let path = Path.Combine(directory, "activity.db")
+        let reader = new SessionActivityStore(path)
+        let writer = new SessionActivityStore(path)
+
+        try
+            action reader writer
+        finally
+            (writer :> IDisposable).Dispose()
+            (reader :> IDisposable).Dispose()
+
+            try
+                Directory.Delete(directory, true)
+            with _ ->
+                ()
+
     let evt id sid worktree status skill at : ActivityEventRow =
         { EventId = EventId id
           SessionId = SessionId sid
@@ -125,6 +143,55 @@ type OverviewHistoryIntegrationTests() =
                     Is.EqualTo [ ac (AgentGroupKind.Activity CurrentActivity.PR) 1 ]
                 )
                 Assert.That(response.Snapshots |> List.forall (fun snapshot -> snapshot.Timestamp >= start), Is.True)))
+
+    [<Test>]
+    member _.``history inputs stay on one snapshot when liveness commits after the status read``() =
+        withStores (fun reader writer ->
+            let window = HistoryWindow.duration HistoryWindow.Hours12
+            let start = anchor - window
+            let sessionId = SessionId "interleaved"
+            let baselineAt = start - SessionActivity.openWindow - TimeSpan.FromMinutes 1.0
+            let livenessAt = start.AddMinutes(-1.0)
+
+            writer.AppendEvent(
+                evt
+                    "baseline"
+                    (SessionId.value sessionId)
+                    "C:/wt/interleaved"
+                    SessionLevelStatus.Working
+                    (Some "bd-execute")
+                    baselineAt
+            )
+            |> ignore
+
+            let inputs =
+                reader.QueryOverviewHistoryInputs(
+                    start,
+                    anchor,
+                    beforeLivenessRead = (fun () -> writer.RecordLiveness(sessionId, livenessAt))
+                )
+
+            let response: OverviewHistoryResponse =
+                { Anchor = anchor
+                  Snapshots =
+                    OverviewHistory.sample
+                        anchor
+                        window
+                        inputs.TaskSnapshots
+                        inputs.Events
+                        inputs.Liveness }
+
+            Assert.Multiple(fun () ->
+                Assert.That(inputs.Events, Is.Empty)
+                Assert.That(inputs.Liveness, Is.Empty)
+                Assert.That(
+                    writer.QueryLiveness(start - SessionActivity.openWindow, anchor),
+                    Is.EqualTo [ sessionId, livenessAt ]
+                )
+                Assert.That(
+                    response.Snapshots,
+                    Is.EqualTo [ { Timestamp = start; Tasks = []; Agents = [] } ]
+                )))
 
     [<Test>]
     member _.``API read honors all supported windows and the hard output bound``() =

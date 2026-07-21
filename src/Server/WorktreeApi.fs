@@ -21,15 +21,17 @@ let internal overviewHistoryAt
     =
     let window = OverviewData.HistoryWindow.duration requestedWindow
     let start = anchor - window
-    let taskSnapshots =
-        (store.QueryTaskSnapshotBefore start |> Option.toList)
-        @ store.QueryTaskSnapshots(start, anchor)
-    let events = store.QueryHistoryWindow(start, anchor)
-    let liveness = store.QueryLiveness(start - SessionActivity.openWindow, anchor)
+    let inputs = store.QueryOverviewHistoryInputs(start, anchor)
 
     let response: OverviewData.OverviewHistoryResponse =
         { Anchor = anchor
-          Snapshots = OverviewHistory.sample anchor window taskSnapshots events liveness }
+          Snapshots =
+            OverviewHistory.sample
+                anchor
+                window
+                inputs.TaskSnapshots
+                inputs.Events
+                inputs.Liveness }
 
     response
 

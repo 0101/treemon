@@ -52,6 +52,11 @@ type ActivityEventRow =
       Skill: string option
       Ts: DateTimeOffset }
 
+type internal OverviewHistoryInputs =
+    { TaskSnapshots: (DateTimeOffset * OverviewData.TaskCount list) list
+      Events: ActivityEventRow list
+      Liveness: (SessionId * DateTimeOffset) list }
+
 // --- Serialisation helpers --------------------------------------------------------------------
 
 // Timestamps are stored as UTC round-trip ("O") strings. Normalising to UTC gives every value the
@@ -679,6 +684,71 @@ type SessionActivityStore(dbPath: string) =
         use reader = cmd.ExecuteReader()
 
         readRows reader (fun row -> SessionId(row.GetString 0), parseIso (row.GetString 1)) []
+
+    /// Read every durable input for one Overview history response from one WAL snapshot. The
+    /// optional boundary callback is an internal deterministic test seam for committing a writer
+    /// after the status read but before the liveness read.
+    member internal _.QueryOverviewHistoryInputs
+        (
+            startTime: DateTimeOffset,
+            endTime: DateTimeOffset,
+            ?beforeLivenessRead: unit -> unit
+        ) : OverviewHistoryInputs =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction(deferred = true)
+
+        let queryRows sql bind map =
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- sql
+            bind cmd
+            use reader = cmd.ExecuteReader()
+            readRows reader map []
+
+        let queryRow sql bind map =
+            queryRows sql bind map |> List.tryHead
+
+        let bindStart (cmd: SqliteCommand) =
+            cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
+
+        let bindRange (cmd: SqliteCommand) =
+            bindStart cmd
+            cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
+
+        let taskSnapshots =
+            (queryRow
+                queryTaskSnapshotBeforeSql
+                bindStart
+                (fun row -> parseIso (row.GetString 0), parseTasks (row.GetString 1))
+             |> Option.toList)
+            @ queryRows
+                queryTaskSnapshotsSql
+                bindRange
+                (fun row -> parseIso (row.GetString 0), parseTasks (row.GetString 1))
+
+        let events =
+            queryRows
+                queryHistoryWindowSql
+                (fun cmd ->
+                    cmd.Parameters.AddWithValue("$lookback", isoUtc (startTime - openWindow)) |> ignore
+                    bindRange cmd)
+                readEventRow
+
+        defaultArg beforeLivenessRead ignore ()
+
+        let liveness =
+            queryRows
+                queryLivenessSql
+                (fun cmd ->
+                    cmd.Parameters.AddWithValue("$start", isoUtc (startTime - openWindow)) |> ignore
+                    cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore)
+                (fun row -> SessionId(row.GetString 0), parseIso (row.GetString 1))
+
+        tx.Commit()
+
+        { TaskSnapshots = taskSnapshots
+          Events = events
+          Liveness = liveness }
 
     /// Append one Tasks (beads) history snapshot — the count-only projection, logged only on change by
     /// the scheduler. The Agents dimension is NOT stored here: it is derived on read from
