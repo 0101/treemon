@@ -172,6 +172,11 @@ let private tooltipForPoint (defs: SeriesDef list) (window: TimeSpan) (point: Po
       Rows = rows
       Total = List.sum point.Counts }
 
+let private hoverSampleForPoint defs window index (point: Point) =
+    { PointIndex = index
+      Fraction = point.Fraction
+      Tooltip = tooltipForPoint defs window point }
+
 let private sampleAt (samples: HoverSample array) (cursorFraction: float) =
     let rec search low high best =
         if low > high then
@@ -194,10 +199,7 @@ let hoverSampleAt chartKind (window: TimeSpan) (points: Point list) (cursorFract
     let defs = definitions chartKind
 
     points
-    |> List.mapi (fun index point ->
-        { PointIndex = index
-          Fraction = point.Fraction
-          Tooltip = tooltipForPoint defs window point })
+    |> List.mapi (hoverSampleForPoint defs window)
     |> List.toArray
     |> fun samples -> sampleAt samples cursorFraction
 
@@ -226,8 +228,8 @@ let private sameGeometryInput previous current =
     && previous.Anchor = current.Anchor
     && Object.ReferenceEquals(box previous.Snapshots, box current.Snapshots)
 
-/// Component-facing memoization seam. Production stores the returned value in a React ref; tests can use a
-/// cheap fake builder and assert exactly when the build count changes.
+/// Pure memoization seam for tests and non-React callers. Production uses the component-local geometry
+/// hook below; tests can use a cheap fake builder and assert exactly when the build count changes.
 let memoizedGeometry build input current =
     match current with
     | Some memo when sameGeometryInput memo.Input input -> memo
@@ -243,20 +245,20 @@ let geometryBuildCount memo = memo.BuildCount
 /// second frame; taking the frame returns only the latest candidate and opens the slot for the next frame.
 type HoverFrameQueue<'candidate> =
     private
-        { Pending: 'candidate option
-          IsScheduled: bool }
+    | Empty
+    | Scheduled of 'candidate
 
-let emptyHoverFrameQueue () =
-    { Pending = None
-      IsScheduled = false }
+let emptyHoverFrameQueue () = Empty
 
 let queueHoverFrame candidate queue =
-    { Pending = Some candidate
-      IsScheduled = true },
-    not queue.IsScheduled
+    match queue with
+    | Empty -> Scheduled candidate, true
+    | Scheduled _ -> Scheduled candidate, false
 
 let takeHoverFrame queue =
-    queue.Pending, emptyHoverFrameQueue ()
+    match queue with
+    | Empty -> None, Empty
+    | Scheduled candidate -> Some candidate, Empty
 
 let shouldUpdateHover currentPointIndex nextPointIndex =
     currentPointIndex <> Some nextPointIndex
@@ -538,10 +540,7 @@ let private buildChartGeometry input =
 
     let hoverSamples =
         points
-        |> Array.mapi (fun index point ->
-            { PointIndex = index
-              Fraction = point.Fraction
-              Tooltip = tooltipForPoint defs window point })
+        |> Array.mapi (hoverSampleForPoint defs window)
 
     { HoverSamples = hoverSamples
       StaticSvgElements = gridElements @ areaElements @ markerElements @ axisElements
@@ -549,12 +548,118 @@ let private buildChartGeometry input =
 
 type private HoverState =
     { Sample: HoverSample
-      GeometryBuildCount: int
-      UpdateCount: int }
+      GeometryBuildCount: int }
 
 type private ScheduledFrame =
     { Id: float
       GeometryBuildCount: int }
+
+type private GeometryBuild =
+    { Geometry: ChartGeometry
+      BuildCount: int }
+
+let private useChartGeometry input =
+    let chartKindKey =
+        match input.ChartKind with
+        | ChartKind.Agents -> 0
+        | ChartKind.Tasks -> 1
+
+    let historyWindowKey =
+        match input.HistoryWindow with
+        | HistoryWindow.Hours12 -> 12
+        | HistoryWindow.Hours24 -> 24
+        | HistoryWindow.Hours72 -> 72
+
+    let dependencies =
+        [| box chartKindKey
+           box historyWindowKey
+           box (float (input.Anchor.ToUnixTimeMilliseconds()))
+           box input.Snapshots |]
+
+    let geometry =
+        React.useMemo(
+            (fun () -> buildChartGeometry input),
+            dependencies
+        )
+
+    let trackedBuild, setTrackedBuild =
+        React.useState (fun () ->
+            { Geometry = geometry
+              BuildCount = 1 })
+
+    if Object.ReferenceEquals(box trackedBuild.Geometry, box geometry) then
+        trackedBuild
+    else
+        let nextBuild =
+            { Geometry = geometry
+              BuildCount = trackedBuild.BuildCount + 1 }
+
+        setTrackedBuild nextBuild
+        nextBuild
+
+let private useFrameCoalescedHover geometryBuildCount =
+    let hover, updateHover = React.useStateWithUpdater (None: HoverState option)
+    let frameQueue = React.useRef<HoverFrameQueue<HoverSample>>(emptyHoverFrameQueue ())
+    let scheduledFrame = React.useRef<ScheduledFrame option>(None)
+
+    let cancelFrame frame =
+        Browser.Dom.window?cancelAnimationFrame(frame.Id)
+
+    let clearPendingFrame () =
+        scheduledFrame.current |> Option.iter cancelFrame
+        scheduledFrame.current <- None
+        frameQueue.current <- emptyHoverFrameQueue ()
+
+    React.useEffect(
+        (fun () -> React.createDisposable clearPendingFrame),
+        [| box geometryBuildCount |]
+    )
+
+    let commitSample sample =
+        updateHover (fun current ->
+            let currentForGeometry =
+                current
+                |> Option.filter (fun state -> state.GeometryBuildCount = geometryBuildCount)
+
+            let currentPointIndex = currentForGeometry |> Option.map _.Sample.PointIndex
+
+            if shouldUpdateHover currentPointIndex sample.PointIndex then
+                Some
+                    { Sample = sample
+                      GeometryBuildCount = geometryBuildCount }
+            else
+                current)
+
+    let flushHoverFrame (_: float) =
+        scheduledFrame.current <- None
+        let sample, remaining = takeHoverFrame frameQueue.current
+        frameQueue.current <- remaining
+        sample |> Option.iter commitSample
+
+    let queueSample sample =
+        match scheduledFrame.current with
+        | Some frame when frame.GeometryBuildCount <> geometryBuildCount ->
+            cancelFrame frame
+            scheduledFrame.current <- None
+            frameQueue.current <- emptyHoverFrameQueue ()
+        | _ -> ()
+
+        let nextQueue, shouldSchedule = queueHoverFrame sample frameQueue.current
+        frameQueue.current <- nextQueue
+
+        if shouldSchedule then
+            let frameId: float = Browser.Dom.window?requestAnimationFrame(flushHoverFrame)
+
+            scheduledFrame.current <-
+                Some
+                    { Id = frameId
+                      GeometryBuildCount = geometryBuildCount }
+
+    let clearHover () =
+        clearPendingFrame ()
+        updateHover (fun current -> if current.IsSome then None else current)
+
+    hover |> Option.filter (fun state -> state.GeometryBuildCount = geometryBuildCount), queueSample, clearHover
 
 /// Render one stacked stepped-area chart with its legend and crosshair tooltip. Static paths, markers,
 /// axes, and legend elements are built only when the chart kind, selected window, server anchor, or
@@ -567,88 +672,15 @@ let HistoryChart
     (historyWindow: HistoryWindow)
     (snapshots: OverviewSnapshot list)
     : ReactElement =
-    let hover, setHover = React.useState (None: HoverState option)
-    let hoverRef = React.useRef<HoverState option>(None)
-    let frameQueueRef = React.useRef<HoverFrameQueue<HoverSample>>(emptyHoverFrameQueue ())
-    let frameRef = React.useRef<ScheduledFrame option>(None)
-    let geometryMemoRef = React.useRef<GeometryMemo<ChartGeometry> option>(None)
-
     let input =
         { ChartKind = chartKind
           HistoryWindow = historyWindow
           Anchor = anchor
           Snapshots = snapshots }
 
-    let geometryMemo = memoizedGeometry buildChartGeometry input geometryMemoRef.current
-    geometryMemoRef.current <- Some geometryMemo
-    let geometry = geometryValue geometryMemo
-    let buildCount = geometryBuildCount geometryMemo
-
-    let cancelFrame frame =
-        Browser.Dom.window?cancelAnimationFrame(frame.Id)
-
-    let clearPendingGeneration generation =
-        match frameRef.current with
-        | Some frame when frame.GeometryBuildCount = generation ->
-            cancelFrame frame
-            frameRef.current <- None
-            frameQueueRef.current <- emptyHoverFrameQueue ()
-        | _ -> ()
-
-    let clearAllPendingHover () =
-        match frameRef.current with
-        | Some frame ->
-            cancelFrame frame
-            frameRef.current <- None
-        | None -> ()
-
-        frameQueueRef.current <- emptyHoverFrameQueue ()
-
-    React.useEffect(
-        (fun () ->
-            React.createDisposable (fun () -> clearPendingGeneration buildCount)),
-        [| box buildCount |]
-    )
-
-    let commitSample sample =
-        let current =
-            hoverRef.current
-            |> Option.filter (fun state -> state.GeometryBuildCount = buildCount)
-
-        let currentPointIndex = current |> Option.map _.Sample.PointIndex
-
-        if shouldUpdateHover currentPointIndex sample.PointIndex then
-            let next =
-                { Sample = sample
-                  GeometryBuildCount = buildCount
-                  UpdateCount = current |> Option.map _.UpdateCount |> Option.defaultValue 0 |> (+) 1 }
-
-            hoverRef.current <- Some next
-            setHover (Some next)
-
-    let flushHoverFrame (_: float) =
-        frameRef.current <- None
-        let sample, remaining = takeHoverFrame frameQueueRef.current
-        frameQueueRef.current <- remaining
-        sample |> Option.iter commitSample
-
-    let queueSample sample =
-        match frameRef.current with
-        | Some frame when frame.GeometryBuildCount <> buildCount ->
-            cancelFrame frame
-            frameRef.current <- None
-            frameQueueRef.current <- emptyHoverFrameQueue ()
-        | _ -> ()
-
-        let queue, shouldSchedule = queueHoverFrame sample frameQueueRef.current
-        frameQueueRef.current <- queue
-
-        if shouldSchedule then
-            let frameId: float = Browser.Dom.window?requestAnimationFrame(flushHoverFrame)
-            frameRef.current <-
-                Some
-                    { Id = frameId
-                      GeometryBuildCount = buildCount }
+    let geometryBuild = useChartGeometry input
+    let geometry = geometryBuild.Geometry
+    let activeHover, queueSample, clearHover = useFrameCoalescedHover geometryBuild.BuildCount
 
     let onMove (event: Browser.Types.MouseEvent) =
         if geometry.HoverSamples.Length > 0 then
@@ -665,13 +697,7 @@ let HistoryChart
             | None -> ()
 
     let onLeave (_: Browser.Types.MouseEvent) =
-        clearAllPendingHover ()
-        let hadHover = hoverRef.current.IsSome
-        hoverRef.current <- None
-        if hadHover then setHover None
-
-    let activeHover =
-        hover |> Option.filter (fun state -> state.GeometryBuildCount = buildCount)
+        clearHover ()
 
     let crosshairElements =
         activeHover
@@ -732,16 +758,15 @@ let HistoryChart
                   ) ]
         | None -> Html.none
 
-    let hoverUpdateCount = activeHover |> Option.map _.UpdateCount |> Option.defaultValue 0
-    let hoverSampleIndex = activeHover |> Option.map _.Sample.PointIndex |> Option.defaultValue -1
-
     Html.div
         [ prop.className "history-charts"
-          prop.custom ("data-geometry-build-count", string buildCount)
-          prop.custom ("data-hover-update-count", string hoverUpdateCount)
-          prop.custom ("data-hover-sample-index", string hoverSampleIndex)
+          prop.custom ("data-geometry-build-count", string geometryBuild.BuildCount)
           prop.children
-              [ Html.figure [ prop.children [ svgElement; tooltipElement ] ]
+              [ Html.figure
+                    [ prop.children
+                          [ Html.div
+                                [ prop.className "chart-stage"
+                                  prop.children [ svgElement; tooltipElement ] ] ] ]
                 Html.div [ prop.className "chart-legend"; prop.children geometry.LegendElements ] ] ]
 
 let agentsChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =

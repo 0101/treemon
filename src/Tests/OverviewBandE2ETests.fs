@@ -14,6 +14,8 @@ open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Newtonsoft.Json.Linq
+open Shared
+open OverviewData
 
 let private repoRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
@@ -434,4 +436,99 @@ type OverviewBandE2ETests() =
 
             let! afterPoll = firstChart.GetAttributeAsync("data-geometry-build-count")
             Assert.That(afterPoll, Is.EqualTo "1")
+        }
+
+    [<Test>]
+    member this.``History tooltip stays aligned with the crosshair at both plot edges``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let firstChart = this.Page.Locator(".overview-band .history-charts").First
+            let svg = firstChart.Locator("svg")
+            let cursor = firstChart.Locator(".cursor-line")
+            let anchor = DateTimeOffset.UtcNow
+
+            let historyResponse: OverviewHistoryResponse =
+                { Anchor = anchor
+                  Snapshots =
+                    [ { Timestamp = anchor - TimeSpan.FromHours 12.0
+                        Tasks = [ { Kind = TaskBucketKind.Done; Count = 1 } ]
+                        Agents = [ { Kind = AgentGroupKind.Idle; Count = 1 } ] }
+                      { Timestamp = anchor
+                        Tasks = [ { Kind = TaskBucketKind.Done; Count = 2 } ]
+                        Agents = [ { Kind = AgentGroupKind.Idle; Count = 2 } ] } ] }
+
+            let historyBody =
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    historyResponse,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getOverviewHistory",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(ContentType = "application/json", Body = historyBody)
+                        )
+                )
+
+            let historyRequest =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+            do! toggle.ClickAsync()
+            let! _ = historyRequest
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(firstChart).ToHaveCountAsync(1)
+
+            do! svg.ScrollIntoViewIfNeededAsync()
+            let! svgBox = svg.BoundingBoxAsync()
+            Assert.That(svgBox, Is.Not.Null)
+
+            let probeAlignment () =
+                task {
+                    let! json =
+                        firstChart.EvaluateAsync<string>(
+                            """chart => {
+                              const stage = chart.querySelector('.chart-stage').getBoundingClientRect();
+                              const svg = chart.querySelector('svg');
+                              const svgRect = svg.getBoundingClientRect();
+                              const viewBox = svg.viewBox.baseVal;
+                              const cursorX = Number(chart.querySelector('.cursor-line').getAttribute('x1'));
+                              const crosshairX = svgRect.left + (cursorX - viewBox.x) / viewBox.width * svgRect.width;
+                              const tip = chart.querySelector('.chart-tip').getBoundingClientRect();
+                              return JSON.stringify({
+                                leftDelta: Math.abs(tip.left - crosshairX),
+                                rightDelta: Math.abs(tip.right - crosshairX),
+                                contained: tip.left >= stage.left - 1 && tip.right <= stage.right + 1
+                              });
+                            }""")
+
+                    return JObject.Parse(json)
+                }
+
+            do!
+                svg.HoverAsync(
+                    LocatorHoverOptions(
+                        Position = Microsoft.Playwright.Position(X = 1.0f, Y = svgBox.Height / 2.0f)
+                    )
+                )
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "34")
+            let! left = probeAlignment ()
+            Assert.That(left.Value<float>("leftDelta"), Is.LessThanOrEqualTo(1.5))
+            Assert.That(left.Value<bool>("contained"), Is.True)
+
+            do!
+                svg.HoverAsync(
+                    LocatorHoverOptions(
+                        Position =
+                            Microsoft.Playwright.Position(
+                                X = svgBox.Width - 1.0f,
+                                Y = svgBox.Height / 2.0f
+                            )
+                    )
+                )
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "752")
+            let! right = probeAlignment ()
+            Assert.That(right.Value<float>("rightDelta"), Is.LessThanOrEqualTo(1.5))
+            Assert.That(right.Value<bool>("contained"), Is.True)
         }

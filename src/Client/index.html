@@ -273,7 +273,8 @@
         .history-charts { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #45475a; }
         /* Keep the tasks section's own dashed divider even when the agents chart block sits before it. */
         .history-charts + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
-        .history-charts figure { background: #181825; padding: 12px 14px 6px; border-radius: 10px; margin: 10px 0 0; position: relative; }
+        .history-charts figure { background: #181825; padding: 12px 14px 6px; border-radius: 10px; margin: 10px 0 0; }
+        .history-charts .chart-stage { position: relative; }
         .history-charts svg { display: block; width: 100%; height: auto; }
         .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; font-size: 11.5px; color: #a6adc8; }
         .chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
@@ -282,7 +283,7 @@
         .history-charts .axis-label { fill: #6c7086; font: 10px system-ui; }
         .history-charts .grid-line { stroke: #313244; stroke-width: 1; }
         /* Crosshair tooltip (task tm-activity-history-zx6): dashed guide line + a snapped HTML tooltip
-           positioned within the figure. Mirrors the prototype .agents/canvas/overview-chart-prototype.html. */
+           positioned in the same unpadded stage as the SVG. */
         .history-charts .cursor-line { stroke: #7f849c; stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
         .chart-tip { position: absolute; pointer-events: none; z-index: 5; background: #11111b; border: 1px solid #45475a; border-radius: 7px; padding: 7px 9px; font-size: 11.5px; color: #cdd6f4; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
         .chart-tip .tip-time { color: #6c7086; margin-bottom: 4px; font-size: 10.5px; }
