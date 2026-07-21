@@ -125,17 +125,20 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
 
 let openWorktreeDiff (scopedKey: string) (model: Model) =
     let filename = "diff.html"
-    let openPane = not model.Canvas.CanvasPaneOpen
-    { model with
-        Canvas.CanvasPaneOpen = true
-        Canvas.DocError = None
-        Canvas.TargetWorktree = Some scopedKey
-        Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
-    Cmd.batch [
-        if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
-        Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
-    ]
+    if CanvasState.isKnownSystemView model.Repos scopedKey filename then
+        let openPane = not model.Canvas.CanvasPaneOpen
+        { model with
+            Canvas.CanvasPaneOpen = true
+            Canvas.DocError = None
+            Canvas.TargetWorktree = Some scopedKey
+            Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+            Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
+        Cmd.batch [
+            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+        ]
+    else
+        model, Cmd.none
 
 let archiveCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     match findWorktree scopedKey model with

@@ -10,7 +10,7 @@
 
 ## Expected Behavior
 
-- Every non-archived worktree card has a **Diff** action that opens the canvas pane and focuses its generated `diff.html` SystemView. The same view can open in a standalone browser tab.
+- Every non-archived worktree card has a **Diff** action. It remains disabled with a "Diff view not ready" tooltip until the generated `diff.html` SystemView appears in the scanned canvas-doc inventory; activation revalidates that inventory before opening and targeting the view. The same view can open in a standalone browser tab.
 - The view loads a changed-file summary first, then restores the previous file selection or selects the first file. A clean worktree shows an explicit empty state.
 - The comparison base uses the repository's configured base branch and upstream-remote resolution: prefer the remote-tracking ref, then fall back to the local base branch. A missing base, failed merge-base, failed Git command, or timeout produces a visible error state and no partial summary.
 - The selected file renders as a unified diff by default. Users can switch to split view, and the preference persists.

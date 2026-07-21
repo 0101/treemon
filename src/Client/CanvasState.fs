@@ -74,6 +74,14 @@ let canvasDocKind (repos: RepoModel list) (scopedKey: string) (filename: string)
     |> Option.bind (fun wt -> wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = filename))
     |> Option.map _.Kind
 
+let hasSystemView (filename: string) (worktree: WorktreeStatus) =
+    worktree.CanvasDocs
+    |> List.exists (fun doc -> doc.Filename = filename && doc.Kind = SystemView)
+
+let isKnownSystemView (repos: RepoModel list) (scopedKey: string) (filename: string) =
+    findWorktreeByScopedKey repos scopedKey
+    |> Option.exists (hasSystemView filename)
+
 /// The worktree currently driving the canvas pane. Explicit SystemView actions can temporarily
 /// target a worktree without changing card focus; otherwise the pane follows the focused card.
 let activeCanvasWorktree (focused: FocusTarget option) (targetWorktree: string option) =

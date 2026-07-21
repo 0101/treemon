@@ -850,6 +850,39 @@ type NavigateCanvasDocTests() =
         Assert.That(isKnownCanvasDoc model "myrepo/ghost" "status.html", Is.False,
             "No worktree for the scoped key means nothing is known, so the navigation is dropped")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type OpenWorktreeDiffTests() =
+
+    let guardedModel docs =
+        { defaultModel with
+            Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" docs ] ]
+            Canvas =
+                { CanvasState.empty with
+                    TargetWorktree = Some "existing/target"
+                    ActiveCanvasDoc = Map.ofList [ "existing/target", "status.html" ]
+                    VisitedCanvasDocs = Map.ofList [ "existing/target", [ "status.html" ] ]
+                    DocError = Some { ScopedKey = "existing/target"; Filename = "status.html"; Message = "keep" } } }
+
+    [<Test>]
+    member _.``OpenWorktreeDiff does nothing when diff view is absent``() =
+        let model = guardedModel [ makeDoc "status.html" "h1" ]
+        let updated, cmd = update (OpenWorktreeDiff "myrepo/feat") model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(model), "An absent view must not change pane target or document state")
+            Assert.That(cmd, Is.Empty, "An absent view must not dispatch view or persistence effects"))
+
+    [<Test>]
+    member _.``OpenWorktreeDiff rejects an AgentDoc named diff html``() =
+        let model = guardedModel [ makeDoc "diff.html" "h1" ]
+        let updated, cmd = update (OpenWorktreeDiff "myrepo/feat") model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(model), "Only the scanned diff SystemView may be targeted")
+            Assert.That(cmd, Is.Empty, "A same-named AgentDoc must not dispatch view or persistence effects"))
+
 
 // ── Doc-side JS error (item 3: error overlay → canvas-doc-error banner) ───────
 // A doc-side JS error is stored in Canvas.DocError stamped with the worktree + doc that EMITTED it —

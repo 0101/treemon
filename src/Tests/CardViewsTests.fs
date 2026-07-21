@@ -234,17 +234,34 @@ let private withDiffDocs (response: DashboardResponse) =
                 { repo with
                     Worktrees = withArchivedFixture }) }
 
-let private routeDashboardWithDiffDocs (page: IPage) =
+let private routeDashboard (transform: DashboardResponse -> DashboardResponse) (page: IPage) =
     let routeHandler =
         Func<IRoute, System.Threading.Tasks.Task>(fun route ->
             (task {
                 let! upstream = route.FetchAsync()
                 let! json = upstream.TextAsync()
                 let response = JsonConvert.DeserializeObject<DashboardResponse>(json, dashboardConverter)
-                let body = JsonConvert.SerializeObject(withDiffDocs response, dashboardConverter)
+                let body = JsonConvert.SerializeObject(transform response, dashboardConverter)
                 do! route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = body))
             } :> System.Threading.Tasks.Task))
     page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler)
+
+let private routeDashboardWithDiffDocs = routeDashboard withDiffDocs
+
+let private routeDashboardWithoutDiffDocs =
+    routeDashboard (fun response ->
+        { response with
+            Repos =
+                response.Repos
+                |> List.map (fun repo ->
+                    { repo with
+                        Worktrees =
+                            repo.Worktrees
+                            |> List.map (fun wt ->
+                                { wt with
+                                    CanvasDocs =
+                                        wt.CanvasDocs
+                                        |> List.filter (fun doc -> doc.Filename <> diffCanvasDoc.Filename) }) }) })
 
 let private cardByBranch (page: IPage) branch =
     page.Locator(
@@ -357,6 +374,33 @@ type WorktreeDiffActionTests() =
             let! compactCount = compactCards.CountAsync()
             let! compactDiffCount = compactCards.Locator(".diff-btn").CountAsync()
             Assert.That(compactDiffCount, Is.EqualTo(compactCount))
+        }
+
+    [<Test>]
+    member this.``Diff action is disabled on normal and compact cards until the SystemView is scanned``() =
+        task {
+            do! routeDashboardWithoutDiffDocs this.Page
+            let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
+            do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let normalCards = this.Page.Locator(".wt-card:not(.compact)")
+            let! normalCount = normalCards.CountAsync()
+            let! disabledNormalCount = normalCards.Locator(".diff-btn:disabled").CountAsync()
+            let! normalTitle = normalCards.First.Locator(".diff-btn").GetAttributeAsync("title")
+            Assert.Multiple(fun () ->
+                Assert.That(disabledNormalCount, Is.EqualTo(normalCount))
+                Assert.That(normalTitle, Is.EqualTo("Diff view not ready")))
+
+            let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+            do! compactButton.ClickAsync()
+            let compactCards = this.Page.Locator(".wt-card.compact")
+            do! compactCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! compactCount = compactCards.CountAsync()
+            let! disabledCompactCount = compactCards.Locator(".diff-btn:disabled").CountAsync()
+            let! compactTitle = compactCards.First.Locator(".diff-btn").GetAttributeAsync("title")
+            Assert.Multiple(fun () ->
+                Assert.That(disabledCompactCount, Is.EqualTo(compactCount))
+                Assert.That(compactTitle, Is.EqualTo("Diff view not ready")))
         }
 
     [<Test>]
