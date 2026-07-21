@@ -413,7 +413,7 @@ type CanvasSelectionContextE2ETests() =
     member private this.ServeDoc (body: string) (host: SelectionHost) =
         task {
             let capture =
-                "<script>window.__messages=[];window.__selectionMessages=[];window.__reclaims=0;window.__errors=[];"
+                "<script>window.__canvasTopLevelTransportAvailable=true;window.__messages=[];window.__selectionMessages=[];window.__reclaims=0;window.__errors=[];"
                 + "window.addEventListener('message',function(e){if(e.data&&typeof e.data.action==='string')window.__messages.push(e.data);if(e.data&&e.data.action==='canvas-selection')window.__selectionMessages.push(e.data);if(e.data&&e.data.action==='reclaim-focus')window.__reclaims++});"
                 + "window.addEventListener('error',function(e){window.__errors.push(e.message)});"
                 + "</script>"

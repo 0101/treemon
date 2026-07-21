@@ -161,7 +161,9 @@ type DiffViewerE2ETests() =
     inherit PageTest()
 
     let pageUrl = $"{ServerFixture.canvasUrl}/e2e-diff-worktree/diff.html"
-    let template = File.ReadAllText(templatePath)
+    let template =
+        File.ReadAllText(templatePath)
+        |> CanvasExport.injectAtHead (CanvasDocServer.buildInjection SystemView "diff.html")
     let css = File.ReadAllText(assetPath "diff2html.min.css")
     let renderer = File.ReadAllText(assetPath "diff2html.min.js")
     let highlighter = File.ReadAllText(assetPath "diff2html-ui-slim.min.js")
@@ -344,6 +346,17 @@ type DiffViewerE2ETests() =
                 )
                 Assert.That(isStandalone, Is.True)
                 Assert.That(selected, Is.EqualTo("id-1")))
+        }
+
+    [<Test>]
+    member this.``standalone diff selection action stays visible and reports unavailable transport``() =
+        task {
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RouteFiles()
+            do! this.Goto()
+            let codeLine = this.Page.Locator("#patch .d2h-code-line-ctn").First
+            do! CanvasTestHelpers.assertStandaloneSelectionUnavailable this.Page codeLine
         }
 
     [<Test>]

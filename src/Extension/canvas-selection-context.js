@@ -513,7 +513,13 @@
   }
 
   function send(action, payload) {
-    if (typeof window.canvasSend !== 'function') {
+    if (
+      typeof window.canvasSend !== 'function' ||
+      (
+        window.parent === window &&
+        window.__canvasTopLevelTransportAvailable !== true
+      )
+    ) {
       console.error('[canvas] selection action DROPPED: canvasSend is unavailable');
       return 'transport-unavailable';
     }

@@ -31,6 +31,7 @@ const SYSTEM_VIEW_FILENAMES = new Set(
 
 const TRANSPORT_SHIM = `<script>
 if (window.parent === window) {
+  window.__canvasTopLevelTransportAvailable = true;
   window.addEventListener('message', function(e) {
     if (e.source === window && e.data && typeof e.data.action === 'string') {
       fetch('http://127.0.0.1:__PORT__/_message', {

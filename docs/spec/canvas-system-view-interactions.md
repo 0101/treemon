@@ -15,6 +15,7 @@
 - A SystemView may provide optional selection metadata. Valid metadata is sent as nested `sourceContext`, separate from the human-readable `request` and selected text.
 - The diff view supplies `kind = "diff"`, file identity, hunk header, and old/new line ranges. Beadspace supplies `kind = "beads"` and the selected task ID.
 - Missing metadata is valid. Invalid, non-serializable, oversized, or exception-producing metadata blocks the send and displays an error in the selection toolbar.
+- A standalone top-level SystemView has no parent transport: its selection toolbar stays visible, displays a messaging-unavailable error, and never starts the processing indicator.
 
 ## Technical Approach
 
@@ -40,6 +41,8 @@ interaction owner. SystemView ownership is not surfaced through `CanvasDoc.Owner
 
 The selection runtime calls an optional `window.canvasSelectionMetadata` hook with the captured selection context. The hook may return a plain JSON object only. The runtime nests the validated result under `sourceContext`, includes it in the existing 64,000-code-unit payload limit, and prevents it from overriding reserved message fields. Source metadata remains data and is never interpolated into `request`.
 
+The shared transport treats `window.parent === window` as unavailable unless a top-level host explicitly advertises its forwarding shim through `window.__canvasTopLevelTransportAvailable`. The browser extension sets that capability before installing the canonical runtimes; direct standalone SystemViews do not.
+
 ## Decisions
 
 - SystemView interaction ownership is distinct from authored-file ownership so generated views do not acquire incorrect liveness, archive, share, or morph behavior.
@@ -51,6 +54,7 @@ The selection runtime calls an optional `window.canvasSelectionMetadata` hook wi
   interaction store for SystemViews.
 - All SystemViews receive the generic runtime. View-specific behavior is limited to structured metadata enrichment.
 - Metadata is nested and non-instructional to preserve the existing prompt-injection boundary between selected content and the user's action request.
+- Top-level transport is capability-based so browser-extension forwarding remains supported without presenting false success in direct standalone tabs.
 
 ## Key Files
 

@@ -185,6 +185,13 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(canvasSendMarker),
                     "SystemViews need canvasSend for generic selected-text interactions")
 
+    [<Test>]
+    member _.``canvasSend requires an explicit transport in a top-level window``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.Multiple(fun () ->
+            Assert.That(injection, Does.Contain("window.parent === window"))
+            Assert.That(injection, Does.Contain("__canvasTopLevelTransportAvailable")))
+
     // ── Injected window.canvasExpand(button, sectionId) helper ────────────────
     // canvasExpand swaps the clicked button for a themed spinner and posts the flat
     // {action:'expand-section', section, doc} request to the owning session, so the agent rewrites
@@ -269,6 +276,7 @@ type BuildInjectionTests() =
         Assert.That(extension, Does.Contain("canvas-selection-context.js"))
         Assert.That(extension, Does.Contain("canvas-doc-kinds.json"))
         Assert.That(extension, Does.Contain("SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())"))
+        Assert.That(extension, Does.Contain("window.__canvasTopLevelTransportAvailable = true"))
         Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
         Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
 

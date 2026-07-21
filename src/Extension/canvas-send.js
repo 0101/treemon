@@ -4,6 +4,15 @@
 
   var MAX=64000;
   window.canvasSend=function (action, payload) {
+    if (
+      window.parent === window &&
+      window.__canvasTopLevelTransportAvailable !== true
+    ) {
+      console.error(
+        '[canvas] canvasSend DROPPED: parent transport unavailable'
+      );
+      return false;
+    }
     var msg=Object.assign({}, payload, { action: action });
     var size=JSON.stringify(msg).length;
     if(size>MAX) {

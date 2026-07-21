@@ -5,6 +5,8 @@ open System.IO
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
+open Shared
+open Server
 
 /// Mock beads data — covers all statuses, types, priorities, labels, and dependencies
 /// to exercise every rendering path in the issues table and detail panel.
@@ -43,9 +45,12 @@ type BeadspaceCanvasTests() =
             do! this.Page.RouteAsync("**/beads.html", fun route ->
                 task {
                     let! html = File.ReadAllTextAsync(beadsHtmlPath)
+                    let injected =
+                        html
+                        |> CanvasExport.injectAtHead (CanvasDocServer.buildInjection SystemView "beads.html")
                     do! route.FulfillAsync(RouteFulfillOptions(
                         ContentType = "text/html",
-                        Body = html))
+                        Body = injected))
                 } :> System.Threading.Tasks.Task)
 
             // Intercept beads-data request — serve mock JSON
@@ -379,4 +384,11 @@ type BeadspaceCanvasTests() =
             Assert.That(
                 sourceContext,
                 Is.EqualTo($"""{{"kind":"beads","taskId":"{expectedTaskId}"}}"""))
+        }
+
+    [<Test>]
+    member this.``standalone beads selection action stays visible and reports unavailable transport``() =
+        task {
+            let title = this.Page.Locator(".issue-table-row .col-title").First
+            do! CanvasTestHelpers.assertStandaloneSelectionUnavailable this.Page title
         }
