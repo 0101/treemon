@@ -36,13 +36,13 @@ let shouldRefreshOverviewHistory
     historyWindow
     requestInFlight
     lastRequestedAt
-    (current: OverviewHistoryResponse option)
+    (current: InstalledOverviewHistory option)
     now
     =
     let cadenceAnchor =
-        current
-        |> Option.map _.Anchor
-        |> Option.defaultValue lastRequestedAt
+        match historyWindow, current with
+        | Some selected, Some installed when installed.Window = selected -> installed.Response.Anchor
+        | _ -> lastRequestedAt
 
     panelOpen
     && Option.isSome historyWindow
@@ -53,13 +53,18 @@ let installOverviewHistory
     selectedWindow
     requestedWindow
     (response: OverviewHistoryResponse option)
-    (current: OverviewHistoryResponse option)
+    (current: InstalledOverviewHistory option)
     =
     match selectedWindow, response, current with
     | Some selected, Some loaded, Some installed
-        when selected = requestedWindow && loaded.Anchor < installed.Anchor ->
+        when selected = requestedWindow
+             && installed.Window = requestedWindow
+             && loaded.Anchor < installed.Response.Anchor ->
         current
-    | Some selected, _, _ when selected = requestedWindow -> response
+    | Some selected, Some loaded, _ when selected = requestedWindow ->
+        Some
+            { Window = requestedWindow
+              Response = loaded }
     | _ -> current
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
@@ -584,7 +589,12 @@ let update msg model =
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
         // Mutual exclusivity: opening a drill-down group hides the history chart.
         let historyWindow = if Option.isSome next then None else model.OverviewHistoryWindow
-        { model with SelectedOverviewGroup = next; OverviewHistoryWindow = historyWindow }, Cmd.none
+        { model with
+            SelectedOverviewGroup = next
+            OverviewHistoryWindow = historyWindow
+            OverviewHistory = if Option.isSome next then None else model.OverviewHistory
+            OverviewHistoryRequestInFlight = if Option.isSome next then None else model.OverviewHistoryRequestInFlight },
+        Cmd.none
 
     | CycleOverviewChart now ->
         let next = nextHistoryWindow model.OverviewHistoryWindow
@@ -601,11 +611,12 @@ let update msg model =
                 { Window = window
                   RequestedAt = now }
 
-            // Opening or changing the history window clears drill-down and old chart data immediately.
+            // Keep the installed chart mounted while the newly selected window loads. The installed
+            // value carries its own window, so it continues rendering with the old axis/geometry until
+            // this identified request succeeds and replaces it in one model update.
             { model with
                 OverviewHistoryWindow = next
                 SelectedOverviewGroup = None
-                OverviewHistory = None
                 OverviewHistoryRequestedAt = now
                 OverviewHistoryRequestInFlight = Some request },
             fetchOverviewHistory request

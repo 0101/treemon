@@ -373,6 +373,9 @@ type OverviewChartTests() =
         let response =
             { Anchor = now
               Snapshots = [] }
+        let installed: AppTypes.InstalledOverviewHistory =
+            { Window = HistoryWindow.Hours24
+              Response = response }
 
         let cacheHitCompletedAt = now + App.overviewHistoryRefreshInterval - TimeSpan.FromSeconds 1.0
         let cacheExpiresAt = now + App.overviewHistoryRefreshInterval
@@ -383,9 +386,28 @@ type OverviewChartTests() =
                 (Some HistoryWindow.Hours24)
                 None
                 cacheHitCompletedAt
-                (Some response)
+                (Some installed)
                 cacheExpiresAt,
             Is.True
+        )
+
+    [<Test>]
+    member _.``a failed window switch retries from request time while preserving the old chart`` () =
+        let oldChart: AppTypes.InstalledOverviewHistory =
+            { Window = HistoryWindow.Hours12
+              Response =
+                { Anchor = now - TimeSpan.FromHours 1.0
+                  Snapshots = [] } }
+
+        Assert.That(
+            App.shouldRefreshOverviewHistory
+                true
+                (Some HistoryWindow.Hours24)
+                None
+                (now - TimeSpan.FromSeconds 29.0)
+                (Some oldChart)
+                now,
+            Is.False
         )
 
     [<Test>]
@@ -437,13 +459,18 @@ type OverviewChartTests() =
                 (Some response)
                 None
 
-        Assert.That(installed |> Option.map _.Anchor, Is.EqualTo(Some serverAnchor))
+        Assert.That(
+            installed |> Option.map (fun history -> history.Window, history.Response.Anchor),
+            Is.EqualTo(Some(HistoryWindow.Hours24, serverAnchor))
+        )
 
     [<Test>]
-    member _.``matching failed refresh clears the selected chart`` () =
-        let current =
-            { Anchor = now
-              Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
+    member _.``matching failed refresh keeps the installed chart mounted`` () =
+        let current: AppTypes.InstalledOverviewHistory =
+            { Window = HistoryWindow.Hours12
+              Response =
+                { Anchor = now
+                  Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] } }
 
         let installed =
             App.installOverviewHistory
@@ -452,13 +479,15 @@ type OverviewChartTests() =
                 None
                 (Some current)
 
-        Assert.That(installed, Is.EqualTo None)
+        Assert.That(installed, Is.EqualTo(Some current))
 
     [<Test>]
     member _.``failed refresh for a stale or closed window keeps the current chart`` () =
-        let current =
-            { Anchor = now
-              Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
+        let current: AppTypes.InstalledOverviewHistory =
+            { Window = HistoryWindow.Hours12
+              Response =
+                { Anchor = now
+                  Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] } }
 
         Assert.Multiple(fun () ->
             Assert.That(
@@ -477,9 +506,11 @@ type OverviewChartTests() =
 
     [<Test>]
     member _.``older response for the selected window cannot replace a newer chart`` () =
-        let newer =
-            { Anchor = now
-              Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
+        let newer: AppTypes.InstalledOverviewHistory =
+            { Window = HistoryWindow.Hours24
+              Response =
+                { Anchor = now
+                  Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] } }
 
         let older =
             { Anchor = now - TimeSpan.FromMinutes 1.0
@@ -493,3 +524,27 @@ type OverviewChartTests() =
                 (Some newer)
 
         Assert.That(installed, Is.EqualTo(Some newer))
+
+    [<Test>]
+    member _.``matching new window atomically replaces a chart from the previous window`` () =
+        let current: AppTypes.InstalledOverviewHistory =
+            { Window = HistoryWindow.Hours12
+              Response =
+                { Anchor = now
+                  Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] } }
+
+        let loaded =
+            { Anchor = now - TimeSpan.FromMinutes 1.0
+              Snapshots = [ taskSnap now TaskBucketKind.Done 9 ] }
+
+        let installed =
+            App.installOverviewHistory
+                (Some HistoryWindow.Hours24)
+                HistoryWindow.Hours24
+                (Some loaded)
+                (Some current)
+
+        Assert.That(
+            installed |> Option.map (fun history -> history.Window, history.Response),
+            Is.EqualTo(Some(HistoryWindow.Hours24, loaded))
+        )

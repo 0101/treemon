@@ -439,6 +439,130 @@ type OverviewBandE2ETests() =
         }
 
     [<Test>]
+    member this.``History window switches keep the old chart mounted and reject stale responses``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+            let firstAxisLabel = charts.First.Locator(".axis-label-x").First
+            let anchor = DateTimeOffset.UtcNow
+
+            let historyBody count =
+                let response: OverviewHistoryResponse =
+                    { Anchor = anchor
+                      Snapshots =
+                        [ { Timestamp = anchor - TimeSpan.FromHours 72.0
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = count } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = count } ] }
+                          { Timestamp = anchor
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = count + 1 } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = count + 1 } ] } ] }
+
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    response,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            let requestCount = ref 0
+            let delayed24 = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+            let delayed72 = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getOverviewHistory",
+                    fun route ->
+                        requestCount.Value <- requestCount.Value + 1
+
+                        match requestCount.Value with
+                        | 1 ->
+                            route.FulfillAsync(
+                                RouteFulfillOptions(
+                                    ContentType = "application/json",
+                                    Body = historyBody 1
+                                )
+                            )
+                        | 2 ->
+                            delayed24.TrySetResult(route) |> ignore
+                            System.Threading.Tasks.Task.CompletedTask
+                        | 3 ->
+                            delayed72.TrySetResult(route) |> ignore
+                            System.Threading.Tasks.Task.CompletedTask
+                        | _ -> route.AbortAsync()
+                )
+
+            let firstResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do! toggle.ClickAsync()
+            let! _ = firstResponse
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+
+            let firstChart = charts.First
+            let! _ = firstChart.EvaluateAsync<string>("chart => chart.dataset.switchSentinel = 'mounted'")
+            let! beforeSwitch = firstChart.BoundingBoxAsync()
+            Assert.That(beforeSwitch, Is.Not.Null)
+
+            do! toggle.ClickAsync()
+            let! staleRoute = delayed24.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 24h")
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
+
+            let! during24 = firstChart.BoundingBoxAsync()
+            Assert.That(during24, Is.Not.Null)
+            Assert.That(during24.Height, Is.EqualTo(beforeSwitch.Height).Within(0.5), "chart height stays stable while 24h is pending")
+
+            do! toggle.ClickAsync()
+            let! currentRoute = delayed72.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 72h")
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+
+            let! during72 = firstChart.BoundingBoxAsync()
+            Assert.That(during72, Is.Not.Null)
+            Assert.That(during72.Height, Is.EqualTo(beforeSwitch.Height).Within(0.5), "chart height stays stable during rapid switching")
+
+            let staleResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do!
+                staleRoute.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = historyBody 24
+                    )
+                )
+
+            let! _ = staleResponse
+            let! _ =
+                this.Page.EvaluateAsync<bool>(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))"
+                )
+
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
+
+            let currentResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do!
+                currentRoute.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = historyBody 72
+                    )
+                )
+
+            let! _ = currentResponse
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-72h")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-geometry-build-count", "2")
+        }
+
+    [<Test>]
     member this.``History tooltip stays aligned with the crosshair at both plot edges``() =
         task {
             let toggle = this.Page.Locator(".overview-band .history-toggle")

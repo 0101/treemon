@@ -67,6 +67,9 @@ server-side sample anchor with the resulting `OverviewSnapshot` timeline.
 - The client fetches immediately when the chart opens and refreshes it at most every 30 seconds while
   visible. The server response anchor fixes the chart's right edge and remains consistent for every
   caller sharing a cached response.
+- When switching between visible windows, the installed chart remains mounted with its existing
+  geometry and height until the matching response succeeds. A failed or stale response leaves that
+  chart intact; the matching response replaces the chart atomically.
 - A response is installed only if its requested window is still selected; a slower response for a
   previously selected window cannot replace the current chart.
 - Agents and Tasks each render a stepped stacked-area chart directly below their live section. A
@@ -135,6 +138,7 @@ corresponding live section.
 | History read consistency | Read task, status, and liveness inputs in one SQLite transaction per uncached computation. |
 | Response anchor | Use the server computation anchor so cached callers render the same timeline edges. |
 | Client refresh gate | Track the identified in-flight request separately; use the installed server anchor for normal cadence and the last request time only for failure retry backoff. |
+| Window-switch rendering | Store the installed chart's window with its response; selection changes immediately, but rendering keeps the installed window until the matching request succeeds. |
 | Cache | Cache one in-flight/completed response per window until 30 seconds after its server anchor. |
 | Rendering | Hand-written stepped SVG with memoized static geometry and frame-coalesced hover. |
 | Client geometry key | Rebuild only when chart kind, selected window, server anchor, or snapshot-list identity changes; commit only the latest hover candidate per animation frame and suppress repeated sampled points. |

@@ -19,6 +19,10 @@ type OverviewHistoryRequest =
     { Window: HistoryWindow
       RequestedAt: System.DateTimeOffset }
 
+type InstalledOverviewHistory =
+    { Window: HistoryWindow
+      Response: OverviewHistoryResponse }
+
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -48,7 +52,7 @@ type Model =
       // The response anchor drives normal refresh cadence. RequestedAt provides failure retry backoff,
       // while the request identity prevents overlapping polls and stale completions.
       OverviewHistoryWindow: HistoryWindow option
-      OverviewHistory: OverviewHistoryResponse option
+      OverviewHistory: InstalledOverviewHistory option
       OverviewHistoryRequestedAt: System.DateTimeOffset
       OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
 

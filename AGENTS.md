@@ -82,6 +82,10 @@ This project uses [focused-review](https://github.com/0101/focused-review) for a
 | Canvas doc server | 5002 |
 | Dev client (Vite) | 5174 |
 
+Feature development and verification must never deploy, restart, stop, kill, or bind to the
+production instance or port 5000. Runtime checks must use isolated non-production ports and must not
+disturb any existing process.
+
 ## Operations
 
 `treemon.ps1` manages the application lifecycle: `dev`, `deploy`, `start`, `stop`, `restart`, `status`, `log`, `add`, `remove`.

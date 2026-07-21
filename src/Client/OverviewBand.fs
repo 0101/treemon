@@ -270,13 +270,13 @@ let view
     (onSelectWorktree: string -> unit)
     (historyWindow: HistoryWindow option)
     (onCycleChart: unit -> unit)
-    (history: OverviewHistoryResponse option)
+    (history: InstalledOverviewHistory option)
     (repos: RepoModel list)
     : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
     let chartData =
         match historyWindow, history with
-        | Some window, Some response -> Some(window, response)
+        | Some _, Some installed -> Some(installed.Window, installed.Response)
         | _ -> None
 
     match overview.Agents, overview.Tasks with
