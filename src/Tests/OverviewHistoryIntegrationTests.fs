@@ -118,6 +118,42 @@ type OverviewHistoryIntegrationTests() =
                 )))
 
     [<Test>]
+    member _.``API history cache preserves an anchored snapshot until expiration``() =
+        withStore (fun store ->
+            let cache = OverviewHistoryCache.create ()
+            let initialTasks = [ tc TaskBucketKind.Planned 1 ]
+            let changedTasks = [ tc TaskBucketKind.Planned 2 ]
+
+            store.AppendTaskSnapshot(anchor.AddHours(-1.0), initialTasks)
+
+            let first =
+                WorktreeApi.overviewHistoryCachedAt cache (Some store) anchor HistoryWindow.Hours12
+                |> Async.RunSynchronously
+
+            store.AppendTaskSnapshot(anchor.AddMinutes(-1.0), changedTasks)
+
+            let hit =
+                WorktreeApi.overviewHistoryCachedAt
+                    cache
+                    (Some store)
+                    (anchor.AddSeconds 29.0)
+                    HistoryWindow.Hours12
+                |> Async.RunSynchronously
+
+            let refreshed =
+                WorktreeApi.overviewHistoryCachedAt
+                    cache
+                    (Some store)
+                    (anchor.AddSeconds 30.0)
+                    HistoryWindow.Hours12
+                |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(hit, Is.EqualTo first)
+                Assert.That(refreshed.Anchor, Is.EqualTo(anchor.AddSeconds 30.0))
+                Assert.That((List.last refreshed.Snapshots).Tasks, Is.EqualTo changedTasks)))
+
+    [<Test>]
     member _.``API read carries task status and liveness lookbacks to the left edge``() =
         withStore (fun store ->
             let window = HistoryWindow.duration HistoryWindow.Hours12

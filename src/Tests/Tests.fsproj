@@ -67,6 +67,7 @@
     <Compile Include="OverviewDataTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
     <Compile Include="OverviewHistoryTests.fs" />
+    <Compile Include="OverviewHistoryCacheTests.fs" />
     <Compile Include="OverviewHistoryIntegrationTests.fs" />
     <Compile Include="OverviewChartTests.fs" />
     <Compile Include="BeadsDataTests.fs" />

@@ -35,6 +35,22 @@ let internal overviewHistoryAt
 
     response
 
+let internal overviewHistoryCachedAt
+    cache
+    (activityStore: SessionActivityStore option)
+    (anchor: DateTimeOffset)
+    requestedWindow
+    =
+    OverviewHistoryCache.get cache anchor requestedWindow (fun () ->
+        async {
+            match activityStore with
+            | None ->
+                return
+                    { OverviewData.OverviewHistoryResponse.Anchor = anchor
+                      Snapshots = [] }
+            | Some store -> return overviewHistoryAt store anchor requestedWindow
+        })
+
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
         let json = File.ReadAllText(path)
@@ -471,6 +487,7 @@ let worktreeApi
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+    let overviewHistoryCache = OverviewHistoryCache.create ()
 
     let validatePath path =
         async {
@@ -814,13 +831,8 @@ let worktreeApi
           // plus the liveness timeline, carrying the state active at the requested window's left edge.
           getOverviewHistory =
             fun requestedWindow ->
-                async {
-                    let anchor = DateTimeOffset.UtcNow
-
-                    match activityStore with
-                    | None ->
-                        return
-                            { OverviewData.OverviewHistoryResponse.Anchor = anchor
-                              Snapshots = [] }
-                    | Some store -> return overviewHistoryAt store anchor requestedWindow
-                } }
+                overviewHistoryCachedAt
+                    overviewHistoryCache
+                    activityStore
+                    DateTimeOffset.UtcNow
+                    requestedWindow }
