@@ -7,6 +7,7 @@ open OverviewData
 open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
+open Tests.OverviewTestHelpers
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -16,16 +17,6 @@ type OverviewHistoryTests() =
     let anchor = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
     let tc kind count : TaskCount = { Kind = kind; Count = count }
     let ac kind count : AgentCount = { Kind = kind; Count = count }
-
-    let evt id sid worktree status skill at : ActivityEventRow =
-        { EventId = EventId id
-          SessionId = SessionId sid
-          WorktreePath = WorktreePath worktree
-          Provider = CopilotCli
-          Kind = "status"
-          Status = status
-          Skill = skill
-          Ts = at }
 
     let boundary (window: TimeSpan) bucket =
         let start = anchor - window

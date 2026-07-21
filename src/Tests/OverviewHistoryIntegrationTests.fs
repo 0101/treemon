@@ -8,6 +8,7 @@ open OverviewData
 open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
+open Tests.OverviewTestHelpers
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -32,34 +33,6 @@ type OverviewHistoryIntegrationTests() =
                 Directory.Delete(directory, true)
             with _ ->
                 ()
-
-    let withStores (action: SessionActivityStore -> SessionActivityStore -> unit) =
-        let directory = Path.Combine(Path.GetTempPath(), $"treemon-overview-history-{Guid.NewGuid()}")
-        Directory.CreateDirectory directory |> ignore
-        let path = Path.Combine(directory, "activity.db")
-        let reader = new SessionActivityStore(path)
-        let writer = new SessionActivityStore(path)
-
-        try
-            action reader writer
-        finally
-            (writer :> IDisposable).Dispose()
-            (reader :> IDisposable).Dispose()
-
-            try
-                Directory.Delete(directory, true)
-            with _ ->
-                ()
-
-    let evt id sid worktree status skill at : ActivityEventRow =
-        { EventId = EventId id
-          SessionId = SessionId sid
-          WorktreePath = WorktreePath worktree
-          Provider = CopilotCli
-          Kind = "status"
-          Status = status
-          Skill = skill
-          Ts = at }
 
     let stored sid worktree status updatedAt lastSeen : StoredStatus =
         { SessionId = SessionId sid
@@ -184,7 +157,13 @@ type OverviewHistoryIntegrationTests() =
 
     [<Test>]
     member _.``history inputs stay on one snapshot when liveness commits after the status read``() =
-        withStores (fun reader writer ->
+        let directory = Path.Combine(Path.GetTempPath(), $"treemon-overview-history-{Guid.NewGuid()}")
+        Directory.CreateDirectory directory |> ignore
+
+        try
+            let path = Path.Combine(directory, "activity.db")
+            use reader = new SessionActivityStore(path)
+            use writer = new SessionActivityStore(path)
             let window = HistoryWindow.duration HistoryWindow.Hours12
             let start = anchor - window
             let sessionId = SessionId "interleaved"
@@ -229,7 +208,12 @@ type OverviewHistoryIntegrationTests() =
                 Assert.That(
                     response.Snapshots,
                     Is.EqualTo [ { Timestamp = start; Tasks = []; Agents = [] } ]
-                )))
+                ))
+        finally
+            try
+                Directory.Delete(directory, true)
+            with _ ->
+                ()
 
     [<Test>]
     member _.``API read honors all supported windows and the hard output bound``() =
