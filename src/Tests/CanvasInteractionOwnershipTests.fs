@@ -94,6 +94,53 @@ type PersistenceTests() =
             Assert.That(runAsync (restarted.GetOwner(secondWorktree, "diff.html")), Is.EqualTo(Some "session-b")))
 
     [<Test>]
+    member _.``successful worktree deletion removes persisted owners and pending claims``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+            Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
+
+            let result =
+                Server.WorktreeApi.removeWorktreeAndOwnership
+                    (fun _ _ _ -> async { return Ok () })
+                    store.RemoveWorktree
+                    dir
+                    worktree
+                    (Some "feature")
+                |> runAsync
+
+            assertOk result "Worktree deletion should succeed"
+            let restarted = createStore filePath
+            Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option))
+            Assert.That(store.ClaimPending(worktree, "session-b"), Is.Empty))
+
+    [<Test>]
+    member _.``failed worktree deletion preserves persisted owners and pending claims``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+            Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
+
+            let result =
+                Server.WorktreeApi.removeWorktreeAndOwnership
+                    (fun _ _ _ -> async { return Error "remove failed" })
+                    store.RemoveWorktree
+                    dir
+                    worktree
+                    (Some "feature")
+                |> runAsync
+
+            match result with
+            | Error "remove failed" -> ()
+            | other -> Assert.Fail($"Expected deletion failure but got: {other}")
+
+            let restarted = createStore filePath
+            Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
+            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "beads.html" ])))
+
+    [<Test>]
     member _.``startup prune removes missing views and worktrees while preserving existing views``() =
         withOwnershipFile (fun dir filePath ->
             let knownWorktree = Path.Combine(dir, "known")

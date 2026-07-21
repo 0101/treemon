@@ -351,6 +351,17 @@ let private openTerminal
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
     }
 
+let internal removeWorktreeAndOwnership removeGitWorktree removeInteractionOwnership repoRoot worktreePath branch =
+    async {
+        let! result = removeGitWorktree repoRoot worktreePath branch
+
+        match result with
+        | Error _ -> return result
+        | Ok () ->
+            do! removeInteractionOwnership worktreePath
+            return result
+    }
+
 let private deleteWorktree
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -366,9 +377,13 @@ let private deleteWorktree
             return Error "Cannot delete the main worktree"
         | Some ctx ->
             agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
-            let! result = GitWorktree.removeWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
-            do! CanvasInteractionOwnership.removeWorktree ctx.Worktree.Path
-            return result
+            return!
+                removeWorktreeAndOwnership
+                    GitWorktree.removeWorktree
+                    CanvasInteractionOwnership.removeWorktree
+                    ctx.RepoRoot
+                    ctx.Worktree.Path
+                    ctx.Worktree.Branch
     }
 
 let private updateArchivedBranches
