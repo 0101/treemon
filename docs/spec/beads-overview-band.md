@@ -240,13 +240,14 @@ the solution compiling (no compat shims, per house rules).
   is computed from `Overview.Scale`, with the largest bucket filling the fixed max width and all
   others at `count / Scale` of that width. The computed inline width / CSS variable is the accepted
   exception to static CSS classes because proportional width is inherently data-driven. Agent groups
-  render one `.overview-circle` **per live session** (clustered per agent inside an `.overview-member`
-  wrapper). A session with a known context-window occupancy also gets `.overview-donut` and an inline
+  render one `.overview-circle` **per live session**. A session with a known context-window occupancy
+  also gets `.overview-donut` and an inline
   `--ctx-remaining` (0–1); the donut's conic-gradient fills that fraction of *remaining* context over
   a muted track and a radial mask cuts the centre hole — the same accepted inline-custom-property
-  exception the task bars use with `--bar-fill`. No usage reported ⇒ the plain solid circle (donut
-  class not applied). The drill-down agent chips reuse the same per-session donuts next to the branch
-  name; collapsed repo headers show per-session **plain dots** (no donut — too dense for arcs).
+  exception the task bars use with `--bar-fill`. Context donuts are 15px with a thin 2.5px ring;
+  no usage reported ⇒ a centred 10px solid circle (donut class not applied). Card markers use the
+  same geometry, but a working context donut adds a fixed-size 10px red centre whose opacity pulses
+  while the ring remains stable. Collapsed repo headers keep their denser 8px plain dots.
 - **Accent colour drives both mark and count via `currentColor`.** One class per category
   (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the

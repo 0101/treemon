@@ -8,9 +8,10 @@ module OverviewBand
 // two STACKED sections split by a 1px dashed rule, each opening with an uppercase muted header, each
 // category a column whose count+label meta line sits ABOVE its visual (count FIRST in the accent
 // colour, label neutral, same size/weight):
-//   - Agents        -> a row of ~15px CIRCLES, one per agent, grouped by activity (red-dot working
+//   - Agents        -> a row of session markers, one per agent, grouped by activity (red-dot working
 //                      agents), plus the distinct Waiting group (yellow) and Idle group (blue-dot
-//                      agents with an open-but-idle session).
+//                      agents with an open-but-idle session). Context donuts are 15px; plain
+//                      no-context dots are centred at 10px.
 //   - Tasks         -> ONE proportional BAR per status on one true shared linear scale. Each bar
 //                      carries an inline `--bar-fill` custom property = count / Overview.Scale (its
 //                      share of the largest bucket); CSS multiplies that by a RESPONSIVE shared max
@@ -94,11 +95,11 @@ let private metaLine (accentClass: string) (label: string) (count: int) =
               [ Html.span [ prop.className ("overview-count " + accentClass); prop.text (string count) ]
                 Html.span [ prop.className "overview-label"; prop.text label ] ] ]
 
-/// One agent group column: the meta line above a row of ~15px circles, one per agent, tinted to the
-/// group's accent (circle fill = currentColor, driven by the accent class). Each agent with a known
+/// One agent group column: the meta line above a row of session markers, one per agent, tinted to the
+/// group's accent (fill = currentColor, driven by the accent class). Each agent with a known
 /// context-window occupancy renders as a donut whose arc = fraction of context *remaining* (inline
 /// `--ctx-remaining`), so a healthy low-usage agent reads as a nearly full ring and one near its limit
-/// thins to a sliver; an agent that hasn't reported usage falls back to the plain solid circle.
+/// thins to a sliver; an agent that hasn't reported usage falls back to a centred 10px solid circle.
 /// Clicking the column raises onSelectGroup (App toggles the drill-down selection); when this group is
 /// the selected one it renders as the black "tab" (overview-item-selected) sitting flush above its
 /// breakdown panel.
