@@ -217,10 +217,10 @@ the solution compiling (no compat shims, per house rules).
   (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
   task buckets (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has
   `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
-  Blocked, Done = Σ Closed) + agent groups (`CodingTool = Working` grouped by
-  `Activity.classify` of `CurrentSkill`, absent skill ⇒ Working; `CodingTool = WaitingForUser` ⇒
-  Waiting; `CodingTool = Idle` ⇒ Idle; `NoSession` excluded) + `Scale` (the largest bucket count — the
-  one true shared linear denominator). **Archived
+  Blocked, Done = Σ Closed) + agent groups (each open `WorktreeStatus.Sessions` entry is classified
+  from its own status and skill via `OverviewData.agentGroupOf`; one worktree can therefore contribute
+  sessions to several groups, while an empty session list / `NoSession` contributes none) + `Scale`
+  (the largest bucket count — the one true shared linear denominator). **Archived
   worktrees are excluded from the entire roll-up** (every task bucket and every agent group), so
   archiving a worktree drops all of its contributions at once. Empty buckets/groups are omitted
   (never a `0`); both lists come back in canonical order, with Unattended trailing Done. The result

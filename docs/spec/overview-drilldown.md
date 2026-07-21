@@ -97,7 +97,8 @@ type GroupMember =
       Branch: string
       RepoId: RepoId         // stable repo identity — keeps two same-named repos separable
       RepoName: string
-      Contribution: int }    // agent group: 1; task bucket: this worktree's task count in the bucket
+      Sessions: SessionDot list
+      Contribution: int }    // agent group: matching sessions; task bucket: task count in the bucket
 
 type TaskBucket = { Kind: TaskBucketKind; Count: int; Members: GroupMember list }
 type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list }
@@ -106,9 +107,9 @@ type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list 
 - `aggregate` currently flattens `repos |> List.collect _.Worktrees`, discarding repo identity.
   Build membership **before flattening** (or thread `RepoWorktrees.RootFolderName` onto each worktree)
   so each `GroupMember` carries its `RepoName`.
-- Invariants (assert in tests): agent group `Count = Members.Length`; task bucket
-  `Count = Members |> List.sumBy _.Contribution`. Members preserve the repo order and the canonical
-  group order.
+- Invariants (assert in tests): both agent-group and task-bucket counts equal
+  `Members |> List.sumBy _.Contribution`. For agents, one worktree can appear in several groups and
+  contributes the number of its sessions matching that group. Members preserve repo and group order.
 - Task-bucket membership follows the existing per-bucket predicates exactly (e.g. `InProgress` counts
   `Beads.InProgress` only where `isActive`; `Done` excludes archived; `Planned` folds `Loose`;
   `Unattended` = inactive worktrees' `InProgress + Queued`). A worktree is a member iff its

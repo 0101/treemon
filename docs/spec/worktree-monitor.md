@@ -17,7 +17,7 @@
 - Merged PRs get dimmed cards with delete button
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
-- Fixed header bar with system metrics and deploy branch badge (see `docs/spec/fixed-header.md`)
+- Fixed header bar with system metrics and deploy branch badge
 - Keyboard navigation: arrow keys move focus spatially across cards and repo headers (see `docs/spec/keyboard-navigation.md`)
 - Canvas pane: per-worktree interactive HTML documents for agent-to-user rich content (see `docs/spec/canvas-pane.md`)
 
