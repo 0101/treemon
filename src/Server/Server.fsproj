@@ -32,6 +32,7 @@
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
     <Compile Include="CanvasBridge.fs" />
+    <Compile Include="EmbeddedResource.fs" />
     <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />
