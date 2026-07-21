@@ -62,6 +62,15 @@ let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
       OccurredAt = ts t
       Event = ev }
 
+let private storedWithUsage sid worktree status updatedAt usage usageAt =
+    { SessionId = SessionId sid
+      WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+      Provider = CopilotCli
+      Status = { status with ContextUsage = Some usage }
+      UpdatedAt = updatedAt
+      LastSeen = usageAt
+      ContextUsageAt = Some usageAt }
+
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Disposing the service disposes the store; the dir is then removed.
@@ -509,21 +518,10 @@ type RestartRebuildTests() =
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
         let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
         let usageAt = now.AddSeconds(-30.0)
+        let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
 
         let seed (store: SessionActivityStore) =
-            let stored =
-                { SessionId = SessionId "s1"
-                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
-                  Provider = CopilotCli
-                  Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
-                  UpdatedAt = now.AddMinutes(-1.0)
-                  LastSeen = now.AddMinutes(-1.0)
-                  ContextUsageAt = None }
-
-            { stored with
-                Status.ContextUsage = Some usage
-                ContextUsageAt = Some usageAt
-                LastSeen = usageAt }
+            storedWithUsage "s1" worktree status (now.AddMinutes(-1.0)) usage usageAt
             |> store.UpsertContextUsage
             |> ignore
 
@@ -549,21 +547,10 @@ type RestartRebuildTests() =
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
         let usage = { CurrentTokens = 150000; TokenLimit = 200000 }
         let usageAt = now.AddMinutes(-1.0)
+        let status = { emptyStatus with Status = SessionLevelStatus.Working }
 
         let seed (store: SessionActivityStore) =
-            let stored =
-                { SessionId = SessionId "s1"
-                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
-                  Provider = CopilotCli
-                  Status = { emptyStatus with Status = SessionLevelStatus.Working }
-                  UpdatedAt = now.AddMinutes(-2.0)
-                  LastSeen = now.AddMinutes(-2.0)
-                  ContextUsageAt = None }
-
-            { stored with
-                Status.ContextUsage = Some usage
-                ContextUsageAt = Some usageAt
-                LastSeen = usageAt }
+            storedWithUsage "s1" worktree status (now.AddMinutes(-2.0)) usage usageAt
             |> store.UpsertContextUsage
             |> ignore
 
@@ -588,18 +575,10 @@ type RestartRebuildTests() =
         let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
         let usage = { CurrentTokens = 110000; TokenLimit = 200000 }
         let usageAt = now - idleWindow - TimeSpan.FromMinutes 5.0
+        let status = { emptyStatus with Status = SessionLevelStatus.Idle }
 
         let seed (store: SessionActivityStore) =
-            { SessionId = SessionId "s1"
-              WorktreePath = normalizedWorktree
-              Provider = CopilotCli
-              Status =
-                { emptyStatus with
-                    Status = SessionLevelStatus.Idle
-                    ContextUsage = Some usage }
-              UpdatedAt = usageAt.AddMinutes(-1.0)
-              LastSeen = usageAt
-              ContextUsageAt = Some usageAt }
+            storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt
             |> store.UpsertContextUsage
             |> ignore
 
