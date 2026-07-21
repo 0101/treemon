@@ -389,6 +389,7 @@ type CanvasReclaimBridgeE2ETests() =
 // Selected-text contextual actions
 type private SelectionHost =
     | TreemonHost
+    | SystemViewHost
     | BrowserHost
     | MissingTransport
 
@@ -419,6 +420,7 @@ type CanvasSelectionContextE2ETests() =
             let injection =
                 match host with
                 | TreemonHost -> Server.CanvasDocServer.buildInjection AgentDoc "selection.html"
+                | SystemViewHost -> Server.CanvasDocServer.buildInjection SystemView "selection.html"
                 | BrowserHost -> Server.CanvasSendScript.script + Server.CanvasSelectionScript.script
                 | MissingTransport -> Server.CanvasSelectionScript.script
             let html =
@@ -589,11 +591,26 @@ type CanvasSelectionContextE2ETests() =
         }
 
     [<Test>]
-    member this.``Explain Remove and Comment send the exact ordered payload without duplicating the comment``() =
+    member this.``SystemView Explain Remove and Comment each send once while authored-doc machinery stays excluded``() =
         task {
             do! (this.ServeDoc
                 "<section data-section=\"alpha\">Before <span id=\"selected\">Selected phrase</span> after</section>"
-                TreemonHost)
+                SystemViewHost)
+
+            let! capabilities =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify({
+                        canvasSend: typeof window.canvasSend,
+                        canvasExpand: typeof window.canvasExpand,
+                        idiomorph: typeof window.Idiomorph,
+                        onerror: window.onerror,
+                        heartbeat: document.head.innerHTML.includes('/bridge/heartbeat'),
+                        errorOverlay: document.head.innerHTML.includes('canvas-doc-error')
+                    })""")
+            Assert.That(
+                capabilities,
+                Is.EqualTo("""{"canvasSend":"function","canvasExpand":"undefined","idiomorph":"undefined","onerror":null,"heartbeat":false,"errorOverlay":false}"""),
+                "SystemViews keep the generic transport but none of the authored-doc heartbeat, expand, error, or morph machinery")
 
             let send intent =
                 task {
@@ -632,7 +649,9 @@ type CanvasSelectionContextE2ETests() =
             let! animation = pulse.EvaluateAsync<string>("element => getComputedStyle(element).animationName")
             Assert.That(animation, Is.EqualTo("canvas-selection-processing-pulse"))
 
-            let! _ = this.Page.EvaluateAsync("() => window.postMessage({action:'content-updated'},'*')")
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.dispatchEvent(new Event('canvas-morph-complete'))")
             let! _ = this.Page.WaitForFunctionAsync(
                 "() => { const h=document.querySelector('canvas-selection-processing'); return !h || h.style.display==='none'; }",
                 null,

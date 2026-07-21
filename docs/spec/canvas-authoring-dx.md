@@ -22,8 +22,8 @@ chosen by `buildInjection` (`src/Server/CanvasDocServer.fs`):
 
 | Doc kind | Injected runtime |
 |---|---|
-| `SystemView` | `baseStyle` + `linkInterceptor` + `reclaimFocusScript` |
-| `AgentDoc` | the above + `bridgeScript`, `canvasSend`, `canvasExpand`, selected-text contextual actions, JS error overlay, idiomorph runtime, and morph controller |
+| `SystemView` | `baseStyle` + `linkInterceptor` + `reclaimFocusScript`, `canvasSend`, and selected-text contextual actions |
+| `AgentDoc` | the above + `bridgeScript`, `canvasExpand`, JS error overlay, idiomorph runtime, and morph controller |
 
 ### 1. Base dark-theme CSS reset (Phase 6.1)
 

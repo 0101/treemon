@@ -76,7 +76,7 @@ let private helperCap (injection: string) =
 [<Category("Fast")>]
 type BuildInjectionTests() =
 
-    // ── SystemView: stripped injection (no morph, no bridge) ──────────────────
+    // ── SystemView: generic interactions without authored-doc machinery ───────
 
     [<Test>]
     member _.``SystemView injection omits the idiomorph runtime and morph controller``() =
@@ -170,8 +170,8 @@ type BuildInjectionTests() =
 
     // ── Item 2: injected window.canvasSend(action, payload) helper ────────────
     // canvasSend wraps the flat postMessage contract and enforces the SAME size cap the client
-    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). It is
-    // injected for AgentDocs only — a SystemView is server-generated and posts nothing.
+    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). Both doc
+    // kinds need it because the generic selected-text runtime posts through this helper.
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasSend helper``() =
@@ -180,16 +180,16 @@ type BuildInjectionTests() =
                     "Agent docs get the first-class window.canvasSend(action,payload) helper")
 
     [<Test>]
-    member _.``SystemView injection omits the canvasSend helper``() =
+    member _.``SystemView injection includes the canvasSend helper``() =
         let injection = buildInjection SystemView "beads.html"
-        Assert.That(injection, Does.Not.Contain(canvasSendMarker),
-                    "A system view is server-generated and posts nothing, so canvasSend is omitted")
+        Assert.That(injection, Does.Contain(canvasSendMarker),
+                    "SystemViews need canvasSend for generic selected-text interactions")
 
     // ── Injected window.canvasExpand(button, sectionId) helper ────────────────
     // canvasExpand swaps the clicked button for a themed spinner and posts the flat
     // {action:'expand-section', section, doc} request to the owning session, so the agent rewrites
-    // the doc in place. It calls canvasSend, so like canvasSend it is AgentDoc-only — a SystemView
-    // has no owner session to receive the request and posts nothing.
+    // the doc in place. It remains AgentDoc-only because a generated SystemView has no authored
+    // document to expand in response to a session request.
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasExpand helper and its spinner``() =
@@ -239,10 +239,11 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(selectionProcessingMarker))
 
     [<Test>]
-    member _.``SystemView injection omits selected-text contextual actions``() =
+    member _.``SystemView injection includes selected-text contextual actions and processing highlight``() =
         let injection = buildInjection SystemView "beads.html"
-        Assert.That(injection, Does.Not.Contain(selectionContextMarker))
-        Assert.That(injection, Does.Not.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionProcessingMarker))
 
     [<Test>]
     member _.``server embeds the canonical extension selection runtime without drift``() =
@@ -343,7 +344,8 @@ type BuildInjectionTests() =
     // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
     // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
     // {action:'canvas-doc-error', wt, doc, message, source, line, col} message the client surfaces in a
-    // dismissible banner. A SystemView runs no author JS, so it never gets the overlay.
+    // dismissible banner. SystemViews keep their own runtime error handling and never get this
+    // authored-document reporting overlay.
 
     [<Test>]
     member _.``AgentDoc injection includes the JS error overlay``() =
@@ -359,7 +361,7 @@ type BuildInjectionTests() =
     member _.``SystemView injection omits the JS error overlay``() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(errorOverlayMarker),
-                    "A system view runs no author JS, so the error overlay is omitted")
+                    "SystemViews must not receive the authored-document error overlay")
 
     [<Test>]
     member _.``the error overlay wraps its postMessage in try/catch so the error path can't loop``() =

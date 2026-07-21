@@ -322,18 +322,23 @@ let private errorOverlayScript (filename: string) =
     |> String.concat ""
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
-/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally
-/// get the message-bridge heartbeat, canvasSend/canvasExpand helpers, the generic selected-text
-/// contextual actions, the JS error overlay, and the idiomorph runtime + morph controller.
+/// Both kinds get baseStyle, link interception, Escape focus reclaim, canvasSend, and the generic
+/// selected-text contextual actions. AgentDocs additionally get the message-bridge heartbeat,
+/// canvasExpand helper, JS error overlay, and the idiomorph runtime + morph controller.
 /// `filename` is embedded into the error overlay so a doc-side error carries its own identity.
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
-/// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
-/// them, and the only message they post back is the shared Escape focus-reclaim bridge — the session
-/// bridge (heartbeat), canvasSend, and morph pieces are all omitted.
+/// JS-rendered dashboard back to the empty template shell). Their selected-text interactions route
+/// separately from authored ownership, so the author heartbeat, canvasExpand, error overlay, and
+/// morph pieces remain omitted.
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
-    | SystemView -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript
+    | SystemView ->
+        CanvasExport.baseStyle
+        + linkInterceptor
+        + reclaimFocusScript
+        + CanvasSendScript.script
+        + CanvasSelectionScript.script
     | AgentDoc ->
         CanvasExport.baseStyle
         + linkInterceptor
