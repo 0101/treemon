@@ -22,7 +22,6 @@ This project uses strict functional F# style. These rules are non-negotiable.
 **Critical requirements:**
 - **NEVER use loops to build or accumulate values** — use recursion or higher-order functions (`List.map`, `List.filter`, `List.fold`, `Array.map`, `Seq.map`, etc.). Iterating *purely* for side effects (`for ... do` or `List.iter`) is fine; keep transformation and effects separate — transform cleanly first, then iterate for effects (minimizing side effects is a separate concern).
 - Prefer immutable state. If mutation is required by an impure boundary such as a timer, subscription, mailbox, or NUnit lifecycle, confine it to the smallest scope as `let mutable` and add one inline comment explaining why an immutable solution does not fit. Do not use `ref` as a workaround; it is the same mutation with worse ergonomics.
-- **NEVER use `break` or `continue`** — restructure with higher-order functions
 - **NEVER pass collections into methods to be mutated** — return new collections instead
 
 **Patterns:**
