@@ -1,9 +1,30 @@
 module Server.ProcessRunner
 
+open System
 open System.Diagnostics
+open System.IO
 open System.Threading
 
 let private defaultTimeoutMs = 60_000
+let private argumentListTimeoutMs = 10_000
+
+type CaptureStream =
+    | StandardOutput
+    | StandardError
+
+type ArgumentListFailure =
+    | StartFailed of string
+    | TimedOut
+    | CaptureLimitExceeded of CaptureStream
+
+type ArgumentListOutput =
+    { ExitCode: int
+      Stdout: byte[]
+      Stderr: byte[] }
+
+type private BoundedCapture =
+    { Bytes: byte[]
+      LimitExceeded: bool }
 
 let private truncate (s: string) =
     if s.Length > 200 then s[..199] + "..." else s
@@ -84,3 +105,147 @@ let runResultWithTimeout (timeoutMs: int) (context: string) (fileName: string) (
         let! result = startAndCapture timeoutMs context fileName arguments workingDirectory
         return toResult result
     }
+
+let private captureBounded
+    (stream: Stream)
+    (maxBytes: int)
+    (cancellationToken: CancellationToken)
+    =
+    task {
+        use captured = new MemoryStream(min maxBytes (64 * 1024))
+        let buffer = Array.zeroCreate<byte> (64 * 1024)
+        // Stream reads are an impure boundary: these two mutable flags are the
+        // smallest state needed to drive the asynchronous drain loop.
+        let mutable reading = true
+        let mutable limitExceeded = false
+
+        while reading do
+            let! count = stream.ReadAsync(buffer.AsMemory(), cancellationToken)
+
+            if count = 0 then
+                reading <- false
+            else
+                let remaining = maxBytes - int captured.Length
+                let captureCount = min count (max 0 remaining)
+
+                if captureCount > 0 then
+                    do! captured.WriteAsync(buffer.AsMemory(0, captureCount), cancellationToken)
+
+                limitExceeded <- limitExceeded || count > captureCount
+
+        return
+            { Bytes = captured.ToArray()
+              LimitExceeded = limitExceeded }
+    }
+
+let private killProcessTree (proc: Process) =
+    try
+        if not proc.HasExited then
+            proc.Kill(entireProcessTree = true)
+    with _ ->
+        ()
+
+let private observeCapture (captureTask: Tasks.Task<BoundedCapture>) =
+    task {
+        try
+            let! _ = captureTask
+            return ()
+        with _ ->
+            return ()
+    }
+
+/// Runs a process without shell argument parsing. Output capture is bounded and
+/// timeout cancellation terminates the complete process tree.
+let runArgumentListWithTimeout
+    (timeoutMs: int)
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    : Async<Result<ArgumentListOutput, ArgumentListFailure>> =
+    async {
+        try
+            let psi =
+                ProcessStartInfo(
+                    FileName = fileName,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                )
+
+            arguments |> List.iter psi.ArgumentList.Add
+            workingDirectory |> Option.iter (fun dir -> psi.WorkingDirectory <- dir)
+
+            use proc = new Process(StartInfo = psi)
+
+            if not (proc.Start()) then
+                return Error(StartFailed "Process did not start")
+            else
+                use cts = new CancellationTokenSource(timeoutMs)
+                let stdoutTask = captureBounded proc.StandardOutput.BaseStream stdoutLimitBytes cts.Token
+                let stderrTask = captureBounded proc.StandardError.BaseStream stderrLimitBytes cts.Token
+
+                try
+                    do! proc.WaitForExitAsync(cts.Token) |> Async.AwaitTask
+                    let! stdout = stdoutTask |> Async.AwaitTask
+                    let! stderr = stderrTask |> Async.AwaitTask
+
+                    Log.log
+                        context
+                        $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode}, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}"
+
+                    return
+                        if stdout.LimitExceeded then
+                            Error(CaptureLimitExceeded StandardOutput)
+                        elif stderr.LimitExceeded then
+                            Error(CaptureLimitExceeded StandardError)
+                        else
+                            Ok
+                                { ExitCode = proc.ExitCode
+                                  Stdout = stdout.Bytes
+                                  Stderr = stderr.Bytes }
+                with :? OperationCanceledException ->
+                    killProcessTree proc
+
+                    use killCts = new CancellationTokenSource(5_000)
+
+                    try
+                        do! proc.WaitForExitAsync(killCts.Token) |> Async.AwaitTask
+                    with :? OperationCanceledException ->
+                        ()
+
+                    do!
+                        Tasks.Task.WhenAll(
+                            [| observeCapture stdoutTask
+                               observeCapture stderrTask |]
+                        )
+                        |> Async.AwaitTask
+                        |> Async.Ignore
+
+                    Log.log context $"{fileName} ({arguments.Length} args) -> timed out after {timeoutMs}ms"
+                    return Error TimedOut
+        with :? ComponentModel.Win32Exception as ex ->
+            Log.log context $"{fileName} ({arguments.Length} args) -> failed to start"
+            return Error(StartFailed ex.Message)
+    }
+
+/// Argument-list process execution with the production 10-second timeout.
+let runArgumentList
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    =
+    runArgumentListWithTimeout
+        argumentListTimeoutMs
+        stdoutLimitBytes
+        stderrLimitBytes
+        context
+        fileName
+        arguments
+        workingDirectory
