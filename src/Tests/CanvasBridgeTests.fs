@@ -682,7 +682,7 @@ type OwnerRoutingTests() =
 type SystemViewInteractionRoutingTests() =
 
     [<Test>]
-    member _.``unclaimed SystemView is claimed before drain and remains exclusive until reassigned``() =
+    member _.``heartbeat cannot steal pending SystemView claim from deliberately launched session``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 2
             use sinkA = new HttpSink(ports[0])
@@ -714,6 +714,14 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(
                 runAsync (Server.CanvasInteractionOwnership.beginClaim path "diff.html"),
                 Is.EqualTo(None: string option))
+
+            // B was already registered when the interaction launch began, so its periodic
+            // re-registration is only a heartbeat: it cannot claim or drain the pending view.
+            registerSession path sinkB.Url (Some sidB)
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option))
+            Assert.That(sinkB.Bodies, Is.Empty)
 
             // Registration claims the target synchronously before drainQueue runs.
             registerSession path sinkA.Url (Some sidA)

@@ -175,14 +175,17 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
     let sessionId = normalizeSessionId sessionId
     let worktreeKey = normalizePath worktreePath
     let key = registryKeyFor worktreeKey sessionId
+    let existing = sessionRegistry.TryGetValue(key)
 
-    match sessionId with
-    | Some sid ->
+    match sessionId, existing with
+    | Some sid, (false, _) ->
+        // Only a newly seen session can be the one deliberately launched for a pending
+        // interaction. Re-registration of an existing session is a heartbeat refresh.
         let claimed = CanvasInteractionOwnership.claimPending worktreeKey sid
         if not (List.isEmpty claimed) then
             let names = String.concat ", " claimed
             Log.log "CanvasBridge" $"Session {sid} claimed SystemView interaction target(s): {names}"
-    | None -> ()
+    | _ -> ()
 
     let entry =
         { WorktreePath = worktreeKey
@@ -190,7 +193,7 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
           SessionId = sessionId
           RegisteredAt = nextRegisteredAt () }
 
-    match sessionRegistry.TryGetValue(key) with
+    match existing with
     | true, oldEntry ->
         Log.log "CanvasBridge" $"Updating session registration {key} for {worktreeKey}: {oldEntry.InjectUrl} -> {injectUrl}"
     | false, _ -> ()

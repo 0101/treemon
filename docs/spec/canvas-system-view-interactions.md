@@ -26,7 +26,8 @@ The pending claim is in-memory and keyed by normalized worktree plus SystemView 
 durable owner is persisted in `data/canvas-interaction-owners.json`. An identified bridge
 registration for the session deliberately started or continued for the interaction atomically claims
 all pending views for its worktree before queue draining. Periodic heartbeat re-registration from an
-already-running co-located session must not steal a pending claim. SystemView queue entries re-resolve
+already-running co-located session must not steal a pending claim; only a newly seen identified
+session registration may consume one. SystemView queue entries re-resolve
 the current interaction owner when drained, never drain anonymously while unclaimed, and therefore
 honor an explicit reassignment made after enqueue. Scheduler reconciliation prunes owners whose
 worktree is no longer known or whose generated view file no longer exists. Explicit worktree-removal
