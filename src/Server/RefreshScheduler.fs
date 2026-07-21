@@ -429,6 +429,35 @@ type PathFilters =
 let private isPathInSet (paths: Map<RepoId, Set<string>>) repoId path =
     paths |> Map.tryFind repoId |> Option.map (Set.contains path) |> Option.defaultValue false
 
+type MergedPrBranchScope =
+    { GitData: Map<string, GitWorktree.GitData>
+      KnownBranches: Set<string>
+      PruneBranches: Set<string> option }
+
+let internal mergedPrBranchScope (ignoredPaths: Set<string>) (repo: PerRepoState) =
+    let eligiblePaths = Set.difference repo.KnownPaths ignoredPaths
+
+    let eligibleGitData =
+        repo.GitData |> Map.filter (fun path _ -> Set.contains path eligiblePaths)
+
+    let knownBranches =
+        eligibleGitData
+        |> Map.values
+        |> Seq.choose (fun gitData -> GitWorktree.upstreamBranchName gitData.Upstream)
+        |> Set.ofSeq
+
+    let collectedGitPaths = eligibleGitData |> Map.keys |> Set.ofSeq
+
+    let readFailedPaths =
+        eligibleGitData
+        |> Map.filter (fun _ gitData -> gitData.Upstream = GitWorktree.UpstreamReadFailed)
+        |> Map.keys
+        |> Set.ofSeq
+
+    { GitData = eligibleGitData
+      KnownBranches = knownBranches
+      PruneBranches = MergedPrStore.pruneScope eligiblePaths collectedGitPaths readFailedPaths knownBranches }
+
 let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
 
@@ -488,6 +517,7 @@ let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, Dat
 
 let private executeTask
     (agent: MailboxProcessor<StateMsg>)
+    (mergedPrStore: MergedPrStore.Store)
     (rootPaths: Map<RepoId, string>)
     (task: RefreshTask)
     =
@@ -556,40 +586,35 @@ let private executeTask
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
 
-            let knownBranches =
-                repo.GitData
-                |> Map.values
-                |> Seq.choose (fun gitData -> GitWorktree.upstreamBranchName gitData.Upstream)
-                |> set
+            let ignorePredicate =
+                GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
 
-            // Prune the store only against a trustworthy branch enumeration; an unready/partial one —
-            // or one where a worktree's upstream read transiently failed — yields `None`, skipping
-            // the prune so it can't wipe just-loaded merged-PR facts (F7 / Decision #8).
-            let collectedGitPaths = repo.GitData |> Map.keys |> Set.ofSeq
+            let ignoredPaths =
+                repo.WorktreeList
+                |> List.filter (isWorktreeIgnored ignorePredicate)
+                |> List.map _.Path
+                |> Set.ofList
 
-            let readFailedPaths =
-                repo.GitData
-                |> Map.filter (fun _ gitData -> gitData.Upstream = GitWorktree.UpstreamReadFailed)
-                |> Map.keys
-                |> Set.ofSeq
+            let branchScope = mergedPrBranchScope ignoredPaths repo
 
-            let knownBranchesForPrune =
-                MergedPrStore.pruneScope repo.KnownPaths collectedGitPaths readFailedPaths knownBranches
+            let! livePrObservations =
+                PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote branchScope.KnownBranches
 
-            // Reconcile the bounded live fetch with the persisted store (live wins; the store fills
-            // aged-out merged branches). `PrData` becomes this effective map (spec: merged-pr-persistence.md).
-            let! livePrMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
-            let! persisted = MergedPrStore.getForRepo repoId
+            let livePrMap = livePrObservations |> Map.map (fun _ (status, _) -> status)
 
-            // Current worktree tips keyed by upstream branch name, so the reconcile can identity-gate
-            // each persisted record: a record is surfaced only when its `HeadSha` matches one of the
-            // branch's present tips, and evicted when a present, non-empty tip set does NOT contain it
-            // (a reused-name incarnation). A SET per branch (not a single tip) is required because
-            // several worktrees can track the SAME upstream branch at different tips; collapsing them
-            // via `Map.ofSeq` would keep one arbitrary tip and evict records whose still-valid tip lost
-            // the collapse (spec: merged-pr-persistence.md, Decision #11 / review F2).
+            let liveHeadShas =
+                livePrObservations
+                |> Map.toSeq
+                |> Seq.choose (fun (branch, (_, headSha)) ->
+                    headSha
+                    |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                    |> Option.map (fun sha -> branch, sha))
+                |> Map.ofSeq
+
+            let! persisted = mergedPrStore.GetForRepo repoId
+
             let worktreeHeads =
-                repo.GitData
+                branchScope.GitData
                 |> Map.values
                 |> Seq.choose (fun gitData ->
                     match GitWorktree.upstreamBranchName gitData.Upstream with
@@ -600,10 +625,15 @@ let private executeTask
                 |> Map.ofSeq
 
             let effectiveMap, newPersisted =
-                MergedPrStore.reconcileMergedPrs livePrMap persisted worktreeHeads knownBranchesForPrune
+                MergedPrStore.reconcileMergedPrs
+                    livePrMap
+                    liveHeadShas
+                    persisted
+                    worktreeHeads
+                    branchScope.PruneBranches
 
             if newPersisted <> persisted then
-                MergedPrStore.setForRepo repoId newPersisted
+                mergedPrStore.SetForRepo repoId newPersisted
 
             agent.Post(UpdatePr(repoId, effectiveMap))
 
@@ -618,6 +648,7 @@ let private timeoutMs = 60_000
 
 let private executeWithTimeout
     (agent: MailboxProcessor<StateMsg>)
+    (mergedPrStore: MergedPrStore.Store)
     (rootPaths: Map<RepoId, string>)
     (task: RefreshTask)
     =
@@ -625,7 +656,7 @@ let private executeWithTimeout
         let sw = Stopwatch.StartNew()
 
         try
-            let! child = Async.StartChild(executeTask agent rootPaths task, timeoutMs)
+            let! child = Async.StartChild(executeTask agent mergedPrStore rootPaths task, timeoutMs)
             do! child
             sw.Stop()
             return Ok sw.Elapsed
@@ -668,6 +699,7 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
 
 let private runPhase
     (agent: MailboxProcessor<StateMsg>)
+    (mergedPrStore: MergedPrStore.Store)
     (rootPaths: Map<RepoId, string>)
     (tasks: RefreshTask list)
     =
@@ -678,7 +710,7 @@ let private runPhase
             tasks
             |> List.map (fun task ->
                 async {
-                    let! result = executeWithTimeout agent rootPaths task
+                    let! result = executeWithTimeout agent mergedPrStore rootPaths task
                     logTaskResult agent task result
                     return task, now
                 })
@@ -687,11 +719,15 @@ let private runPhase
         return results |> Array.toList
     }
 
-let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, string>) =
+let runInitialBurst
+    (agent: MailboxProcessor<StateMsg>)
+    (mergedPrStore: MergedPrStore.Store)
+    (rootPaths: Map<RepoId, string>)
+    =
     async {
         Log.log "Scheduler" "Starting initial burst — Phase 1 (discover worktrees)"
         let phase1Tasks = buildPhase1Tasks rootPaths
-        let! phase1Runs = runPhase agent rootPaths phase1Tasks
+        let! phase1Runs = runPhase agent mergedPrStore rootPaths phase1Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
         let archivedBranchSets = readArchivedBranchSets rootPaths
@@ -701,12 +737,12 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let filters = { Archived = archivedPaths; Ignored = ignoredPaths }
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
         let phase2Tasks = buildPhase2Tasks filters state.Repos
-        let! phase2Runs = runPhase agent rootPaths phase2Tasks
+        let! phase2Runs = runPhase agent mergedPrStore rootPaths phase2Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
         Log.log "Scheduler" "Starting initial burst — Phase 3 (PR data)"
         let phase3Tasks = buildPhase3Tasks state.Repos
-        let! phase3Runs = runPhase agent rootPaths phase3Tasks
+        let! phase3Runs = runPhase agent mergedPrStore rootPaths phase3Tasks
 
         Log.log "Scheduler" "Initial burst complete"
 
@@ -846,7 +882,12 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
-let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
+let start
+    (agent: MailboxProcessor<StateMsg>)
+    (mergedPrStore: MergedPrStore.Store)
+    (worktreeRoots: string list)
+    (ct: CancellationToken)
+    =
     let rootPaths = buildRootPaths worktreeRoots
 
     let initialRepos =
@@ -888,7 +929,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
             match pickMostOverdue activity now effectiveLastRuns tasks with
             | Some task ->
-                let! result = executeWithTimeout agent rootPaths task
+                let! result = executeWithTimeout agent mergedPrStore rootPaths task
                 logTaskResult agent task result
 
                 match task with
@@ -906,7 +947,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
     let startup =
         async {
-            let! lastRuns = runInitialBurst agent rootPaths
+            let! lastRuns = runInitialBurst agent mergedPrStore rootPaths
             let! state = agent.PostAndAsyncReply(GetState)
             let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
             let latestWatchers = ref initialWatchers

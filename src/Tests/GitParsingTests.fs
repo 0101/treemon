@@ -5,6 +5,8 @@ open System.IO
 open NUnit.Framework
 open Server.GitWorktree
 open Server.PathUtils
+open Tests.GitTestHelpers
+open Tests.TestUtils
 
 [<SetUpFixture>]
 type LogDirSetup() =
@@ -233,6 +235,28 @@ type ParseCommitOutputTests() =
         Assert.That(result.IsSome, Is.True)
         Assert.That(result.Value.Hash, Is.EqualTo("abc123"))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CollectWorktreeGitDataTests() =
+
+    [<Test>]
+    member _.``HeadCommit is the actual merge HEAD rather than the last non-merge display commit``() =
+        withTempDir "treemon-head-identity" (fun repoDir ->
+            initRepoOnMain repoDir
+            gitAssert repoDir "checkout -b side"
+            gitAssert repoDir "commit --allow-empty -m side"
+            gitAssert repoDir "checkout main"
+            gitAssert repoDir "commit --allow-empty -m main-work"
+            let nonMergeHead = gitOut repoDir "rev-parse HEAD"
+            gitAssert repoDir "merge --no-ff side -m merge"
+            let mergeHead = gitOut repoDir "rev-parse HEAD"
+
+            let data = collectWorktreeGitData repoDir (Some "main") "main" |> runAsync
+
+            Assert.That(data.HeadCommit, Is.EqualTo(mergeHead))
+            Assert.That(data.HeadCommit, Is.Not.EqualTo(nonMergeHead)))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -285,7 +309,7 @@ type ParseDiffStatsTests() =
         Assert.That(result, Is.EqualTo((12345, 6789)))
 
 // classifyUpstream turns a `git rev-parse --abbrev-ref @{u}` result into the three cases the
-// merged-PR prune logic needs (spec docs/spec/merged-pr-persistence.md, Decision #8 residual): a
+// merged-PR prune logic needs (see worktree-monitor.md, Merged-PR Persistence): a
 // clean upstream, git's deterministic "no upstream", or a transient read failure that must NOT be
 // mistaken for "no upstream". Pure, so no setup.
 [<TestFixture>]

@@ -275,6 +275,16 @@ let main args =
         else
             None
 
+    let mergedPrStore =
+        if not config.Demo && config.TestFixtures.IsNone then
+            let path = MergedPrStore.filePathForPort config.Port
+            let store = MergedPrStore.create path
+            Log.log "Startup" $"Merged PR store: {path}"
+            store.Load()
+            Some store
+        else
+            None
+
     let remotingApi, schedulerAgent =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
@@ -285,10 +295,9 @@ let main args =
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
-            MergedPrStore.load ()
 
-            match config.TestFixtures with
-            | Some path ->
+            match config.TestFixtures, mergedPrStore with
+            | Some path, _ ->
                 match WorktreeApi.loadFixtures path with
                 | Ok fixtures ->
                     populateAgentFromFixtures agent fixtures
@@ -296,9 +305,11 @@ let main args =
                 | Error msg ->
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
-            | None ->
-                RefreshScheduler.start agent worktreeRoots cts.Token
+            | None, Some store ->
+                RefreshScheduler.start agent store worktreeRoots cts.Token
                 Log.log "Startup" "Scheduler background loop started"
+            | None, None ->
+                failwith "Merged PR store was not initialized for the live scheduler"
 
             WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
@@ -320,6 +331,16 @@ let main args =
     System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
         Log.log "Shutdown" "Cancelling scheduler"
         cts.Cancel()
+
+        mergedPrStore
+        |> Option.iter (fun store ->
+            try
+                match Async.RunSynchronously(store.Flush(), timeout = 5000) with
+                | Ok() -> ()
+                | Error error -> Log.log "Shutdown" error
+            with :? System.TimeoutException ->
+                Log.log "Shutdown" "Timed out flushing merged PR store")
+
         cts.Dispose()
         sessionActivityService |> Option.iter (fun svc -> (svc :> System.IDisposable).Dispose()))
 

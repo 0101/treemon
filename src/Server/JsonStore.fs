@@ -4,15 +4,8 @@ open System
 open System.IO
 open System.Text.Json
 
-/// Atomically persists a JSON document to `path`: serializes to an in-memory buffer, writes it to a
-/// temp sibling (`path + ".tmp"`), then `File.Move`s it into place (overwrite) so a concurrent
-/// reader never observes a half-written file. Owns the whole effectful shell — directory creation,
-/// the indented `MemoryStream`/`Utf8JsonWriter` setup, the temp-file + atomic swap, and
-/// swallow-and-log error handling — while the caller supplies only `writeBody`, which writes the
-/// document (root object included) to the given writer. NEVER throws: a persist failure is logged
-/// under `logTag`, not raised. Mirrors the `FileUtils` `logTag` convention and is shared by
-/// `MergedPrStore`, `CanvasDocOwnership`, and `SessionManager` (review F1).
-let persist (logTag: string) (path: string) (writeBody: Utf8JsonWriter -> unit) =
+/// Atomically persists a JSON document and reports failures after logging them.
+let tryPersist (logTag: string) (path: string) (writeBody: Utf8JsonWriter -> unit) : Async<Result<unit, string>> =
     async {
         try
             let dir = Path.GetDirectoryName(path)
@@ -28,9 +21,16 @@ let persist (logTag: string) (path: string) (writeBody: Utf8JsonWriter -> unit) 
             let tempPath = path + ".tmp"
             do! File.WriteAllTextAsync(tempPath, json) |> Async.AwaitTask
             File.Move(tempPath, path, overwrite = true)
+            return Ok()
         with ex ->
-            Log.log logTag $"Failed to persist {path}: {ex.Message}"
+            let error = $"Failed to persist {path}: {ex.Message}"
+            Log.log logTag error
+            return Error error
     }
+
+/// Atomically persists a JSON document, logging and ignoring failures for legacy direct callers.
+let persist (logTag: string) (path: string) (writeBody: Utf8JsonWriter -> unit) : Async<unit> =
+    tryPersist logTag path writeBody |> Async.Ignore
 
 /// Loads a JSON document from `path` and projects its root element with `parse`, returning `None`
 /// for an absent OR corrupt file and `Some (parse root)` otherwise. Owns the safe-load shell —

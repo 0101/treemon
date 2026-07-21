@@ -41,6 +41,12 @@ type ParsePrListFixtureTests() =
         Assert.That(repoGuid, Is.EqualTo(Some "abc12345-def6-7890-abcd-ef1234567890"))
 
     [<Test>]
+    member _.``Extracts immutable source commit SHA``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let completed = prs |> List.find (fun pr -> pr.PrId = 100)
+        Assert.That(completed.HeadSha, Is.EqualTo(Some "sha-refactor-data-layer"))
+
+    [<Test>]
     member _.``Active PR is not merged``() =
         let _, prs = readFixture "pr-list.json" |> parsePrList
         let active = prs |> List.find (fun pr -> pr.PrId = 101)

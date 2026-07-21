@@ -117,6 +117,14 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - GitHub Actions workflow runs mapped to `BuildInfo` / `BuildStatus`; failed runs fetch job details for step name
 - Per open PR, an extra detail fetch (`/repos/{owner}/{repo}/pulls/{number}`) retrieves `mergeable` status; run in parallel with Actions fetch, adding no sequential latency
 
+### Merged-PR Persistence
+
+- Live provider results are authoritative. When the bounded PR fetch no longer returns a tracked upstream branch, a persisted merged record supplies a fallback `HasPr`; live `HasPr` entries are never overridden. Only the terminal merged fact is retained — open PRs and volatile builds, comments, draft, and conflict state are not persisted.
+- `MergedPrStore` keeps `repo → upstream branch → { Id; Title; Url; HeadSha }` in port-scoped gitignored runtime state at `data/merged-prs-{port}.json`. Each server instance owns its store; missing, corrupt, identity-less, or older incompatible records start empty, and failed writes remain dirty in memory until a retry succeeds.
+- Records are pruned to live branches only from a trustworthy enumeration: at least one eligible worktree and branch exist, every non-ignored worktree has collected git data, and no eligible worktree's upstream read failed. Otherwise live merge upserts and fallback overlay still run, but pruning is skipped.
+- The upstream/provider branch identifies the association; `HeadSha` is the immutable provider-reported PR source commit. Fallback accepts a match against any current worktree tip for that upstream branch, and a present mismatch evicts the stale record so branch-name reuse or later unmerged commits cannot inherit an old merged badge.
+- `PrStatus.lookupPrStatus`, `WorktreeApi` behavior, and `SyncEngine` behavior are unchanged. The two `WorktreeApi` PR lookup sites obtain the branch name from the upstream-state representation through `GitWorktree.upstreamBranchName`.
+
 ### Merge Conflict Detection
 
 - `HasConflicts: bool` on `PrInfo` — `true` when the PR has merge conflicts
@@ -194,12 +202,13 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 |------|---------|
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
-| `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
+| `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling, merged-PR reconciliation |
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
-| `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
-| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, work metrics |
+| `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI, including the bounded recent-closed window |
+| `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |
+| `src/Server/GitWorktree.fs` | Worktree enumeration, upstream state, HEAD identity, dirty detection, work metrics |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/SyncEngine.fs` | Branch sync pipeline, provider-aware conflict resolution |

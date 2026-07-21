@@ -118,6 +118,13 @@ let withTempFile (prefix: string) (content: string) (action: string -> 'a) =
     finally
         if File.Exists(tempFile) then File.Delete(tempFile)
 
+let withTempDir (prefix: string) (action: string -> 'a) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    try action tempDir
+    finally
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
+
 /// Run `action` with the process CWD swapped to a throwaway temp directory, then
 /// restore and delete it. Tests that persist relative to the current directory
 /// (e.g. CanvasDocOwnership.attribute writes data/canvas-owners.json under CWD) use

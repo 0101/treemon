@@ -7,7 +7,7 @@ let private normalizePath = Server.PathUtils.normalizePath
 let private filePath = Path.Combine("data", "canvas-owners.json")
 
 let private persistImpl (state: Map<string, Map<string, string>>) =
-    JsonStore.persist "CanvasDocOwnership" filePath (fun writer ->
+    JsonStore.tryPersist "CanvasDocOwnership" filePath (fun writer ->
         writer.WriteStartObject()
 
         state

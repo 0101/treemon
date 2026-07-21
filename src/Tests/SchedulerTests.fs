@@ -1159,6 +1159,43 @@ type ResolveIgnoredPathsTests() =
         let ignored = result |> Map.find (RepoId "Repo1")
         Assert.That(ignored, Is.Empty, "No patterns should produce empty ignored set")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MergedPrBranchScopeTests() =
+
+    [<Test>]
+    member _.``ignored uncollected worktree does not block pruning active branches``() =
+        let activePath = "/r1/main"
+        let ignoredPath = "/r1/ignored"
+
+        let gitData : GitData =
+            { Path = activePath
+              Branch = "main"
+              HeadCommit = "sha-main"
+              LastCommitMessage = "main"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = Upstream "main"
+              MainBehindCount = 0
+              IsDirty = false
+              WorkMetrics = None }
+
+        let ignoredGitData =
+            { gitData with
+                Path = ignoredPath
+                HeadCommit = "stale-ignored-sha" }
+
+        let repo =
+            { PerRepoState.empty with
+                KnownPaths = Set.ofList [ activePath; ignoredPath ]
+                GitData = Map.ofList [ activePath, gitData; ignoredPath, ignoredGitData ] }
+
+        let scope = mergedPrBranchScope (Set.ofList [ ignoredPath ]) repo
+
+        Assert.That(scope.GitData |> Map.containsKey ignoredPath, Is.False)
+        Assert.That(scope.KnownBranches, Is.EqualTo(Set.ofList [ "main" ]))
+        Assert.That(scope.PruneBranches, Is.EqualTo(Some(Set.ofList [ "main" ])))
+
 
 [<TestFixture>]
 [<Category("Unit")>]

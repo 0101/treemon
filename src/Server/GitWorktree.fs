@@ -20,8 +20,7 @@ type CommitInfo =
 /// Outcome of resolving a worktree's upstream tracking branch (`git rev-parse --abbrev-ref @{u}`).
 /// Distinguishes git's deterministic "no upstream configured" from a transient read failure
 /// (timeout, `index.lock`, IO error) so downstream prune logic never mistakes a failed read for
-/// "this branch has no upstream" and wrongly forgets a merged PR (spec merged-pr-persistence.md,
-/// Decision #8 residual).
+/// "this branch has no upstream" and wrongly forgets a merged PR.
 type UpstreamResult =
     | Upstream of string
     | NoUpstream
@@ -31,8 +30,8 @@ type GitData =
     { Path: string
       Branch: string
       /// The worktree tip commit hash (from `getLastCommit`), used as the identity stamp for a
-      /// merged-PR record so a reused branch name cannot resurrect a prior incarnation's badge
-      /// (spec merged-pr-persistence.md, Decision #11). Empty when no commit could be read.
+      /// merged-PR record so a reused branch name cannot resurrect a prior incarnation's badge.
+      /// Empty when no commit could be read.
       HeadCommit: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
@@ -140,6 +139,12 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
+let private getHeadCommit (worktreePath: string) =
+    async {
+        let! output = runGit worktreePath "rev-parse HEAD"
+        return output |> Option.map _.Trim() |> Option.defaultValue ""
+    }
+
 let private tryFastForwardMain (repoRoot: string) (baseBranch: string) (mainRef: string) =
     async {
         let! currentBranch = runGit repoRoot "rev-parse --abbrev-ref HEAD"
@@ -191,7 +196,7 @@ let private noUpstreamMarkers =
       "no such branch" ]
 
 /// Pure classification of a `git rev-parse --abbrev-ref @{u}` result into the three cases the
-/// merged-PR prune logic distinguishes (spec merged-pr-persistence.md, Decision #8 residual):
+/// merged-PR prune logic distinguishes (see worktree-monitor.md, Merged-PR Persistence):
 ///  - `Upstream name` — configured and read cleanly;
 ///  - `NoUpstream` — git deterministically reports no upstream (branch tracks nothing, detached, or
 ///    unborn) — a stable state carrying no record to lose, so it is safe to prune against;
@@ -267,6 +272,7 @@ let getDiffStats (worktreePath: string) (mainRef: string) =
 let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainRef: string) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
+        let! headChild = Async.StartChild(getHeadCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
         let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
@@ -274,6 +280,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath mainRef)
 
         let! commit = commitChild
+        let! headCommit = headChild
         let! upstream = upstreamChild
         let! mainBehind = mainBehindChild
         let! dirty = dirtyChild
@@ -307,7 +314,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         return
             { Path = worktreePath
               Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
-              HeadCommit = commit |> Option.map _.Hash |> Option.defaultValue ""
+              HeadCommit = headCommit
               LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               Upstream = upstreamState

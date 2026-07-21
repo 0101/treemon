@@ -1,19 +1,22 @@
 module Tests.MergedPrStoreTests
 
-open System
 open System.IO
 open NUnit.Framework
 open Shared
 open Server.MergedPrStore
 open Tests.TestUtils
 
-let private withTempDir (action: string -> unit) =
-    let tempDir = Path.Combine(Path.GetTempPath(), $"treemon-mergedpr-test-{Guid.NewGuid()}")
-    Directory.CreateDirectory(tempDir) |> ignore
-    try action tempDir
-    finally try Directory.Delete(tempDir, recursive = true) with _ -> ()
+let private mk id title url : MergedPrRecord =
+    { Id = id
+      Title = title
+      Url = url
+      HeadSha = $"sha-{id}" }
 
-let private mk id title url : MergedPrRecord = { Id = id; Title = title; Url = url; HeadSha = "" }
+let private reconcileMergedPrs live persisted worktreeHeads knownBranches =
+    Server.MergedPrStore.reconcileMergedPrs live Map.empty persisted worktreeHeads knownBranches
+
+let private reconcileObserved live liveHeadShas persisted worktreeHeads knownBranches =
+    Server.MergedPrStore.reconcileMergedPrs live liveHeadShas persisted worktreeHeads knownBranches
 
 let private sampleStore =
     Map.ofList
@@ -30,7 +33,7 @@ type MergedPrStorePersistenceTests() =
 
     [<Test>]
     member _.``persist then load round-trips the whole store``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
             runAsync (persistAtPath path sampleStore)
 
@@ -40,7 +43,7 @@ type MergedPrStorePersistenceTests() =
 
     [<Test>]
     member _.``persist then load preserves a record's head_sha``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
 
             let stamped =
@@ -56,29 +59,26 @@ type MergedPrStorePersistenceTests() =
                 "a non-empty head_sha must survive a persist -> load round-trip"))
 
     [<Test>]
-    member _.``load of a legacy file without head_sha defaults HeadSha to empty``() =
-        withTempDir (fun dir ->
+    member _.``load discards a record without head_sha``() =
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
-            // A legacy file predating HeadSha: its records carry only id/title/url, no head_sha.
             File.WriteAllText(
                 path,
                 """{ "C:/code/repo-a": { "feature/x": { "id": 12, "title": "Add X", "url": "https://example.test/pull/12" } } }""")
 
-            let record = loadAtPath path |> Map.find (RepoId "C:/code/repo-a") |> Map.find "feature/x"
-
-            Assert.That(record, Is.EqualTo(mk 12 "Add X" "https://example.test/pull/12"),
-                "a record with no head_sha must load with HeadSha = \"\" (legacy/unverified)"))
+            Assert.That(Map.isEmpty (loadAtPath path), Is.True,
+                "a record without a provider identity must not bypass identity checks"))
 
     [<Test>]
     member _.``load of an absent file returns an empty store``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "does-not-exist.json")
             Assert.That(Map.isEmpty (loadAtPath path), Is.True,
                 "a missing file must load as empty, not throw"))
 
     [<Test>]
     member _.``load of a corrupt file returns an empty store without throwing``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
             File.WriteAllText(path, "{ this is not valid json ")
 
@@ -87,7 +87,7 @@ type MergedPrStorePersistenceTests() =
 
     [<Test>]
     member _.``persist creates the target directory when missing``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "nested", "merged-prs.json")
             runAsync (persistAtPath path sampleStore)
 
@@ -96,7 +96,7 @@ type MergedPrStorePersistenceTests() =
 
     [<Test>]
     member _.``successful persist leaves no temp file behind``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
             runAsync (persistAtPath path sampleStore)
 
@@ -105,92 +105,103 @@ type MergedPrStorePersistenceTests() =
 
     [<Test>]
     member _.``persisting an empty store yields an empty-object file that loads as empty``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-test" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
             runAsync (persistAtPath path Map.empty)
 
             Assert.That(File.Exists(path), Is.True)
             Assert.That(Map.isEmpty (loadAtPath path), Is.True))
 
-// The public store API (getForRepo/setForRepo/load) drives a process-global MailboxProcessor that
-// persists data/merged-prs.json relative to CWD, so these run under a throwaway CWD and are
-// NonParallelizable (the CWD swap and the agent are process-global). Each test uses a unique RepoId
-// so the singleton agent never leaks in-memory state between tests; assertions are scoped to that
-// RepoId because the agent rewrites its whole state (other tests' repos included) on every persist.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-[<NonParallelizable>]
 type MergedPrStoreAgentTests() =
 
-    // Relative on purpose: resolved against the withTempCwd-swapped CWD at each I/O call.
-    let persistedPath = Path.Combine("data", "merged-prs.json")
+    let repoId = RepoId "/test/merged"
 
-    let uniqueRepo () =
-        let id = Guid.NewGuid().ToString("N")[..7]
-        RepoId $"/test/merged/{id}"
+    let createStore dir =
+        let path = Path.Combine(dir, "merged-prs.json")
+        let store = create path
+        store.Load()
+        path, store
 
-    // getForRepo round-trips through the agent only AFTER the preceding message is drained, so
-    // awaiting it is the sync barrier that guarantees a prior setForRepo's persist has completed.
-    let barrier repoId = runAsync (getForRepo repoId) |> ignore
+    [<Test>]
+    member _.``stores with different paths are isolated``() =
+        withTempDir "treemon-mergedpr-agent" (fun dir ->
+            let firstPath = Path.Combine(dir, "first.json")
+            let secondPath = Path.Combine(dir, "second.json")
+            let first = create firstPath
+            let second = create secondPath
+            first.Load()
+            second.Load()
+
+            let firstRecords = Map.ofList [ "feature/x", mk 1 "First" "https://example.test/pull/1" ]
+            let secondRecords = Map.ofList [ "feature/x", mk 2 "Second" "https://example.test/pull/2" ]
+            first.SetForRepo repoId firstRecords
+            second.SetForRepo repoId secondRecords
+            runAsync (first.Flush()) |> fun result -> assertOk result "first store"
+            runAsync (second.Flush()) |> fun result -> assertOk result "second store"
+
+            Assert.That(loadAtPath firstPath |> Map.find repoId, Is.EqualTo(firstRecords))
+            Assert.That(loadAtPath secondPath |> Map.find repoId, Is.EqualTo(secondRecords)))
 
     [<Test>]
     member _.``setForRepo then getForRepo round-trips a repo's records``() =
-        withTempCwd (fun () ->
-            let repoId = uniqueRepo ()
+        withTempDir "treemon-mergedpr-agent" (fun dir ->
+            let _, store = createStore dir
             let records = Map.ofList [ "feature/x", mk 21 "X" "https://example.test/pull/21" ]
 
-            setForRepo repoId records
-            let got = runAsync (getForRepo repoId)
+            store.SetForRepo repoId records
+            let got = runAsync (store.GetForRepo repoId)
 
             Assert.That(got, Is.EqualTo(records),
                 "getForRepo must return exactly what setForRepo stored"))
 
     [<Test>]
     member _.``setForRepo with an empty map drops the repo from memory and disk``() =
-        withTempCwd (fun () ->
-            let repoId = uniqueRepo ()
+        withTempDir "treemon-mergedpr-agent" (fun dir ->
+            let persistedPath, store = createStore dir
             let records = Map.ofList [ "feature/y", mk 9 "Y" "https://example.test/pull/9" ]
 
-            setForRepo repoId records
-            barrier repoId
-            setForRepo repoId Map.empty
-            barrier repoId
+            store.SetForRepo repoId records
+            runAsync (store.Flush()) |> fun result -> assertOk result "initial persist"
+            store.SetForRepo repoId Map.empty
+            runAsync (store.Flush()) |> fun result -> assertOk result "clearing persist"
 
-            Assert.That(Map.isEmpty (runAsync (getForRepo repoId)), Is.True,
+            Assert.That(Map.isEmpty (runAsync (store.GetForRepo repoId)), Is.True,
                 "getForRepo must be empty after the repo is cleared")
             Assert.That(loadAtPath persistedPath |> Map.containsKey repoId, Is.False,
                 "an emptied repo must be dropped from the persisted file, keeping it minimal"))
 
     [<Test>]
     member _.``an unchanged setForRepo does not rewrite the file``() =
-        withTempCwd (fun () ->
-            let repoId = uniqueRepo ()
+        withTempDir "treemon-mergedpr-agent" (fun dir ->
+            let persistedPath, store = createStore dir
             let records = Map.ofList [ "feature/z", mk 3 "Z" "https://example.test/pull/3" ]
 
-            setForRepo repoId records
-            barrier repoId
+            store.SetForRepo repoId records
+            runAsync (store.Flush()) |> fun result -> assertOk result "initial persist"
             File.Delete(persistedPath) // delete the persisted file as a write sentinel
 
-            setForRepo repoId records // identical records -> Decision #6: must not persist
-            barrier repoId
+            store.SetForRepo repoId records
+            runAsync (store.Flush()) |> fun result -> assertOk result "no-op flush"
 
             Assert.That(File.Exists(persistedPath), Is.False,
                 "a no-op setForRepo must not touch the disk (persist only when the store changes)"))
 
     [<Test>]
     member _.``a changed setForRepo rewrites the file with the new records``() =
-        withTempCwd (fun () ->
-            let repoId = uniqueRepo ()
+        withTempDir "treemon-mergedpr-agent" (fun dir ->
+            let persistedPath, store = createStore dir
             let records = Map.ofList [ "feature/z", mk 3 "Z" "https://example.test/pull/3" ]
 
-            setForRepo repoId records
-            barrier repoId
+            store.SetForRepo repoId records
+            runAsync (store.Flush()) |> fun result -> assertOk result "initial persist"
             File.Delete(persistedPath)
 
             let updated = records |> Map.add "feature/w" (mk 4 "W" "https://example.test/pull/4")
-            setForRepo repoId updated
-            barrier repoId
+            store.SetForRepo repoId updated
+            runAsync (store.Flush()) |> fun result -> assertOk result "updated persist"
 
             Assert.That(File.Exists(persistedPath), Is.True, "a changed setForRepo must persist")
             Assert.That(loadAtPath persistedPath |> Map.tryFind repoId, Is.EqualTo(Some updated),
@@ -296,27 +307,29 @@ type ReconcileMergedPrsTests() =
         Assert.That(effective |> Map.containsKey "feature/gone", Is.False,
             "a pruned branch must not be overlaid into the effective map")
 
-    // (d) upsert newly-observed merged PRs, keeping only Id/Title/Url (stamped with the verified tip).
     [<Test>]
-    member _.``upserts a newly observed live merged PR, persisting only Id/Title/Url``() =
+    member _.``upserts a newly observed live merged PR with its provider head SHA``() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
+        let providerHeads = Map.ofList [ "feature/x", "sha-77" ]
         let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-77" ] ]
 
-        let _, newPersisted = reconcileMergedPrs live Map.empty worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+        let _, newPersisted =
+            reconcileObserved live providerHeads Map.empty worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
             Is.EqualTo(Some { mk 77 "Freshly merged" "https://example.test/pull/77" with HeadSha = "sha-77" }),
-            "a live merged PR (with a verified tip) must be recorded, dropping every volatile field")
+            "a live merged PR must retain its immutable provider identity and drop volatile fields")
 
-    // (d, variant) the "up" in upsert: refresh an existing record from the latest live merged PR.
     [<Test>]
     member _.``upsert refreshes an existing record from the live merged PR``() =
         let persisted = Map.ofList [ "feature/x", mk 1 "stale" "https://example.test/pull/1" ]
         let live = Map.ofList [ "feature/x", mergedLivePr 2 "renamed" "https://example.test/pull/2" ]
+        let providerHeads = Map.ofList [ "feature/x", "sha-2" ]
         let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-2" ] ]
 
-        let _, newPersisted = reconcileMergedPrs live persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+        let _, newPersisted =
+            reconcileObserved live providerHeads persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
             Is.EqualTo(Some { mk 2 "renamed" "https://example.test/pull/2" with HeadSha = "sha-2" }),
@@ -330,9 +343,11 @@ type ReconcileMergedPrsTests() =
         let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-12" }
         let persisted = Map.ofList [ "feature/x", record ]
         let live = Map.ofList [ "feature/x", mergedLivePr 12 "Add X" "https://example.test/pull/12" ]
+        let providerHeads = Map.ofList [ "feature/x", "sha-12" ]
         let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-12" ] ]
 
-        let effective, newPersisted = reconcileMergedPrs live persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+        let effective, newPersisted =
+            reconcileObserved live providerHeads persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(newPersisted, Is.EqualTo(persisted),
             "re-upserting an identical merged PR must leave the store structurally unchanged (Decision #6)")
@@ -387,9 +402,10 @@ type ReconcileMergedPrsTests() =
     member _.``still upserts a live merged PR when the enumeration is untrusted (review F7)``() =
         let live =
             Map.ofList [ "feature/new", mergedLivePr 88 "Just merged" "https://example.test/pull/88" ]
+        let providerHeads = Map.ofList [ "feature/new", "sha-88" ]
         let worktreeHeads = Map.ofList [ "feature/new", Set.ofList [ "sha-88" ] ]
 
-        let _, newPersisted = reconcileMergedPrs live Map.empty worktreeHeads None
+        let _, newPersisted = reconcileObserved live providerHeads Map.empty worktreeHeads None
 
         Assert.That(Map.tryFind "feature/new" newPersisted,
             Is.EqualTo(Some { mk 88 "Just merged" "https://example.test/pull/88" with HeadSha = "sha-88" }),
@@ -428,29 +444,6 @@ type ReconcileMergedPrsTests() =
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a tip-matched aged-out record is overlaid as its reconstructed merged PR")
 
-    // (Decision #11) Identity gate — LEGACY: a record with an empty HeadSha is unverified (pre-existing
-    // on-disk data). It keeps the prior name-only overlay even when a present tip would otherwise differ.
-    [<Test>]
-    member _.``keeps and overlays a legacy record with an empty HeadSha regardless of the worktree tip (Decision #11)``() =
-        let record = mk 12 "Add X" "https://example.test/pull/12" // HeadSha = "" (legacy/unverified)
-        let persisted = Map.ofList [ "feature/x", record ]
-        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Y" ] ] // a present, differing tip must NOT evict
-
-        let effective, newPersisted =
-            reconcileMergedPrs Map.empty persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
-
-        Assert.That(Map.tryFind "feature/x" newPersisted, Is.EqualTo(Some record),
-            "a legacy (empty HeadSha) record is unverified and must be kept, never evicted")
-        Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
-            "a legacy record keeps the prior name-only overlay until re-observed live and re-stamped")
-
-    // (review F2) Identity gate with a MULTI-TIP branch: several worktrees can track the SAME upstream
-    // branch at different tips. worktreeHeads therefore carries a SET of tips per branch, and identity
-    // is "match ANY observed tip". A persisted record whose HeadSha matches ONE of the two observed
-    // tips is the same incarnation on one of those worktrees, so it must be KEPT and overlaid — never
-    // evicted because the other worktree happens to sit on a different tip. (Before this fix,
-    // worktreeHeads was built with Map.ofSeq, silently keeping only the last (branch,tip) pair; if that
-    // arbitrary survivor differed from the record's HeadSha, the record was wrongly evicted.)
     [<Test>]
     member _.``keeps and overlays a record whose HeadSha matches one of two observed tips for the branch (review F2)``() =
         let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X1" }
@@ -466,8 +459,23 @@ type ReconcileMergedPrsTests() =
         Assert.That(Map.tryFind "feature/x" effective, Is.EqualTo(Some(reconstructed record)),
             "a still-valid multi-tip record must be overlaid, not lost to an arbitrary Map.ofSeq collapse (review F2)")
 
-    // (review F2) The eviction side of the multi-tip gate: a record whose HeadSha matches NEITHER of
-    // the branch's present tips is a confirmed reused-name incarnation and must still be evicted.
+    [<Test>]
+    member _.``provider identity survives removal of a sibling worktree at a different tip``() =
+        let live =
+            Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
+        let providerHeads = Map.ofList [ "feature/x", "sha-X2" ]
+        let initialHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-X1"; "sha-X2" ] ]
+
+        let _, observed =
+            reconcileObserved live providerHeads Map.empty initialHeads (Some(Set.ofList [ "feature/x" ]))
+
+        let remainingHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-X2" ] ]
+        let effective, persisted =
+            reconcileMergedPrs Map.empty observed remainingHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(persisted |> Map.tryFind "feature/x" |> Option.map _.HeadSha, Is.EqualTo(Some "sha-X2"))
+        Assert.That(Map.containsKey "feature/x" effective, Is.True)
+
     [<Test>]
     member _.``evicts a record whose HeadSha matches none of the branch's observed tips (review F2)``() =
         let record = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-OLD" }
@@ -482,52 +490,52 @@ type ReconcileMergedPrsTests() =
         Assert.That(effective |> Map.containsKey "feature/x", Is.False,
             "an evicted multi-tip mismatch must never be overlaid into the effective map (review F2)")
 
-    // (Decision #11) Upsert stamps identity: a newly observed live merged PR is recorded with the
-    // branch's current worktree tip from worktreeHeads, giving the record its commit identity.
     [<Test>]
-    member _.``stamps a newly observed live merged PR with its worktree tip from worktreeHeads (Decision #11)``() =
+    member _.``records provider identity even when the local worktree tip is temporarily unavailable``() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
-        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Z" ] ]
+        let providerHeads = Map.ofList [ "feature/x", "sha-provider" ]
 
         let _, newPersisted =
-            reconcileMergedPrs live Map.empty worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+            reconcileObserved live providerHeads Map.empty Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted,
-            Is.EqualTo(Some { mk 77 "Freshly merged" "https://example.test/pull/77" with HeadSha = "sha-Z" }),
-            "the upsert must stamp HeadSha from worktreeHeads[branch] as the record's commit identity")
+            Is.EqualTo(Some { mk 77 "Freshly merged" "https://example.test/pull/77" with HeadSha = "sha-provider" }))
 
-    // (review F1) Never write an unverifiable identity: a live merge observed while the branch's tip
-    // is UNKNOWN (absent from worktreeHeads — a transient getLastCommit failure at merge-observation
-    // time) must NOT be recorded. An HeadSha = "" written now is treated as legacy and permanently
-    // exempted from identity eviction, so a later delete+recreate of the branch name could resurrect
-    // the stale merged badge (and trigger an unintended sync push per Decision #9). The upsert must
-    // be skipped, leaving the store empty.
     [<Test>]
-    member _.``does not record a live merged PR whose branch has no worktree tip (review F1)``() =
+    member _.``does not record a live merged PR whose provider head SHA is unavailable``() =
         let live =
             Map.ofList [ "feature/x", mergedLivePr 77 "Freshly merged" "https://example.test/pull/77" ]
-        // worktreeHeads lacks feature/x entirely: no verified tip exists for the observed merge.
         let _, newPersisted =
             reconcileMergedPrs live Map.empty Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.containsKey "feature/x" newPersisted, Is.False,
-            "a merge observed without a verified tip must NOT be persisted as an unverifiable HeadSha=\"\" record (review F1)")
+            "a merge without immutable provider identity must not enter the durable fallback")
 
-    // (review F1) The same guard on the "up" of upsert: a re-observed merge whose tip is unknown must
-    // leave any EXISTING verified record untouched rather than overwriting it with an unverifiable
-    // HeadSha = "" (which the identity gate would then exempt from eviction).
     [<Test>]
-    member _.``does not overwrite an existing verified record when a re-observed merge has no worktree tip (review F1)``() =
+    member _.``does not overwrite an existing verified record when a re-observed merge has no provider SHA``() =
         let existing = { mk 12 "Add X" "https://example.test/pull/12" with HeadSha = "sha-X" }
         let persisted = Map.ofList [ "feature/x", existing ]
         let live = Map.ofList [ "feature/x", mergedLivePr 99 "reobserved" "https://example.test/pull/99" ]
-        // worktreeHeads lacks feature/x: the re-observation carries no verified tip to restamp with.
         let _, newPersisted =
             reconcileMergedPrs live persisted Map.empty (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.tryFind "feature/x" newPersisted, Is.EqualTo(Some existing),
-            "a re-observed merge without a verified tip must leave the existing verified record intact (review F1)")
+            "a re-observed merge without provider identity must leave the verified record intact")
+
+    [<Test>]
+    member _.``does not rebind an old merged PR to later unmerged work on the same branch``() =
+        let existing = { mk 42 "Merged X" "https://example.test/pull/42" with HeadSha = "sha-X" }
+        let persisted = Map.ofList [ "feature/x", existing ]
+        let live = Map.ofList [ "feature/x", mergedLivePr 42 "Merged X" "https://example.test/pull/42" ]
+        let providerHeads = Map.ofList [ "feature/x", "sha-X" ]
+        let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Y" ] ]
+
+        let _, newPersisted =
+            reconcileObserved live providerHeads persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
+
+        Assert.That(Map.containsKey "feature/x" newPersisted, Is.False,
+            "later local commit Y must not be stamped as proof that merged PR #42 covers it")
 
 // pruneScope decides whether the live-derived branch enumeration is trustworthy enough to prune
 // against (review F7 / Decision #8): it must be complete, non-empty, AND free of transient upstream
@@ -601,12 +609,7 @@ type MergedPrPruneScopeTests() =
         Assert.That(pruneScope known collected readFailed branches, Is.EqualTo(Some branches),
             "a read failure outside the known worktree set must not block pruning")
 
-// End-to-end integration (task tm-pr-recency-window-54z, spec docs/spec/merged-pr-persistence.md).
-// Exercises the REAL disk I/O of MergedPrStore (persistAtPath/loadAtPath) wired to the pure
-// reconcileMergedPrs against a temp data dir. Uses the path-injectable internal persist/load — NOT
-// the singleton getForRepo/setForRepo, which are bound to the default data/merged-prs.json — so the
-// test only ever writes to a temp file, never the repo data dir. Each numbered member maps 1:1 to a
-// falsifiable step in the task's integration scope.
+// End-to-end coverage for the merged-PR persistence lifecycle described in worktree-monitor.md.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -638,7 +641,7 @@ type MergedPrStoreEndToEndTests() =
     // is non-empty. (Reaching the assertion proves loadAtPath returned rather than threw.)
     [<Test>]
     member _.``step 6 - a corrupt store file loads as empty without throwing``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-e2e" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
             File.WriteAllBytes(path, [| 0uy; 159uy; 146uy; 150uy; 123uy; 34uy; 255uy; 0uy |])
 
@@ -651,12 +654,18 @@ type MergedPrStoreEndToEndTests() =
     // steps compose end-to-end on one physical file, not just in isolation.
     [<Test>]
     member _.``full lifecycle - observe, persist, reload, fallback, then prune on one file``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-mergedpr-e2e" (fun dir ->
             let path = Path.Combine(dir, "merged-prs.json")
 
-            // observe + persist (a verified worktree tip is required to record the merge, review F1)
+            let providerHeads = Map.ofList [ branch, "sha-42" ]
             let worktreeHeads = Map.ofList [ branch, Set.ofList [ "sha-42" ] ]
-            let _, observed = reconcileMergedPrs (Map.ofList [ branch, liveMerged42 ]) Map.empty worktreeHeads (known branch)
+            let _, observed =
+                reconcileObserved
+                    (Map.ofList [ branch, liveMerged42 ])
+                    providerHeads
+                    Map.empty
+                    worktreeHeads
+                    (known branch)
             persistStore path (Map.ofList [ repo, observed ])
 
             // simulated restart + aged-out fallback (empty live map)

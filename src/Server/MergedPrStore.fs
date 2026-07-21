@@ -3,11 +3,8 @@ module Server.MergedPrStore
 open System.IO
 open Shared
 
-/// One persisted merged-PR fact — the minimal fields the merged badge renders (`Id`/`Title`/`Url`)
-/// plus `HeadSha`, the worktree tip commit at record time (the merged-record identity, Decision #11).
-/// Volatile PR data (builds, comments, conflicts, draft) is deliberately never stored; only the
-/// terminal "merged" fact survives the bounded GitHub fetch window and server restarts. An empty
-/// `HeadSha` means legacy/unverified (pre-existing on-disk data, or a tolerant-load default).
+/// One persisted merged-PR fact. `HeadSha` is the provider-reported PR source commit, so later
+/// commits on a reused or advanced branch cannot inherit the old merged state.
 type MergedPrRecord =
     { Id: int
       Title: string
@@ -27,70 +24,39 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
           IsMerged = true
           HasConflicts = false }
 
-/// Pure reconciliation (no I/O) of the live PR map with the persisted merged records. Returns the
-/// effective map and the new persisted records (equal to `persisted` when nothing moved, so the
-/// caller can skip the write, Decision #6):
-///  - upserts every live `HasPr { IsMerged = true }` (keeping only `Id`/`Title`/`Url`, stamping
-///    `HeadSha` from `worktreeHeads` — one of the branch's current worktree tips, Decision #11) —
-///    but ONLY when that branch has at least one present, non-empty tip; a merge observed while the
-///    tip is unknown is NOT written (never stamp an unverifiable `HeadSha = ""` the identity gate
-///    can't evict, review F1);
-///  - identity-gates by tip BEFORE the name-prune: a record is evicted only on a confirmed mismatch
-///    (non-empty `HeadSha` AND a present, non-empty tip SET that does NOT contain it = a reused-name
-///    incarnation); a match against ANY observed tip, an absent/empty tip set, or an empty (legacy)
-///    `HeadSha` is kept (Decision #11);
-///  - overlays a reconstructed merged `HasPr` for persisted branches the live map lacks — a live
-///    `HasPr` always wins, the overlay is fallback-only, and surviving records are match-or-legacy
-///    so the fallback is safe (Decision #3);
-///  - prunes to `knownBranches` only when `Some` (a complete, non-empty enumeration). `None` SKIPS
-///    pruning so an empty/partial set can never wipe just-loaded facts (review F7 / Decision #8).
-/// `worktreeHeads` maps branch -> the SET of its current worktree tip SHAs (the identity source,
-/// Decision #11). A set (not a single SHA) is required because several worktrees can track the SAME
-/// upstream branch at different tips; collapsing them to one arbitrary tip would evict records whose
-/// still-valid tip lost the collapse (review F2). Identity is therefore "match ANY observed tip".
+/// Reconciles live provider data with durable merged records. Provider head SHAs are immutable PR
+/// identities; local worktree tips only decide whether a stored identity still describes any
+/// current worktree for that branch.
 let reconcileMergedPrs
     (livePrMap: Map<string, PrStatus>)
+    (liveHeadShas: Map<string, string>)
     (persisted: Map<string, MergedPrRecord>)
     (worktreeHeads: Map<string, Set<string>>)
     (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
-    // Upsert every branch observed as merged — provider ground truth, always safe and additive —
-    // but ONLY when it has at least one present, non-empty worktree tip. When no tip is known
-    // (getLastCommit failed transiently at observation time, so worktreeHeads omits the branch or
-    // carries an empty set), leave any existing record untouched: never overwrite it with an
-    // unverifiable `HeadSha = ""`, which the identity gate below would permanently exempt from
-    // eviction, letting a later reused branch name resurrect a stale merged badge (review F1). When
-    // several worktrees share the branch we stamp one of its current tips (the gate accepts ANY of
-    // the branch's observed tips, so a same-branch multi-worktree setup won't false-evict, F2).
     let upserted =
         livePrMap
         |> Map.fold
             (fun acc branch status ->
                 match status with
                 | HasPr pr when pr.IsMerged ->
-                    match Map.tryFind branch worktreeHeads with
-                    | Some tips when not (Set.isEmpty tips) ->
-                        acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = Set.minElement tips }
+                    match liveHeadShas |> Map.tryFind branch |> Option.filter (System.String.IsNullOrWhiteSpace >> not) with
+                    | Some headSha ->
+                        acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = headSha }
                     | _ -> acc
                 | _ -> acc)
             persisted
 
-    // Identity gate (Decision #11), BEFORE the name-prune: keep a record when its `HeadSha` is empty
-    // (legacy/unverified), when its branch has no observed tip (absent, or a present-but-empty set),
-    // or when ANY observed tip matches it; evict only on a confirmed mismatch (non-empty `HeadSha`
-    // AND a present, non-empty tip set that does NOT contain it = a reused-name incarnation, F2).
     let identityFiltered =
         upserted
         |> Map.filter (fun branch record ->
-            if record.HeadSha = "" then
-                true
-            else
-                match Map.tryFind branch worktreeHeads with
-                | None -> true
-                | Some tips -> Set.isEmpty tips || Set.contains record.HeadSha tips)
+            not (System.String.IsNullOrWhiteSpace record.HeadSha)
+            &&
+            (match Map.tryFind branch worktreeHeads with
+             | None -> true
+             | Some tips -> Set.isEmpty tips || Set.contains record.HeadSha tips))
 
-    // Prune only against a trustworthy enumeration (`Some`); `None` leaves the store intact (F7).
     let newPersisted =
         match knownBranches with
         | Some branches -> identityFiltered |> Map.filter (fun branch _ -> Set.contains branch branches)
@@ -133,34 +99,35 @@ let pruneScope
     else
         None
 
-/// Default on-disk location: gitignored server runtime state, NOT the user-authored `config.json`.
-/// Matches `data/canvas-owners.json` and `data/sessions.json`.
-let private filePath = Path.Combine("data", "merged-prs.json")
+let filePathForPort port = Path.Combine("data", $"merged-prs-{port}.json")
 
-/// Serializes the whole store as `repo -> branch -> {id;title;url}` via the shared atomic writer.
-/// The path is explicit so tests can target a temp dir.
-let internal persistAtPath (path: string) (state: Map<RepoId, Map<string, MergedPrRecord>>) =
-    JsonStore.persist "MergedPrStore" path (fun writer ->
+let private writeState (writer: System.Text.Json.Utf8JsonWriter) (state: Map<RepoId, Map<string, MergedPrRecord>>) =
+    writer.WriteStartObject()
+
+    state
+    |> Map.iter (fun (RepoId repoId) branchMap ->
+        writer.WritePropertyName(repoId)
         writer.WriteStartObject()
 
-        state
-        |> Map.iter (fun (RepoId repoId) branchMap ->
-            writer.WritePropertyName(repoId)
+        branchMap
+        |> Map.iter (fun branch record ->
+            writer.WritePropertyName(branch)
             writer.WriteStartObject()
-
-            branchMap
-            |> Map.iter (fun branch record ->
-                writer.WritePropertyName(branch)
-                writer.WriteStartObject()
-                writer.WriteNumber("id", record.Id)
-                writer.WriteString("title", record.Title)
-                writer.WriteString("url", record.Url)
-                writer.WriteString("head_sha", record.HeadSha)
-                writer.WriteEndObject())
-
+            writer.WriteNumber("id", record.Id)
+            writer.WriteString("title", record.Title)
+            writer.WriteString("url", record.Url)
+            writer.WriteString("head_sha", record.HeadSha)
             writer.WriteEndObject())
 
         writer.WriteEndObject())
+
+    writer.WriteEndObject()
+
+let internal tryPersistAtPath (path: string) (state: Map<RepoId, Map<string, MergedPrRecord>>) =
+    JsonStore.tryPersist "MergedPrStore" path (fun writer -> writeState writer state)
+
+let internal persistAtPath path state =
+    tryPersistAtPath path state |> Async.Ignore
 
 /// Loads the store via the shared safe loader; an absent or corrupt file yields an empty store so
 /// startup never throws. The path is explicit so tests can target a temp dir.
@@ -175,40 +142,45 @@ let internal loadAtPath (path: string) : Map<RepoId, Map<string, MergedPrRecord>
                         (fun acc branchProp ->
                             let el = branchProp.Value
 
-                            // Read head_sha tolerantly: a missing (legacy file) or non-string
-                            // (corrupt) value defaults to "" — an empty HeadSha = legacy/unverified.
                             let headSha =
                                 match el.TryGetProperty("head_sha") with
-                                | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String -> v.GetString()
-                                | _ -> ""
+                                | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String ->
+                                    v.GetString() |> Option.ofObj |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
+                                | _ -> None
 
-                            let record =
+                            headSha
+                            |> Option.map (fun sha ->
                                 { Id = el.GetProperty("id").GetInt32()
                                   Title = el.GetProperty("title").GetString()
                                   Url = el.GetProperty("url").GetString()
-                                  HeadSha = headSha }
-
-                            acc |> Map.add branchProp.Name record)
+                                  HeadSha = sha })
+                            |> Option.map (fun record -> acc |> Map.add branchProp.Name record)
+                            |> Option.defaultValue acc)
                         Map.empty
 
-                acc |> Map.add (RepoId repoProp.Name) branchMap)
+                if Map.isEmpty branchMap then acc
+                else acc |> Map.add (RepoId repoProp.Name) branchMap)
             Map.empty)
     |> Option.defaultValue Map.empty
 
-let private store =
-    PersistentStore.create "MergedPrStore" (persistAtPath filePath) (fun () -> loadAtPath filePath)
+type Store =
+    { GetForRepo: RepoId -> Async<Map<string, MergedPrRecord>>
+      SetForRepo: RepoId -> Map<string, MergedPrRecord> -> unit
+      Load: unit -> unit
+      Flush: unit -> Async<Result<unit, string>> }
 
-/// Async read of a repo's persisted merged-PR records (branch -> record); empty when none stored.
-let getForRepo (repoId: RepoId) : Async<Map<string, MergedPrRecord>> =
-    async {
-        let! records = store.Get repoId
-        return records |> Option.defaultValue Map.empty
-    }
+let create path =
+    let store =
+        PersistentStore.create "MergedPrStore" (tryPersistAtPath path) (fun () -> loadAtPath path)
 
-/// Replaces a repo's persisted records, persisting only when they change (Decision #6); an empty
-/// map drops the repo key so the file stays minimal.
-let setForRepo (repoId: RepoId) (records: Map<string, MergedPrRecord>) =
-    store.Update repoId (fun _ -> if Map.isEmpty records then None else Some records)
-
-/// Loads the store at startup. Never throws (absent/corrupt -> empty store).
-let load () = store.Load()
+    { GetForRepo =
+        fun repoId ->
+            async {
+                let! records = store.Get repoId
+                return records |> Option.defaultValue Map.empty
+            }
+      SetForRepo =
+        fun repoId records ->
+            store.Update repoId (fun _ -> if Map.isEmpty records then None else Some records)
+      Load = store.Load
+      Flush = store.Flush }
