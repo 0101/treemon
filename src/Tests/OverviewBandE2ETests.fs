@@ -119,6 +119,24 @@ let private bandProbeJs =
           const d = agentsSec.querySelector('.overview-donut');
           return d ? getComputedStyle(d).getPropertyValue('--ctx-remaining').trim() : '';
         })(),
+        donutWidth: (() => {
+          const d = agentsSec.querySelector('.overview-donut');
+          return d ? getComputedStyle(d).width : '';
+        })(),
+        donutHeight: (() => {
+          const d = agentsSec.querySelector('.overview-donut');
+          return d ? getComputedStyle(d).height : '';
+        })(),
+        plainCircleWidth: (() => {
+          const d = agentsSec.querySelector('.overview-circle:not(.overview-donut)');
+          return d ? getComputedStyle(d).width : '';
+        })(),
+        plainCircleHeight: (() => {
+          const d = agentsSec.querySelector('.overview-circle:not(.overview-donut)');
+          return d ? getComputedStyle(d).height : '';
+        })(),
+        circleGap: getComputedStyle(circles).gap,
+        circleAlignItems: getComputedStyle(circles).alignItems,
         investigatingCircles: (() => {
           const it = itemByLabel(agentsSec, 'Investigating');
           return it ? it.querySelectorAll('.overview-circle').length : 0;
@@ -157,12 +175,25 @@ let private cardProbeJs =
       const working = document.querySelector('.wt-card.ct-working');
       const before = working ? getComputedStyle(working, '::before') : null;
       const redDot = document.querySelector('.ct-dot.working');
+      const contextDonut = document.querySelector('.wt-card .ct-dot.ct-donut.working');
+      const donutRing = contextDonut ? getComputedStyle(contextDonut, '::before') : null;
+      const donutCenter = contextDonut ? getComputedStyle(contextDonut, '::after') : null;
       return JSON.stringify({
         cardCount: cards.length,
         anyActClass,
         beforeContent: before ? before.content : 'none',
         beforeBackground: before ? before.backgroundColor : '',
-        redDotColor: redDot ? getComputedStyle(redDot).backgroundColor : null
+        redDotColor: redDot ? getComputedStyle(redDot).backgroundColor : null,
+        hasContextDonut: !!contextDonut,
+        contextDonutWidth: contextDonut ? getComputedStyle(contextDonut).width : '',
+        contextDonutHeight: contextDonut ? getComputedStyle(contextDonut).height : '',
+        contextDonutAnimation: contextDonut ? getComputedStyle(contextDonut).animationName : '',
+        donutRingAnimation: donutRing ? donutRing.animationName : '',
+        donutCenterWidth: donutCenter ? donutCenter.width : '',
+        donutCenterHeight: donutCenter ? donutCenter.height : '',
+        donutCenterColor: donutCenter ? donutCenter.backgroundColor : '',
+        donutCenterAnimation: donutCenter ? donutCenter.animationName : '',
+        donutCenterDuration: donutCenter ? donutCenter.animationDuration : ''
       });
     }
     """
@@ -342,6 +373,30 @@ type OverviewBandE2ETests() =
         let remaining =
             System.Double.Parse(probe.Value<string>("donutCtxRemaining"), System.Globalization.CultureInfo.InvariantCulture)
         Assert.That(remaining, Is.GreaterThan(0.0).And.LessThanOrEqualTo(1.0), "--ctx-remaining is a fraction in (0,1]")
+
+    [<Test>]
+    member _.``Donuts - overview mixes centered 10px dots with thin 15px rings``() =
+        let probe = requireProbe ()
+        Assert.That(probe.Value<string>("donutWidth"), Is.EqualTo("15px"))
+        Assert.That(probe.Value<string>("donutHeight"), Is.EqualTo("15px"))
+        Assert.That(probe.Value<string>("plainCircleWidth"), Is.EqualTo("10px"))
+        Assert.That(probe.Value<string>("plainCircleHeight"), Is.EqualTo("10px"))
+        Assert.That(probe.Value<string>("circleGap"), Is.EqualTo("6px"))
+        Assert.That(probe.Value<string>("circleAlignItems"), Is.EqualTo("center"))
+
+    [<Test>]
+    member _.``Donuts - card ring stays stable while its fixed-size red center pulses``() =
+        let probe = requireCardProbe ()
+        Assert.That(probe.Value<bool>("hasContextDonut"), Is.True)
+        Assert.That(probe.Value<string>("contextDonutWidth"), Is.EqualTo("15px"))
+        Assert.That(probe.Value<string>("contextDonutHeight"), Is.EqualTo("15px"))
+        Assert.That(probe.Value<string>("contextDonutAnimation"), Is.EqualTo("none"))
+        Assert.That(probe.Value<string>("donutRingAnimation"), Is.EqualTo("none"))
+        Assert.That(probe.Value<string>("donutCenterWidth"), Is.EqualTo("10px"))
+        Assert.That(probe.Value<string>("donutCenterHeight"), Is.EqualTo("10px"))
+        Assert.That(probe.Value<string>("donutCenterColor"), Is.EqualTo(rgb "#ff0000"))
+        Assert.That(probe.Value<string>("donutCenterAnimation"), Is.EqualTo("pulse"))
+        Assert.That(probe.Value<string>("donutCenterDuration"), Is.EqualTo("2s"))
 
     [<Test>]
     member _.``Donuts - a multi-session worktree clusters its session circles in one group``() =

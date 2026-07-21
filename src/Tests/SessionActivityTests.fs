@@ -363,13 +363,11 @@ type FreshnessTests() =
     [<Test>]
     member _.``Freshness only rewrites Status, preserving skill and messages``() =
         let rich =
-            { Status = SessionLevelStatus.WaitingForUser
-              Skill = Some "review"
-              Intent = None
-              Title = None
-              LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
-              LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z")
-              ContextUsage = None }
+            { emptyStatus with
+                Status = SessionLevelStatus.WaitingForUser
+                Skill = Some "review"
+                LastUserMessage = Some(msg "the auth module" "2026-03-01T10:00:00Z")
+                LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:01Z") }
         let lastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
         let adjusted = freshnessAdjusted now lastSeen rich
         Assert.That(adjusted.Status, Is.EqualTo(SessionLevelStatus.Idle))
@@ -420,13 +418,11 @@ type PickActiveTests() =
     [<Test>]
     member _.``The whole winning record is returned, not cherry-picked fields``() =
         let winner =
-            { Status = SessionLevelStatus.Working
-              Skill = Some "bd-execute"
-              Intent = None
-              Title = None
-              LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
-              LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z")
-              ContextUsage = None }
+            { emptyStatus with
+                Status = SessionLevelStatus.Working
+                Skill = Some "bd-execute"
+                LastUserMessage = Some(msg "go" "2026-03-01T10:00:00Z")
+                LastAssistantMessage = Some(msg "on it" "2026-03-01T10:00:01Z") }
         let sessions =
             [ statusAt SessionLevelStatus.Idle (Some "stale-skill"), ts "2026-03-01T11:00:00Z"
               winner, ts "2026-03-01T10:30:00Z" ]

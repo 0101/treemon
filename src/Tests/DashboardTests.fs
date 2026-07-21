@@ -80,7 +80,7 @@ type DashboardTests() =
     [<Category("Fast")>]
     member this.``CT dot has correct background color``(status: string, expectedColor: string) =
         task {
-            let dots = this.Page.Locator($".ct-dot.{status}")
+            let dots = this.Page.Locator($".ct-dot.{status}:not(.ct-donut)")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), $"Fixture has {status} worktrees; {status} dots should be present")
@@ -1468,7 +1468,7 @@ type DashboardTests() =
     [<Category("Fast")>]
     member this.``Working dot has pulse animation``() =
         task {
-            let workingDots = this.Page.Locator(".ct-dot.working")
+            let workingDots = this.Page.Locator(".ct-dot.working:not(.ct-donut)")
             do! workingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! animationName = workingDots.First |> computedStyle "animationName"
@@ -1487,13 +1487,13 @@ type DashboardTests() =
     [<Test>]
     member this.``Non-working dots have no pulse animation``() =
         task {
-            let waitingDots = this.Page.Locator(".ct-dot.waiting")
+            let waitingDots = this.Page.Locator(".ct-dot.waiting:not(.ct-donut)")
             do! waitingDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! animName = waitingDots.First |> computedStyle "animationName"
             Assert.That(animName, Is.EqualTo("none"), "Waiting dot should have no animation")
 
-            let idleDots = this.Page.Locator(".ct-dot.idle")
+            let idleDots = this.Page.Locator(".ct-dot.idle:not(.ct-donut)")
             do! idleDots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! idleAnimName = idleDots.First |> computedStyle "animationName"
@@ -1501,18 +1501,18 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``All ct-dots are circles with 15px size``() =
+    member this.``Context-less card dots are centered 10px circles``() =
         task {
-            let dots = this.Page.Locator(".wt-card .ct-dot")
+            let dots = this.Page.Locator(".wt-card .ct-dot:not(.ct-donut)")
             do! dots.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dots.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1))
 
             let! width = dots.First |> computedStyle "width"
-            Assert.That(width, Is.EqualTo("15px"), "CT dot width should be 15px")
+            Assert.That(width, Is.EqualTo("10px"), "Context-less CT dot width should be 10px")
 
             let! height = dots.First |> computedStyle "height"
-            Assert.That(height, Is.EqualTo("15px"), "CT dot height should be 15px")
+            Assert.That(height, Is.EqualTo("10px"), "Context-less CT dot height should be 10px")
 
             let! borderRadius = dots.First |> computedStyle "borderRadius"
             Assert.That(borderRadius, Is.EqualTo("50%"), "CT dot should be circular (border-radius: 50%)")
@@ -4064,5 +4064,4 @@ type DashboardTests() =
             Assert.That(afterClass, Does.Contain("repo-header"),
                 "Focus should remain on repo header (arrow keys while modal open should not have changed it)")
         }
-
 

@@ -99,17 +99,20 @@ let view model dispatch =
         prop.text "Click"
     ]
 
-// State is part of the model
+// Clock captured by a command and passed through Msg
 let update msg model =
     match msg with
     | Fetch ->
-        { model with LastFetchTime = Some System.DateTime.Now },
+        model,
+        Cmd.OfFunc.perform (fun () -> System.DateTime.Now) () FetchStarted
+    | FetchStarted timestamp ->
+        { model with LastFetchTime = Some timestamp },
         Cmd.OfAsync.perform api.fetch () Fetched
 
-// Styling via React props
+// Styling via a CSS class
 let view model dispatch =
     Html.div [
-        prop.style [ style.color.red ]
+        prop.className "error-text"
     ]
 
 // A dedicated local hook may coalesce rendering-only hover feedback
@@ -135,4 +138,10 @@ let useHover () =
     )
 
     hover, queueHover
+```
+
+```css
+.error-text {
+    color: red;
+}
 ```

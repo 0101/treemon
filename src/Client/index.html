@@ -102,20 +102,39 @@
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
         .btn-icon { width: 13px; height: 13px; display: block; }
 
-        .ct-dot { width: 15px; height: 15px; border-radius: 50%; flex-shrink: 0; }
+        .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
         .ct-dot.working  { --ct-color: #ff0000; background: var(--ct-color); animation: pulse 2s ease-in-out infinite; }
         .ct-dot.waiting  { --ct-color: #f9e2af; background: var(--ct-color); }
         .ct-dot.idle     { --ct-color: #89b4fa; background: var(--ct-color); }
         .ct-dot.nosession { --ct-color: #585b70; background: var(--ct-color); }
         .ct-dots { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-        /* Per-session context donut: the arc (the session's status colour) spans `--ctx-remaining`
-           (0–1, set inline per session) of the ring over a muted track — so a healthy low-usage
-           session is a nearly full ring and one near its limit thins to a sliver; a radial mask
-           punches the centre hole. A session with no reported usage keeps the plain `.ct-dot`. */
+        /* Per-session context donut: a stable 15px ring surrounds a 10px centre. The ring arc
+           (the session's status colour) spans `--ctx-remaining` over a muted track; for a working
+           session, only the red centre pulses. A session with no reported usage stays a centred
+           10px plain `.ct-dot`. */
         .ct-dot.ct-donut {
+          position: relative;
+          width: 15px;
+          height: 15px;
+          background: transparent;
+          animation: none;
+        }
+        .ct-dot.ct-donut::before {
+          position: absolute;
+          inset: 0;
+          content: "";
+          border-radius: 50%;
           background: conic-gradient(var(--ct-color) calc(var(--ctx-remaining, 1) * 360deg), #45475a 0);
-          -webkit-mask: radial-gradient(circle closest-side, transparent 0 50%, #000 53%);
-                  mask: radial-gradient(circle closest-side, transparent 0 50%, #000 53%);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+                  mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+        }
+        .ct-dot.ct-donut.working::after {
+          position: absolute;
+          inset: 2.5px;
+          content: "";
+          border-radius: 50%;
+          background: var(--ct-color);
+          animation: pulse 2s ease-in-out infinite;
         }
         .canvas-badge { background: #89b4fa; color: #1e1e2e; font-size: 0.7em; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; display: inline-block; margin-left: 4px; padding: 0 4px; }
 
@@ -192,17 +211,18 @@
            it tints the count text while the label keeps the neutral .overview-meta colour. */
         .overview-count { font-weight: 400; margin-right: 3px; }
         .overview-label { font-weight: 400; }
-        .overview-circles { display: flex; align-items: center; gap: 7px; }
-        .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
+        .overview-circles { display: flex; align-items: center; gap: 6px; }
+        .overview-circle { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex: none; }
         /* Context-usage donut: the filled arc (currentColor accent) spans `--ctx-remaining` (0–1, set
            inline per agent) of the ring over a muted track — so a healthy low-usage agent is a nearly
-           full ring and one near its limit thins to a sliver; a radial mask punches the centre hole.
-           An agent with no reported usage keeps the plain solid `.overview-circle` above (the
-           `.overview-donut` class is simply not applied). */
+           full ring and one near its limit thins to a sliver. Context donuts stay 15px while agents
+           with no reported usage render as centred 10px solid circles. */
         .overview-donut {
+          width: 15px;
+          height: 15px;
           background: conic-gradient(currentColor calc(var(--ctx-remaining, 1) * 360deg), #45475a 0);
-          -webkit-mask: radial-gradient(circle closest-side, transparent 0 55%, #000 57%);
-                  mask: radial-gradient(circle closest-side, transparent 0 55%, #000 57%);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+                  mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
         }
         /* Bar width = its share of the shared scale (`--bar-fill`, set inline per bar) times a
            RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
