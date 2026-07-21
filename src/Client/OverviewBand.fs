@@ -241,24 +241,20 @@ let private section (header: string) (columns: ReactElement list) (breakdown: Re
                 Html.div [ prop.className "overview-items"; prop.children columns ]
                 breakdown ] ]
 
-/// The band's single history-window cycle button (spec: docs/spec/overview-activity-history.md,
-/// decision #5). Clicking advances Hidden -> 24h -> 72h -> Hidden via onCycleChart; the label mirrors
-/// the state (◷ History / ◷ 24h / ◷ 72h) and aria-pressed reflects whether a window is open. Styled
-/// like the band's controls (.history-toggle), pinned to the band's top-right toolbar.
-let private cycleButton (chartWindow: OverviewChartWindow) (onCycleChart: unit -> unit) =
+/// The band's single history-window cycle button. None is the client-only Hidden state.
+let private cycleButton (historyWindow: HistoryWindow option) (onCycleChart: unit -> unit) =
     let label =
-        match chartWindow with
-        | OverviewChartWindow.Hidden -> "\u25F7 History"
-        | OverviewChartWindow.Hours24 -> "\u25F7 24h"
-        | OverviewChartWindow.Hours72 -> "\u25F7 72h"
+        historyWindow
+        |> Option.map (fun window -> $"\u25F7 {historyWindowLabel window}")
+        |> Option.defaultValue "\u25F7 History"
 
     Html.div
         [ prop.className "overview-toolbar"
           prop.children
               [ Html.button
                     [ prop.className "history-toggle"
-                      prop.ariaPressed (chartWindow <> OverviewChartWindow.Hidden)
-                      prop.title "Cycle history window (hidden \u2192 24h \u2192 72h)"
+                      prop.ariaPressed (Option.isSome historyWindow)
+                      prop.title "Cycle history window (hidden \u2192 12h \u2192 24h \u2192 72h)"
                       prop.onClick (fun _ -> onCycleChart ())
                       prop.text label ] ] ]
 
@@ -266,26 +262,22 @@ let private cycleButton (chartWindow: OverviewChartWindow) (onCycleChart: unit -
 /// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the
 /// currently drilled-down group (if any); `onSelectGroup` toggles a group's selection when its column
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
-/// arrow-nav parity. `chartWindow`/`onCycleChart` drive the ephemeral in-band history chart's cycle
-/// button (Hidden -> 24h -> 72h -> Hidden), mutually exclusive with the drill-down; `history` is the
-/// OverviewSnapshot list last fetched for the active window, which OverviewChart turns into the stacked
-/// stepped-area charts rendered directly under each section (agents live -> agents history -> tasks live
-/// -> tasks history) whenever a window is open.
+/// arrow-nav parity. `historyWindow`/`onCycleChart` drive the ephemeral in-band history chart's cycle,
+/// mutually exclusive with the drill-down. The anchored server response fixes both charts' right edge.
 let view
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
-    (chartWindow: OverviewChartWindow)
+    (historyWindow: HistoryWindow option)
     (onCycleChart: unit -> unit)
-    (history: OverviewSnapshot list)
-    (now: System.DateTimeOffset)
+    (history: OverviewHistoryResponse option)
     (repos: RepoModel list)
     : ReactElement =
     let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
-    // "Now" anchors the charts' right edge (right-edge hold to now). Passed in from the model (the
-    // history-fetch instant) rather than read live here, so the axis steps forward once per poll with
-    // fresh data instead of drifting on every render.
-    let chartsOpen = chartWindow <> OverviewChartWindow.Hidden
+    let chartData =
+        match historyWindow, history with
+        | Some window, Some response -> Some(window, response)
+        | _ -> None
 
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
@@ -293,7 +285,7 @@ let view
         Html.div
             [ prop.className "overview-band"
               prop.children
-                  [ cycleButton chartWindow onCycleChart
+                  [ cycleButton historyWindow onCycleChart
                     match agents with
                     | [] -> Html.none
                     | groups ->
@@ -310,10 +302,11 @@ let view
                     // Agents history chart, directly under the agents live section (order: agents live ->
                     // agents history -> tasks live -> tasks history). Only when a window is open and the
                     // agents section is present; mutually exclusive with the drill-down (enforced in state).
-                    match agents, chartsOpen with
+                    match agents, chartData with
                     | [], _ -> Html.none
-                    | _, false -> Html.none
-                    | _, true -> OverviewChart.agentsChart chartWindow now history
+                    | _, None -> Html.none
+                    | _, Some (window, response) ->
+                        OverviewChart.agentsChart window response.Anchor response.Snapshots
                     match tasks with
                     | [] -> Html.none
                     | buckets ->
@@ -328,7 +321,8 @@ let view
                                  |> Option.defaultValue Html.none
                              | _ -> Html.none)
                     // Tasks history chart, directly under the tasks live section.
-                    match tasks, chartsOpen with
+                    match tasks, chartData with
                     | [], _ -> Html.none
-                    | _, false -> Html.none
-                    | _, true -> OverviewChart.tasksChart chartWindow now history ] ]
+                    | _, None -> Html.none
+                    | _, Some (window, response) ->
+                        OverviewChart.tasksChart window response.Anchor response.Snapshots ] ]

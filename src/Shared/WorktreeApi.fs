@@ -3,7 +3,7 @@ namespace Shared
 open System
 
 /// The Fable.Remoting contract between client and server. Kept in its own file (not Types.fs) purely
-/// for compile order: `getOverviewHistory` returns `OverviewData.OverviewSnapshot list`, and
+/// for compile order: `getOverviewHistory` uses the history types in `OverviewData`, and
 /// `OverviewData` is compiled AFTER `Types.fs`, so the interface must live after it to name that type.
 /// Everything else it references (requests/results, WorktreePath, etc.) is defined earlier in Types.fs.
 type IWorktreeApi =
@@ -39,7 +39,6 @@ type IWorktreeApi =
       addRoot: string -> Async<Result<unit, string>>
       removeRoot: string -> Async<Result<unit, string>>
       getRoots: unit -> Async<string list>
-      /// Records within the last 72h (the widest window the in-band chart offers), reconciled on read
-      /// from the push event store: Tasks from the snapshot table, Agents derived from the event stream.
-      /// Newest data included; older records ignored on read.
-      getOverviewHistory: unit -> Async<OverviewData.OverviewSnapshot list> }
+      /// Count-only Overview history for the explicitly requested window, anchored to the server
+      /// computation instant so every caller renders identical timeline edges.
+      getOverviewHistory: OverviewData.HistoryWindow -> Async<OverviewData.OverviewHistoryResponse> }

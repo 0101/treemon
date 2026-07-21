@@ -20,11 +20,9 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
-// Fetch the Overview band's recent history (last 72h) for the in-band chart. On failure it degrades to
-// an empty snapshot list rather than an error, matching the spec's "renders nothing" fallback.
-let fetchOverviewHistory () =
-    let loaded history = OverviewHistoryLoaded(history, System.DateTimeOffset.Now)
-    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory () loaded (fun _ -> loaded [])
+let fetchOverviewHistory window =
+    let loaded response = OverviewHistoryLoaded(window, Some response)
+    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory window loaded (fun _ -> OverviewHistoryLoaded(window, None))
 
 // The in-band history chart is refreshed no more often than this while open. The poll ticks ~1/s and
 // getOverviewHistory reconstructs the whole agent timeline from the event window (hundreds of ms on a
@@ -32,10 +30,15 @@ let fetchOverviewHistory () =
 // sub-30s freshness.
 let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
 
-let shouldRefreshOverviewHistory panelOpen chartWindow lastFetchedAt now =
+let shouldRefreshOverviewHistory panelOpen historyWindow lastRequestedAt now =
     panelOpen
-    && chartWindow <> OverviewChartWindow.Hidden
-    && now - lastFetchedAt >= overviewHistoryRefreshInterval
+    && Option.isSome historyWindow
+    && now - lastRequestedAt >= overviewHistoryRefreshInterval
+
+let installOverviewHistory selectedWindow requestedWindow response current =
+    match selectedWindow, response with
+    | Some selected, Some loaded when selected = requestedWindow -> Some loaded
+    | _ -> current
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
@@ -69,9 +72,9 @@ let init () =
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       SelectedOverviewGroup = None
-      OverviewChartWindow = OverviewChartWindow.Hidden
-      OverviewHistory = []
-      OverviewHistoryNow = System.DateTimeOffset.Now },
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -318,19 +321,24 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        // Refresh the in-band history chart while it is open, but THROTTLED to overviewHistoryRefreshInterval
-        // (the poll fires ~1/s and getOverviewHistory is expensive). OverviewHistoryNow doubles as the
-        // last-fetch marker — bumped here on dispatch so the 1s poll can't stampede overlapping fetches —
-        // and as the chart's right-edge anchor, so the axis steps forward with the data, not on every render.
+        // Refresh the in-band history chart while it is open, but THROTTLED to
+        // overviewHistoryRefreshInterval. RequestedAt is bumped on dispatch so the one-second poll cannot
+        // stampede overlapping requests; the server response anchor separately fixes the chart's right edge.
         let shouldRefreshHistory =
             shouldRefreshOverviewHistory
                 model.OverviewPanelOpen
-                model.OverviewChartWindow
-                model.OverviewHistoryNow
+                model.OverviewHistoryWindow
+                model.OverviewHistoryRequestedAt
                 nowDto
 
-        let historyCmd = if shouldRefreshHistory then fetchOverviewHistory () else Cmd.none
-        let model = if shouldRefreshHistory then { model with OverviewHistoryNow = nowDto } else model
+        let historyCmd =
+            match shouldRefreshHistory, model.OverviewHistoryWindow with
+            | true, Some window -> fetchOverviewHistory window
+            | _ -> Cmd.none
+
+        let model =
+            if shouldRefreshHistory then { model with OverviewHistoryRequestedAt = nowDto }
+            else model
 
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
@@ -537,33 +545,34 @@ let update msg model =
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
-        // Mutual exclusivity: opening a drill-down group hides the history chart (mirrors how
-        // ToggleOverviewPanel clears the selection). Only reset when a selection is actually set.
-        let chartWindow = if Option.isSome next then OverviewChartWindow.Hidden else model.OverviewChartWindow
-        { model with SelectedOverviewGroup = next; OverviewChartWindow = chartWindow }, Cmd.none
+        // Mutual exclusivity: opening a drill-down group hides the history chart.
+        let historyWindow = if Option.isSome next then None else model.OverviewHistoryWindow
+        { model with SelectedOverviewGroup = next; OverviewHistoryWindow = historyWindow }, Cmd.none
 
     | CycleOverviewChart now ->
-        // Advance the ephemeral window: Hidden -> 24h -> 72h -> Hidden.
-        let next =
-            match model.OverviewChartWindow with
-            | OverviewChartWindow.Hidden -> OverviewChartWindow.Hours24
-            | OverviewChartWindow.Hours24 -> OverviewChartWindow.Hours72
-            | OverviewChartWindow.Hours72 -> OverviewChartWindow.Hidden
-        match next with
-        | OverviewChartWindow.Hidden ->
-            // Cycling back to hidden just closes the chart; nothing to fetch.
-            { model with OverviewChartWindow = next }, Cmd.none
-        | _ ->
-            // Entering a non-hidden window is the band's other mutually-exclusive detail view: clear any
-            // drill-down selection and (re)fetch the history that scopes the chart. Anchor the chart to now
-            // so the first render is placed correctly and the throttle countdown starts from the open.
-            { model with OverviewChartWindow = next; SelectedOverviewGroup = None; OverviewHistoryNow = now },
-            fetchOverviewHistory ()
+        let next = nextHistoryWindow model.OverviewHistoryWindow
 
-    | OverviewHistoryLoaded (history, fetchedAt) ->
-        // Anchor the chart's right edge to the instant this history was fetched, so the axis advances in
-        // discrete steps once per refresh (with fresh data) instead of drifting on every render.
-        { model with OverviewHistory = history; OverviewHistoryNow = fetchedAt }, Cmd.none
+        match next with
+        | None ->
+            { model with OverviewHistoryWindow = None; OverviewHistory = None }, Cmd.none
+        | Some window ->
+            // Opening or changing the history window clears drill-down and old chart data immediately.
+            { model with
+                OverviewHistoryWindow = next
+                SelectedOverviewGroup = None
+                OverviewHistory = None
+                OverviewHistoryRequestedAt = now },
+            fetchOverviewHistory window
+
+    | OverviewHistoryLoaded (requestedWindow, response) ->
+        { model with
+            OverviewHistory =
+                installOverviewHistory
+                    model.OverviewHistoryWindow
+                    requestedWindow
+                    response
+                    model.OverviewHistory },
+        Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -940,10 +949,9 @@ let view model dispatch =
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)
-                        model.OverviewChartWindow
+                        model.OverviewHistoryWindow
                         (fun () -> dispatch (CycleOverviewChart System.DateTimeOffset.Now))
                         model.OverviewHistory
-                        model.OverviewHistoryNow
                         model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then

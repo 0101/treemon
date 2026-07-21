@@ -244,9 +244,15 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // CLI blue) WITHOUT moving updated_at, re-folding status, or appending a history row. Keeping
             // it off the ordering/append path is what stops a heartbeat from overtaking a slightly-earlier
             // real event and dropping it (F20), and from inflating activity_events with synthetic rows
-            // (F14). A heartbeat for a session with no prior event is ignored — there is nothing live to
-            // keep alive (the extension never heartbeats before its first status-bearing event).
-            match live |> Map.tryFind report.SessionId with
+            // (F14). After a restart, an older but still-open session can be absent from the idle-window
+            // live rebuild; lazily rehydrate its durable status when its next heartbeat proves it is open.
+            // A heartbeat with no prior durable event is still ignored.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+
+            match prior with
             | None -> live
             | Some prior ->
                 let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }

@@ -8,6 +8,19 @@ type OverviewSelection =
     | Agents of AgentGroupKind
     | Tasks of TaskBucketKind
 
+let nextHistoryWindow =
+    function
+    | None -> Some HistoryWindow.Hours12
+    | Some HistoryWindow.Hours12 -> Some HistoryWindow.Hours24
+    | Some HistoryWindow.Hours24 -> Some HistoryWindow.Hours72
+    | Some HistoryWindow.Hours72 -> None
+
+let historyWindowLabel =
+    function
+    | HistoryWindow.Hours12 -> "12h"
+    | HistoryWindow.Hours24 -> "24h"
+    | HistoryWindow.Hours72 -> "72h"
+
 let taskLabel =
     function
     | TaskBucketKind.Planned -> "Planned"

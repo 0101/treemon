@@ -15,18 +15,6 @@ open OverviewPresentation
 open Elmish
 open Fable.Remoting.Client
 
-/// Ephemeral history-chart window for the Overview band (spec: docs/spec/overview-activity-history.md,
-/// decisions #5/#6). The band's single cycle button advances Hidden -> Hours24 -> Hours72 -> Hidden;
-/// a non-hidden window scopes the in-band history chart to the last 24h/72h. Client-only session
-/// state — never persisted, resets on reload — and mutually exclusive with the drill-down selection
-/// (SelectedOverviewGroup): the band shows at most one detail view at a time.
-/// (Named `Hidden` rather than the spec sketch's `None` to avoid colliding with `Option.None`.)
-[<RequireQualifiedAccess>]
-type OverviewChartWindow =
-    | Hidden
-    | Hours24
-    | Hours72
-
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -52,17 +40,12 @@ type Model =
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       SelectedOverviewGroup: OverviewSelection option
-      // Ephemeral in-band history chart (spec: docs/spec/overview-activity-history.md). OverviewChartWindow
-      // is the cycle-button state (Hidden/24h/72h); OverviewHistory holds the snapshots last fetched from
-      // getOverviewHistory for the active window. OverviewHistoryNow anchors the chart's right edge to the
-      // instant that history was fetched, so the axis steps forward once per refresh (with fresh data)
-      // instead of drifting continuously against a stale dataset on every render. It doubles as the
-      // refresh throttle marker (see overviewHistoryRefreshInterval). Both reset on reload and stay
-      // mutually exclusive with the drill-down (SelectedOverviewGroup) — opening the chart clears the
-      // selection and vice versa.
-      OverviewChartWindow: OverviewChartWindow
-      OverviewHistory: OverviewSnapshot list
-      OverviewHistoryNow: System.DateTimeOffset }
+      // None is the client-only Hidden state; only a concrete shared HistoryWindow can cross the API.
+      // The response carries the server anchor used by the chart, while RequestedAt independently gates
+      // client refreshes and prevents the one-second poll from issuing overlapping requests.
+      OverviewHistoryWindow: HistoryWindow option
+      OverviewHistory: OverviewHistoryResponse option
+      OverviewHistoryRequestedAt: System.DateTimeOffset }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -105,12 +88,11 @@ type Msg =
     // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
     | SelectOverviewGroup of OverviewSelection
     | SelectOverviewWorktree of scopedKey: string
-    // In-band history chart (spec: docs/spec/overview-activity-history.md). CycleOverviewChart advances the
-    // ephemeral OverviewChartWindow (Hidden -> 24h -> 72h -> Hidden); entering a non-hidden window clears the
-    // drill-down selection and fetches getOverviewHistory. OverviewHistoryLoaded carries the fetched snapshots
-    // (or [] on failure, so the chart degrades gracefully) into the model.
+    // In-band history chart (spec: docs/spec/overview-activity-history.md). CycleOverviewChart advances
+    // Hidden -> 12h -> 24h -> 72h -> Hidden. The requested window travels with the response so a slower
+    // request for a previous selection can be ignored.
     | CycleOverviewChart of now: System.DateTimeOffset
-    | OverviewHistoryLoaded of history: OverviewData.OverviewSnapshot list * fetchedAt: System.DateTimeOffset
+    | OverviewHistoryLoaded of requestedWindow: HistoryWindow * response: OverviewHistoryResponse option
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string

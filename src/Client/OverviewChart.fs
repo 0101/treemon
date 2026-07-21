@@ -1,11 +1,11 @@
 module OverviewChart
 
 // Pure builders for the Overview band's in-band history chart (spec: docs/spec/overview-activity-history.md).
-// Turn an OverviewSnapshot list + a selected window (24h / 72h) into a STACKED, STEPPED inline SVG area
+// Turn an OverviewSnapshot list + a selected window (12h / 24h / 72h) into a STACKED, STEPPED inline SVG area
 // chart plus a legend, reusing the band's existing task-*/activity-* accent classes so a bucket's live
 // bar/circle and its history area share one colour (area fill = currentColor, tinted by the accent class).
 //
-// Geometry mirrors .agents/canvas/overview-chart-prototype.html verbatim: a fixed 760x170 viewBox,
+// Geometry uses the prototype's fixed 760x170 viewBox, with a 2px minimum for every present series,
 // LEFT-EDGE CARRY (a window opening mid-gap starts with the snapshot active at the window start), stepped
 // stacked areas (each value holds until the next logged change, so irregular gaps produce uneven step
 // widths), a RIGHT-EDGE HOLD flat to "now", and EMPTY SERIES OMITTED from both the chart and the legend.
@@ -18,7 +18,6 @@ open System
 open Shared
 open OverviewData
 open OverviewPresentation
-open AppTypes
 open Feliz
 open Fable.Core.JsInterop
 
@@ -28,6 +27,8 @@ let [<Literal>] private padL = 34.0
 let [<Literal>] private padR = 8.0
 let [<Literal>] private padT = 10.0
 let [<Literal>] private padB = 22.0
+let [<Literal>] private minimumSeriesHeight = 2.0
+let [<Literal>] private minimumSeriesWidth = 2.0
 let private plotW = w - padL - padR
 let private plotH = h - padT - padB
 
@@ -83,19 +84,13 @@ let private definitions =
     | ChartKind.Agents -> agentDefs
     | ChartKind.Tasks -> taskDefs
 
-/// The TimeSpan a window scopes to (Hidden collapses to zero — callers gate on non-Hidden before rendering).
-let private windowSpan =
-    function
-    | OverviewChartWindow.Hidden -> TimeSpan.Zero
-    | OverviewChartWindow.Hours24 -> TimeSpan.FromHours 24.0
-    | OverviewChartWindow.Hours72 -> TimeSpan.FromHours 72.0
+let windowAxisLabels window =
+    let hoursTotal = (HistoryWindow.duration window).TotalHours
 
-/// The window's short label for the chart title (e.g. "24h").
-let private windowLabel =
-    function
-    | OverviewChartWindow.Hidden -> ""
-    | OverviewChartWindow.Hours24 -> "24h"
-    | OverviewChartWindow.Hours72 -> "72h"
+    [ 0.0; 0.25; 0.5; 0.75; 1.0 ]
+    |> List.map (fun fraction ->
+        let hoursAgo = int (Math.Round(hoursTotal * (1.0 - fraction)))
+        if hoursAgo = 0 then "now" else $"-{hoursAgo}h")
 
 /// One plotted point: its fraction along the window (0 = window start, 1 = now) and its per-series counts
 /// aligned to the given `defs`.
@@ -188,6 +183,123 @@ let tooltipAt chartKind (window: TimeSpan) (points: Point list) (cursorFraction:
 // the emitted path/attribute geometry is deterministic under both Fable and the .NET test compile.
 let private ix (v: float) = string (int (Math.Round v))
 
+/// Project counts into pixel heights while keeping every present series visible. Heights below 2px
+/// borrow only from larger series; when the whole stack is shorter than the combined minimum, it expands.
+let seriesPixelHeights (totalHeight: float) (counts: int list) : float list =
+    let totalCount = List.sum counts
+
+    if totalCount = 0 then
+        counts |> List.map (fun _ -> 0.0)
+    else
+        let rawHeights =
+            counts
+            |> List.map (fun count ->
+                if count > 0 then totalHeight * float count / float totalCount else 0.0)
+
+        let deficit =
+            List.zip counts rawHeights
+            |> List.sumBy (fun (count, height) ->
+                if count > 0 then max 0.0 (minimumSeriesHeight - height) else 0.0)
+
+        let available =
+            rawHeights
+            |> List.sumBy (fun height -> max 0.0 (height - minimumSeriesHeight))
+
+        if deficit <= 0.0 then
+            rawHeights
+        elif available >= deficit then
+            List.map2
+                (fun count height ->
+                    if count <= 0 then 0.0
+                    elif height < minimumSeriesHeight then minimumSeriesHeight
+                    else height - deficit * (height - minimumSeriesHeight) / available)
+                counts
+                rawHeights
+        else
+            counts
+            |> List.map (fun count -> if count > 0 then minimumSeriesHeight else 0.0)
+
+type IntervalMarker =
+    { X: float
+      Width: float
+      Lower: float
+      Upper: float }
+
+/// Add a 2px-wide marker when a present stepped interval is too short to survive x-coordinate rounding.
+let minimumIntervalMarkers
+    (plotLeft: float)
+    (plotRight: float)
+    (xs: float[])
+    (lower: float[])
+    (upper: float[])
+    : IntervalMarker list =
+    if xs.Length < 2 then
+        []
+    else
+        let intervals =
+            [ 0 .. xs.Length - 2 ]
+            |> List.map (fun index ->
+                let height = upper[index] - lower[index]
+
+                if height > 0.0 then
+                    Some(xs[index], xs[index + 1], lower[index], upper[index])
+                else
+                    None)
+
+        let reversedRuns, currentRun =
+            intervals
+            |> List.fold
+                (fun (runs, current) interval ->
+                    match interval, current with
+                    | Some present, _ -> runs, present :: current
+                    | None, [] -> runs, []
+                    | None, present -> List.rev present :: runs, [])
+                ([], [])
+
+        let runs =
+            (match currentRun with
+             | [] -> reversedRuns
+             | present -> List.rev present :: reversedRuns)
+            |> List.rev
+
+        runs
+        |> List.choose (fun run ->
+            let startX, _, _, _ = List.head run
+            let _, endX, _, _ = List.last run
+            let intervalWidth = endX - startX
+            let _, _, lower, upper =
+                run
+                |> List.maxBy (fun (_, _, lower, upper) -> upper - lower)
+
+            if intervalWidth >= minimumSeriesWidth then
+                None
+            else
+                let center = (startX + endX) / 2.0
+                let x = max plotLeft (min (plotRight - minimumSeriesWidth) (center - minimumSeriesWidth / 2.0))
+
+                Some
+                    { X = x
+                      Width = minimumSeriesWidth
+                      Lower = lower
+                      Upper = upper })
+
+/// Keep the last point that renders into each x pixel. Multiple status changes inside one pixel cannot
+/// be drawn as separate areas; retaining all of them makes the closed stacked paths self-intersect.
+let lastPointPerPixel (xs: float[]) : int[] =
+    xs
+    |> Array.indexed
+    |> Array.fold
+        (fun grouped (index, x) ->
+            let pixel = int (Math.Round x)
+
+            match grouped with
+            | (previousPixel, _) :: rest when previousPixel = pixel -> (pixel, index) :: rest
+            | _ -> (pixel, index) :: grouped)
+        []
+    |> List.rev
+    |> List.map snd
+    |> List.toArray
+
 /// Ephemeral hover state for the crosshair tooltip (task tm-activity-history-zx6): the cursor's position
 /// in SVG-x (for the dashed guide line) and window-fraction (for snapping to the active snapshot), plus
 /// its pixel offset within the figure (for placing the HTML tooltip). Lives only while the pointer is
@@ -199,10 +311,10 @@ type private HoverState =
       Py: float
       RectWidth: float }
 
-/// Render one stacked stepped-area chart with its title, legend, and crosshair tooltip for the given
-/// series over the window (spec decision #8). `title` is the section name ("Active agents" / "Tasks");
-/// `chartKind` selects the canonical series set. When there is no history the chart degrades to a bare
-/// baseline (grid + axes, no areas, no hover) rather than erroring.
+/// Render one stacked stepped-area chart with its legend and crosshair tooltip for the given series over
+/// the window (spec decision #8). `title` supplies the accessible section name ("Active agents" /
+/// "Tasks"); `chartKind` selects the canonical series set. When there is no history the chart degrades
+/// to a bare baseline (grid + axes, no areas, no hover) rather than erroring.
 ///
 /// Hovering the plot shows a dashed vertical crosshair at the cursor and a tooltip SNAPPED to the active
 /// stepped snapshot — the last plotted point at or before the cursor time, matching the stepped rendering
@@ -211,7 +323,14 @@ type private HoverState =
 /// geometry (buildPoints/agentDefs/taskDefs) is shared with the static path & legend builders above and
 /// with the `agentPoints`/`taskPoints` test seams.
 [<ReactComponent>]
-let HistoryChart (title: string) (winLabel: string) chartKind (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : ReactElement =
+let HistoryChart
+    (title: string)
+    chartKind
+    (now: DateTimeOffset)
+    (historyWindow: HistoryWindow)
+    (snapshots: OverviewSnapshot list)
+    : ReactElement =
+    let window = HistoryWindow.duration historyWindow
     let defs = definitions chartKind
     let hover, setHover = React.useState (None: HoverState option)
     let pts = buildPoints defs now window snapshots |> List.toArray
@@ -224,7 +343,13 @@ let HistoryChart (title: string) (winLabel: string) chartKind (now: DateTimeOffs
 
     let xOf (frac: float) = padL + frac * plotW
     let yOf (v: float) = padT + plotH - (v / yTop) * plotH
+    let yOfHeight height = padT + plotH - height
     let xs = pts |> Array.map (fun p -> xOf p.Fraction)
+    let heights =
+        pts
+        |> Array.map (fun point ->
+            let totalHeight = float (List.sum point.Counts) / yTop * plotH
+            seriesPixelHeights totalHeight point.Counts |> List.toArray)
 
     // Horizontal gridlines + y labels at 0, mid, top.
     let gridEls =
@@ -244,58 +369,84 @@ let HistoryChart (title: string) (winLabel: string) chartKind (now: DateTimeOffs
                     svg.textAnchor.endOfText
                     svg.text (string (int gy)) ] ])
 
-    // X labels at quarter points, adapting to the window (24h -> -24h..now, 72h -> -72h..now).
-    let hoursTotal = window.TotalHours
+    // X labels at quarter points, adapting to the selected window.
     let axisEls =
-        [ 0.0; 0.25; 0.5; 0.75; 1.0 ]
-        |> List.map (fun frac ->
-            let hoursAgo = int (Math.Round(hoursTotal * (1.0 - frac)))
+        List.zip [ 0.0; 0.25; 0.5; 0.75; 1.0 ] (windowAxisLabels historyWindow)
+        |> List.map (fun (frac, label) ->
             let anchor =
                 if frac = 0.0 then svg.textAnchor.startOfText
                 elif frac = 1.0 then svg.textAnchor.endOfText
                 else svg.textAnchor.middle
             Svg.text
-                [ svg.className "axis-label"
+                [ svg.className "axis-label axis-label-x"
                   svg.x (int (Math.Round(xOf frac)))
                   svg.y (int (Math.Round(h - 6.0)))
                   anchor
-                  svg.text (if hoursAgo = 0 then "now" else $"-{hoursAgo}h") ])
+                  svg.text label ])
 
-    // Stacked stepped areas, bottom series first so upper series paint on top. Threads the running lower
-    // edge immutably (no let mutable), and OMITS any series that is empty across the whole window.
-    let buildPath (accent: string) (lower: float[]) (upper: float[]) =
+    // Stacked stepped areas, bottom series first so upper series paint on top. Values are pixel heights
+    // with a 2px minimum for each present series. Threads the running lower edge immutably and omits
+    // any series that is empty across the whole window.
+    let buildPath (pathXs: float[]) (accent: string) (lower: float[]) (upper: float[]) =
+        let pathLength = pathXs.Length
         let stepSegs =
-            [ for i in 1 .. n - 1 ->
-                  $"L {ix xs[i]} {ix (yOf upper[i - 1])} L {ix xs[i]} {ix (yOf upper[i])}" ]
+            [ for i in 1 .. pathLength - 1 ->
+                  $"L {ix pathXs[i]} {ix (yOfHeight upper[i - 1])} L {ix pathXs[i]} {ix (yOfHeight upper[i])}" ]
         let downSegs =
-            [ for i in n - 1 .. -1 .. 1 ->
-                  $"L {ix xs[i]} {ix (yOf lower[i])} L {ix xs[i]} {ix (yOf lower[i - 1])}" ]
+            [ for i in pathLength - 1 .. -1 .. 1 ->
+                  $"L {ix pathXs[i]} {ix (yOfHeight lower[i])} L {ix pathXs[i]} {ix (yOfHeight lower[i - 1])}" ]
         let d =
             String.concat
                 " "
-                ([ $"M {ix xs[0]} {ix (yOf upper[0])}" ]
+                ([ $"M {ix pathXs[0]} {ix (yOfHeight upper[0])}" ]
                  @ stepSegs
                  @ downSegs
-                 @ [ $"L {ix xs[0]} {ix (yOf lower[0])} Z" ])
+                 @ [ $"L {ix pathXs[0]} {ix (yOfHeight lower[0])} Z" ])
         Svg.path [ svg.className accent; svg.d d; svg.fill "currentColor"; svg.fillOpacity 0.82 ]
 
-    let areaEls =
+    let stackedSeries =
         if n = 0 then
             []
         else
-            let _, revEls =
+            let _, reversed =
                 defs
                 |> List.indexed
                 |> List.fold
                     (fun (lower: float[], acc) (k, def) ->
-                        let vals = pts |> Array.map (fun p -> float (List.item k p.Counts))
+                        let vals = heights |> Array.map (fun point -> point[k])
                         let upper = Array.init n (fun i -> lower[i] + vals[i])
-                        let acc' =
-                            if vals |> Array.exists (fun v -> v > 0.0) then buildPath def.Accent lower upper :: acc
-                            else acc
-                        upper, acc')
+                        upper, (def.Accent, vals, lower, upper) :: acc)
                     (Array.zeroCreate n, [])
-            List.rev revEls
+            reversed
+            |> List.rev
+            |> List.filter (fun (_, vals, _, _) -> vals |> Array.exists (fun value -> value > 0.0))
+
+    let renderIndices = lastPointPerPixel xs
+    let renderXs = renderIndices |> Array.map (fun index -> xs[index])
+    let atRenderPoints (values: float[]) = renderIndices |> Array.map (fun index -> values[index])
+
+    let areaEls =
+        stackedSeries
+        |> List.map (fun (accent, _, lower, upper) ->
+            buildPath renderXs accent (atRenderPoints lower) (atRenderPoints upper))
+
+    let markerEls =
+        stackedSeries
+        |> List.collect (fun (accent, _, lower, upper) ->
+            minimumIntervalMarkers padL (padL + plotW) xs lower upper
+            |> List.map (fun marker ->
+                let x = marker.X + marker.Width / 2.0
+
+                Svg.line
+                    [ svg.className accent
+                      svg.x1 x
+                      svg.y1 (yOfHeight marker.Upper)
+                      svg.x2 x
+                      svg.y2 (yOfHeight marker.Lower)
+                      svg.stroke "currentColor"
+                      svg.strokeWidth marker.Width
+                      svg.custom ("strokeLinecap", "butt")
+                      svg.custom ("vector-effect", "non-scaling-stroke") ]))
 
     // Legend — one entry per series that is non-empty somewhere in the window (matches the omitted areas).
     let legendEls =
@@ -358,10 +509,10 @@ let HistoryChart (title: string) (winLabel: string) chartKind (now: DateTimeOffs
               svg.width w
               svg.height h
               svg.custom ("role", "img")
-              svg.custom ("aria-label", $"{title} over the last {winLabel}")
+              svg.custom ("aria-label", $"{title} over the last {historyWindowLabel historyWindow}")
               svg.onMouseMove onMove
               svg.onMouseLeave (fun _ -> setHover None)
-              svg.children (gridEls @ areaEls @ axisEls @ crosshairEls) ]
+              svg.children (gridEls @ areaEls @ markerEls @ axisEls @ crosshairEls) ]
 
     // The snapped HTML tooltip, absolutely positioned within the figure. Rows/total/header come from the
     // pure `tooltipAt` seam; the component only positions & paints. Flips left of the cursor near the right
@@ -405,14 +556,8 @@ let HistoryChart (title: string) (winLabel: string) chartKind (now: DateTimeOffs
               [ Html.figure [ prop.children [ svgEl; tooltipEl ] ]
                 Html.div [ prop.className "chart-legend"; prop.children legendEls ] ] ]
 
-/// The Active-agents history chart for the given window. Returns Html.none when the window is Hidden.
-let agentsChart (window: OverviewChartWindow) (now: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
-    match window with
-    | OverviewChartWindow.Hidden -> Html.none
-    | _ -> HistoryChart "Active agents" (windowLabel window) ChartKind.Agents now (windowSpan window) snapshots
+let agentsChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
+    HistoryChart "Active agents" ChartKind.Agents anchor window snapshots
 
-/// The Tasks history chart for the given window. Returns Html.none when the window is Hidden.
-let tasksChart (window: OverviewChartWindow) (now: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
-    match window with
-    | OverviewChartWindow.Hidden -> Html.none
-    | _ -> HistoryChart "Tasks" (windowLabel window) ChartKind.Tasks now (windowSpan window) snapshots
+let tasksChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
+    HistoryChart "Tasks" ChartKind.Tasks anchor window snapshots

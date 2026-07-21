@@ -14,8 +14,7 @@ module Server.OverviewHistory
 //            the same openness and per-session grouping rules.
 //
 // `mergeHistory` stitches the two independently-changing series into one stepped OverviewSnapshot
-// stream (carry each dimension forward at every change point), so getOverviewHistory and
-// OverviewChart.fs are untouched — they still consume a plain `OverviewSnapshot list`.
+// stream (carry each dimension forward at every change point) for the anchored API response.
 //
 // Pure: no IO, no mutation. The store owns persistence; this module owns the change-detection, the
 // event→agent reconstruction, and the merge, so all three are unit-testable in isolation.

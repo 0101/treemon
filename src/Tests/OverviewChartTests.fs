@@ -4,7 +4,7 @@ open System
 open NUnit.Framework
 open Shared
 open OverviewData
-open AppTypes
+open OverviewPresentation
 
 // Unit tests for OverviewChart's pure windowing builders (spec: docs/spec/overview-activity-history.md).
 // The SVG rendering itself is inline geometry verified by the E2E band tests; here we pin the pure
@@ -13,7 +13,8 @@ open AppTypes
 //   - left-edge CARRY: a window opening after the last change starts from that snapshot's value,
 //   - right-edge HOLD: the final point sits at fraction 1.0 holding the last value flat to "now",
 //   - windowing drops records older than the window (they only survive as the carried left edge),
-//   - counts are aligned to the canonical agent/task series order.
+//   - counts are aligned to the canonical agent/task series order,
+//   - every present series receives at least 2px of chart height.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -104,6 +105,82 @@ type OverviewChartTests() =
         Assert.That(List.item 2 pts.Head.Counts, Is.EqualTo 3) // Executing is index 2
         Assert.That(pts.Head.Counts |> List.sum, Is.EqualTo 3) // every other series is empty
 
+    [<Test>]
+    member _.``small series borrow enough height to remain visible`` () =
+        let heights = OverviewChart.seriesPixelHeights 100.0 [ 99; 1; 0 ]
+
+        Assert.That(heights[0], Is.EqualTo(98.0).Within 1e-9)
+        Assert.That(heights[1], Is.EqualTo(2.0).Within 1e-9)
+        Assert.That(heights[2], Is.EqualTo(0.0).Within 1e-9)
+        Assert.That(List.sum heights, Is.EqualTo(100.0).Within 1e-9)
+
+    [<Test>]
+    member _.``short stacks expand when every present series needs the minimum height`` () =
+        let heights = OverviewChart.seriesPixelHeights 1.0 [ 1; 1; 0 ]
+
+        Assert.That(heights[0], Is.EqualTo(2.0).Within 1e-9)
+        Assert.That(heights[1], Is.EqualTo(2.0).Within 1e-9)
+        Assert.That(heights[2], Is.EqualTo(0.0).Within 1e-9)
+
+    [<Test>]
+    member _.``subpixel intervals get a two pixel marker clamped to the plot edge`` () =
+        let markers =
+            OverviewChart.minimumIntervalMarkers
+                34.0
+                752.0
+                [| 751.62; 752.0 |]
+                [| 0.0; 0.0 |]
+                [| 2.0; 2.0 |]
+
+        Assert.That(markers.Length, Is.EqualTo 1)
+        Assert.That(markers.Head.X, Is.EqualTo(750.0).Within 1e-9)
+        Assert.That(markers.Head.Width, Is.EqualTo(2.0).Within 1e-9)
+        Assert.That(markers.Head.Lower, Is.EqualTo(0.0).Within 1e-9)
+        Assert.That(markers.Head.Upper, Is.EqualTo(2.0).Within 1e-9)
+
+    [<Test>]
+    member _.``visible intervals and absent series do not add markers`` () =
+        let visible =
+            OverviewChart.minimumIntervalMarkers
+                34.0
+                752.0
+                [| 100.0; 101.0; 102.1 |]
+                [| 0.0; 0.0; 0.0 |]
+                [| 2.0; 2.0; 2.0 |]
+
+        let absent =
+            OverviewChart.minimumIntervalMarkers
+                34.0
+                752.0
+                [| 100.0; 100.5 |]
+                [| 2.0; 2.0 |]
+                [| 2.0; 2.0 |]
+
+        Assert.That(visible, Is.Empty)
+        Assert.That(absent, Is.Empty)
+
+    [<Test>]
+    member _.``continuous subpixel intervals coalesce into one marker`` () =
+        let markers =
+            OverviewChart.minimumIntervalMarkers
+                34.0
+                752.0
+                [| 100.0; 100.4; 100.8 |]
+                [| 0.0; 0.0; 0.0 |]
+                [| 2.0; 3.0; 3.0 |]
+
+        Assert.That(markers.Length, Is.EqualTo 1)
+        Assert.That(markers.Head.X, Is.EqualTo(99.4).Within 1e-9)
+        Assert.That(markers.Head.Lower, Is.EqualTo(0.0).Within 1e-9)
+        Assert.That(markers.Head.Upper, Is.EqualTo(3.0).Within 1e-9)
+
+    [<Test>]
+    member _.``rendering keeps only the latest point in each rounded x pixel`` () =
+        let indices =
+            OverviewChart.lastPointPerPixel [| 34.0; 34.2; 34.49; 34.51; 35.4; 35.6; 752.0 |]
+
+        Assert.That(indices, Is.EqualTo [| 2; 4; 5; 6 |])
+
     // ── Crosshair tooltip seam (task tm-activity-history-zx6) ──
 
     [<Test>]
@@ -161,6 +238,97 @@ type OverviewChartTests() =
     member _.``history refresh is disabled while the Overview panel is closed`` () =
         let lastFetchedAt = now - App.overviewHistoryRefreshInterval
         Assert.That(
-            App.shouldRefreshOverviewHistory false OverviewChartWindow.Hours24 lastFetchedAt now,
+            App.shouldRefreshOverviewHistory false (Some HistoryWindow.Hours24) lastFetchedAt now,
             Is.False
         )
+
+    [<Test>]
+    member _.``visible history keeps the 30 second refresh gate`` () =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                App.shouldRefreshOverviewHistory
+                    true
+                    (Some HistoryWindow.Hours12)
+                    (now - TimeSpan.FromSeconds 29.0)
+                    now,
+                Is.False
+            )
+
+            Assert.That(
+                App.shouldRefreshOverviewHistory
+                    true
+                    (Some HistoryWindow.Hours12)
+                    (now - App.overviewHistoryRefreshInterval)
+                    now,
+                Is.True
+            ))
+
+    [<Test>]
+    member _.``history window cycle includes 12h before 24h and 72h`` () =
+        let states =
+            [ None
+              nextHistoryWindow None
+              nextHistoryWindow (Some HistoryWindow.Hours12)
+              nextHistoryWindow (Some HistoryWindow.Hours24)
+              nextHistoryWindow (Some HistoryWindow.Hours72) ]
+
+        Assert.That(
+            states,
+            Is.EqualTo(
+                [ None
+                  Some HistoryWindow.Hours12
+                  Some HistoryWindow.Hours24
+                  Some HistoryWindow.Hours72
+                  None ]
+            )
+        )
+
+    [<Test>]
+    member _.``12h chart axis uses three hour quarter points`` () =
+        Assert.That(
+            OverviewChart.windowAxisLabels HistoryWindow.Hours12,
+            Is.EqualTo([ "-12h"; "-9h"; "-6h"; "-3h"; "now" ])
+        )
+
+    [<Test>]
+    member _.``requested windows map to their explicit durations`` () =
+        let hours =
+            [ HistoryWindow.Hours12
+              HistoryWindow.Hours24
+              HistoryWindow.Hours72 ]
+            |> List.map (HistoryWindow.duration >> _.TotalHours)
+
+        Assert.That(hours, Is.EqualTo([ 12.0; 24.0; 72.0 ]))
+
+    [<Test>]
+    member _.``matching response keeps the server anchor`` () =
+        let serverAnchor = now - TimeSpan.FromMinutes 7.0
+        let response = { Anchor = serverAnchor; Snapshots = [] }
+
+        let installed =
+            App.installOverviewHistory
+                (Some HistoryWindow.Hours24)
+                HistoryWindow.Hours24
+                (Some response)
+                None
+
+        Assert.That(installed |> Option.map _.Anchor, Is.EqualTo(Some serverAnchor))
+
+    [<Test>]
+    member _.``response for a previous window cannot replace the selected window`` () =
+        let current =
+            { Anchor = now
+              Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
+
+        let stale =
+            { Anchor = now - TimeSpan.FromMinutes 1.0
+              Snapshots = [ taskSnap now TaskBucketKind.Done 9 ] }
+
+        let installed =
+            App.installOverviewHistory
+                (Some HistoryWindow.Hours24)
+                HistoryWindow.Hours12
+                (Some stale)
+                (Some current)
+
+        Assert.That(installed, Is.EqualTo(Some current))

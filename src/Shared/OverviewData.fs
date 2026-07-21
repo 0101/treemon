@@ -107,13 +107,33 @@ type TaskCount = { Kind: TaskBucketKind; Count: int }
 type AgentCount = { Kind: AgentGroupKind; Count: int }
 
 /// One point in the Overview band's history: the moment it was captured plus the count-only task-bucket
-/// and agent-group rolls (Members dropped, Scale re-derived by the view). The unit `IWorktreeApi.
-/// getOverviewHistory` returns — reconciled on read from the push event store (Tasks from
+/// and agent-group rolls (Members dropped, Scale re-derived by the view). These are sampled inside the
+/// anchored response from `IWorktreeApi.getOverviewHistory` and reconciled from the push event store (Tasks from
 /// `task_snapshots`, Agents derived from `activity_events`; see Server.OverviewHistory).
 type OverviewSnapshot =
     { Timestamp: DateTimeOffset
       Tasks: TaskCount list
       Agents: AgentCount list }
+
+/// A server-requestable Overview history window. Hidden is deliberately represented only by the
+/// client's `HistoryWindow option`, so it cannot cross the API boundary.
+[<RequireQualifiedAccess>]
+type HistoryWindow =
+    | Hours12
+    | Hours24
+    | Hours72
+
+module HistoryWindow =
+    let duration =
+        function
+        | HistoryWindow.Hours12 -> TimeSpan.FromHours 12.0
+        | HistoryWindow.Hours24 -> TimeSpan.FromHours 24.0
+        | HistoryWindow.Hours72 -> TimeSpan.FromHours 72.0
+
+/// The sampled Overview history plus the server instant used to compute its window edges.
+type OverviewHistoryResponse =
+    { Anchor: DateTimeOffset
+      Snapshots: OverviewSnapshot list }
 
 // Canonical left-to-right order of the task bars. Unattended trails Done: it is the muted
 // catch-all for In-progress/Queued tasks whose worktree has no active agent.

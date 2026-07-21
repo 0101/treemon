@@ -367,3 +367,44 @@ type OverviewBandE2ETests() =
             Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
             Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
         }
+
+    [<Test>]
+    member this.``History cycle includes 12h and remains mutually exclusive with drill-down``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+            let breakdown = this.Page.Locator(".overview-band .overview-breakdown")
+            let investigating =
+                this.Page.Locator(".overview-band .overview-section .overview-item", PageLocatorOptions(HasText = "Investigating"))
+
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 History")
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+
+            let! axisLabels = charts.First.Locator(".axis-label-x").AllTextContentsAsync()
+            Assert.That(
+                axisLabels |> List.ofSeq,
+                Is.EqualTo([ "-12h"; "-9h"; "-6h"; "-3h"; "now" ])
+            )
+
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 24h")
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 72h")
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 History")
+            do! Assertions.Expect(charts).ToHaveCountAsync(0)
+
+            do! investigating.ClickAsync()
+            do! Assertions.Expect(breakdown).ToHaveCountAsync(1)
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(breakdown).ToHaveCountAsync(0)
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+
+            do! investigating.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 History")
+            do! Assertions.Expect(charts).ToHaveCountAsync(0)
+            do! Assertions.Expect(breakdown).ToHaveCountAsync(1)
+        }

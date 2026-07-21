@@ -81,8 +81,14 @@ let readOnlyApi
       addRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       removeRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       getRoots = fun () -> async { return [] }
-      // No activity history in demo/fixture modes (nothing is logged there).
-      getOverviewHistory = fun () -> async { return [] } }
+      // No durable activity history in demo/fixture modes, but preserve the anchored wire contract.
+      getOverviewHistory =
+        fun _ ->
+            async {
+                return
+                    { OverviewData.OverviewHistoryResponse.Anchor = DateTimeOffset.UtcNow
+                      Snapshots = [] }
+            } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -782,25 +788,30 @@ let worktreeApi
           addRoot = fun path -> async { return addRootToConfig path }
           removeRoot = fun path -> async { return removeRootFromConfig path }
           getRoots = fun () -> async { return readWorktreeRootsConfig () }
-          // 72h is the widest window the in-band chart offers; the client narrows to 24h itself.
           // Tasks come from the store's snapshot table; Agents are derived on read from status events
-          // plus the liveness timeline, carrying the state active at the left edge. Merged into one
-          // stepped OverviewSnapshot stream. No store (demo/fixture) → no history.
+          // plus the liveness timeline, carrying the state active at the requested window's left edge.
           getOverviewHistory =
-            fun () ->
+            fun requestedWindow ->
                 async {
+                    let anchor = DateTimeOffset.UtcNow
+
                     match activityStore with
-                    | None -> return []
+                    | None ->
+                        return
+                            { OverviewData.OverviewHistoryResponse.Anchor = anchor
+                              Snapshots = [] }
                     | Some store ->
-                        let now = DateTimeOffset.UtcNow
-                        let window = TimeSpan.FromHours 72.0
-                        let start = now - window
+                        let window = OverviewData.HistoryWindow.duration requestedWindow
+                        let start = anchor - window
                         let taskSnaps =
                             match store.QueryTaskSnapshotBefore start with
-                            | Some (_, tasks) -> (start, tasks) :: store.QueryTaskSnapshots(start, now)
-                            | None -> store.QueryTaskSnapshots(start, now)
-                        let events = store.QueryHistoryWindow(start, now)
-                        let liveness = store.QueryLiveness(start - SessionActivity.openWindow, now)
-                        let agentSnaps = OverviewHistory.deriveAgents now window events liveness
-                        return OverviewHistory.mergeHistory taskSnaps agentSnaps
+                            | Some (_, tasks) -> (start, tasks) :: store.QueryTaskSnapshots(start, anchor)
+                            | None -> store.QueryTaskSnapshots(start, anchor)
+                        let events = store.QueryHistoryWindow(start, anchor)
+                        let liveness = store.QueryLiveness(start - SessionActivity.openWindow, anchor)
+                        let agentSnaps = OverviewHistory.deriveAgents anchor window events liveness
+
+                        return
+                            { OverviewData.OverviewHistoryResponse.Anchor = anchor
+                              Snapshots = OverviewHistory.mergeHistory taskSnaps agentSnaps }
                 } }

@@ -162,10 +162,8 @@ type CanvasDocKindSerializationTests() =
                 Assert.That(obj.ReferenceEquals(wt.Planning, null), Is.False,
                             $"worktree '{wt.Branch}' must have a non-null Planning after load"))
 
-// The activity-history log persists an OverviewSnapshot per line and IWorktreeApi.getOverviewHistory
-// returns OverviewSnapshot list over Fable.Remoting, so the count-only snapshot shape (and its two
-// nested DU kinds — TaskBucketKind and the payload-carrying AgentGroupKind.Activity of CurrentActivity)
-// must survive the exact same converter the wire uses. These guard that round-trip end to end.
+// The count-only snapshots, explicit requested windows, and anchored response all cross the
+// Fable.Remoting boundary and must survive its converter unchanged.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -191,3 +189,20 @@ type OverviewSnapshotSerializationTests() =
         let original = [ sample; { sample with Tasks = []; Agents = [] } ]
         let result = roundTrip original
         Assert.That(result, Is.EqualTo(original))
+
+    [<Test>]
+    member _.``all Overview history windows survive JSON round-trip``() =
+        let original =
+            [ HistoryWindow.Hours12
+              HistoryWindow.Hours24
+              HistoryWindow.Hours72 ]
+
+        Assert.That(roundTrip original, Is.EqualTo(original))
+
+    [<Test>]
+    member _.``anchored Overview history response survives JSON round-trip``() =
+        let original =
+            { Anchor = DateTimeOffset(2026, 7, 14, 10, 0, 0, TimeSpan.Zero)
+              Snapshots = [ sample ] }
+
+        Assert.That(roundTrip original, Is.EqualTo(original))
