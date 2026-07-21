@@ -238,6 +238,32 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
     // the scheduler. Returns the new in-memory live map.
     let apply (live: Map<SessionId, StoredStatus>) (report: SessionActivityReport) : Map<SessionId, StoredStatus> =
+        let foldReportState () =
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let status =
+                prior
+                |> Option.map _.Status
+                |> Option.defaultValue emptyStatus
+                |> fun current -> SessionActivity.fold current report.Event
+            let stored =
+                match prior with
+                | Some existing ->
+                    { existing with
+                        Status = status
+                        LastSeen = max existing.LastSeen report.OccurredAt }
+                | None ->
+                    { SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Status = status
+                      UpdatedAt = DateTimeOffset.MinValue
+                      LastSeen = report.OccurredAt
+                      ContextUsageAt = None }
+            status, stored
+
         match report.Event with
         | Heartbeat ->
             // Liveness-only: bump the session's last_seen (the openness signal that keeps an idle-but-open
@@ -289,29 +315,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
-            let status =
-                prior
-                |> Option.map _.Status
-                |> Option.defaultValue emptyStatus
-                |> fun current -> SessionActivity.fold current report.Event
-            let stored =
-                match prior with
-                | Some existing ->
-                    { existing with
-                        Status = status
-                        LastSeen = max existing.LastSeen report.OccurredAt }
-                | None ->
-                    { SessionId = report.SessionId
-                      WorktreePath = report.WorktreePath
-                      Provider = report.Provider
-                      Status = status
-                      UpdatedAt = DateTimeOffset.MinValue
-                      LastSeen = report.OccurredAt
-                      ContextUsageAt = None }
+            let _, stored = foldReportState ()
             store.UpsertStatus stored
             scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
             live |> Map.add report.SessionId stored
@@ -320,29 +324,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // Activity fields are source events, but they are ordered independently from lifecycle
             // status. Preserve UpdatedAt so a fire-and-forget report cannot block an older lifecycle
             // transition or be discarded merely because a newer lifecycle event arrived first.
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
-            let status =
-                prior
-                |> Option.map _.Status
-                |> Option.defaultValue emptyStatus
-                |> fun current -> SessionActivity.fold current report.Event
-            let stored =
-                match prior with
-                | Some existing ->
-                    { existing with
-                        Status = status
-                        LastSeen = max existing.LastSeen report.OccurredAt }
-                | None ->
-                    { SessionId = report.SessionId
-                      WorktreePath = report.WorktreePath
-                      Provider = report.Provider
-                      Status = status
-                      UpdatedAt = DateTimeOffset.MinValue
-                      LastSeen = report.OccurredAt
-                      ContextUsageAt = None }
+            let status, stored = foldReportState ()
             let eventRow =
                 { EventId = report.EventId
                   SessionId = report.SessionId

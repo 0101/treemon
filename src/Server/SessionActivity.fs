@@ -165,15 +165,11 @@ let foldMany (initial: SessionStatus) (events: SessionEvent seq) : SessionStatus
 /// (live `session.title_changed` or metadata bootstrap) changed most recently, preserving the source.
 let effectiveActivity (s: SessionStatus) : AgentActivity option =
     match s.Intent, s.Title with
-    | Some intent, Some title when intent.At >= title.At ->
-        Some(AgentActivity.Intent(intent.Text, intent.At))
-    | Some _, Some title ->
-        Some(AgentActivity.SessionTitle(title.Text, title.At))
-    | Some intent, None ->
-        Some(AgentActivity.Intent(intent.Text, intent.At))
-    | None, Some title ->
-        Some(AgentActivity.SessionTitle(title.Text, title.At))
     | None, None -> None
+    | Some intent, Some title when title.At > intent.At ->
+        Some(AgentActivity.SessionTitle(title.Text, title.At))
+    | Some intent, _ -> Some(AgentActivity.Intent(intent.Text, intent.At))
+    | None, Some title -> Some(AgentActivity.SessionTitle(title.Text, title.At))
 
 // --- Freshness (crash safety-net) -------------------------------------------------------------
 
