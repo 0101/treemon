@@ -395,6 +395,16 @@ type CanvasReclaimBridgeE2ETests() =
 // selection lifecycle, exact payload contract, comment pinning, Escape, editable
 // exclusions, browser-fallback postMessage, and the processing pulse.
 // ============================================================================
+type private SelectionHost =
+    | TreemonHost
+    | BrowserHost
+    | MissingTransport
+
+let private selectionLifecycleBody =
+    "<section data-section=\"first\"><span id=\"first\">First selection</span></section>"
+    + "<section data-section=\"second\"><span id=\"second\">Second selection</span></section>"
+    + "<div id=\"editable\" contenteditable=\"true\">Editable selection</div>"
+
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
@@ -408,21 +418,18 @@ type CanvasSelectionContextE2ETests() =
         opts.ReducedMotion <- ReducedMotion.Reduce
         opts
 
-    member private this.ServeDoc (body: string) (useCanvasSend: bool) =
+    member private this.ServeDoc (body: string) (host: SelectionHost) =
         task {
             let capture =
-                "<script>window.__selectionMessages=[];window.__reclaims=0;window.__errors=[];"
-                + "window.addEventListener('message',function(e){if(e.data&&e.data.action==='canvas-selection')window.__selectionMessages.push(e.data);if(e.data&&e.data.action==='reclaim-focus')window.__reclaims++});"
+                "<script>window.__messages=[];window.__selectionMessages=[];window.__reclaims=0;window.__errors=[];"
+                + "window.addEventListener('message',function(e){if(e.data&&typeof e.data.action==='string')window.__messages.push(e.data);if(e.data&&e.data.action==='canvas-selection')window.__selectionMessages.push(e.data);if(e.data&&e.data.action==='reclaim-focus')window.__reclaims++});"
                 + "window.addEventListener('error',function(e){window.__errors.push(e.message)});"
-                + (if useCanvasSend then
-                       "window.canvasSend=function(action,payload){var message=Object.assign({},payload,{action:action});window.postMessage(message,'*');return true};"
-                   else "")
                 + "</script>"
             let injection =
-                if useCanvasSend then
-                    Server.CanvasDocServer.buildInjection AgentDoc "selection.html"
-                else
-                    Server.CanvasSelectionScript.script
+                match host with
+                | TreemonHost -> Server.CanvasDocServer.buildInjection AgentDoc "selection.html"
+                | BrowserHost -> Server.CanvasSendScript.script + Server.CanvasSelectionScript.script
+                | MissingTransport -> Server.CanvasSelectionScript.script
             let html =
                 "<!doctype html><html><head><title>selection</title>"
                 + capture
@@ -469,14 +476,9 @@ type CanvasSelectionContextE2ETests() =
         }
 
     [<Test>]
-    member this.``selection toolbar hides on unselection while comment stays pinned until replacement or Escape``() =
+    member this.``selection toolbar hides when the selection is cleared``() =
         task {
-            do! (this.ServeDoc
-                ("<section data-section=\"first\"><span id=\"first\">First selection</span></section>"
-                 + "<section data-section=\"second\"><span id=\"second\">Second selection</span></section>"
-                 + "<div id=\"editable\" contenteditable=\"true\">Editable selection</div>")
-                true)
-
+            do! this.ServeDoc selectionLifecycleBody TreemonHost
             do! this.SelectText "#first"
             let! _ = this.WaitForToolbar()
             let toolbar = this.Page.Locator("canvas-selection-context .box")
@@ -488,7 +490,13 @@ type CanvasSelectionContextE2ETests() =
                 "() => document.querySelector('canvas-selection-context').style.display==='none'",
                 null,
                 PageWaitForFunctionOptions(Timeout = 5000.0f))
+            return ()
+        }
 
+    [<Test>]
+    member this.``Escape hides the selection toolbar and reclaims dashboard focus``() =
+        task {
+            do! this.ServeDoc selectionLifecycleBody TreemonHost
             do! this.SelectText "#first"
             let! _ = this.WaitForToolbar()
             do! this.Page.Keyboard.PressAsync("Escape")
@@ -496,9 +504,16 @@ type CanvasSelectionContextE2ETests() =
                 "() => document.querySelector('canvas-selection-context').style.display==='none' && window.__reclaims===1",
                 null,
                 PageWaitForFunctionOptions(Timeout = 5000.0f))
+            return ()
+        }
 
+    [<Test>]
+    member this.``comment mode stays pinned until a replacement selection``() =
+        task {
+            do! this.ServeDoc selectionLifecycleBody TreemonHost
             do! this.SelectText "#first"
             let! _ = this.WaitForToolbar()
+            let toolbar = this.Page.Locator("canvas-selection-context .box")
             do! this.Page.Locator("canvas-selection-context button[data-comment]").ClickAsync()
             let input = this.Page.Locator("canvas-selection-context input")
             do! input.FillAsync("draft")
@@ -515,8 +530,17 @@ type CanvasSelectionContextE2ETests() =
                 PageWaitForFunctionOptions(Timeout = 5000.0f))
             let! replacedDraft = input.InputValueAsync()
             Assert.That(replacedDraft, Is.Empty)
+        }
 
+    [<Test>]
+    member this.``composing Escape keeps a comment open while ordinary Escape closes it``() =
+        task {
+            do! this.ServeDoc selectionLifecycleBody TreemonHost
+            do! this.SelectText "#first"
+            let! _ = this.WaitForToolbar()
+            let toolbar = this.Page.Locator("canvas-selection-context .box")
             do! this.Page.Locator("canvas-selection-context button[data-comment]").ClickAsync()
+            let input = this.Page.Locator("canvas-selection-context input")
             do! input.FillAsync("composing")
             let! _ =
                 input.EvaluateAsync(
@@ -532,13 +556,19 @@ type CanvasSelectionContextE2ETests() =
                 "() => document.querySelector('canvas-selection-context').style.display==='none'",
                 null,
                 PageWaitForFunctionOptions(Timeout = 5000.0f))
-            do! this.WaitForAnimationFrame()
             let! reclaimCount = this.Page.EvaluateAsync<int>("() => window.__reclaims")
-            Assert.That(reclaimCount, Is.EqualTo(1), "Escape in the comment input closes it without reclaiming dashboard focus")
+            Assert.That(reclaimCount, Is.Zero, "Escape in the comment input closes it without reclaiming dashboard focus")
+        }
 
+    [<Test>]
+    member this.``editable field selection does not show the toolbar``() =
+        task {
+            do! this.ServeDoc selectionLifecycleBody TreemonHost
             do! this.SelectText "#editable"
-            let! _ = this.WaitForAnimationFrame()
-            let! display = this.Page.EvaluateAsync<string>("() => document.querySelector('canvas-selection-context').style.display")
+            do! this.WaitForAnimationFrame()
+            let! display =
+                this.Page.EvaluateAsync<string>(
+                    "() => document.querySelector('canvas-selection-context')?.style.display ?? 'none'")
             Assert.That(display, Is.EqualTo("none"))
         }
 
@@ -547,7 +577,7 @@ type CanvasSelectionContextE2ETests() =
         task {
             do! (this.ServeDoc
                 "<section data-section=\"race\"><span id=\"selected\">Race selection</span></section>"
-                true)
+                TreemonHost)
 
             let! _ = this.Page.EvaluateAsync(
                 """() => {
@@ -569,7 +599,7 @@ type CanvasSelectionContextE2ETests() =
         task {
             do! (this.ServeDoc
                 "<section data-section=\"alpha\">Before <span id=\"selected\">Selected phrase</span> after</section>"
-                true)
+                TreemonHost)
 
             let send intent =
                 task {
@@ -619,11 +649,22 @@ type CanvasSelectionContextE2ETests() =
         }
 
     [<Test>]
-    member this.``browser fallback posts selection actions without canvasSend``() =
+    member this.``browser fallback exposes canvasSend and posts selection actions through it``() =
         task {
             do! (this.ServeDoc
                 "<section data-section=\"fallback\">Before <span id=\"selected\">Fallback selection</span> after</section>"
-                false)
+                BrowserHost)
+
+            let! helperType = this.Page.EvaluateAsync<string>("() => typeof window.canvasSend")
+            Assert.That(helperType, Is.EqualTo("function"))
+            let! sent = this.Page.EvaluateAsync<bool>("() => window.canvasSend('custom-action',{value:1})")
+            Assert.That(sent, Is.True)
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => window.__messages.some(message => message.action === 'custom-action')")
+            let! customMessage =
+                this.Page.EvaluateAsync<string>(
+                    "() => JSON.stringify(window.__messages.find(message => message.action === 'custom-action'))")
+            Assert.That(customMessage, Is.EqualTo("""{"value":1,"action":"custom-action"}"""))
 
             do! this.SelectText "#selected"
             let! _ = this.WaitForToolbar()
@@ -634,4 +675,137 @@ type CanvasSelectionContextE2ETests() =
             let expected =
                 """{"intent":"explain","doc":"selection.html","contextBefore":"Before ","selectedText":"Fallback selection","contextAfter":" after","section":"fallback","request":"User asked to explain/expand this","action":"canvas-selection"}"""
             Assert.That(message, Is.EqualTo(expected))
+        }
+
+    [<Test>]
+    member this.``a selection spanning editable content is rejected``() =
+        task {
+            do! (this.ServeDoc
+                ("<span id=\"before\">Before</span>"
+                 + "<div id=\"editable\" contenteditable=\"true\">Unsaved draft</div>"
+                 + "<span id=\"after\">After</span>")
+                BrowserHost)
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                        const before = document.querySelector('#before').firstChild;
+                        const after = document.querySelector('#after').firstChild;
+                        const range = document.createRange();
+                        range.setStart(before, 0);
+                        range.setEnd(after, after.textContent.length);
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    }""")
+            do! this.WaitForAnimationFrame()
+            let! outcome =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify({
+                        toolbar: document.querySelector('canvas-selection-context')?.style.display ?? 'none',
+                        messages: window.__selectionMessages
+                    })""")
+            Assert.That(outcome, Is.EqualTo("""{"toolbar":"none","messages":[]}"""))
+        }
+
+    [<Test>]
+    member this.``processing highlight renders at most two hundred visible rectangles``() =
+        task {
+            let body =
+                [ 1..400 ]
+                |> List.map (fun index -> $"<div>Line {index}</div>")
+                |> String.concat ""
+                |> fun lines -> $"<div id=\"large\">{lines}</div>"
+            do! this.ServeDoc body BrowserHost
+            do! this.SelectText "#large"
+            let! _ = this.WaitForToolbar()
+            let! _ =
+                this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]")
+                    .EvaluateAsync("button => button.click()")
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => document.querySelector('canvas-selection-processing')?.shadowRoot.querySelectorAll('.pulse').length > 0")
+            let! pulseCount =
+                this.Page.EvaluateAsync<int>(
+                    "() => document.querySelector('canvas-selection-processing').shadowRoot.querySelectorAll('.pulse').length")
+            Assert.That(pulseCount, Is.InRange(1, 200))
+        }
+
+    [<Test>]
+    member this.``unsafe data-section falls back to a safe id``() =
+        task {
+            do! (this.ServeDoc
+                "<section data-section=\"release notes\"><span id=\"release_notes\">Target text</span></section>"
+                BrowserHost)
+            do! this.SelectText "#release_notes"
+            let! _ = this.WaitForToolbar()
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync("() => window.__selectionMessages.length===1")
+            let! message = this.Page.EvaluateAsync<string>("() => JSON.stringify(window.__selectionMessages[0])")
+            let expected =
+                """{"intent":"explain","doc":"selection.html","contextBefore":"","selectedText":"Target text","contextAfter":"","section":"release_notes","request":"User asked to explain/expand this","action":"canvas-selection"}"""
+            Assert.That(message, Is.EqualTo(expected))
+        }
+
+    [<Test>]
+    member this.``missing transport reports that canvas messaging is unavailable``() =
+        task {
+            do! (this.ServeDoc
+                "<span id=\"selected\">Unavailable transport</span>"
+                MissingTransport)
+            do! this.SelectText "#selected"
+            let! _ = this.WaitForToolbar()
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let expected = "Canvas messaging is unavailable in this document."
+            let! _ = this.Page.WaitForFunctionAsync(
+                "(expected) => document.querySelector('canvas-selection-context')?.shadowRoot.querySelector('.error').textContent === expected",
+                expected)
+            let! error = this.Page.Locator("canvas-selection-context .error").TextContentAsync()
+            Assert.That(error, Is.EqualTo(expected))
+        }
+
+    [<Test>]
+    member this.``a new editable selection clears the previous processing highlight``() =
+        task {
+            do! this.ServeDoc selectionLifecycleBody BrowserHost
+            do! this.SelectText "#first"
+            let! _ = this.WaitForToolbar()
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => document.querySelector('canvas-selection-processing')?.style.display === 'block'")
+
+            do! this.SelectText "#editable"
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => document.querySelector('canvas-selection-processing')?.style.display === 'none'")
+            let! outcome =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify({
+                        processing: document.querySelector('canvas-selection-processing').style.display,
+                        toolbar: document.querySelector('canvas-selection-context').style.display
+                    })""")
+            Assert.That(outcome, Is.EqualTo("""{"processing":"none","toolbar":"none"}"""))
+        }
+
+    [<Test>]
+    member this.``processing highlight clears after morph completion rather than update request``() =
+        task {
+            do! (this.ServeDoc
+                "<span id=\"selected\">Morph lifecycle</span>"
+                BrowserHost)
+            do! this.SelectText "#selected"
+            let! _ = this.WaitForToolbar()
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => document.querySelector('canvas-selection-processing')?.style.display === 'block'")
+
+            let! _ = this.Page.EvaluateAsync("() => window.postMessage({action:'content-updated'},'*')")
+            do! this.WaitForAnimationFrame()
+            let! beforeCompletion =
+                this.Page.EvaluateAsync<string>(
+                    "() => document.querySelector('canvas-selection-processing').style.display")
+            Assert.That(beforeCompletion, Is.EqualTo("block"))
+
+            let! _ = this.Page.EvaluateAsync("() => window.dispatchEvent(new Event('canvas-morph-complete'))")
+            let! _ = this.Page.WaitForFunctionAsync(
+                "() => document.querySelector('canvas-selection-processing')?.style.display === 'none'")
+            return ()
         }

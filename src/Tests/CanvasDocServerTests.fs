@@ -2,6 +2,7 @@ module Tests.CanvasDocServerTests
 
 open System.IO
 open System.Text.RegularExpressions
+open System.Text.Json
 open NUnit.Framework
 open Shared
 open Server
@@ -9,8 +10,8 @@ open Server.CanvasDocServer
 open Tests.TestUtils
 
 // baseStyle, linkInterceptor and bridgeScript are private to the server module, so we assert on
-// stable, unique fragments of each. The idiomorph runtime and morph controller are public, so we
-// assert on the exact strings the spec/verify task reference (IdiomorphScript.idiomorphJs etc.).
+// stable, unique fragments of each. Shared runtime assets and the idiomorph scripts are public, so
+// tests can also verify their canonical disk sources.
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
@@ -40,7 +41,7 @@ let private styleBlock (injection: string) =
     m.Groups[1].Value
 
 // ── Item 2: injected window.canvasSend helper markers ─────────────────────────
-let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
+let private canvasSendMarker = "window.canvasSend="   // unique to CanvasSendScript.script
 
 // ── Injected window.canvasExpand expand-in-place helper markers ───────────────
 let private canvasExpandMarker = "window.canvasExpand=" // unique to canvasExpandScript
@@ -244,19 +245,6 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Not.Contain(selectionActionMarker))
 
     [<Test>]
-    member _.``selection payload keeps surrounding context in reading order and comments are not duplicated``() =
-        let source = CanvasSelectionScript.source
-        let before = source.IndexOf("contextBefore: state.contextBefore")
-        let selected = source.IndexOf("selectedText: state.selectedText")
-        let after = source.IndexOf("contextAfter: state.contextAfter")
-
-        Assert.That(before, Is.GreaterThanOrEqualTo(0))
-        Assert.That(selected, Is.GreaterThan(before))
-        Assert.That(after, Is.GreaterThan(selected))
-        Assert.That(source, Does.Not.Contain("payload.comment"))
-        Assert.That(source, Does.Contain("return 'User commented: ' + comment"))
-
-    [<Test>]
     member _.``server embeds the canonical extension selection runtime without drift``() =
         let runtimePath =
             Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-selection-context.js"))
@@ -264,16 +252,39 @@ type BuildInjectionTests() =
         Assert.That(CanvasSelectionScript.source, Is.EqualTo(runtime))
 
     [<Test>]
-    member _.``browser fallback loads the canonical selection runtime and skips beads``() =
+    member _.``server embeds the canonical canvasSend runtime without drift``() =
+        let runtimePath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-send.js"))
+        let runtime = File.ReadAllText(runtimePath)
+        Assert.That(CanvasSendScript.source, Is.EqualTo(runtime))
+
+    [<Test>]
+    member _.``browser fallback loads canonical runtimes and document kinds``() =
         let extensionPath =
             Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "extension.mjs"))
         let extension = File.ReadAllText(extensionPath)
 
+        Assert.That(extension, Does.Contain("canvas-send.js"))
         Assert.That(extension, Does.Contain("canvas-selection-context.js"))
-        Assert.That(extension, Does.Contain("filename.toLowerCase() === \"beads.html\" ? \"\""))
+        Assert.That(extension, Does.Contain("canvas-doc-kinds.json"))
+        Assert.That(extension, Does.Contain("SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())"))
         Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
         Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
-        Assert.That(CanvasSelectionScript.source, Does.Contain("if (window.parent !== window)"))
+
+    [<Test>]
+    member _.``shared document-kind configuration matches server classification``() =
+        let configPath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-doc-kinds.json"))
+        let systemViews =
+            JsonSerializer.Deserialize<string array>(File.ReadAllText(configPath))
+            |> Option.ofObj
+            |> Option.defaultValue [||]
+
+        Assert.That(systemViews, Is.Not.Empty)
+        systemViews
+        |> Array.iter (fun filename ->
+            Assert.That(CanvasDocKinds.classify filename, Is.EqualTo(SystemView), filename))
+        Assert.That(CanvasDocKinds.classify "status.html", Is.EqualTo(AgentDoc))
 
     [<Test>]
     member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =
@@ -390,13 +401,13 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``beads.html classifies as a SystemView and gets the stripped injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "beads.html") "beads.html"
+        let injection = buildInjection (CanvasDocKinds.classify "beads.html") "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController))
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "status.html") "status.html"
+        let injection = buildInjection (CanvasDocKinds.classify "status.html") "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
 

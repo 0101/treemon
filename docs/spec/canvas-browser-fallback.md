@@ -54,14 +54,16 @@ same-origin transport shim posts `/_message` as `application/json`.
 
 ### Injected Scripts
 
-Browser-mode AgentDocs receive three scripts injected before `</head>`:
+Browser-mode AgentDocs receive four scripts injected before `</head>`:
 
 - **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
+- **`canvasSend`** — the same canonical `src/Extension/canvas-send.js` runtime embedded by the
+  Treemon server, so authored interactions use one payload merge, size cap, and return contract in
+  both hosts.
 - **Selected-text contextual actions** — the same canonical runtime the Treemon doc server embeds,
-  using the raw size-checked `postMessage` fallback because browser mode has no pane-injected
-  `canvasSend`. Fallback HTML is unframeable (`frame-ancestors 'none'`), and the raw sender also
-  refuses to post when framed, so selected text cannot leak to an embedding page. `beads.html` is
-  excluded, matching its ownerless `SystemView` classification.
+  calling only the shared `canvasSend` helper. SystemView filenames are excluded through the shared
+  `src/Extension/canvas-doc-kinds.json` configuration rather than a fallback-only filename check.
+  Fallback HTML remains unframeable (`frame-ancestors 'none'`).
 - **Content-polling reload** — polls `/canvas/:filename/hash` every 3s and reloads the page when the hash changes.
 
 ### Canvas-write detection (session events)
@@ -90,7 +92,9 @@ from Add/Update/Move headers. In browser mode the extension sends serving URLs f
 ## Key Files
 
 - `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server
 - `src/Extension/canvas-selection-context.js` — canonical selected-text interaction runtime shared with the server
+- `src/Extension/canvas-doc-kinds.json` — canonical SystemView filename list shared with the server
 - `src/Extension/canvas-ownership.mjs` — extracted session-event canvas-write watcher and apply-patch destination parsing
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

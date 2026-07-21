@@ -5,6 +5,7 @@
   const editableSelector = 'input,textarea,select,[contenteditable]:not([contenteditable="false"])';
   const sectionPattern = /^[A-Za-z0-9_-]+$/;
   const contextLength = 160;
+  const maxProcessingRects = 200;
   let state = null;
   let host = null;
   let shadow = null;
@@ -31,6 +32,18 @@
       (anchor && anchor.closest(editableSelector)) ||
       (focus && focus.closest(editableSelector))
     );
+  }
+
+  function rangeIntersectsEditable(range) {
+    const common = elementFor(range.commonAncestorContainer);
+    if (common && common.closest(editableSelector)) return true;
+    return Array.from(document.querySelectorAll(editableSelector)).some(function (element) {
+      try {
+        return range.intersectsNode(element);
+      } catch {
+        return false;
+      }
+    });
   }
 
   function ensureHost() {
@@ -224,14 +237,26 @@
     cancelAnimationFrame(processingFrame);
     processingFrame = requestAnimationFrame(function () {
       ensureProcessingHost();
-      const rects = rangeRects(processingRange);
-      if (!rects.length) {
+      const allRects = rangeRects(processingRange);
+      if (!allRects.length) {
         clearProcessing();
         return;
       }
 
       const layer = processingShadow.querySelector('.layer');
       layer.replaceChildren();
+      const rects = allRects.filter(function (rect) {
+        return (
+          rect.bottom >= 0 &&
+          rect.right >= 0 &&
+          rect.top <= window.innerHeight &&
+          rect.left <= window.innerWidth
+        );
+      }).slice(0, maxProcessingRects);
+      if (!rects.length) {
+        processingHost.style.display = 'none';
+        return;
+      }
       rects.forEach(function (rect) {
         const pulse = document.createElement('span');
         pulse.className = 'pulse';
@@ -279,11 +304,10 @@
     const start = elementFor(range.startContainer);
     const section = start && start.closest('[data-section]');
     const identified = start && start.closest('[id]');
-    const value =
-      (section && section.getAttribute('data-section')) ||
-      (identified && identified.id) ||
-      '';
-    return sectionPattern.test(value) ? value : null;
+    const sectionValue = section && section.getAttribute('data-section');
+    if (sectionPattern.test(sectionValue || '')) return sectionValue;
+    const idValue = identified && identified.id;
+    return sectionPattern.test(idValue || '') ? idValue : null;
   }
 
   function sameRange(left, right) {
@@ -298,11 +322,12 @@
   function captureSelection(selection) {
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
     if (isEditableSelection(selection)) return null;
+    const range = selection.getRangeAt(0).cloneRange();
+    if (rangeIntersectsEditable(range)) return null;
 
     const selectedText = selection.toString();
     if (!selectedText.trim()) return null;
 
-    const range = selection.getRangeAt(0).cloneRange();
     const rect = rangeRect(range);
     if (!rect) return null;
 
@@ -397,24 +422,11 @@
   }
 
   function send(action, payload) {
-    if (typeof window.canvasSend === 'function') return window.canvasSend(action, payload);
-    if (window.parent !== window) {
-      console.error('[canvas] selection action DROPPED: canvasSend is unavailable in a framed document');
-      return false;
+    if (typeof window.canvasSend !== 'function') {
+      console.error('[canvas] selection action DROPPED: canvasSend is unavailable');
+      return 'transport-unavailable';
     }
-
-    const message = Object.assign({}, payload, { action: action });
-    const size = JSON.stringify(message).length;
-    if (size > 64000) {
-      console.error(
-        '[canvas] selection action DROPPED: message too large (' +
-        size +
-        ' > 64000 UTF-16 code units); not sent'
-      );
-      return false;
-    }
-    window.parent.postMessage(message, '*');
-    return true;
+    return window.canvasSend(action, payload) ? 'sent' : 'too-large';
   }
 
   function sendSelection(intent, comment) {
@@ -430,12 +442,16 @@
       request: requestFor(intent, comment)
     };
 
-    if (send('canvas-selection', payload)) {
+    const result = send('canvas-selection', payload);
+    if (result === 'sent') {
       startProcessing(state.range);
       hide(true);
     } else {
       ensureHost();
-      errorText.textContent = 'The selected text or comment is too large to send.';
+      errorText.textContent =
+        result === 'transport-unavailable'
+          ? 'Canvas messaging is unavailable in this document.'
+          : 'The selected text or comment is too large to send.';
       position();
     }
   }
@@ -443,10 +459,11 @@
   function handleSelectionChange() {
     cancelAnimationFrame(selectionFrame);
     selectionFrame = requestAnimationFrame(function () {
-      const captured = captureSelection(window.getSelection());
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0 && !selection.isCollapsed) clearProcessing();
+      const captured = captureSelection(selection);
 
       if (captured) {
-        clearProcessing();
         if (state && state.mode === 'commenting' && sameRange(state.range, captured.range)) {
           position();
           return;
@@ -488,7 +505,7 @@
       event.data.action === 'content-updated'
     ) {
       hide(false);
-      clearProcessing();
     }
   });
+  window.addEventListener('canvas-morph-complete', clearProcessing);
 })();

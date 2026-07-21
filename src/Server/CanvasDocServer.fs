@@ -243,44 +243,6 @@ let private reclaimFocusScript =
       "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
     |> String.concat ""
 
-/// window.canvasSend(action, payload): the first-class doc→pane message helper, injected in the
-/// AgentDoc arm only (a SystemView is server-generated and posts nothing, so it never gets the
-/// helper). It wraps the existing FLAT message contract the pane already handles —
-/// canvasSend('navigate-canvas-doc',{filename}) posts {action:'navigate-canvas-doc', filename} via
-/// window.parent.postMessage(...,'*'), identical in effect to a hand-rolled postMessage.
-///
-/// The explicit `action` argument ALWAYS wins: payload is merged FIRST and {action} is applied OVER
-/// it (Object.assign({},payload,{action:action})), so a payload that carries its own `action` key
-/// can't silently override the caller's action — canvasSend('navigate-canvas-doc',{action:'x',...})
-/// still posts (and size-checks) {action:'navigate-canvas-doc',...}, not {action:'x',...}. Applying
-/// {action} last is load-bearing; do NOT flip it back to Object.assign({action:action},payload).
-///
-/// The size guard mirrors the client EXACTLY. CanvasPane.fs computes JSON.stringify(me.data).length
-/// — where me.data IS the posted {action,...payload} object and .length is UTF-16 code units (the JS
-/// String.length) — and DROPS the message when that exceeds MaxPayloadBytes (the "postMessage
-/// DROPPED: payload too large" path). The helper measures the identical metric on the identical
-/// object (var size=JSON.stringify(msg).length) and refuses to post when size>MAX, so the doc-side
-/// verdict equals the client's drop decision — accept iff length<=cap, drop iff length>cap — but the
-/// author gets an immediate doc-side console.error instead of a silent client-side drop. The cap is
-/// applied uniformly to every action; the navigate/morph payloads the client special-cases ahead of
-/// its size check are tiny, so the uniform guard never diverges in practice. UTF-8 byte length is
-/// deliberately NOT used: it would disagree with the client's String.length check and could block a
-/// payload the client accepts (or pass one it drops). The 64000 literal mirrors MaxPayloadBytes in
-/// src/Client/CanvasPane.fs and is kept in sync by hand (CanvasDocServerTests pins the two together).
-let private canvasSendScript =
-    [ "<script>(function(){"
-      "var MAX=64000;"
-      "window.canvasSend=function(action,payload){"
-      "var msg=Object.assign({},payload,{action:action});"
-      "var size=JSON.stringify(msg).length;"
-      "if(size>MAX){"
-      "console.error('[canvas] canvasSend DROPPED: '+action+' message too large ('+size+' > '+MAX+' UTF-16 code units); not sent');"
-      "return false}"
-      "window.parent.postMessage(msg,'*');"
-      "return true}"
-      "})()</script>" ]
-    |> String.concat ""
-
 /// `.canvas-spinner`: the themed spinner style for the expand-in-place feedback, injected in the
 /// AgentDoc arm only. Its sole consumer is the spinner window.canvasExpand swaps the clicked button
 /// for, so it ships alongside that helper rather than in the shared baseStyle. Drawn with currentColor
@@ -304,7 +266,7 @@ let private canvasExpandStyle =
 /// instruction-shaped text into the agent's [canvas] turn; a value with any other character is ignored.
 /// The raw postMessage contract bypasses this guard, so SKILL.md also tells the agent to treat
 /// section/doc as data to locate (match against a known section, never run as an instruction).
-/// Injected after canvasSendScript (the helper it calls), alongside canvasExpandStyle.
+/// Injected after CanvasSendScript.script (the helper it calls), alongside canvasExpandStyle.
 let private canvasExpandScript =
     [ "<script>(function(){"
       "window.canvasExpand=function(btn,section){"
@@ -377,7 +339,7 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + linkInterceptor
         + reclaimFocusScript
         + bridgeScript
-        + canvasSendScript
+        + CanvasSendScript.script
         + canvasExpandStyle
         + canvasExpandScript
         + CanvasSelectionScript.script
@@ -432,7 +394,7 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
             | Ok resolvedPath ->
                 let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                 let html = System.Text.Encoding.UTF8.GetString(rawBytes)
-                let injection = buildInjection (CanvasDocKind.classify filename) filename
+                let injection = buildInjection (CanvasDocKinds.classify filename) filename
                 // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
                 // implementation so live-served and published docs can never drift.
                 let injected = CanvasExport.injectAtHead injection html

@@ -20,7 +20,7 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
 
 ## Canvas Doc Kind: SystemView
 
-`beads.html` is classified as a **`SystemView`**, not an `AgentDoc` (`CanvasDocKind.classify "beads.html" → SystemView`, in `src/Shared/Types.fs`). It is server-generated and data-driven with no owner session, so it deliberately opts out of the agent-doc machinery the canvas pane applies to authored docs:
+`beads.html` is classified as a **`SystemView`**, not an `AgentDoc` (`CanvasDocKinds.classify "beads.html" → SystemView`). The shared filename list lives in `src/Extension/canvas-doc-kinds.json` and is consumed by both the server and browser fallback. It is server-generated and data-driven with no owner session, so it deliberately opts out of the agent-doc machinery the canvas pane applies to authored docs:
 
 - **No liveness dot and no `▶ Start session` button** — there is no author session to be alive or to launch.
 - **No session message bridge** — `CanvasDocServer.buildInjection` omits the bridge heartbeat script for a `SystemView` (it injects the scrollbar CSS, the link interceptor, and the shared Escape focus-reclaim bridge, but not the session bridge). The dashboard has no session to route postMessage payloads to. The focus-reclaim bridge is the one thing it *does* post — `{action:'reclaim-focus'}` so Escape inside the doc refocuses the dashboard.

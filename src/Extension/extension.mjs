@@ -20,8 +20,14 @@ const HEARTBEAT_MAX_INTERVAL_MS = 120000;
 const TREEMON_FETCH_TIMEOUT_MS = 5000;
 
 const log = (msg) => console.error(`[canvas-bridge] ${msg}`);
+const CANVAS_SEND_SCRIPT =
+  `<script>${readFileSync(new URL("./canvas-send.js", import.meta.url), "utf8")}</script>`;
 const CANVAS_SELECTION_CONTEXT_SCRIPT =
   `<script>${readFileSync(new URL("./canvas-selection-context.js", import.meta.url), "utf8")}</script>`;
+const SYSTEM_VIEW_FILENAMES = new Set(
+  JSON.parse(readFileSync(new URL("./canvas-doc-kinds.json", import.meta.url), "utf8"))
+    .map((filename) => filename.toLowerCase()),
+);
 
 const TRANSPORT_SHIM = `<script>
 if (window.parent === window) {
@@ -86,9 +92,11 @@ function hashContent(content) {
 
 function injectScripts(html, port, filename) {
   const shim = TRANSPORT_SHIM.replaceAll("__PORT__", String(port));
-  const selectionContext =
-    filename.toLowerCase() === "beads.html" ? "" : "\n" + CANVAS_SELECTION_CONTEXT_SCRIPT;
-  const scripts = shim + selectionContext + "\n" + CONTENT_POLL_SCRIPT;
+  const agentDocScripts =
+    SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())
+      ? ""
+      : "\n" + CANVAS_SEND_SCRIPT + "\n" + CANVAS_SELECTION_CONTEXT_SCRIPT;
+  const scripts = shim + agentDocScripts + "\n" + CONTENT_POLL_SCRIPT;
   if (html.includes("</head>")) {
     return html.replace("</head>", scripts + "\n</head>");
   }

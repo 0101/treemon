@@ -166,11 +166,11 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
   would lose the source-order tiebreak to the later `:where(body){padding:2rem 2.25rem}`, so
   `BeadspaceTemplate.html` resets margin/padding on its `body` selector directly. Still injected for
   both kinds via `buildInjection`.
-- **`canvasSend`:** add a new injected script constant (mirroring `bridgeScript`'s IIFE style) and
-  append it in the `AgentDoc` arm of `buildInjection` only. Implement the size check with the same
-  metric the client uses — `JSON.stringify({ action, ...payload }).length` compared against
-  `64_000` — so the helper never blocks a payload the client would accept nor passes one it would
-  drop.
+- **`canvasSend`:** `src/Extension/canvas-send.js` is the single runtime source. The server embeds it
+  through `CanvasSendScript.fs`, while browser fallback injects the same file after its transport
+  shim. The size check uses the same metric the client uses —
+  `JSON.stringify({ action, ...payload }).length` compared against `64_000` — so the helper never
+  blocks a payload the client would accept nor passes one it would drop.
 - **Error overlay:** add a new injected script *function* (AgentDoc arm) installing `window.onerror`
   + `unhandledrejection` → `postMessage({ action: 'canvas-doc-error', wt, doc, ... }, '*')`. The overlay
   is served per-doc, so `buildInjection (kind) (filename)` threads the served filename in and the
@@ -179,8 +179,8 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
   error its full emitter identity (worktree + filename).
 - **Selected-text actions:** `src/Extension/canvas-selection-context.js` is the single runtime
   source. The server embeds it as an assembly resource through `CanvasSelectionScript.fs`; browser
-  fallback reads and injects the same file. The script uses `canvasSend` when available and the raw
-  size-checked `postMessage` contract otherwise.
+  fallback reads and injects the same file. The script depends exclusively on the shared
+  `canvasSend` runtime and reports unavailable transport separately from an oversized payload.
 - Keep `MaxPayloadBytes` as the single source of truth for the cap; reference its value in the
   injected helper (literal kept in sync with `CanvasPane.fs`).
 
