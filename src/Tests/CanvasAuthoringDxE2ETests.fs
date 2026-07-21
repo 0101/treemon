@@ -407,7 +407,6 @@ type CanvasSelectionContextE2ETests() =
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
-        opts.ReducedMotion <- ReducedMotion.Reduce
         opts
 
     member private this.ServeDoc (body: string) (host: SelectionHost) =
