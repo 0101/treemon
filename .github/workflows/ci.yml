@@ -35,5 +35,8 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      - name: Test
+      - name: Test extensions
+        run: npm run test:extension
+
+      - name: Test .NET
         run: dotnet test src/Tests/Tests.fsproj --filter "Category!=Local" --no-build --verbosity normal
