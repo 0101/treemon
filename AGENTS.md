@@ -61,7 +61,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 
 ## Before Writing New Code
 
-Before implementing a helper, utility, or any non-trivial logic, **search the codebase** for existing functions that do the same thing. Grep for the underlying command, operation, or concept — not just the function name you have in mind. The exact operation may not exist yet: check whether a cohesive existing function can be extended or parameterized, including with a projection or operation function, before creating a parallel path. Generalize only when it preserves clarity and one source of truth; do not force structurally similar domain code together. Reuse what exists, and choose the destination module by responsibility rather than by the first call site.
+Before implementing a helper, utility, or any non-trivial logic, **search the codebase** for the underlying command, operation, or concept — not just the function name you have in mind. Reuse an existing function when possible. If reusable logic is embedded in business logic, extract it into the module that owns the concept. Otherwise, consider extending or parameterizing a cohesive existing function, including with a projection or operation function. Generalize only when this creates one clear source of truth without coupling distinct domain behavior, and choose the destination module by responsibility rather than by the first call site.
 
 ## Before Finishing a Change
 
