@@ -72,7 +72,7 @@ let private deliverableTo key (sessionId: string option) (msg: QueuedMessage) =
     let owner =
         match msg.Kind with
         | AgentDoc -> msg.Owner
-        | SystemView -> CanvasInteractionOwnership.getOwnerSync key msg.Filename
+        | SystemView -> CanvasInteractionOwnership.getDeliveryOwnerSync key msg.Filename
 
     match msg.Kind, owner with
     | AgentDoc, None -> true
@@ -218,6 +218,37 @@ let sessionsForWorktree (worktreePath: string) : SessionEntry list =
     |> Seq.filter (fun e -> String.Equals(e.WorktreePath, worktreeKey, StringComparison.OrdinalIgnoreCase))
     |> Seq.toList
 
+let internal registrationStamp (worktreePath: string) (sessionId: string) =
+    sessionsForWorktree worktreePath
+    |> List.tryFind (fun entry -> entry.SessionId = Some sessionId)
+    |> Option.map _.RegisteredAt
+
+let internal waitForRegistrationAfter
+    (timeout: TimeSpan)
+    (worktreePath: string)
+    (sessionId: string)
+    (previous: DateTime option)
+    =
+    let deadline = DateTime.UtcNow + timeout
+
+    let rec wait () =
+        async {
+            let registered =
+                registrationStamp worktreePath sessionId
+                |> Option.exists (fun registeredAt ->
+                    previous |> Option.forall (fun previousAt -> registeredAt > previousAt))
+
+            if registered then
+                return true
+            elif DateTime.UtcNow >= deadline then
+                return false
+            else
+                do! Async.Sleep 50
+                return! wait ()
+        }
+
+    wait ()
+
 /// The most recently registered session for a worktree. Deterministic because
 /// RegisteredAt is issued from a monotonic clock. Preserves the prior "last
 /// registered wins" semantics for the single-status / single-session views.
@@ -257,7 +288,7 @@ let private postPayload (entry: SessionEntry) (payload: string) (key: string) : 
 let getTargetOwner (worktreePath: string) (filename: string) =
     match CanvasDocKinds.classify filename with
     | AgentDoc -> CanvasDocOwnership.getOwner worktreePath filename
-    | SystemView -> CanvasInteractionOwnership.getOwner worktreePath filename
+    | SystemView -> CanvasInteractionOwnership.getDeliveryOwner worktreePath filename
 
 /// Route a canvas-doc message to its authored owner (AgentDoc) or persistent interaction owner
 /// (SystemView).

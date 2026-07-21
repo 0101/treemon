@@ -262,7 +262,8 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
         // banner is an independent fact and is left untouched.
         let clearedSendState =
             match model.Canvas.CanvasSendState with
-            | CanvasSendState.Failed _ -> CanvasSendState.Idle
+            | CanvasSendState.Failed _
+            | CanvasSendState.OwnerUnavailable _ -> CanvasSendState.Idle
             | other -> other
         { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = None } },
         writeClipboardCmd (buildClipboardPayload shareResult)
@@ -315,7 +316,12 @@ let canvasMessageReceived (payload: string) (model: Model) =
     match visibleDoc, worktree with
     | Some (scopedKey, filename), Some wt ->
         Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
-        model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } (fun r -> CanvasSendResult(r, scopedKey)) (fun e -> CanvasSendResult(CanvasMessageResult.Error e.Message, scopedKey))
+        model,
+        Cmd.OfAsync.either
+            worktreeApi.Value.sendCanvasMessage
+            { WorktreePath = wt.Path; Filename = filename; Payload = payload }
+            (fun result -> CanvasSendResult(result, scopedKey, filename))
+            (fun ex -> CanvasSendResult(CanvasMessageResult.Error ex.Message, scopedKey, filename))
     | Some (scopedKey, _), None ->
         Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
         model, Cmd.none
@@ -323,16 +329,46 @@ let canvasMessageReceived (payload: string) (model: Model) =
         Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
         model, Cmd.none
 
-let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (model: Model) =
+let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (filename: string) (model: Model) =
     match result with
     | CanvasMessageResult.Error msg ->
         Fable.Core.JS.console.error ("Canvas message error:", msg)
         { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
+    | CanvasMessageResult.OwnerUnavailable msg ->
+        Fable.Core.JS.console.error ("Canvas interaction owner unavailable:", msg)
+        { model with Canvas.CanvasSendState = CanvasSendState.OwnerUnavailable(msg, scopedKey, filename) }, Cmd.none
     | CanvasMessageResult.Ok ->
         { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
     | CanvasMessageResult.Queued ->
         Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
         { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
+
+let reassignCanvasInteraction (scopedKey: string) (filename: string) (model: Model) =
+    match findWorktree scopedKey model with
+    | Some wt when isKnownCanvasDoc model scopedKey filename ->
+        let request: CanvasInteractionRecoveryRequest =
+            { WorktreePath = wt.Path
+              Filename = filename }
+
+        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey },
+        Cmd.OfAsync.either
+            worktreeApi.Value.reassignCanvasInteraction
+            request
+            (fun result -> ReassignCanvasInteractionResult(scopedKey, filename, result))
+            (fun ex -> ReassignCanvasInteractionResult(scopedKey, filename, Error ex.Message))
+    | _ -> model, Cmd.none
+
+let reassignCanvasInteractionResult
+    (scopedKey: string)
+    (filename: string)
+    (result: Result<unit, string>)
+    (model: Model)
+    =
+    match result with
+    | Ok () ->
+        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
+    | Error msg ->
+        { model with Canvas.CanvasSendState = CanvasSendState.OwnerUnavailable(msg, scopedKey, filename) }, Cmd.none
 
 let dismissCanvasMessageError (model: Model) =
     { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none

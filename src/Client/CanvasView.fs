@@ -57,6 +57,9 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
         | Some scopedKey -> dispatch (LaunchCanvasSession scopedKey)
         | _ -> ()
 
+    let reassignCanvasInteraction scopedKey filename =
+        dispatch (ReassignCanvasInteraction(scopedKey, filename))
+
     // The single unviewed input: the same badge-source map (`unviewedDocsByScopedKey`), computed
     // ONCE and converted to Map<string, Set<string>> for O(1) per-doc membership. The overview
     // highlights from this whole map; the focused card's set is derived from it below, so the
@@ -93,6 +96,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           DismissError = (fun () -> dispatch DismissCanvasMessageError)
           DismissDocError = (fun () -> dispatch DismissCanvasDocError)
           DismissShareNotice = (fun () -> dispatch DismissShareNotice)
+          ReassignInteraction = reassignCanvasInteraction
           LaunchSession = launchCanvasSession }
 
     let canvasState: CanvasPane.CanvasPaneState =

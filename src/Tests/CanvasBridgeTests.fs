@@ -682,6 +682,82 @@ type OwnerRoutingTests() =
 type SystemViewInteractionRoutingTests() =
 
     [<Test>]
+    member _.``owner registration wait requires a newer registration and succeeds on retry``() =
+        let path = uniquePath "registration-wait"
+        let sid = uniqueSid "owner"
+        registerSession path "http://127.0.0.1:1/inject" (Some sid)
+        let previous = registrationStamp path sid
+
+        let timedOut =
+            waitForRegistrationAfter (TimeSpan.FromMilliseconds 100.0) path sid previous
+            |> runAsync
+
+        Assert.That(timedOut, Is.False, "A stale registration must not prove that resume succeeded")
+
+        let retry =
+            waitForRegistrationAfter (TimeSpan.FromSeconds 2.0) path sid previous
+            |> Async.StartAsTask
+
+        registerSession path "http://127.0.0.1:1/inject" (Some sid)
+
+        Assert.That(retry.GetAwaiter().GetResult(), Is.True, "A newer registration must complete the retry")
+
+    [<Test>]
+    member _.``start-fresh reassignment claims queued interaction and delivers it only to replacement``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use oldOwnerSink = new HttpSink(ports[0])
+            use replacementSink = new HttpSink(ports[1])
+            oldOwnerSink.Start()
+            replacementSink.Start()
+
+            let path = Path.Combine(Environment.CurrentDirectory, $"system-reassign-{Guid.NewGuid():N}")
+            let oldSid = uniqueSid "old"
+            let replacementSid = uniqueSid "replacement"
+            runAsync (Server.CanvasInteractionOwnership.assign path "diff.html" oldSid)
+
+            let queued =
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "diff.html"
+                          Payload = "recover-me" })
+
+            Assert.That(queued, Is.EqualTo(CanvasMessageResult.Queued))
+
+            let reassignment =
+                match runAsync (Server.CanvasInteractionOwnership.beginReassignment path "diff.html") with
+                | Ok value -> value
+                | Error err -> failwith err
+
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some oldSid),
+                "The old owner remains authoritative until replacement registration")
+
+            registerSession path oldOwnerSink.Url (Some oldSid)
+            Assert.That(
+                oldOwnerSink.Bodies,
+                Is.Empty,
+                "A pending explicit reassignment must freeze delivery to the old owner")
+
+            registerSession path replacementSink.Url (Some replacementSid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> replacementSink.Bodies = [ "recover-me" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "Replacement registration must claim and drain the queued interaction")
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some replacementSid))
+
+            runAsync (
+                Server.CanvasInteractionOwnership.cancelReassignment
+                    path
+                    "diff.html"
+                    reassignment.Token))
+
+    [<Test>]
     member _.``heartbeat cannot steal pending SystemView claim from deliberately launched session``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 2

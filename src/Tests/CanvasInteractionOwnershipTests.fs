@@ -3,6 +3,7 @@ module Tests.CanvasInteractionOwnershipTests
 open System
 open System.IO
 open NUnit.Framework
+open Shared
 open Server.CanvasInteractionOwnership
 open Tests.TestUtils
 
@@ -82,6 +83,122 @@ type PersistenceTests() =
 
             Assert.That(store.ClaimPending(worktree, "unrelated-session"), Is.Empty)
             Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option)))
+
+    [<Test>]
+    member _.``pending reassignment preserves the old owner until a new session claims atomically``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+
+            let reassignment =
+                match runAsync (store.BeginReassignment(worktree, "diff.html")) with
+                | Ok value -> value
+                | Error err -> failwith err
+
+            Assert.That(
+                runAsync (store.GetOwner(worktree, "diff.html")),
+                Is.EqualTo(Some "session-a"),
+                "Starting recovery must preserve affinity until the replacement registers")
+
+            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "diff.html" ]))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-b"))
+
+            runAsync (store.CancelReassignment(worktree, "diff.html", reassignment.Token))
+            let restarted = createStore filePath
+            Assert.That(
+                runAsync (restarted.GetOwner(worktree, "diff.html")),
+                Is.EqualTo(Some "session-b"),
+                "The claim must persist the replacement owner before queue delivery"))
+
+    [<Test>]
+    member _.``failed reassignment can be cancelled and retried without losing the old owner``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+
+            let first =
+                match runAsync (store.BeginReassignment(worktree, "diff.html")) with
+                | Ok value -> value
+                | Error err -> failwith err
+
+            runAsync (store.CancelReassignment(worktree, "diff.html", first.Token))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
+
+            let retry = runAsync (store.BeginReassignment(worktree, "diff.html"))
+            Assert.That(Result.isOk retry, Is.True, "A failed start-fresh attempt must be retryable")
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a")))
+
+    [<Test>]
+    member _.``resume failure and timeout surface recovery while a retry can succeed``() =
+        let spawnFailure =
+            Server.WorktreeApi.resumeSystemViewOwnerWith
+                (fun () -> async { return Error "resume rejected" })
+                (fun () -> async { return true })
+                "diff.html"
+            |> runAsync
+
+        let registrationTimeout =
+            Server.WorktreeApi.resumeSystemViewOwnerWith
+                (fun () -> async { return Ok () })
+                (fun () -> async { return false })
+                "diff.html"
+            |> runAsync
+
+        let retry =
+            Server.WorktreeApi.resumeSystemViewOwnerWith
+                (fun () -> async { return Ok () })
+                (fun () -> async { return true })
+                "diff.html"
+            |> runAsync
+
+        match spawnFailure, registrationTimeout with
+        | CanvasMessageResult.OwnerUnavailable _, CanvasMessageResult.OwnerUnavailable _ -> ()
+        | other -> Assert.Fail($"Expected recoverable owner failures, got {other}")
+
+        Assert.That(retry, Is.EqualTo(CanvasMessageResult.Queued))
+
+    [<Test>]
+    member _.``start fresh rolls back its pending claim on launch failure and persists replacement on retry``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+
+            let run launch waitForReplacement =
+                Server.WorktreeApi.startFreshSystemViewWith
+                    (fun () -> store.BeginReassignment(worktree, "diff.html"))
+                    (fun token -> store.CancelReassignment(worktree, "diff.html", token))
+                    launch
+                    waitForReplacement
+                    "diff.html"
+                |> runAsync
+
+            let failed =
+                run
+                    (fun () -> async { return Error "terminal failed" })
+                    (fun _ -> async { return None })
+
+            match failed with
+            | Error "Could not start a fresh interaction session for diff.html: terminal failed" -> ()
+            | other -> Assert.Fail($"Expected the launch failure to surface, got {other}")
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
+
+            let succeeded =
+                run
+                    (fun () -> async { return Ok () })
+                    (fun _ ->
+                        async {
+                            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "diff.html" ]))
+                            return! store.GetOwner(worktree, "diff.html")
+                        })
+
+            match succeeded with
+            | Ok () -> ()
+            | Error err -> Assert.Fail($"Expected start-fresh retry to succeed, got {err}")
+            let restarted = createStore filePath
+            Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-b")))
 
     [<Test>]
     member _.``view and worktree cleanup remove persisted interaction ownership``() =

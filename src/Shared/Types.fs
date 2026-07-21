@@ -261,10 +261,15 @@ type CanvasMessageRequest =
       Filename: string
       Payload: string }
 
+type CanvasInteractionRecoveryRequest =
+    { WorktreePath: WorktreePath
+      Filename: string }
+
 [<RequireQualifiedAccess>]
 type CanvasMessageResult =
     | Ok
     | Error of string
+    | OwnerUnavailable of string
     | Queued
 
 type BridgeLiveness =
@@ -455,6 +460,7 @@ type IWorktreeApi =
       saveCanvasSize: CanvasSize -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
+      reassignCanvasInteraction: CanvasInteractionRecoveryRequest -> Async<Result<unit, string>>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
       shareCanvasDoc: ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>
       saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>

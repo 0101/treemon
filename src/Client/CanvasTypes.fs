@@ -12,6 +12,7 @@ type CanvasSendState =
     | Idle
     | Waiting of scopedKey: string
     | Failed of message: string
+    | OwnerUnavailable of message: string * scopedKey: string * filename: string
 
 /// A doc-scoped banner error stamped with the worktree + the doc it is attributed to. Two producers
 /// feed it: (1) a doc-side JS error (window.onerror / unhandledrejection forwarded from an AgentDoc

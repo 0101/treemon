@@ -12,6 +12,8 @@
 - Selecting ordinary non-editable text in either an AgentDoc or SystemView shows the same contextual action toolbar and processing indicator.
 - AgentDoc messages continue routing through `CanvasDoc.OwnerSessionId`.
 - Each `(worktree, SystemView filename)` has a separate persistent interaction-session owner. The first explicitly started or claimed session becomes the target; subsequent interactions resume or route only to that session until ownership is reassigned or the view/worktree is removed.
+- Resuming an offline interaction owner is successful only after that exact session re-registers its bridge. A spawn error or registration timeout is shown as a hard failure with an explicit **Start fresh and reassign** action; it is never left as a silent queued wait.
+- Starting fresh preserves the old durable owner while the replacement launches, suspends queue delivery to that old owner, then atomically changes the owner and drains to the new identified session when it registers. Launch failure or timeout cancels the pending reassignment, so retrying still targets the old owner.
 - A SystemView may provide optional selection metadata. Valid metadata is sent as nested `sourceContext`, separate from the human-readable `request` and selected text.
 - The diff view supplies `kind = "diff"`, file identity, hunk header, and old/new line ranges. Beadspace supplies `kind = "beads"` and the selected task ID.
 - Missing metadata is valid. Invalid, non-serializable, oversized, or exception-producing metadata blocks the send and displays an error in the selection toolbar.
@@ -22,6 +24,15 @@
 `CanvasDocServer.buildInjection` includes `CanvasSendScript` and `CanvasSelectionScript` for both document kinds. SystemViews continue to omit heartbeat/author bridge, error/morph authoring machinery, and idiomorph.
 
 Interaction ownership is stored separately from `CanvasDocOwnership` because generated views have no author. Message routing resolves authored ownership for AgentDocs and interaction ownership for SystemViews. An unclaimed SystemView interaction is queued while Treemon starts or continues a session for that view; the session claims the interaction target before the queued message is delivered. Ownership persists across restarts and is removed with the view or worktree.
+
+For an owned SystemView whose bridge is offline, Treemon resumes the persisted owner and waits for
+a newer registration from that exact session. Spawn failure or registration timeout returns a
+recoverable owner-unavailable result to the pane. The user-approved start-fresh path records an
+in-memory reassignment claim without deleting the durable owner; a newly seen identified session
+atomically replaces and persists that owner before queue draining. Cancelling or timing out the
+claim leaves the previous owner unchanged. While the reassignment claim is pending, owner resolution
+for delivery returns no target so a late heartbeat from the old session cannot consume the queued
+interaction before the replacement claims it.
 
 The pending claim is in-memory and keyed by normalized worktree plus SystemView filename; the
 durable owner is persisted in `data/canvas-interaction-owners.json`. An identified bridge
@@ -47,6 +58,8 @@ The shared transport treats `window.parent === window` as unavailable unless a t
 
 - SystemView interaction ownership is distinct from authored-file ownership so generated views do not acquire incorrect liveness, archive, share, or morph behavior.
 - Ownership persists until explicit reassignment or view/worktree removal; session termination alone does not release it.
+- Conversation affinity wins over automatic availability: an unavailable owner is never reassigned automatically. The pane surfaces the failure and requires the user to choose **Start fresh and reassign**.
+- Reassignment is committed only by a new identified bridge registration. Until then the old durable owner remains authoritative, so failed launches and registration timeouts are safe to retry.
 - The session deliberately started or continued for an unclaimed interaction claims the view before
   draining; heartbeat refreshes from other sessions cannot claim it, and later registrations cannot
   overwrite it.
