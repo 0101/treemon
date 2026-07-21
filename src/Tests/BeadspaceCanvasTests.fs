@@ -361,3 +361,22 @@ type BeadspaceCanvasTests() =
             let! count = detailPanel.CountAsync()
             Assert.That(count, Is.EqualTo(1), "Clicking the row body should still expand the detail panel")
         }
+
+    [<Test>]
+    member this.``Selection metadata identifies the exact beads task``() =
+        task {
+            let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
+            do! allChip.ClickAsync()
+            let firstRow = this.Page.Locator(".issue-table-row").First
+            let! expectedTaskId = firstRow.GetAttributeAsync("data-issue-id")
+            let! sourceContext =
+                firstRow.Locator(".col-title").EvaluateAsync<string>(
+                    """element => {
+                        const range = document.createRange();
+                        range.selectNodeContents(element);
+                        return JSON.stringify(window.canvasSelectionMetadata({ range: range }));
+                    }""")
+            Assert.That(
+                sourceContext,
+                Is.EqualTo($"""{{"kind":"beads","taskId":"{expectedTaskId}"}}"""))
+        }

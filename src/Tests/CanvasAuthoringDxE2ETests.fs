@@ -475,6 +475,11 @@ type CanvasSelectionContextE2ETests() =
             return ()
         }
 
+    member private this.WaitForSelectionError expected =
+        this.Page.WaitForFunctionAsync(
+            "(expected) => document.querySelector('canvas-selection-context')?.shadowRoot.querySelector('.error').textContent === expected",
+            expected)
+
     [<Test>]
     member this.``selection toolbar hides when the selection is cleared``() =
         task {
@@ -685,6 +690,149 @@ type CanvasSelectionContextE2ETests() =
             let expected =
                 """{"intent":"explain","doc":"selection.html","contextBefore":"Before ","selectedText":"Fallback selection","contextAfter":" after","section":"fallback","request":"User asked to explain/expand this","action":"canvas-selection"}"""
             Assert.That(message, Is.EqualTo(expected))
+        }
+
+    [<Test>]
+    member this.``valid selection metadata is nested as source context``() =
+        task {
+            do! (this.ServeDoc
+                "<section data-section=\"metadata\"><span id=\"selected\">Metadata selection</span></section>"
+                BrowserHost)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                        window.canvasSelectionMetadata = context => ({
+                            kind: 'beads',
+                            taskId: 'task-42',
+                            capture: {
+                                selectedText: context.selectedText,
+                                section: context.section
+                            }
+                        });
+                    }""")
+            do! this.SelectAndWaitForToolbar "#selected"
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync("() => window.__selectionMessages.length===1")
+            let! message = this.Page.EvaluateAsync<string>("() => JSON.stringify(window.__selectionMessages[0])")
+            let expected =
+                """{"intent":"explain","doc":"selection.html","contextBefore":"","selectedText":"Metadata selection","contextAfter":"","section":"metadata","request":"User asked to explain/expand this","sourceContext":{"kind":"beads","taskId":"task-42","capture":{"selectedText":"Metadata selection","section":"metadata"}},"action":"canvas-selection"}"""
+            Assert.That(message, Is.EqualTo(expected))
+        }
+
+    [<Test>]
+    member this.``reserved metadata fields stay nested and cannot override selection fields``() =
+        task {
+            do! (this.ServeDoc
+                "<section data-section=\"safe\"><span id=\"selected\">Original selection</span></section>"
+                BrowserHost)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                        window.canvasSelectionMetadata = () => ({
+                            action: 'replace-action',
+                            intent: 'remove',
+                            request: 'Replace the request',
+                            selectedText: 'Replace the selection',
+                            contextBefore: 'Replace before',
+                            contextAfter: 'Replace after',
+                            section: 'replace-section'
+                        });
+                    }""")
+            do! this.SelectAndWaitForToolbar "#selected"
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync("() => window.__selectionMessages.length===1")
+            let! message = this.Page.EvaluateAsync<string>("() => JSON.stringify(window.__selectionMessages[0])")
+            let expected =
+                """{"intent":"explain","doc":"selection.html","contextBefore":"","selectedText":"Original selection","contextAfter":"","section":"safe","request":"User asked to explain/expand this","sourceContext":{"action":"replace-action","intent":"remove","request":"Replace the request","selectedText":"Replace the selection","contextBefore":"Replace before","contextAfter":"Replace after","section":"replace-section"},"action":"canvas-selection"}"""
+            Assert.That(message, Is.EqualTo(expected))
+        }
+
+    [<TestCase("array")>]
+    [<TestCase("cycle")>]
+    [<TestCase("non-plain")>]
+    member this.``invalid selection metadata shows an error and sends nothing``(invalidKind: string) =
+        task {
+            do! (this.ServeDoc
+                "<span id=\"selected\">Invalid metadata</span>"
+                BrowserHost)
+            let hook =
+                match invalidKind with
+                | "array" -> "() => []"
+                | "cycle" -> "() => { const value = { kind: 'beads' }; value.self = value; return value; }"
+                | "non-plain" -> "() => ({ kind: 'beads', createdAt: new Date() })"
+                | _ -> failwith $"Unexpected invalid metadata kind: {invalidKind}"
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "(hook) => { window.canvasSelectionMetadata = (0, eval)(hook); }",
+                    hook)
+            do! this.SelectAndWaitForToolbar "#selected"
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let expected = "Selection source context must be a plain serializable JSON object."
+            let! _ = this.WaitForSelectionError expected
+            let! outcome =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify({
+                        messages: window.__selectionMessages,
+                        toolbar: document.querySelector('canvas-selection-context').style.display,
+                        error: document.querySelector('canvas-selection-context').shadowRoot.querySelector('.error').textContent
+                    })""")
+            Assert.That(
+                outcome,
+                Is.EqualTo(
+                    """{"messages":[],"toolbar":"block","error":"Selection source context must be a plain serializable JSON object."}"""))
+        }
+
+    [<Test>]
+    member this.``selection metadata exceptions show an error and send nothing``() =
+        task {
+            do! (this.ServeDoc
+                "<span id=\"selected\">Throwing metadata</span>"
+                BrowserHost)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { window.canvasSelectionMetadata = () => { throw new Error('provider failed'); }; }")
+            do! this.SelectAndWaitForToolbar "#selected"
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let expected = "Selection source context could not be created."
+            let! _ = this.WaitForSelectionError expected
+            let! outcome =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify({
+                        messages: window.__selectionMessages,
+                        toolbar: document.querySelector('canvas-selection-context').style.display,
+                        error: document.querySelector('canvas-selection-context').shadowRoot.querySelector('.error').textContent
+                    })""")
+            Assert.That(
+                outcome,
+                Is.EqualTo(
+                    """{"messages":[],"toolbar":"block","error":"Selection source context could not be created."}"""))
+        }
+
+    [<Test>]
+    member this.``oversized selection metadata shows an error and sends nothing``() =
+        task {
+            do! (this.ServeDoc
+                "<span id=\"selected\">Oversized metadata</span>"
+                BrowserHost)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { window.canvasSelectionMetadata = () => ({ kind: 'beads', detail: 'x'.repeat(64000) }); }")
+            do! this.SelectAndWaitForToolbar "#selected"
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let expected = "The selected text or comment is too large to send."
+            let! _ = this.WaitForSelectionError expected
+            let! outcome =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify({
+                        messages: window.__selectionMessages,
+                        toolbar: document.querySelector('canvas-selection-context').style.display,
+                        processing: document.querySelector('canvas-selection-processing')?.style.display ?? 'none',
+                        error: document.querySelector('canvas-selection-context').shadowRoot.querySelector('.error').textContent
+                    })""")
+            Assert.That(
+                outcome,
+                Is.EqualTo(
+                    """{"messages":[],"toolbar":"block","processing":"none","error":"The selected text or comment is too large to send."}"""))
         }
 
     [<Test>]

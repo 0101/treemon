@@ -497,6 +497,22 @@ function createCopyIdButton(id) {
     return btn;
 }
 
+function selectionTaskId(node) {
+    var element = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+    var issue = element && element.closest('[data-issue-id], [data-detail-for]');
+    return issue && (issue.dataset.issueId || issue.dataset.detailFor) || null;
+}
+
+window.canvasSelectionMetadata = function(selectionContext) {
+    var range = selectionContext && selectionContext.range;
+    if (!range) return { kind: 'beads' };
+    var startTaskId = selectionTaskId(range.startContainer);
+    var endTaskId = selectionTaskId(range.endContainer);
+    return startTaskId && startTaskId === endTaskId
+        ? { kind: 'beads', taskId: startTaskId }
+        : { kind: 'beads' };
+};
+
 function daysAgo(dateStr) {
     if (!dateStr) return 0;
     var diff = Date.now() - new Date(dateStr).getTime();

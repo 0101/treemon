@@ -6,6 +6,10 @@
   const sectionPattern = /^[A-Za-z0-9_-]+$/;
   const contextLength = 160;
   const maxProcessingRects = 200;
+  const invalidMetadataMessage =
+    'Selection source context must be a plain serializable JSON object.';
+  const metadataExceptionMessage =
+    'Selection source context could not be created.';
   let state = null;
   let host = null;
   let shadow = null;
@@ -421,6 +425,93 @@
     return 'User commented: ' + comment;
   }
 
+  function isPlainObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  function cloneJsonValue(value, ancestors) {
+    if (value === null) return null;
+
+    const valueType = typeof value;
+    if (valueType === 'string' || valueType === 'boolean') return value;
+    if (valueType === 'number' && Number.isFinite(value)) return value;
+    if (valueType !== 'object') throw new TypeError('Unsupported JSON value');
+    if (ancestors.has(value)) throw new TypeError('Cyclic JSON value');
+
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) {
+        return value.map(function (item, index) {
+          if (!Object.prototype.hasOwnProperty.call(value, index)) {
+            throw new TypeError('Sparse arrays are not supported');
+          }
+          return cloneJsonValue(item, ancestors);
+        });
+      }
+      if (!isPlainObject(value)) throw new TypeError('Non-plain JSON object');
+      if (Object.getOwnPropertySymbols(value).length) {
+        throw new TypeError('Symbol keys are not supported');
+      }
+
+      return Object.keys(value).reduce(function (copy, key) {
+        copy[key] = cloneJsonValue(value[key], ancestors);
+        return copy;
+      }, Object.create(null));
+    } finally {
+      ancestors.delete(value);
+    }
+  }
+
+  function selectionMetadataContext(current) {
+    return {
+      range: current.range.cloneRange(),
+      rect: {
+        left: current.rect.left,
+        top: current.rect.top,
+        right: current.rect.right,
+        bottom: current.rect.bottom,
+        width: current.rect.width,
+        height: current.rect.height
+      },
+      selectedText: current.selectedText,
+      contextBefore: current.contextBefore,
+      contextAfter: current.contextAfter,
+      section: current.section
+    };
+  }
+
+  function selectionMetadata(current) {
+    const hook = window.canvasSelectionMetadata;
+    if (hook == null) return { status: 'absent' };
+    if (typeof hook !== 'function') return { status: 'invalid' };
+
+    let metadata;
+    try {
+      metadata = hook(selectionMetadataContext(current));
+    } catch (error) {
+      console.error('[canvas] selection action DROPPED: canvasSelectionMetadata threw', error);
+      return { status: 'exception' };
+    }
+
+    try {
+      if (!isPlainObject(metadata)) return { status: 'invalid' };
+      return {
+        status: 'valid',
+        value: cloneJsonValue(metadata, new Set())
+      };
+    } catch {
+      return { status: 'invalid' };
+    }
+  }
+
+  function showError(message) {
+    ensureHost();
+    errorText.textContent = message;
+    position();
+  }
+
   function send(action, payload) {
     if (typeof window.canvasSend !== 'function') {
       console.error('[canvas] selection action DROPPED: canvasSend is unavailable');
@@ -442,17 +533,27 @@
       request: requestFor(intent, comment)
     };
 
+    const metadata = selectionMetadata(state);
+    if (metadata.status === 'invalid') {
+      showError(invalidMetadataMessage);
+      return;
+    }
+    if (metadata.status === 'exception') {
+      showError(metadataExceptionMessage);
+      return;
+    }
+    if (metadata.status === 'valid') payload.sourceContext = metadata.value;
+
     const result = send('canvas-selection', payload);
     if (result === 'sent') {
       startProcessing(state.range);
       hide(true);
     } else {
-      ensureHost();
-      errorText.textContent =
+      showError(
         result === 'transport-unavailable'
           ? 'Canvas messaging is unavailable in this document.'
-          : 'The selected text or comment is too large to send.';
-      position();
+          : 'The selected text or comment is too large to send.'
+      );
     }
   }
 
