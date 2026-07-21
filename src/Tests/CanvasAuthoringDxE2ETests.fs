@@ -63,26 +63,28 @@ type CanvasInjectionThemeE2ETests() =
         }
 
     [<Test>]
-    member this.``Item 1: the base bakes in a readable type scale and measure (typography over boxes)``() =
+    member this.``Item 1: the base bakes in a readable type scale and single-column page (typography over boxes)``() =
         task {
-            let doc = "<!doctype html><html><head><title>typo</title></head><body><h1>Title</h1><p id=p>Body copy long enough to need a measure cap for comfortable reading across the pane.</p></body></html>"
+            let doc = "<!doctype html><html><head><title>typo</title></head><body><h1>Title</h1><p id=p>Body copy long enough to fill the single column comfortably across the pane.</p></body></html>"
             let served = injectInto AgentDoc "typo.html" doc
             do! this.ServeAndGoto "**/typo.html" $"{ServerFixture.canvasUrl}/wt/typo.html" served
 
             let! bodyFont = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).fontSize")
             let! bodyLine = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).lineHeight")
             let! h1Font = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontSize")
+            let! bodyMaxWidth = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.body).maxWidth")
             let! pMaxWidth = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.getElementById('p')).maxWidth")
             let! h1Family = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontFamily")
             let! h1Weight = this.Page.EvaluateAsync<string>("() => getComputedStyle(document.querySelector('h1')).fontWeight")
             // 15px / line-height 1.55 base + serif headings at weight 500 (h1 = 1.85rem = 29.6px) + a
-            // ~70ch measure on text, so a plain doc reads via type and whitespace rather than boxes.
+            // ~800px single-column page (text fills the width), so a plain doc reads via type and whitespace rather than boxes.
             Assert.That(bodyFont, Is.EqualTo("15px"), $"body should default to a readable 15px (was {bodyFont})")
             Assert.That(bodyLine, Is.EqualTo("23.25px"), $"body line-height should be 1.55x = 23.25px (was {bodyLine})")
             Assert.That(h1Font, Is.EqualTo("29.6px"), $"h1 should be 1.85rem = 29.6px from the type scale (was {h1Font})")
             Assert.That(h1Family.ToLower(), Does.Contain("serif"), $"headings should use the serif stack (was {h1Family})")
             Assert.That(h1Weight, Is.EqualTo("500"), $"headings should not be bold — weight 500 (was {h1Weight})")
-            Assert.That(pMaxWidth, Is.Not.EqualTo("none"), $"paragraphs should be capped to a readable measure, not full-width (was {pMaxWidth})")
+            Assert.That(bodyMaxWidth, Is.EqualTo("800px"), $"the page should cap at the ~800px single column (was {bodyMaxWidth})")
+            Assert.That(pMaxWidth, Is.EqualTo("none"), $"paragraphs should fill the column, not carry a separate measure cap (was {pMaxWidth})")
         }
 
     [<Test>]
@@ -300,4 +302,87 @@ type CanvasAuthoringDxPaneE2ETests() =
             let! bannerCount = (this.Page.Locator(".canvas-pane .canvas-doc-error-banner")).CountAsync()
             Assert.That(bannerCount, Is.EqualTo(0),
                 "a well-formed string action must route normally and never raise the missing-action banner")
+        }
+
+
+// ============================================================================
+// Escape focus-reclaim bridge (reclaimFocusScript)
+//
+// The doc-side half of the cross-origin Escape reclaim: the injected keydown
+// listener must post {action:'reclaim-focus'} to the parent ONLY for Escape and
+// ONLY when the key did not originate in an editable field. Served top-level
+// (parent === self), so the page can capture the message it posts to itself —
+// this exercises the real injected script in a browser, catching regressions the
+// injection-string unit test can't (non-Escape keys, broken editable exemption).
+// ============================================================================
+[<TestFixture>]
+[<Category("E2E")>]
+[<Category("Canvas")>]
+[<Category("AuthoringDxE2E")>]
+type CanvasReclaimBridgeE2ETests() =
+    inherit PageTest()
+
+    override this.ContextOptions() =
+        let opts = base.ContextOptions()
+        opts.IgnoreHTTPSErrors <- true
+        opts
+
+    /// Serve the injected doc top-level and install a counter for the reclaim-focus messages the
+    /// injected bridge posts to `parent` (the page itself when loaded top-level). A `__sentinel`
+    /// flag lets tests settle deterministically (see Settle).
+    member private this.ServeDoc() =
+        task {
+            let doc =
+                "<!doctype html><html><head><title>reclaim</title></head>"
+                + "<body><input id=\"field\"><button id=\"btn\">b</button></body></html>"
+            let served = injectInto SystemView "reclaim.html" doc
+            do! this.Page.RouteAsync("**/reclaim.html", fun route ->
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "text/html; charset=utf-8", Body = served)))
+            let! _ = this.Page.GotoAsync($"{ServerFixture.canvasUrl}/wt/reclaim.html", PageGotoOptions(WaitUntil = WaitUntilState.Load))
+            let! _ = this.Page.EvaluateAsync(
+                        "() => { window.__reclaims = 0; window.__sentinelSeen = false; window.addEventListener('message', function(e){ if (e.data && e.data.action === 'reclaim-focus') window.__reclaims++; if (e.data && e.data.action === '__sentinel') window.__sentinelSeen = true; }); }")
+            ()
+        }
+
+    /// Post a sentinel after the key event and wait for it. Message delivery to the same window is
+    /// FIFO, so once the sentinel lands, any reclaim-focus the keydown posted has already been
+    /// counted — a deterministic settle with no fixed sleep.
+    member private this.Settle() =
+        task {
+            let! _ = this.Page.EvaluateAsync("() => window.postMessage({action:'__sentinel'}, '*')")
+            let! _ = this.Page.WaitForFunctionAsync("() => window.__sentinelSeen === true", null, PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
+        }
+
+    [<Test>]
+    member this.``Escape outside an editable field posts a reclaim-focus message``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#btn").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Escape")
+            do! this.Settle()
+            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            Assert.That(n, Is.EqualTo(1), "Escape from a non-editable element must post reclaim-focus to the pane")
+        }
+
+    [<Test>]
+    member this.``Escape inside an editable field does not post reclaim-focus``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#field").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Escape")
+            do! this.Settle()
+            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            Assert.That(n, Is.EqualTo(0), "Escape originating in an editable field must be left to the field, not reclaimed")
+        }
+
+    [<Test>]
+    member this.``a non-Escape key does not post reclaim-focus``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#btn").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("ArrowDown")
+            do! this.Settle()
+            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            Assert.That(n, Is.EqualTo(0), "Only Escape may post reclaim-focus")
         }

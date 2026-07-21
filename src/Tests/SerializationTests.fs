@@ -74,11 +74,14 @@ type WrapperTypeSerializationTests() =
         let original =
             { RepoId = "my-repo"
               BranchName = BranchName.create "feature/new"
-              BaseBranch = BranchName.create "main" }
+              BaseBranch = BranchName.create "main"
+              Prompt = None
+              Skill = Some "investigate" }
 
         let result = roundTrip original
         Assert.That(result.BranchName, Is.EqualTo(original.BranchName))
         Assert.That(result.BaseBranch, Is.EqualTo(original.BaseBranch))
+        Assert.That(result.Skill, Is.EqualTo(original.Skill))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -139,3 +142,21 @@ type CanvasDocKindSerializationTests() =
                         Is.True, "Fixture should contain a beads.html SystemView doc")
             Assert.That(allDocs |> List.exists (fun d -> d.Kind = AgentDoc),
                         Is.True, "Fixture should contain at least one AgentDoc")
+
+    // Regression guard: the hand-written fixture omits the (non-optional) Planning record, so Newtonsoft
+    // leaves it null. loadFixtures must default it to BeadsPlanning.zero — a null Planning is
+    // un-deserializable by the Fable.Remoting client and silently breaks the dashboard's first load
+    // (every card falls back to a skeleton, which manifests as E2E timeouts waiting for .branch-name).
+    [<Test>]
+    member _.``loadFixtures defaults null Planning to zero on every worktree``() =
+        let fixturePath =
+            System.IO.Path.Combine(__SOURCE_DIRECTORY__, "fixtures", "worktrees.json")
+        match Server.WorktreeApi.loadFixtures fixturePath with
+        | Error msg -> Assert.Fail($"Fixture failed to load: {msg}")
+        | Ok data ->
+            let worktrees = data.Worktrees.Repos |> List.collect _.Worktrees
+            Assert.That(worktrees, Is.Not.Empty, "fixture should contain worktrees")
+            worktrees
+            |> List.iter (fun wt ->
+                Assert.That(obj.ReferenceEquals(wt.Planning, null), Is.False,
+                            $"worktree '{wt.Branch}' must have a non-null Planning after load"))

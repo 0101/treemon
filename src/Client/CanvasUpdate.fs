@@ -367,4 +367,5 @@ let messageListener (dispatch: Dispatch<Msg>) =
           SelectDoc = NavigateCanvasDoc >> dispatch
           OnMorphComplete = fun () -> dispatch MorphComplete
           OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message))
-          OnMalformedMessage = fun () -> dispatch CanvasMalformedDocMessage }
+          OnMalformedMessage = fun () -> dispatch CanvasMalformedDocMessage
+          OnReclaimFocus = fun () -> dispatch (KeyPressed ("Escape", false)) }

@@ -17,9 +17,15 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
       Beads = BeadsSummary.zero
+      Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
+      CodingToolSince = None
+      CurrentSkill = None
+      AgentActivity = None
+      Sessions = []
       LastUserMessage = None
+      LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
       IsDirty = false
@@ -58,10 +64,13 @@ let private defaultModel : Model =
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
+      WorktreeSkills = []
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty }
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false
+      SelectedOverviewGroup = None }
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
 /// build failure (TypeInitializationException for eager static init, or

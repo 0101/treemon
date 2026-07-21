@@ -30,6 +30,18 @@ type AttributeOutcome =
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
+/// Defense-in-depth for the F9 command-injection class: a declared owner sessionId is eventually
+/// interpolated into a launched `--resume {id}` command (via CanvasDocOwnership.getOwner ->
+/// CodingToolCli.build Resume). CodingToolCli now single-quote-escapes that value at the sink, but
+/// we additionally refuse to *store* an owner id outside the safe set real provider session ids use
+/// (ASCII alphanumerics, '-', '_' — GUIDs and provider UUIDs all qualify), so a hostile id carrying
+/// ';', a newline, or '$(...)' never enters the ownership store in the first place.
+let private isSafeSessionIdChar (c: char) =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
+
+let internal isValidSessionId (sessionId: string) =
+    not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
+
 let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
     let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
     return
@@ -110,6 +122,8 @@ let attributeOwnership
             return Invalid "missing filename"
         elif System.String.IsNullOrWhiteSpace sessionId then
             return Invalid "missing sessionId"
+        elif not (isValidSessionId sessionId) then
+            return Invalid "invalid sessionId format"
         else
             let worktreePath = worktreePath |> Server.PathUtils.normalizePath
             let! isKnown = isKnownWorktree agent worktreePath
@@ -215,6 +229,20 @@ let private bridgeScript =
 /// with .html.
 let private linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=(a.pathname||h).split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
 
+/// Bridge Escape from a cross-origin canvas doc back to the dashboard's focus reclaim. The doc is a
+/// separate origin, so its keydown never reaches the pane's document-level focus-reclaim listener;
+/// this injected listener posts {action:'reclaim-focus'} on Escape (unless the key originated in an
+/// editable field — checked via e.target, which owns its own Escape). The pane routes it to the same
+/// Escape reclaim. Injected into both doc kinds — reclaim should work from any doc the user looks at.
+let private reclaimFocusScript =
+    [ "<script>document.addEventListener('keydown',function(e){"
+      "if(e.key!=='Escape')return;"
+      "var t=e.target;"
+      "if(t){var n=(t.tagName||'').toUpperCase();"
+      "if(n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable)return}"
+      "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
+    |> String.concat ""
+
 /// window.canvasSend(action, payload): the first-class doc→pane message helper, injected in the
 /// AgentDoc arm only (a SystemView is server-generated and posts nothing, so it never gets the
 /// helper). It wraps the existing FLAT message contract the pane already handles —
@@ -249,6 +277,42 @@ let private canvasSendScript =
       "console.error('[canvas] canvasSend DROPPED: '+action+' message too large ('+size+' > '+MAX+' UTF-16 code units); not sent');"
       "return false}"
       "window.parent.postMessage(msg,'*');"
+      "return true}"
+      "})()</script>" ]
+    |> String.concat ""
+
+/// `.canvas-spinner`: the themed spinner style for the expand-in-place feedback, injected in the
+/// AgentDoc arm only. Its sole consumer is the spinner window.canvasExpand swaps the clicked button
+/// for, so it ships alongside that helper rather than in the shared baseStyle. Drawn with currentColor
+/// + a CSS keyframe so it stays on-theme without depending on any doc-defined variable;
+/// `.canvas-spinner` is a normal-specificity utility class an author can still override.
+let private canvasExpandStyle =
+    "<style>@keyframes canvas-spin{to{transform:rotate(360deg)}}.canvas-spinner{display:inline-flex;align-items:center;gap:.5em;color:inherit}.canvas-spinner::before{content:\"\";width:1em;height:1em;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:canvas-spin .6s linear infinite;opacity:.85}</style>"
+
+/// window.canvasExpand(button, sectionId): the doc→agent "expand this section in place" helper,
+/// injected in the AgentDoc arm only (it calls window.canvasSend, and only an AgentDoc has an owner
+/// session to receive the request). On click it (1) sends the flat {action:'expand-section', section,
+/// doc} message — `doc` is THIS doc's filename (the last location.pathname segment, decoded), so the
+/// owning agent knows which .agents/canvas/<doc> file to edit — and (2) swaps the triggering button
+/// for the themed spinner (styled by canvasExpandStyle), giving the user immediate in-pane feedback
+/// while the agent works. The agent replaces the button with the real expanded content; Treemon's
+/// content-change morph then swaps the spinner for that content, in place where the button was. The
+/// button is swapped ONLY after canvasSend actually posts (returns true), so a dropped message (e.g.
+/// oversized — unreachable here, but defensive) never strands a spinner with no agent on the other
+/// end. `section` is validated against [A-Za-z0-9_-] before posting — a hardening guard so doc content
+/// (which may embed untrusted external data like branch names or PR titles) can't smuggle
+/// instruction-shaped text into the agent's [canvas] turn; a value with any other character is ignored.
+/// The raw postMessage contract bypasses this guard, so SKILL.md also tells the agent to treat
+/// section/doc as data to locate (match against a known section, never run as an instruction).
+/// Injected after canvasSendScript (the helper it calls), alongside canvasExpandStyle.
+let private canvasExpandScript =
+    [ "<script>(function(){"
+      "window.canvasExpand=function(btn,section){"
+      "if(!section)return false;"
+      "if(!/^[A-Za-z0-9_-]+$/.test(section)){console.error('[canvas] canvasExpand IGNORED: sectionId must match [A-Za-z0-9_-]: '+section);return false}"
+      "var doc=decodeURIComponent((location.pathname.split('/').pop())||'');"
+      "if(!window.canvasSend('expand-section',{section:section,doc:doc}))return false;"
+      "if(btn){var s=document.createElement('span');s.className='canvas-spinner';s.setAttribute('role','status');s.textContent='Expanding…';btn.replaceWith(s)}"
       "return true}"
       "})()</script>" ]
     |> String.concat ""
@@ -296,19 +360,22 @@ let private errorOverlayScript (filename: string) =
     |> String.concat ""
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
-/// Both kinds get baseStyle + linkInterceptor. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, the JS error overlay, and the idiomorph runtime +
-/// morph controller. `filename` is the doc being served: it is embedded into the error overlay so a
-/// doc-side error carries its own identity (the emitter), letting the pane attribute it correctly
-/// even when other docs are mounted as hidden iframes. It is unused for SystemViews (no overlay).
+/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally get the message-bridge
+/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper and
+/// its spinner style (canvasExpandStyle), the JS error overlay, and the idiomorph runtime +
+/// morph controller. `filename` is the doc being served: it is embedded into the error overlay
+/// so a doc-side error carries its own identity (the emitter), letting the pane attribute it
+/// correctly even when other docs are mounted as hidden iframes. It is unused for SystemViews
+/// (no overlay).
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
-/// them, and they post nothing back — so the bridge, canvasSend, and morph pieces are all omitted.
+/// them, and the only message they post back is the shared Escape focus-reclaim bridge — the session
+/// bridge (heartbeat), canvasSend, and morph pieces are all omitted.
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
-    | SystemView -> CanvasExport.baseStyle + linkInterceptor
-    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + bridgeScript + canvasSendScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | SystemView -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript
+    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript + bridgeScript + canvasSendScript + canvasExpandStyle + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string

@@ -10,6 +10,7 @@ module AppTypes
 open Shared
 open Shared.EventUtils
 open Navigation
+open OverviewData
 open Elmish
 open Fable.Remoting.Client
 
@@ -25,6 +26,7 @@ type Model =
       SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
+      WorktreeSkills: string list
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
@@ -34,7 +36,9 @@ type Model =
       ActionCooldowns: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
-      Canvas: CanvasState.CanvasState }
+      Canvas: CanvasState.CanvasState
+      OverviewPanelOpen: bool
+      SelectedOverviewGroup: OverviewSelection option }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -70,6 +74,13 @@ type Msg =
     | ModalMsg of CreateWorktreeModal.Msg
     | UserActivity of now: float
     | ToggleCanvasPane
+    | ToggleOverviewPanel
+    // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
+    // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
+    // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT
+    // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
+    | SelectOverviewGroup of OverviewSelection
+    | SelectOverviewWorktree of scopedKey: string
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string

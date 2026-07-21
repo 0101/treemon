@@ -178,7 +178,7 @@ type SmokeTests() =
 
         if not hasUserMessage then
             Assert.Ignore(
-                "No worktree has LastUserMessage populated. This can happen when all Claude sessions " +
+                "No worktree has LastUserMessage populated. This can happen when all coding-tool sessions " +
                 "are older than 2h (Idle status) or no user messages found within 1MB scan limit.")
         else
             Assert.That(readyBody, Does.Not.Contain("\"LastUserMessage\":[\"\"]"),
@@ -503,21 +503,21 @@ type MultiRepoSmokeTests() =
         }
 
     [<Test>]
-    member this.``Active Claude cards display user message text``() =
+    member this.``Active coding-tool cards display user message text``() =
         task {
             let activeCards = this.Page.Locator(".wt-card.ct-working, .wt-card.ct-waiting-for-user")
             let! activeCount = activeCards.CountAsync()
-            TestContext.Out.WriteLine($"Active Claude cards (initial): {activeCount}")
+            TestContext.Out.WriteLine($"Active coding-tool cards (initial): {activeCount}")
 
             if activeCount = 0 then
                 do! this.Page.WaitForTimeoutAsync(15000.0f)
                 let! retryCount = activeCards.CountAsync()
-                TestContext.Out.WriteLine($"Active Claude cards (after 15s): {retryCount}")
+                TestContext.Out.WriteLine($"Active coding-tool cards (after 15s): {retryCount}")
 
                 if retryCount = 0 then
                     Assert.Ignore(
-                        "No active Claude session cards visible. This test requires at least one " +
-                        "worktree with an active Claude session (Working or WaitingForUser).")
+                        "No active coding-tool session cards visible. This test requires at least one " +
+                        "worktree with an active coding-tool session (Working or WaitingForUser).")
 
             let userPrompts = this.Page.Locator(".wt-card .user-prompt")
             let! promptCount = userPrompts.CountAsync()
@@ -533,7 +533,7 @@ type MultiRepoSmokeTests() =
             else
                 TestContext.Out.WriteLine(
                     "NOTE: No user-prompt elements found on any card. " +
-                    "This can happen if Claude sessions are old (>2h) and all cards show ct-idle status, " +
+                    "This can happen if coding-tool sessions are old (>2h) and all cards show ct-idle status, " +
                     "or if no user messages were found within the 1MB scan limit.")
         }
 

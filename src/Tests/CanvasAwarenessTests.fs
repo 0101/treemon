@@ -18,9 +18,15 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       LastCommitMessage = "msg"
       LastCommitTime = DateTimeOffset.UtcNow
       Beads = BeadsSummary.zero
+      Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
+      CodingToolSince = None
+      CurrentSkill = None
+      AgentActivity = None
+      Sessions = []
       LastUserMessage = None
+      LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
       IsDirty = false
@@ -73,10 +79,13 @@ let private defaultModel : Model =
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
+      WorktreeSkills = []
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty }
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false
+      SelectedOverviewGroup = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a
@@ -269,6 +278,87 @@ type DetectCanvasEventsTests() =
 
         Assert.That(result |> Map.containsKey "r1/main", Is.False, "r1/main unchanged")
         Assert.That(result |> Map.containsKey "r2/dev", Is.True, "r2/dev is new")
+
+
+// ── Freshness gate (phantom "published" suppression on restart) ──────
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasEventFreshnessGateTests() =
+
+    let event filename kind : CanvasEvent =
+        { Filename = filename; Timestamp = DateTimeOffset.UtcNow; Kind = kind }
+
+    [<Test>]
+    member _.``gate drops a phantom event whose doc mtime is stale``() =
+        let now = DateTimeOffset.UtcNow
+        let events = Map.ofList [ "r/feat", [ event "old.html" NewDoc ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "old.html", now.AddHours(-3.0) ] ]
+
+        let result = gateCanvasEventsByFreshness now modified events
+
+        Assert.That(result, Is.Empty, "A pre-existing doc (stale mtime) must not surface as a canvas event")
+
+    [<Test>]
+    member _.``gate keeps a fresh event and restamps it with the real mtime``() =
+        let now = DateTimeOffset.UtcNow
+        let mtime = now.AddMinutes(-1.0)
+        let events = Map.ofList [ "r/feat", [ event "new.html" NewDoc ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "new.html", mtime ] ]
+
+        let result = gateCanvasEventsByFreshness now modified events
+
+        let evts = result["r/feat"]
+        Assert.That(evts.Length, Is.EqualTo(1))
+        Assert.That(evts[0].Filename, Is.EqualTo("new.html"))
+        Assert.That(evts[0].Timestamp, Is.EqualTo(mtime), "Event is restamped with the file's real mtime")
+
+    [<Test>]
+    member _.``gate drops events for a doc missing from the modified map``() =
+        let now = DateTimeOffset.UtcNow
+        let events = Map.ofList [ "r/feat", [ event "ghost.html" UpdatedDoc ] ]
+
+        let result = gateCanvasEventsByFreshness now Map.empty events
+
+        Assert.That(result, Is.Empty)
+
+    [<Test>]
+    member _.``detect + gate suppresses a pre-existing doc reappearing after a restart``() =
+        // Baseline was momentarily empty (restart scan gap); the doc reappears as absent->present,
+        // which detectCanvasEvents alone reports as NewDoc — but its mtime is old, so the gate drops it.
+        let now = DateTimeOffset.UtcNow
+        let prev = Map.empty
+        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddDays(-2.0) ] ]
+
+        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+
+        Assert.That(result, Is.Empty, "A pre-existing doc reappearing after restart must not show as published")
+
+    [<Test>]
+    member _.``detect + gate still reports a genuinely fresh new doc``() =
+        let now = DateTimeOffset.UtcNow
+        let prev = Map.empty
+        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddSeconds(-2.0) ] ]
+
+        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+
+        let evts = result["r/feat"]
+        Assert.That(evts[0].Kind, Is.EqualTo(NewDoc), "A truly recent publish still surfaces")
+
+    [<Test>]
+    member _.``isCanvasDocFresh is true within the window and false outside it or when missing``() =
+        let now = DateTimeOffset.UtcNow
+        let modified = Map.ofList [ "r/feat", Map.ofList [
+            "fresh.html", now.AddMinutes(-1.0)
+            "stale.html", now.AddHours(-2.0) ] ]
+
+        Assert.That(isCanvasDocFresh now modified "r/feat" "fresh.html", Is.True)
+        Assert.That(isCanvasDocFresh now modified "r/feat" "stale.html", Is.False)
+        Assert.That(isCanvasDocFresh now modified "r/feat" "missing.html", Is.False)
+        Assert.That(isCanvasDocFresh now modified "r/ghost" "fresh.html", Is.False)
 
 
 // ── Auto-display idle logic ──────────────────────────────────────────
@@ -1194,3 +1284,36 @@ type LoadLastViewedHashesTests() =
             "the server value is kept (not overwritten by the current hash), so the update still registers")
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
             "a doc updated since the server last saw it must remain unviewed")
+
+
+// ── SelectOverviewWorktree archived-row guard (finding F4) ───────────────────
+// A task-bucket breakdown can list ARCHIVED worktrees as clickable rows (only the Done bucket filters
+// archived; other buckets keep them). Archived worktrees have no focusable card (visibleFocusTargets
+// scans only repo.Worktrees; archived entries render in the separate archive section, never .focused).
+// So SelectOverviewWorktree must treat a scopedKey that resolves to no focusable card as a no-op
+// rather than setting an invalid FocusedElement that produces no visible focus/scroll and gets reset.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type SelectOverviewWorktreeGuardTests() =
+
+    // A repo whose "feat" worktree is live and whose "old" worktree is archived (lives in
+    // ArchivedWorktrees, so it has no focusable card even though its scopedKey looks routable).
+    let repoWithArchived () =
+        let live = makeWorktree "r" "feat" []
+        let archived = { makeWorktree "r" "old" [] with IsArchived = true }
+        { makeRepo "r" [ live ] with ArchivedWorktrees = [ archived ] }
+
+    [<Test>]
+    member _.``an archived worktree scopedKey does not set FocusedElement (F4)``() =
+        let model = { defaultModel with Repos = [ repoWithArchived () ]; FocusedElement = None }
+        let updated, _ = update (SelectOverviewWorktree "r/old") model
+        Assert.That(updated.FocusedElement, Is.EqualTo(None),
+            "clicking an archived breakdown row must be a no-op, not an invalid Card focus (F4)")
+
+    [<Test>]
+    member _.``an archived scopedKey leaves an existing focus untouched (F4)``() =
+        let model = { defaultModel with Repos = [ repoWithArchived () ]; FocusedElement = Some (Card "r/feat") }
+        let updated, _ = update (SelectOverviewWorktree "r/old") model
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "r/feat")),
+            "a dead archived-row click must not clobber the current focus target (F4)")

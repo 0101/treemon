@@ -54,13 +54,23 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
         | Some (Card scopedKey) -> dispatch (LaunchCanvasSession scopedKey)
         | _ -> ()
 
+    // The single unviewed input: the same badge-source map (`unviewedDocsByScopedKey`), computed
+    // ONCE and converted to Map<string, Set<string>> for O(1) per-doc membership. The overview
+    // highlights from this whole map; the focused card's set is derived from it below, so the
+    // overview highlight and the Canvas badge can never disagree. Only the pane UI consumes it, so
+    // the repo/worktree/doc walk is skipped entirely while the pane is closed.
+    let unviewedByScopedKey =
+        if model.Canvas.CanvasPaneOpen then
+            unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
+            |> Map.map (fun _ filenames -> Set.ofList filenames)
+        else Map.empty
+
     let focusedUnviewedFilenames =
         match model.FocusedElement with
         | Some (Card scopedKey) ->
-            unviewedDocsByScopedKey model.Repos model.Canvas.LastViewedHashes
+            unviewedByScopedKey
             |> Map.tryFind scopedKey
-            |> Option.defaultValue []
-            |> Set.ofList
+            |> Option.defaultValue Set.empty
         | _ -> Set.empty
 
     let focusedVisitedDocs =
@@ -91,4 +101,9 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           ShareNotice = model.Canvas.ShareNotice
           BridgeLiveness = model.Canvas.BridgeLiveness }
 
-    CanvasPane.view canvasState (focusedWorktreeCanvasDoc model) model.Repos focusedUnviewedFilenames focusedVisitedDocs canvasCallbacks
+    let canvasAwareness: CanvasPane.CanvasPaneAwareness =
+        { UnviewedByScopedKey = unviewedByScopedKey
+          UnviewedFilenames = focusedUnviewedFilenames
+          VisitedDocs = focusedVisitedDocs }
+
+    CanvasPane.view canvasState (focusedWorktreeCanvasDoc model) model.Repos canvasAwareness canvasCallbacks

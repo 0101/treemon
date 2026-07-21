@@ -17,6 +17,13 @@ let extractBranchName (message: string) =
             else
                 None
 
+let makeCardEvent source message status =
+    { Source = source
+      Message = message
+      Timestamp = System.DateTimeOffset.Now
+      Status = Some status
+      Duration = None }
+
 let eventKey (evt: CardEvent) =
     evt.Source, extractBranchName evt.Message |> Option.defaultValue ""
 

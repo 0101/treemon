@@ -20,7 +20,7 @@ dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 This project uses strict functional F# style. These rules are non-negotiable.
 
 **Critical requirements:**
-- **NEVER use loops** — use recursion or higher-order functions (`List.map`, `List.filter`, `List.fold`, `Array.map`, `Seq.map`, etc.)
+- **NEVER use loops to build or accumulate values** — use recursion or higher-order functions (`List.map`, `List.filter`, `List.fold`, `Array.map`, `Seq.map`, etc.). Iterating *purely* for side effects (`for ... do` or `List.iter`) is fine; keep transformation and effects separate — transform cleanly first, then iterate for effects (minimizing side effects is a separate concern).
 - **NEVER use `let mutable`** — all bindings must be immutable; use recursion with accumulators or `fold` instead
 - **NEVER use `break` or `continue`** — restructure with higher-order functions
 - **NEVER pass collections into methods to be mutated** — return new collections instead

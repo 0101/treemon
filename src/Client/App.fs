@@ -26,6 +26,9 @@ let hasSyncRunning (events: Map<string, CardEvent list>) =
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
 
+// Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
+// OverviewBand.overviewSelectionPresent (same pure roll-up pipeline as the band view).
+
 let init () =
     { Repos = []
       IsLoading = true
@@ -38,6 +41,7 @@ let init () =
       SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
+      WorktreeSkills = []
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
@@ -47,7 +51,9 @@ let init () =
       ActionCooldowns = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
-      Canvas = CanvasState.empty },
+      Canvas = CanvasState.empty
+      OverviewPanelOpen = false
+      SelectedOverviewGroup = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -88,8 +94,14 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.bind (fun wt -> if not wt.IsMainWorktree then Some (ConfirmDeleteWorktree scopedKey) else None)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
-    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
     | _ -> None
+
+let private focusDashboard: Cmd<Msg> =
+    Cmd.ofEffect (fun _ ->
+        Dom.document.querySelector ".dashboard"
+        |> Option.ofObj
+        |> Option.iter (fun el -> el?focus()))
 
 let update msg model =
     match msg with
@@ -124,15 +136,20 @@ let update msg model =
                       BaseBranch = r.BaseBranch })
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
+            let currentCanvasModified = canvasModifiedByScopedKey repos
             let canvasEvents =
                 if isFirstLoad then model.Canvas.CanvasEvents
                 else
-                    let newEvents = detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    let newEvents =
+                        detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                        |> gateCanvasEventsByFreshness now currentCanvasModified
                     mergeCanvasEvents model.Canvas.CanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
-                else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                else
+                    detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    |> List.filter (fun (scopedKey, filename) -> isCanvasDocFresh now currentCanvasModified scopedKey filename)
             let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
@@ -172,10 +189,12 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
+                WorktreeSkills = response.WorktreeSkills
                 Mascot.EyeDirection = MascotState.randomEyeDirection ()
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                OverviewPanelOpen = if isFirstLoad then response.OverviewPanelOpen else model.OverviewPanelOpen
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
                 Canvas.CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
                 Canvas.CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
@@ -183,6 +202,13 @@ let update msg model =
                 Canvas.CanvasEvents = canvasEvents
                 Canvas.CanvasSendState = canvasSendState }
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
+            |> (fun m ->
+                // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
+                // the selected group (its count fell to 0), clear it so the panel closes.
+                match m.SelectedOverviewGroup with
+                | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) ->
+                    { m with SelectedOverviewGroup = None }
+                | _ -> m)
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
@@ -328,11 +354,7 @@ let update msg model =
         let model = { model with ConfirmModal = confirmModal }
         match action with
         | ConfirmModal.NoAction ->
-            model,
-            Cmd.ofEffect (fun _ ->
-                Dom.document.querySelector ".dashboard"
-                |> Option.ofObj
-                |> Option.iter (fun el -> el?focus()))
+            model, focusDashboard
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
             Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
@@ -408,8 +430,12 @@ let update msg model =
         let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
         let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
+        let refocusCmd =
+            if CreateWorktreeModal.isOpen model.CreateModal && not (CreateWorktreeModal.isOpen result.Modal) then
+                focusDashboard
+            else Cmd.none
         { model with CreateModal = result.Modal; FocusedElement = focus },
-        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd ]
+        Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
 
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
@@ -417,11 +443,7 @@ let update msg model =
         if model.ConfirmModal <> ConfirmModal.NoConfirm then
             match key with
             | "Escape" ->
-                { model with ConfirmModal = ConfirmModal.NoConfirm },
-                Cmd.ofEffect (fun _ ->
-                    Dom.document.querySelector ".dashboard"
-                    |> Option.ofObj
-                    |> Option.iter (fun el -> el?focus()))
+                { model with ConfirmModal = ConfirmModal.NoConfirm }, focusDashboard
             | _ -> model, Cmd.none
         elif CreateWorktreeModal.isOpen model.CreateModal then
             match key with
@@ -431,13 +453,16 @@ let update msg model =
                     |> Option.map RepoHeader
                     |> Option.orElse model.FocusedElement
                 { model with CreateModal = CreateWorktreeModal.Closed; FocusedElement = restoredFocus },
-                Cmd.none
+                focusDashboard
             | _ -> model, Cmd.none
         else
         let focusWithRetarget newFocus scrollHint extra =
             let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
             m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
         match key with
+        | "Escape" when Option.isSome model.SelectedOverviewGroup ->
+            // Esc closes the drill-down breakdown panel when a group is selected.
+            { model with SelectedOverviewGroup = None }, Cmd.none
         | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
             let cols = getColumnCount ()
             let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
@@ -451,6 +476,10 @@ let update msg model =
             focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
         | "End" ->
             focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
+        | "Escape" ->
+            let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
+            { model with FocusedElement = newFocus },
+            Cmd.batch [ focusDashboard; scrollToFocus Normal newFocus ]
         | _ when hasModifier ->
             model, Cmd.none
         | _ ->
@@ -462,6 +491,40 @@ let update msg model =
                 | None -> model, Cmd.none
 
     | ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model
+
+    | ToggleOverviewPanel ->
+        let newState = not model.OverviewPanelOpen
+        // Closing the band drops any drill-down selection so it can't linger while hidden.
+        let selection = if newState then model.SelectedOverviewGroup else None
+        { model with OverviewPanelOpen = newState; SelectedOverviewGroup = selection },
+        Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
+
+    | SelectOverviewGroup selection ->
+        // Toggle: re-selecting the already-selected group clears it (closes the panel).
+        let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
+        { model with SelectedOverviewGroup = next }, Cmd.none
+
+    | SelectOverviewWorktree scopedKey ->
+        // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
+        // scroll it into view — WITHOUT opening the Canvas pane (the deliberate difference from
+        // FocusOverviewCard). Persist collapsed-repo state only when an expand actually changed it.
+        // Guard: archived worktrees can appear in non-Done breakdown buckets, but they have no
+        // focusable card (they render in the separate archive section, never with .focused). Setting
+        // FocusedElement to such a key produces no visible focus/scroll and gets reset on the next
+        // refresh — so a non-focusable scopedKey is a no-op rather than an invalid focus target.
+        if not (resolvesToFocusableCard scopedKey model.Repos) then
+            model, Cmd.none
+        else
+        let repos, expanded = expandRepoOwning scopedKey model.Repos
+        let focus = Some (Card scopedKey)
+        let retargetedModel, retargetCmd =
+            { model with Repos = repos } |> CanvasUpdate.applyFocus true focus
+        retargetedModel,
+        Cmd.batch [
+            retargetCmd
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView Normal focus)
+            if expanded then saveCollapsedReposCmd repos
+        ]
 
     | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
 
@@ -546,6 +609,11 @@ let update msg model =
 
     | NoOp -> model, Cmd.none
 
+let private isEditableElement (el: Browser.Types.Element) =
+    match el.tagName.ToUpper() with
+    | "INPUT" | "TEXTAREA" | "SELECT" -> true
+    | _ -> el?isContentEditable = true
+
 let appSubscriptions (model: Model) : Sub<Msg> =
     let pollingIntervalMs =
         match model.Activity.ActivityLevel with
@@ -570,10 +638,32 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
+    // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
+    // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
+    // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
+    // catches Escape from anywhere outside the dashboard and routes it through the normal handler,
+    // which refocuses the dashboard and restores a focus target. Skips when focus is already inside
+    // the dashboard (its onKeyDown handles it) or in an editable field (which owns its own Escape).
+    let focusReclaim (dispatch: Dispatch<Msg>) =
+        let insideDashboard (el: Browser.Types.Element) =
+            let ancestor: Browser.Types.Element = el?closest(".dashboard")
+            ancestor |> Option.ofObj |> Option.isSome
+        let handler =
+            fun (e: Browser.Types.Event) ->
+                let ke = e :?> Browser.Types.KeyboardEvent
+                if ke.key = "Escape" then
+                    match Option.ofObj Dom.document.activeElement with
+                    | Some el when insideDashboard el || isEditableElement el -> ()
+                    | _ -> dispatch (KeyPressed ("Escape", false))
+        Dom.document.addEventListener ("keydown", handler)
+        { new System.IDisposable with
+            member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
+
     let subs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
-          [ "canvas-messages" ], CanvasUpdate.messageListener ]
+          [ "canvas-messages" ], CanvasUpdate.messageListener
+          [ "focus-reclaim" ], focusReclaim ]
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
@@ -687,6 +777,13 @@ let viewAppHeader model dispatch =
                                 prop.text "Compact"
                             ]
                             Html.button [
+                                prop.className (if model.OverviewPanelOpen then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleOverviewPanel)
+                                prop.title "Toggle overview panel"
+                                prop.text "Overview"
+                            ]
+                            Html.button [
                                 prop.className (if model.Canvas.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
                                 prop.onClick (fun _ -> dispatch ToggleCanvasPane)
@@ -707,6 +804,11 @@ let viewAppHeader model dispatch =
             ]
         ]
     ]
+
+let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
+    match Option.ofObj (box e.target) with
+    | Some target -> isEditableElement (unbox target)
+    | None -> false
 
 let view model dispatch =
     let canvasPositionClass =
@@ -744,7 +846,7 @@ let view model dispatch =
     let cardCallbacks: CardCallbacks =
         { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
           ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
-          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
           OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
@@ -763,14 +865,22 @@ let view model dispatch =
             prop.tabIndex 0
             prop.autoFocus true
             prop.onKeyDown (fun e ->
-                match e.key with
-                | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
-                    e.preventDefault()
-                    dispatch (KeyPressed (e.key, false))
-                | key ->
-                    let hasModifier = e.ctrlKey || e.altKey || e.metaKey
-                    dispatch (KeyPressed (key, hasModifier)))
+                if not (isEditableEventTarget e) then
+                    match e.key with
+                    | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" | "Home" | "End" ->
+                        e.preventDefault()
+                        dispatch (KeyPressed (e.key, false))
+                    | key ->
+                        let hasModifier = e.ctrlKey || e.altKey || e.metaKey
+                        dispatch (KeyPressed (key, hasModifier)))
             prop.children [
+                if model.OverviewPanelOpen then
+                    OverviewBand.view
+                        model.SelectedOverviewGroup
+                        (SelectOverviewGroup >> dispatch)
+                        (SelectOverviewWorktree >> dispatch)
+                        model.Repos
+
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
                     Html.div [
                         prop.className "status-bar"

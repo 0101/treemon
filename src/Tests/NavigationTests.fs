@@ -12,9 +12,15 @@ module NavHelpers =
           LastCommitMessage = "msg"
           LastCommitTime = DateTimeOffset.UtcNow
           Beads = BeadsSummary.zero
+          Planning = BeadsPlanning.zero
           CodingTool = CodingToolStatus.Idle
           CodingToolProvider = None
+          CodingToolSince = None
+          CurrentSkill = None
+          AgentActivity = None
+          Sessions = []
           LastUserMessage = None
+          LastAssistantMessage = None
           Pr = PrStatus.NoPr
           MainBehindCount = 0
           IsDirty = false
@@ -182,3 +188,65 @@ type ExpandRepoOwningTests() =
         let updated, expanded = expandRepoOwning "/repo/missing" repos
         Assert.That(expanded, Is.False)
         Assert.That(updated, Is.EqualTo(repos))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ReclaimFocusTargetTests() =
+
+    [<Test>]
+    member _.``no current focus falls back to the first visible element``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a"; "b" ] ]
+        let result = reclaimFocusTarget repos None
+        Assert.That(result, Is.EqualTo(Some (RepoHeader (RepoId "r1"))))
+
+    [<Test>]
+    member _.``a still-visible current focus is preserved``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a"; "b" ] ]
+        let focused = Some (NavHelpers.cardTarget "r1" "b")
+        let result = reclaimFocusTarget repos focused
+        Assert.That(result, Is.EqualTo(focused))
+
+    [<Test>]
+    member _.``a no-longer-visible current focus falls back to the first visible element``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a" ] ]
+        let focused = Some (NavHelpers.cardTarget "r1" "gone")
+        let result = reclaimFocusTarget repos focused
+        Assert.That(result, Is.EqualTo(Some (RepoHeader (RepoId "r1"))))
+
+    [<Test>]
+    member _.``no repos yields no focus target``() =
+        let result = reclaimFocusTarget [] (Some (NavHelpers.cardTarget "r1" "a"))
+        Assert.That(result, Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ResolvesToFocusableCardTests() =
+
+    // Archived worktrees live in ArchivedWorktrees and never render as focusable .focused cards
+    // (visibleFocusTargets scans only repo.Worktrees). A drill-down breakdown row for an archived
+    // worktree (non-Done buckets keep archived members) must not be treated as a valid focus target.
+    let withArchived (repo: RepoModel) (archivedBranch: string) =
+        let wt = { NavHelpers.makeWorktree archivedBranch with IsArchived = true }
+        { repo with ArchivedWorktrees = [ wt ] }
+
+    [<Test>]
+    member _.``a live worktree scoped key resolves to a focusable card``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a"; "b" ] ]
+        Assert.That(resolvesToFocusableCard "/repo/a" repos, Is.True)
+
+    [<Test>]
+    member _.``an archived worktree scoped key does not resolve to a focusable card``() =
+        let repos = [ withArchived (NavHelpers.makeRepo "r1" [ "a" ]) "archived-x" ]
+        Assert.That(resolvesToFocusableCard "/repo/archived-x" repos, Is.False)
+
+    [<Test>]
+    member _.``an unknown scoped key does not resolve to a focusable card``() =
+        let repos = [ NavHelpers.makeRepo "r1" [ "a" ] ]
+        Assert.That(resolvesToFocusableCard "/repo/missing" repos, Is.False)
+
+    [<Test>]
+    member _.``resolves even when the owning repo is collapsed (drill-down expands it)``() =
+        let repos = [ { NavHelpers.makeRepo "r1" [ "a" ] with IsCollapsed = true } ]
+        Assert.That(resolvesToFocusableCard "/repo/a" repos, Is.True)
