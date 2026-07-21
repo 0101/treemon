@@ -30,13 +30,14 @@ type OverviewHistoryCacheTests() =
     member _.``simultaneous callers share one in-flight computation and response``() =
         task {
             let cache = OverviewHistoryCache.create ()
-            let calls = ref 0
+            // Concurrent callbacks require one shared atomic invocation counter.
+            let mutable calls = 0
             let started = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let release = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
             let compute () =
                 async {
-                    let count = Interlocked.Increment calls
+                    let count = Interlocked.Increment(&calls)
                     started.TrySetResult(()) |> ignore
                     do! release.Task |> Async.AwaitTask
                     return response anchor count
@@ -47,13 +48,13 @@ type OverviewHistoryCacheTests() =
                 |> List.map (fun _ -> get cache anchor HistoryWindow.Hours12 compute)
 
             do! started.Task.WaitAsync timeout
-            Assert.That(!calls, Is.EqualTo 1)
+            Assert.That(calls, Is.EqualTo 1)
 
             release.SetResult(())
             let! responses = Task.WhenAll requests
 
             Assert.Multiple(fun () ->
-                Assert.That(!calls, Is.EqualTo 1)
+                Assert.That(calls, Is.EqualTo 1)
                 Assert.That(responses |> Array.distinct, Has.Length.EqualTo 1)
                 Assert.That(responses[0], Is.EqualTo(response anchor 1)))
         }
@@ -62,11 +63,12 @@ type OverviewHistoryCacheTests() =
     member _.``entry expires from its response anchor rather than its last hit``() =
         task {
             let cache = OverviewHistoryCache.create ()
-            let calls = ref 0
+            // Cache recomputations require a counter retained across async callbacks.
+            let mutable calls = 0
 
             let compute () =
                 async {
-                    let generation = Interlocked.Increment calls
+                    let generation = Interlocked.Increment(&calls)
                     let responseAnchor =
                         if generation = 1 then anchor
                         else anchor.AddSeconds 30.0
@@ -82,18 +84,19 @@ type OverviewHistoryCacheTests() =
                 Assert.That(hit, Is.EqualTo first)
                 Assert.That(refreshed.Anchor, Is.EqualTo(anchor.AddSeconds 30.0))
                 Assert.That(refreshed, Is.Not.EqualTo first)
-                Assert.That(!calls, Is.EqualTo 2))
+                Assert.That(calls, Is.EqualTo 2))
         }
 
     [<Test>]
     member _.``window keys cache independently and stay bounded``() =
         task {
             let cache = OverviewHistoryCache.create ()
-            let calls = ref 0
+            // Independent async window callbacks require one shared atomic counter.
+            let mutable calls = 0
 
             let compute window () =
                 async {
-                    let count = Interlocked.Increment calls
+                    let count = Interlocked.Increment(&calls)
                     let offset =
                         match window with
                         | HistoryWindow.Hours12 -> 12.0
@@ -122,7 +125,7 @@ type OverviewHistoryCacheTests() =
             Assert.Multiple(fun () ->
                 Assert.That(hits, Is.EqualTo first)
                 Assert.That(first |> Array.map _.Anchor |> Array.distinct, Has.Length.EqualTo 3)
-                Assert.That(!calls, Is.EqualTo 3)
+                Assert.That(calls, Is.EqualTo 3)
                 Assert.That(OverviewHistoryCache.entryCount cache, Is.EqualTo 3))
         }
 
@@ -130,11 +133,12 @@ type OverviewHistoryCacheTests() =
     member _.``failed computation is evicted so the next request retries``() =
         task {
             let cache = OverviewHistoryCache.create ()
-            let calls = ref 0
+            // Retry callbacks require an attempt counter retained after failure.
+            let mutable calls = 0
 
             let compute () =
                 async {
-                    let attempt = Interlocked.Increment calls
+                    let attempt = Interlocked.Increment(&calls)
 
                     if attempt = 1 then
                         return raise (InvalidOperationException "first attempt failed")
@@ -156,5 +160,5 @@ type OverviewHistoryCacheTests() =
             Assert.Multiple(fun () ->
                 Assert.That(firstError, Is.EqualTo(Some "first attempt failed"))
                 Assert.That(retried, Is.EqualTo(response anchor 2))
-                Assert.That(!calls, Is.EqualTo 2))
+                Assert.That(calls, Is.EqualTo 2))
         }
