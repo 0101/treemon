@@ -53,7 +53,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Beads counts (open / in-progress / done) with progress bar
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
-- Event log (last 3 events), sync/cancel/terminal/delete actions
+- Event log (last 3 events), diff/sync/cancel/terminal/delete actions
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed build, create PR (see `docs/spec/contextual-actions.md`)
 

@@ -116,7 +116,7 @@ from the message-delivery failures already shown via `CanvasSendState.Failed`.
 
 ### 4. Selected-text contextual actions
 
-Selecting ordinary, non-editable text in an AgentDoc shows a shadow-DOM context box beside the
+Selecting ordinary, non-editable text in an AgentDoc or SystemView shows a shadow-DOM context box beside the
 selection with **Explain**, **Remove**, and **Comment**. Clearing the selection hides the normal
 box. Comment expands to an Enter-to-submit input and pins the captured selection until a new
 selection or Escape.
@@ -128,8 +128,9 @@ filename, and ordered `contextBefore`, `selectedText`, `contextAfter` fields. Th
 text.
 
 After submission, a pointer-inert overlay pulses over the selected range until the document updates
-or the user starts another selection. The runtime is AgentDoc-only: SystemViews and static shared
-exports have no owning session and receive no selection UI.
+or the user starts another selection. Static shared exports receive no selection UI. SystemViews
+use persistent interaction-session ownership and may enrich the payload with structured
+`sourceContext`; see `docs/spec/canvas-system-view-interactions.md`.
 
 ### 5. Always-visible doc tab with last-modified age (Phase 8)
 

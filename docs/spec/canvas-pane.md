@@ -17,7 +17,7 @@
 Every `CanvasDoc` carries a `Kind` (`src/Shared/Types.fs`), set when `CanvasScanner` scans the file via `CanvasDocKinds.classify filename`. The classifier reads the shared `src/Extension/canvas-doc-kinds.json` list also used by browser fallback:
 
 - **`AgentDoc`** — authored and owned by a coding session; interactive and file-driven. This is the default for any `.html` an agent writes to `.agents/canvas/`.
-- **`SystemView`** — server-generated, data-driven, with no owner session. Currently only the beads dashboard (`beads.html`; see `docs/spec/beadspace-canvas.md`). `classify` is the single place to register future generated views (e.g. a CI/build view).
+- **`SystemView`** — server-generated, data-driven, with no authored-document owner session. The beads dashboard and worktree diff viewer use this kind. `classify` is the single place to register generated views.
 
 The session-document machinery exists for an interactive document authored and owned by a live session. A `SystemView` is none of those, so the behaviors below are gated on `Kind` — making misfit states (a permanently "dead" liveness dot, a meaningless Start-session, a morph that stomps a self-rendering dashboard) unrepresentable rather than emergent from `OwnerSessionId = None`:
 
@@ -28,8 +28,9 @@ The session-document machinery exists for an interactive document authored and o
 | Tab-strip entry | normal tab | distinct far-left `.canvas-system-tab` (BD glyph + issue count), no liveness dot |
 | Liveness dot | yes | no |
 | `▶ Start session` button | yes | no |
-| Message bridge (heartbeat + session routing) | yes | no |
-| Selected-text Explain / Remove / Comment actions | yes | no |
+| Author heartbeat bridge | yes | no |
+| `canvasSend` + selected-text Explain / Remove / Comment actions | yes | yes |
+| Interaction-session routing | authored owner | persistent generated-view interaction owner |
 | DOM morph (idiomorph runtime + controller + signal) | yes | no |
 | Content-hash awareness (unviewed badge, auto-display, card notification) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
 | Archive button | yes | no (server-regenerated, not user-owned) |
@@ -39,9 +40,9 @@ The beads dashboard sits in three layers relative to the generic pane, which is 
 
 - **Genuinely shared (kept):** scan + hash (`CanvasScanner`), serve + inject (`CanvasDocServer` on `:5002`), the pane shell (tabs, iframe, docking, overview), and disk-as-source-of-truth.
 - **Beads-specific (already special):** auto-provisioning (`BeadspaceProvisioner`) and the private `/beads-data` JSON endpoint.
-- **Inherited but a misfit (gated off for `SystemView`):** the liveness dot (always "dead" — no owner session), `▶ Start session` (meaningless for a generated view), the message bridge (no author session to route to), content-hash awareness (inert — the file hash is stable while the data changes), and morph (redundant with the dashboard's own refresh, and actively harmful when it fires: a deploy/template change would morph the live, JS-rendered dashboard back down to the empty template shell).
+- **Inherited but a misfit (gated off for `SystemView`):** author liveness, the authored-doc Start-session control, content-hash awareness, and morph. SystemViews do receive the generic interaction transport and selected-text actions; those messages route through a separate persistent interaction owner rather than an author.
 
-A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` every 30s and refreshes in place, so it needs neither morph nor the bridge heartbeat.
+A `SystemView` drives its own updates, so it needs neither morph nor the author heartbeat bridge.
 
 ### Doc Lifecycle
 
@@ -98,14 +99,17 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - `LaunchCanvasSession` uses the existing action-launch flow and includes the full on-disk doc path (`{worktree}/.agents/canvas/{filename}`) plus canvas context in the prompt, so the agent is pointed at the real file the doc server serves. That path is built once by `CanvasPrompt.continueWorking` in `src/Shared/Types.fs` — the single source of truth shared by the client launch and server auto-spawn flows.
 - Canvas messages route to the author session for the selected doc.
 - If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
+- SystemView interactions route through a persistent interaction-session owner keyed by worktree and view filename. This is separate from `OwnerSessionId`, does not affect liveness UI, and persists until explicit reassignment or view/worktree removal.
 
 ### Message Flow
 
 - A canvas doc normally sends interaction data with injected `window.canvasSend(...)`; raw
   `window.parent.postMessage(...)` remains the underlying contract.
-- Selecting AgentDoc text emits `canvas-selection` with Explain/Remove/Comment intent and ordered
+- Selecting AgentDoc or SystemView text emits `canvas-selection` with Explain/Remove/Comment intent and ordered
   surrounding context. The selected range pulses until the document updates or another selection
   starts.
+- A trusted SystemView may add bounded structured `sourceContext`; it is never merged into the
+  human-readable request.
 - The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
@@ -135,10 +139,9 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
 - The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
-  receive the shared base style, link interceptor, and Escape focus-reclaim bridge. An `AgentDoc`
-  additionally receives the bridge heartbeat, `canvasSend`, `canvasExpand`, selected-text actions,
-  JS error reporting, idiomorph, and the morph controller. A `SystemView` receives none of that
-  owner-session machinery.
+  receive the shared base style, link interceptor, Escape focus-reclaim bridge, `canvasSend`, and
+  selected-text actions. An `AgentDoc` additionally receives the author heartbeat, `canvasExpand`,
+  JS error reporting, idiomorph, and the morph controller.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
@@ -212,7 +215,7 @@ Three layers of state preservation:
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
 - **Per-doc author routing** — docs persist ownership by `sessionId`, canvas messages route to the selected doc's owner session, and liveness/resume operate per doc instead of per-worktree.
-- **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates the session-document machinery. A `SystemView` (currently only the beads dashboard) opts out of liveness, Start-session, the message bridge, morph, content-hash awareness, and archiving, and gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab. This makes the misfit states unrepresentable rather than emergent from `OwnerSessionId = None`.
+- **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates authored-document machinery. A `SystemView` opts out of author liveness, Start-session, morph, content-hash awareness, and archiving, but participates in generic selected-text interactions through separate persistent interaction ownership. It gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab.
 - **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date.
 - **`Model`+`Msg` lifted into `AppTypes.fs`** — the Elmish `Model` and `Msg` types, plus the shared plumbing the canvas update arms need (`worktreeApi`, `findWorktree`, `saveCollapsedReposCmd`), live in `src/Client/AppTypes.fs` (compiled after `CanvasState.fs`, before `CanvasUpdate.fs`/`App.fs`). This is a pure type/value relocation that creates a compile-order seam: the canvas update arms are extracted into `CanvasUpdate.fs` (compiled between `AppTypes.fs` and `App.fs`) without a cyclic reference, while `update` remains a single function in `App.fs` (no sub-`Msg`/`Cmd.map` split). Consumers that previously reached these via `open App` (three test files) add `open AppTypes`; nothing references them by `App.`-qualified name (the activity helper once at `App.computeActivityLevel` now lives in `ActivityState.fs`).
 - **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetCanvasPosition`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `ShareCanvasDoc`, `ShareCanvasDocResult`, `ClipboardWriteResult`, `DismissShareNotice`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the shared canvas helpers (`activeVisibleDoc`, `isKnownCanvasDoc`, `markVisibleDocCmd`), and the `messageListener` subscription glue move to `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` is now a one-line delegation (`| ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model`). This is **body extraction**, not a `Cmd.map` sub-component split: `update` stays a single function over the flat `Msg`, and each helper takes the whole `Model` and returns `Model * Cmd<Msg>` (data-last `model` parameter). `FocusOverviewCard` stays inline in `App.fs` — it is an overview-card focus arm, not a doc/morph/archive arm, and is outside the moved set. The `isKnownCanvasDoc` consumer in the tests adds `open CanvasUpdate`. Realized line counts: `App.fs` 2015 → 1861 (canvas update logic, ~150 lines, removed); it does **not** reach `main` size (1635) because the canvas **view** code (`canvasEventEntry`, `canvasEventLog`, `focusedWorktreeCanvasDoc`, and the pane-view dispatch wiring) and the canvas params threaded through `worktreeCard`/`renderCard`/`repoSection` remain — a separate view extraction, since completed. The stale "~430 lines / main size" estimate in the original task conflated this deferred view extraction with the update-arm extraction; only the update arms are in scope here. The structural gate (each canvas arm is a one-line delegation; bodies live in `CanvasUpdate.fs`) is what proves the extraction.
@@ -224,4 +227,6 @@ Three layers of state preservation:
 - `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
 - `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
 - `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring URL (the tab-bar Share button, its publish/SAS backend, and the clipboard rich link)
+- `docs/spec/canvas-system-view-interactions.md` — generated-view selection, metadata, and session routing
+- `docs/spec/worktree-diff-viewer.md` — generated worktree diff SystemView
 - `docs/spec/future/canvas-roadmap.md` — remaining canvas work (authoring DX, templates)
