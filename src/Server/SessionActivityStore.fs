@@ -291,25 +291,38 @@ let private queryWindowSql =
 SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
 FROM activity_events
 WHERE ts >= $start AND ts <= $end
-ORDER BY ts;
+ORDER BY ts, rowid;
 """
 
 let private queryHistoryWindowSql =
     """
-SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
-FROM activity_events AS event
-WHERE event.rowid = (
-    SELECT baseline.rowid
-    FROM activity_events AS baseline
-    WHERE baseline.session_id = event.session_id AND baseline.ts < $start
-    ORDER BY baseline.ts DESC, baseline.rowid DESC
-    LIMIT 1
+WITH relevant_sessions AS (
+    SELECT session_id
+    FROM activity_events
+    WHERE ts >= $lookback AND ts <= $end
+    UNION
+    SELECT session_id
+    FROM session_liveness
+    WHERE ts >= $lookback AND ts <= $end
+),
+baseline_rows AS (
+    SELECT (
+        SELECT baseline.rowid
+        FROM activity_events AS baseline
+        WHERE baseline.session_id = relevant.session_id AND baseline.ts < $start
+        ORDER BY baseline.ts DESC, baseline.rowid DESC
+        LIMIT 1
+    ) AS rowid
+    FROM relevant_sessions AS relevant
 )
+SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts, event.rowid
+FROM activity_events AS event
+WHERE event.rowid IN (SELECT rowid FROM baseline_rows WHERE rowid IS NOT NULL)
 UNION ALL
-SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
+SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts, rowid
 FROM activity_events
 WHERE ts >= $start AND ts <= $end
-ORDER BY ts;
+ORDER BY ts, rowid;
 """
 
 let private queryLivenessSql =
@@ -330,7 +343,7 @@ let private queryTaskSnapshotsSql =
 SELECT ts, tasks
 FROM task_snapshots
 WHERE ts >= $start AND ts <= $end
-ORDER BY ts;
+ORDER BY ts, id;
 """
 
 let private queryLatestTaskSnapshotSql =
@@ -642,12 +655,13 @@ type SessionActivityStore(dbPath: string) =
 
         readRows reader readEventRow []
 
-    /// History events in [startTime, endTime], plus each session's latest event before startTime so
-    /// a status established before the chart window can be carried across its left edge.
+    /// History events in [startTime, endTime], plus the latest pre-window status only for sessions
+    /// observed during the window or its openness lookback.
     member _.QueryHistoryWindow(startTime: DateTimeOffset, endTime: DateTimeOffset) : ActivityEventRow list =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- queryHistoryWindowSql
+        cmd.Parameters.AddWithValue("$lookback", isoUtc (startTime - openWindow)) |> ignore
         cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
         cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
         use reader = cmd.ExecuteReader()

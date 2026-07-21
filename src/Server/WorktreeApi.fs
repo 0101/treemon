@@ -10,8 +10,28 @@ open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
+open Server.SessionActivityStore
 
 let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
+
+let internal overviewHistoryAt
+    (store: SessionActivityStore)
+    (anchor: DateTimeOffset)
+    (requestedWindow: OverviewData.HistoryWindow)
+    =
+    let window = OverviewData.HistoryWindow.duration requestedWindow
+    let start = anchor - window
+    let taskSnapshots =
+        (store.QueryTaskSnapshotBefore start |> Option.toList)
+        @ store.QueryTaskSnapshots(start, anchor)
+    let events = store.QueryHistoryWindow(start, anchor)
+    let liveness = store.QueryLiveness(start - SessionActivity.openWindow, anchor)
+
+    let response: OverviewData.OverviewHistoryResponse =
+        { Anchor = anchor
+          Snapshots = OverviewHistory.sample anchor window taskSnapshots events liveness }
+
+    response
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
@@ -800,18 +820,5 @@ let worktreeApi
                         return
                             { OverviewData.OverviewHistoryResponse.Anchor = anchor
                               Snapshots = [] }
-                    | Some store ->
-                        let window = OverviewData.HistoryWindow.duration requestedWindow
-                        let start = anchor - window
-                        let taskSnaps =
-                            match store.QueryTaskSnapshotBefore start with
-                            | Some (_, tasks) -> (start, tasks) :: store.QueryTaskSnapshots(start, anchor)
-                            | None -> store.QueryTaskSnapshots(start, anchor)
-                        let events = store.QueryHistoryWindow(start, anchor)
-                        let liveness = store.QueryLiveness(start - SessionActivity.openWindow, anchor)
-                        let agentSnaps = OverviewHistory.deriveAgents anchor window events liveness
-
-                        return
-                            { OverviewData.OverviewHistoryResponse.Anchor = anchor
-                              Snapshots = OverviewHistory.mergeHistory taskSnaps agentSnaps }
+                    | Some store -> return overviewHistoryAt store anchor requestedWindow
                 } }

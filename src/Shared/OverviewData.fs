@@ -163,7 +163,7 @@ let private agentGroupOrder =
 /// The agent group a worktree's collapsed coding-tool status + skill maps to, or None when it is not
 /// a live agent (NoSession — grey, no open session). The SINGLE source of truth for status → agent
 /// group, shared by the live band aggregate and the event-derived history reconstruction
-/// (Server.OverviewHistory.deriveAgents), so the live band and its history bucket a status identically:
+/// (Server.OverviewHistory.sample), so the live band and its history bucket a status identically:
 ///   Working -> the skill-classified Activity group · WaitingForUser -> Waiting · Idle -> Idle.
 let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGroupKind option =
     match codingTool with
@@ -174,7 +174,7 @@ let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGr
 
 /// Count agents per group from a set of collapsed per-worktree (status, skill) pairs, in the canonical
 /// agent-group order with empty groups dropped — the count-only agent projection. Shared by the
-/// history reconstruction (Server.OverviewHistory.deriveAgents) so an event-derived Agents snapshot is
+/// history reconstruction (Server.OverviewHistory.sample) so an event-derived Agents snapshot is
 /// bucketed and ordered exactly like `aggregate`'s live one.
 let agentCountsOf (worktrees: (CodingToolStatus * string option) seq) : AgentCount list =
     let counts =

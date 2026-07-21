@@ -8,144 +8,215 @@ open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-// Unit tests for the repurposed OverviewHistory module (spec: docs/spec/overview-activity-history.md +
-// docs/spec/session-status-push.md "Overview-history unification"). The history is now unified onto the
-// push event store: Tasks are snapshot-based (change-detected by `tasksChanged`), Agents are DERIVED ON
-// READ from activity events plus liveness (`deriveAgents`, modelling openness decay), and the two series
-// are stitched into one stepped OverviewSnapshot stream (`mergeHistory`). All three are pure.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type OverviewHistoryTests() =
 
-    let baseTime = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
-
-    /// One activity_events row for session `sid` in worktree `wt`, `minsBefore` minutes before baseTime.
-    /// Only Status/Skill/Ts/SessionId/WorktreePath bear on the agent reconstruction.
-    let evt sid wt (status: SessionLevelStatus) skill (minsBefore: float) : ActivityEventRow =
-        { EventId = EventId(Guid.NewGuid().ToString())
-          SessionId = SessionId sid
-          WorktreePath = WorktreePath wt
-          Provider = CopilotCli
-          Kind = "x"
-          Status = status
-          Skill = skill
-          Ts = baseTime.AddMinutes(-minsBefore) }
-
+    let anchor = DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero)
     let tc kind count : TaskCount = { Kind = kind; Count = count }
     let ac kind count : AgentCount = { Kind = kind; Count = count }
-    let live sid minsBefore = SessionId sid, baseTime.AddMinutes(-minsBefore)
 
-    // --- tasksChanged -------------------------------------------------------------------------
+    let evt id sid worktree status skill at : ActivityEventRow =
+        { EventId = EventId id
+          SessionId = SessionId sid
+          WorktreePath = WorktreePath worktree
+          Provider = CopilotCli
+          Kind = "status"
+          Status = status
+          Skill = skill
+          Ts = at }
 
-    [<Test>]
-    member _.``tasksChanged is true with no prior projection (baseline)``() =
-        Assert.That(OverviewHistory.tasksChanged None [ tc TaskBucketKind.Planned 1 ], Is.True)
-
-    // --- deriveAgents -------------------------------------------------------------------------
-
-    [<Test>]
-    member _.``deriveAgents surfaces a working agent, the idle transition, then openness decay``() =
-        let window = TimeSpan.FromHours 72.0
-        // s1: Working (bd-execute) at -60m, goes Idle at -30m, then stops emitting → drops out of the
-        // counts one openWindow after its last event (openness decay), matching the live band.
-        let events =
-            [ evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 60.0
-              evt "s1" "C:/wt/a" SessionLevelStatus.Idle None 30.0 ]
-
-        let derived = OverviewHistory.deriveAgents baseTime window events []
-
-        let expected =
-            [ baseTime - window, []
-              baseTime.AddMinutes(-60.0), [ ac (AgentGroupKind.Activity CurrentActivity.Executing) 1 ]
-              baseTime.AddMinutes(-60.0) + SessionActivity.openWindow, []
-              baseTime.AddMinutes(-30.0), [ ac AgentGroupKind.Idle 1 ]
-              baseTime.AddMinutes(-30.0) + SessionActivity.openWindow, [] ]
-
-        Assert.That(derived, Is.EqualTo expected)
+    let boundary (window: TimeSpan) bucket =
+        let start = anchor - window
+        start.AddTicks(window.Ticks * int64 bucket / int64 OverviewHistory.sampleBucketCount)
 
     [<Test>]
-    member _.``deriveAgents uses liveness points without creating status transitions``() =
-        let window = TimeSpan.FromHours 72.0
-        let events = [ evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 30.0 ]
-        let liveness = [ 1.0 .. 29.0 ] |> List.map (live "s1")
-
-        let derived = OverviewHistory.deriveAgents baseTime window events liveness
-
-        let expected =
-            [ baseTime - window, []
-              baseTime.AddMinutes(-30.0), [ ac (AgentGroupKind.Activity CurrentActivity.Executing) 1 ] ]
-
-        Assert.That(derived, Is.EqualTo expected)
+    member _.``tasksChanged writes the baseline and only later changes``() =
+        let tasks = [ tc TaskBucketKind.Planned 1 ]
+        Assert.Multiple(fun () ->
+            Assert.That(OverviewHistory.tasksChanged None tasks, Is.True)
+            Assert.That(OverviewHistory.tasksChanged (Some tasks) tasks, Is.False)
+            Assert.That(OverviewHistory.tasksChanged (Some tasks) [ tc TaskBucketKind.Planned 2 ], Is.True))
 
     [<Test>]
-    member _.``deriveAgents counts each open session like the live Overview``() =
-        let window = TimeSpan.FromHours 72.0
-        // Same worktree: one Working session and one Idle session, both fresh at -20m. The live
-        // Overview counts sessions independently, so history must preserve both groups too.
-        let events =
-            [ evt "s1" "C:/wt/a" SessionLevelStatus.Idle None 20.0
-              evt "s2" "C:/wt/a" SessionLevelStatus.Working (Some "pr") 20.0 ]
-
-        let derived = OverviewHistory.deriveAgents baseTime window events []
-        let atAppearance = derived |> List.find (fun (t, _) -> t = baseTime.AddMinutes(-20.0)) |> snd
-
-        Assert.That(
-            atAppearance,
-            Is.EqualTo [ ac (AgentGroupKind.Activity CurrentActivity.PR) 1; ac AgentGroupKind.Idle 1 ]
-        )
-
-    [<Test>]
-    member _.``deriveAgents reopens a session when a same-state event follows an openness gap``() =
-        let window = TimeSpan.FromHours 72.0
-        let events =
-            [ evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 20.0
-              evt "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") 10.0 ]
-
-        let derived = OverviewHistory.deriveAgents baseTime window events []
+    member _.``changes exactly at a boundary are applied before the complete sample is emitted``() =
+        let window = HistoryWindow.duration HistoryWindow.Hours12
+        let start = anchor - window
+        let first = boundary window 1
+        let tasksA = [ tc TaskBucketKind.Planned 1 ]
+        let tasksB = [ tc TaskBucketKind.Planned 2 ]
         let executing = [ ac (AgentGroupKind.Activity CurrentActivity.Executing) 1 ]
 
+        let history =
+            OverviewHistory.sample
+                anchor
+                window
+                [ start.AddHours(-1.0), tasksA; first, tasksB ]
+                [ evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") first ]
+                []
+
         Assert.That(
-            derived,
+            history,
             Is.EqualTo
-                [ baseTime - window, []
-                  baseTime.AddMinutes(-20.0), executing
-                  baseTime.AddMinutes(-20.0) + SessionActivity.openWindow, []
-                  baseTime.AddMinutes(-10.0), executing
-                  baseTime.AddMinutes(-10.0) + SessionActivity.openWindow, [] ]
+                [ { Timestamp = start; Tasks = tasksA; Agents = [] }
+                  { Timestamp = first; Tasks = tasksB; Agents = executing }
+                  { Timestamp = boundary window 3; Tasks = tasksB; Agents = [] } ]
         )
 
     [<Test>]
-    member _.``deriveAgents returns a single empty baseline when there are no events``() =
-        let derived = OverviewHistory.deriveAgents baseTime (TimeSpan.FromHours 72.0) [] []
-        Assert.That(derived, Is.EqualTo [ baseTime - TimeSpan.FromHours 72.0, ([]: AgentCount list) ])
+    member _.``a brief state wholly between 72 hour boundaries is omitted``() =
+        let window = HistoryWindow.duration HistoryWindow.Hours72
+        let start = anchor - window
+        let appeared = start.AddMinutes 1.0
 
-    // --- mergeHistory -------------------------------------------------------------------------
+        let history =
+            OverviewHistory.sample
+                anchor
+                window
+                []
+                [ evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") appeared ]
+                []
 
-    [<Test>]
-    member _.``mergeHistory carries each dimension forward at every change point``() =
-        let t1 = baseTime.AddMinutes(-30.0)
-        let t2 = baseTime.AddMinutes(-20.0)
-        let t3 = baseTime.AddMinutes(-10.0)
-        let tasksA = [ tc TaskBucketKind.Planned 2 ]
-        let tasksB = [ tc TaskBucketKind.Planned 5 ]
-        let agentsA = [ ac AgentGroupKind.Waiting 1 ]
-
-        let merged = OverviewHistory.mergeHistory [ t1, tasksA; t3, tasksB ] [ t2, agentsA ]
-
-        let expected =
-            [ { Timestamp = t1; Tasks = tasksA; Agents = [] }
-              { Timestamp = t2; Tasks = tasksA; Agents = agentsA }
-              { Timestamp = t3; Tasks = tasksB; Agents = agentsA } ]
-
-        Assert.That(merged, Is.EqualTo expected)
+        Assert.That(history, Is.EqualTo [ { Timestamp = start; Tasks = []; Agents = [] } ])
 
     [<Test>]
-    member _.``mergeHistory collapses simultaneous task and agent changes into one snapshot``() =
-        let t = baseTime.AddMinutes(-15.0)
-        let tasks = [ tc TaskBucketKind.Blocked 1 ]
-        let agents = [ ac AgentGroupKind.Idle 2 ]
+    member _.``sampling uses the whole state at the boundary rather than category maxima``() =
+        let window = HistoryWindow.duration HistoryWindow.Hours72
+        let start = anchor - window
+        let first = boundary window 1
+        let tasksAtStart = [ tc TaskBucketKind.Planned 1 ]
+        let finalTasks = [ tc TaskBucketKind.Blocked 2 ]
+        let waiting = [ ac AgentGroupKind.Waiting 1 ]
 
-        let merged = OverviewHistory.mergeHistory [ t, tasks ] [ t, agents ]
+        let history =
+            OverviewHistory.sample
+                anchor
+                window
+                [ start.AddHours(-1.0), tasksAtStart
+                  start.AddMinutes 1.0, [ tc TaskBucketKind.Planned 5 ]
+                  start.AddMinutes 14.0, finalTasks ]
+                [ evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") (start.AddMinutes 1.0)
+                  evt "e2" "s1" "C:/wt/a" SessionLevelStatus.WaitingForUser None (start.AddMinutes 14.0) ]
+                []
 
-        Assert.That(merged, Is.EqualTo [ { Timestamp = t; Tasks = tasks; Agents = agents } ])
+        Assert.That(
+            history |> List.take 2,
+            Is.EqualTo
+                [ { Timestamp = start; Tasks = tasksAtStart; Agents = [] }
+                  { Timestamp = first; Tasks = finalTasks; Agents = waiting } ]
+        )
+
+    [<Test>]
+    member _.``left edge carries status and liveness without fabricating a transition``() =
+        let window = HistoryWindow.duration HistoryWindow.Hours12
+        let start = anchor - window
+        let executing = [ ac (AgentGroupKind.Activity CurrentActivity.Executing) 1 ]
+
+        let history =
+            OverviewHistory.sample
+                anchor
+                window
+                []
+                [ evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Working (Some "bd-execute") (start.AddMinutes(-10.0)) ]
+                [ SessionId "s1", start.AddMinutes(-1.0) ]
+
+        let livenessOnly =
+            OverviewHistory.sample
+                anchor
+                window
+                []
+                []
+                [ SessionId "unknown", start.AddMinutes(-1.0) ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                history,
+                Is.EqualTo
+                    [ { Timestamp = start; Tasks = []; Agents = executing }
+                      { Timestamp = boundary window 1; Tasks = []; Agents = [] } ]
+            )
+            Assert.That(livenessOnly, Is.EqualTo [ { Timestamp = start; Tasks = []; Agents = [] } ]))
+
+    [<Test>]
+    member _.``multiple open sessions in one worktree are counted independently``() =
+        let window = HistoryWindow.duration HistoryWindow.Hours12
+        let start = anchor - window
+
+        let history =
+            OverviewHistory.sample
+                anchor
+                window
+                []
+                [ evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Idle None (start.AddMinutes(-1.0))
+                  evt "e2" "s2" "C:/wt/a" SessionLevelStatus.Working (Some "pr") (start.AddMinutes(-1.0)) ]
+                []
+
+        Assert.That(
+            history.Head.Agents,
+            Is.EqualTo
+                [ ac (AgentGroupKind.Activity CurrentActivity.PR) 1
+                  ac AgentGroupKind.Idle 1 ]
+        )
+
+    [<TestCase(12.0, 2.5)>]
+    [<TestCase(24.0, 5.0)>]
+    [<TestCase(72.0, 15.0)>]
+    member _.``every supported window has 288 equal buckets and at most 289 samples``(hours: float, bucketMinutes: float) =
+        let window = TimeSpan.FromHours hours
+        let snapshots =
+            [ 0 .. OverviewHistory.sampleBucketCount ]
+            |> List.map (fun bucket ->
+                boundary window bucket,
+                [ tc TaskBucketKind.Planned (1 + bucket % 2) ])
+
+        let history = OverviewHistory.sample anchor window snapshots [] []
+
+        Assert.Multiple(fun () ->
+            Assert.That(history.Length, Is.EqualTo(OverviewHistory.sampleBucketCount + 1))
+            Assert.That(history.Head.Timestamp, Is.EqualTo(anchor - window))
+            Assert.That(history |> List.last |> _.Timestamp, Is.EqualTo anchor)
+            Assert.That(history[1].Timestamp - history[0].Timestamp, Is.EqualTo(TimeSpan.FromMinutes bucketMinutes)))
+
+    [<Test>]
+    member _.``dense raw history remains ordered in range and bounded to 289 samples``() =
+        let window = HistoryWindow.duration HistoryWindow.Hours72
+        let start = anchor - window
+        let eventCount = 40000
+
+        let events =
+            [ 0 .. eventCount - 1 ]
+            |> List.map (fun index ->
+                let at = start.AddTicks(window.Ticks * int64 (index + 1) / int64 (eventCount + 1))
+                let status, skill =
+                    match index % 3 with
+                    | 0 -> SessionLevelStatus.Working, Some "bd-execute"
+                    | 1 -> SessionLevelStatus.WaitingForUser, None
+                    | _ -> SessionLevelStatus.Idle, None
+
+                evt $"e{index}" $"s{index % 130}" $"C:/wt/{index % 17}" status skill at)
+
+        let liveness =
+            events
+            |> List.indexed
+            |> List.choose (fun (index, row) ->
+                if index % 4 = 0 then Some(row.SessionId, row.Ts.AddSeconds 10.0)
+                else None)
+
+        let tasks =
+            [ 0 .. 999 ]
+            |> List.map (fun index ->
+                start.AddTicks(window.Ticks * int64 (index + 1) / 1001L),
+                [ tc TaskBucketKind.Planned (1 + index % 7) ])
+
+        let history = OverviewHistory.sample anchor window tasks events liveness
+
+        Assert.Multiple(fun () ->
+            Assert.That(history.Length, Is.LessThanOrEqualTo(OverviewHistory.sampleBucketCount + 1))
+            Assert.That(history |> List.forall (fun snapshot -> snapshot.Timestamp >= start && snapshot.Timestamp <= anchor), Is.True)
+            Assert.That(
+                history
+                |> List.pairwise
+                |> List.forall (fun (left, right) -> left.Timestamp < right.Timestamp),
+                Is.True
+            ))

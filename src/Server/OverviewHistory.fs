@@ -1,39 +1,22 @@
 module Server.OverviewHistory
 
-// The Overview band's history, unified onto the push-model event store (spec:
-// docs/spec/overview-activity-history.md + docs/spec/session-status-push.md "Overview-history
-// unification"). An OverviewSnapshot is `{ Tasks; Agents }`, but the two dimensions come from
-// DIFFERENT sources and are reconciled only on read:
-//
-//   - Tasks  (beads planning counts) are NOT event-sourced — they are snapshot-based: the scheduler
-//            logs the count-only projection to SessionActivityStore.task_snapshots on change
-//            (`tasksChanged`), exactly as before, just persisted in SQLite instead of a JSONL file.
-//   - Agents are DERIVED ON READ from status-bearing `activity_events` plus the separate compact
-//            `session_liveness` timeline. Status/skill comes from events; heartbeat/usage points extend
-//            LastSeen without fabricating activity events. The live collapse and history therefore use
-//            the same openness and per-session grouping rules.
-//
-// `mergeHistory` stitches the two independently-changing series into one stepped OverviewSnapshot
-// stream (carry each dimension forward at every change point) for the anchored API response.
-//
-// Pure: no IO, no mutation. The store owns persistence; this module owns the change-detection, the
-// event→agent reconstruction, and the merge, so all three are unit-testable in isolation.
+// Pure fixed-resolution reconstruction for the Overview band's durable history. Tasks carry forward
+// from change-only snapshots. Agent status carries forward from activity events while event/liveness
+// observations control openness. Source changes are folded chronologically, but the expensive live
+// projection is performed only at the 289 possible sample boundaries.
 
 open System
 open OverviewData
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-/// True when a freshly computed Tasks projection differs from the last logged one — the scheduler's
-/// append-only change gate (identical counts append nothing; the first projection always counts as
-/// changed so a baseline row is written).
+let sampleBucketCount = 288
+
 let tasksChanged (last: TaskCount list option) (current: TaskCount list) : bool =
     match last with
     | None -> true
     | Some prev -> prev <> current
 
-/// Project one event row to the StoredStatus shape `collapseByWorktree` consumes. Only Status/Skill/
-/// LastSeen bear on the agent grouping, so the message/usage fields are left empty.
 let private toStored (r: ActivityEventRow) : StoredStatus =
     { SessionId = r.SessionId
       WorktreePath = r.WorktreePath
@@ -50,143 +33,155 @@ let private toStored (r: ActivityEventRow) : StoredStatus =
       LastSeen = r.Ts
       ContextUsageAt = None }
 
-/// One session's state as of instant `t`: the StoredStatus of its last event at or before `t`, found by
-/// binary search over a time-ascending `(Ts, StoredStatus)` array. None when every event is after `t`.
-/// O(log rows) so the sweep does not re-scan a session's whole (idle-heartbeat-heavy) row list at every
-/// candidate instant.
-let private sessionAsOf (arr: (DateTimeOffset * StoredStatus)[]) (t: DateTimeOffset) : StoredStatus option =
-    let rec search lo hi best =
-        if lo > hi then best
-        else
-            let mid = (lo + hi) / 2
-            if fst arr[mid] <= t then search (mid + 1) hi (Some(snd arr[mid]))
-            else search lo (mid - 1) best
+type private Change =
+    | CloseSession of SessionId
+    | SetStatus of ActivityEventRow
+    | ObserveLiveness of SessionId
+    | SetTasks of TaskCount list
 
-    search 0 (arr.Length - 1) None
+type private TimedChange =
+    { At: DateTimeOffset
+      Priority: int
+      Sequence: int
+      Change: Change }
 
-let private latestAt (arr: DateTimeOffset[]) (t: DateTimeOffset) : DateTimeOffset option =
-    let rec search lo hi best =
-        if lo > hi then best
-        else
-            let mid = (lo + hi) / 2
-            if arr[mid] <= t then search (mid + 1) hi (Some arr[mid])
-            else search lo (mid - 1) best
+type private SweepState =
+    { Tasks: TaskCount list
+      Sessions: Map<SessionId, StoredStatus>
+      OpenSessions: Set<SessionId> }
 
-    search 0 (arr.Length - 1) None
-
-/// Derive the Agents history over the window from the raw push event stream. For each candidate
-/// instant, reconstruct every session's state as of that instant, collapse per worktree
-/// (`collapseByWorktree` → the same per-session statuses consumed by the live Overview), classify
-/// each open session into an agent group, and emit the count vector — dropping consecutive unchanged
-/// vectors so only real transitions appear.
-///
-/// Candidate instants are the window edges, every status event, and the start/end of each coalesced
-/// open interval. Heartbeats inside one continuously-open interval do not trigger full reconstruction;
-/// a gap longer than openWindow closes the interval and a later observation reopens it.
-let deriveAgents
-    (now: DateTimeOffset)
-    (window: TimeSpan)
-    (events: ActivityEventRow list)
-    (liveness: (SessionId * DateTimeOffset) list)
-    : (DateTimeOffset * AgentCount list) list =
-    let start = now - window
-
-    let bySession =
-        events
-        |> List.groupBy _.SessionId
-        |> List.map (fun (_, rows) -> rows |> List.sortBy _.Ts)
-
-    // Per-session time-ascending (Ts, StoredStatus) arrays, built ONCE up front so each candidate
-    // instant reconstructs a session's state by binary search rather than re-scanning all its rows.
-    // With idle heartbeats appending thousands of same-status rows per session, the old per-instant
-    // full scan was ~instants × events; this makes the sweep ~instants × sessions × log rows.
-    let bySessionStored =
-        bySession
-        |> List.map (fun rows -> rows |> List.map (fun r -> r.Ts, toStored r) |> List.toArray)
-
-    let livenessBySession =
-        liveness
-        |> List.groupBy fst
-        |> List.map (fun (sessionId, rows) -> sessionId, rows |> List.map snd |> List.sort |> List.toArray)
-        |> Map.ofList
-
-    let withLatestLiveness t (stored: StoredStatus) =
-        livenessBySession
-        |> Map.tryFind stored.SessionId
-        |> Option.bind (fun rows -> latestAt rows t)
-        |> Option.map (fun lastSeen -> { stored with LastSeen = max stored.LastSeen lastSeen })
-        |> Option.defaultValue stored
-
-    let agentsAt (t: DateTimeOffset) : AgentCount list =
-        bySessionStored
-        |> List.choose (fun arr -> sessionAsOf arr t)
-        |> List.map (withLatestLiveness t)
-        |> CodingToolStatus.collapseByWorktree t
-        |> Map.values
-        |> Seq.collect _.SessionStatuses
-        |> Seq.map (fun s -> s.Status, s.Skill)
-        |> agentCountsOf
-
-    let openIntervals (times: DateTimeOffset list) =
-        match times |> List.sort with
+let private closeBoundaries (observations: (SessionId * DateTimeOffset) list) =
+    observations
+    |> List.groupBy fst
+    |> List.collect (fun (sessionId, rows) ->
+        match rows |> List.map snd |> List.distinct |> List.sort with
         | [] -> []
         | first :: rest ->
-            let intervalStart, lastSeen, completed =
+            let lastSeen, closes =
                 rest
-                |> List.fold (fun (intervalStart, lastSeen, completed) observedAt ->
-                    if observedAt - lastSeen <= openWindow then
-                        intervalStart, observedAt, completed
-                    else
-                        observedAt, observedAt, (intervalStart, lastSeen + openWindow) :: completed
-                ) (first, first, [])
+                |> List.fold (fun (lastSeen, closes) observedAt ->
+                    if observedAt - lastSeen <= openWindow then observedAt, closes
+                    else observedAt, lastSeen + openWindow :: closes
+                ) (first, [])
 
-            List.rev ((intervalStart, lastSeen + openWindow) :: completed)
+            (lastSeen + openWindow :: closes)
+            |> List.map (fun closesAt -> sessionId, closesAt))
 
-    let intervalBoundaries =
-        ((events |> List.map (fun event -> event.SessionId, event.Ts)) @ liveness)
-        |> List.groupBy fst
-        |> List.collect (fun (_, rows) ->
-            rows
-            |> List.map snd
-            |> openIntervals
-            |> List.collect (fun (opensAt, closesAt) -> [ opensAt; closesAt ]))
+let private applyChange (state: SweepState) (timed: TimedChange) : SweepState =
+    match timed.Change with
+    | SetTasks tasks ->
+        { state with Tasks = tasks }
+    | SetStatus row ->
+        let stored =
+            match Map.tryFind row.SessionId state.Sessions with
+            | Some current -> { toStored row with LastSeen = max current.LastSeen row.Ts }
+            | None -> toStored row
 
-    let instants =
-        (start :: now :: ((events |> List.map _.Ts) @ intervalBoundaries))
-        |> List.filter (fun t -> t >= start && t <= now)
-        |> List.distinct
-        |> List.sort
+        { state with
+            Sessions = Map.add row.SessionId stored state.Sessions
+            OpenSessions = Set.add row.SessionId state.OpenSessions }
+    | ObserveLiveness sessionId ->
+        match Map.tryFind sessionId state.Sessions with
+        | None -> state
+        | Some stored ->
+            { state with
+                Sessions =
+                    state.Sessions
+                    |> Map.add sessionId { stored with LastSeen = max stored.LastSeen timed.At }
+                OpenSessions = Set.add sessionId state.OpenSessions }
+    | CloseSession sessionId ->
+        match Map.tryFind sessionId state.Sessions with
+        | Some stored when stored.LastSeen + openWindow <= timed.At ->
+            { state with OpenSessions = Set.remove sessionId state.OpenSessions }
+        | _ -> state
 
-    (instants |> List.map (fun t -> t, agentsAt t), [])
-    ||> List.foldBack (fun (t, agents) acc ->
-        match acc with
-        | (_, nextAgents) :: _ when nextAgents = agents -> (t, agents) :: List.tail acc
-        | _ -> (t, agents) :: acc)
+let private snapshotAt (timestamp: DateTimeOffset) (state: SweepState) : OverviewSnapshot =
+    let agents =
+        state.OpenSessions
+        |> Seq.choose (fun sessionId -> Map.tryFind sessionId state.Sessions)
+        |> CodingToolStatus.collapseByWorktree timestamp
+        |> Map.values
+        |> Seq.collect _.SessionStatuses
+        |> Seq.map (fun session -> session.Status, session.Skill)
+        |> agentCountsOf
 
-/// Merge the two independently-changing history series into one stepped OverviewSnapshot stream: at
-/// every change point (in either dimension) emit a snapshot carrying the latest Tasks AND the latest
-/// Agents. Simultaneous changes at one instant collapse into a single snapshot. Before a dimension's
-/// first value it carries the empty list — nothing was known yet — which the chart renders as a bare
-/// baseline. The output feeds `getOverviewHistory` / `OverviewChart.fs` unchanged.
-let mergeHistory
-    (taskSnaps: (DateTimeOffset * TaskCount list) list)
-    (agentSnaps: (DateTimeOffset * AgentCount list) list)
+    { Timestamp = timestamp
+      Tasks = state.Tasks
+      Agents = agents }
+
+let private sameValues (left: OverviewSnapshot) (right: OverviewSnapshot) =
+    left.Tasks = right.Tasks && left.Agents = right.Agents
+
+/// Sample the complete Tasks and Agents state at the left edge and 288 bucket right edges. Every
+/// source change timestamped at or before a boundary is applied first. Consecutive equal snapshots
+/// retain their earliest timestamp, so the result is ordered, left-edge carried, and bounded to 289.
+let sample
+    (anchor: DateTimeOffset)
+    (window: TimeSpan)
+    (taskSnapshots: (DateTimeOffset * TaskCount list) list)
+    (events: ActivityEventRow list)
+    (liveness: (SessionId * DateTimeOffset) list)
     : OverviewSnapshot list =
-    let events =
-        (taskSnaps |> List.map (fun (t, v) -> t, Choice1Of2 v))
-        @ (agentSnaps |> List.map (fun (t, v) -> t, Choice2Of2 v))
-        |> List.sortBy fst
+    let start = anchor - window
+    let events = events |> List.filter (fun row -> row.Ts <= anchor)
+    let liveness = liveness |> List.filter (fun (_, observedAt) -> observedAt <= anchor)
+    let observations = (events |> List.map (fun row -> row.SessionId, row.Ts)) @ liveness
 
-    (([], [], []), events)
-    ||> List.fold (fun (tasks, agents, acc) (t, ev) ->
-        let tasks, agents =
-            match ev with
-            | Choice1Of2 newTasks -> newTasks, agents
-            | Choice2Of2 newAgents -> tasks, newAgents
+    let changes =
+        [ events
+          |> List.mapi (fun sequence row ->
+              { At = row.Ts
+                Priority = 1
+                Sequence = sequence
+                Change = SetStatus row })
+          liveness
+          |> List.mapi (fun sequence (sessionId, observedAt) ->
+              { At = observedAt
+                Priority = 2
+                Sequence = sequence
+                Change = ObserveLiveness sessionId })
+          taskSnapshots
+          |> List.filter (fun (at, _) -> at <= anchor)
+          |> List.mapi (fun sequence (at, tasks) ->
+              { At = at
+                Priority = 3
+                Sequence = sequence
+                Change = SetTasks tasks })
+          closeBoundaries observations
+          |> List.filter (fun (_, closesAt) -> closesAt <= anchor)
+          |> List.mapi (fun sequence (sessionId, closesAt) ->
+              { At = closesAt
+                Priority = 0
+                Sequence = sequence
+                Change = CloseSession sessionId }) ]
+        |> List.concat
+        |> List.sortBy (fun change -> change.At, change.Priority, change.Sequence)
 
-        let snap = { Timestamp = t; Tasks = tasks; Agents = agents }
+    let boundaries =
+        [ 0 .. sampleBucketCount ]
+        |> List.map (fun bucket ->
+            if bucket = sampleBucketCount then anchor
+            else
+                start.AddTicks(
+                    window.Ticks * int64 bucket / int64 sampleBucketCount
+                ))
 
-        match acc with
-        | prev :: rest when prev.Timestamp = t -> tasks, agents, snap :: rest
-        | _ -> tasks, agents, snap :: acc)
-    |> fun (_, _, acc) -> List.rev acc
+    let rec applyThrough boundary state =
+        function
+        | change :: rest when change.At <= boundary ->
+            applyThrough boundary (applyChange state change) rest
+        | remaining -> state, remaining
+
+    boundaries
+    |> List.fold (fun (state, remaining, snapshots) boundary ->
+        let state, remaining = applyThrough boundary state remaining
+        let snapshot = snapshotAt boundary state
+
+        let snapshots =
+            match snapshots with
+            | previous :: _ when sameValues previous snapshot -> snapshots
+            | _ -> snapshot :: snapshots
+
+        state, remaining, snapshots
+    ) ({ Tasks = []; Sessions = Map.empty; OpenSessions = Set.empty }, changes, [])
+    |> fun (_, _, snapshots) -> List.rev snapshots

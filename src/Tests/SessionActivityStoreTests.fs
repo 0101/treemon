@@ -452,6 +452,7 @@ type PruneOldTests() =
                     "2025-12-01T10:00:00Z"
                     "2026-03-01T11:59:00Z"
             )
+            store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:59:00Z")
 
             store.PruneOld(ts "2026-01-01T00:00:00Z") |> ignore
 

@@ -535,17 +535,18 @@ type IngestTests() =
             let liveness = store.QueryLiveness(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(liveness, Is.EqualTo [ SessionId "s1", ts "2026-03-01T10:01:00Z" ])
             let historyEvents = store.QueryHistoryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T10:03:00Z")
-            let agents =
-                OverviewHistory.deriveAgents
+            let history =
+                OverviewHistory.sample
                     (ts "2026-03-01T10:03:00Z")
                     (TimeSpan.FromHours 1.0)
+                    []
                     historyEvents
                     liveness
             let expected : OverviewData.AgentCount list =
                 [ { Kind = OverviewData.AgentGroupKind.Activity CurrentActivity.Working
                     Count = 1 } ]
             Assert.That(
-                agents |> List.last |> snd,
+                history |> List.last |> _.Agents,
                 Is.EqualTo expected,
                 "the heartbeat keeps the historical agent open past the original event's openWindow"
             )

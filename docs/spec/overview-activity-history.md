@@ -42,8 +42,8 @@ server-side sample anchor with the resulting `OverviewSnapshot` timeline.
   The store prunes redundant history after 60 days but retains one pre-cutoff status baseline per
   still-retained session and one task baseline.
 - Task reads include the latest snapshot before the requested window and carry it to the left edge.
-  Agent reads include each session's latest status event before the window plus liveness from one
-  `openWindow` before the edge.
+  For each session observed in the window or lookback, agent reads include its latest pre-window
+  status event plus liveness from one `openWindow` before the edge.
 - Each window is divided into 288 equal buckets: 2.5 minutes for 12 hours, 5 minutes for 24 hours,
   and 15 minutes for 72 hours. The response contains the left-edge baseline plus at most one
   right-edge sample per bucket, with consecutive equal snapshots collapsed.
@@ -128,6 +128,7 @@ corresponding live section.
 | Stored shape | Persist counts only; omit drill-down members and derive chart scale. |
 | Window | Request 12h, 24h, or 72h explicitly; divide every window into 288 equal buckets. |
 | Quantization | Sample the complete state at each bucket's right edge; brief sub-bucket states may be omitted. |
+| Openness sweep | Coalesce dense observations into actual session-close boundaries; ignore a stale close after later liveness extends `LastSeen`. |
 | Response anchor | Use the server computation anchor so cached callers render the same timeline edges. |
 | Client refresh gate | Track client request time separately from the server response anchor. |
 | Cache | Cache one in-flight/completed response per window until 30 seconds after its server anchor. |
