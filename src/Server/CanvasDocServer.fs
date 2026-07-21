@@ -454,8 +454,7 @@ let internal createHost
         WorktreeDiffApi.createHandlers service newIdentity
 
     Microsoft.AspNetCore.Hosting.WebHostBuilder()
-        .UseKestrel(fun opts ->
-            opts.Listen(System.Net.IPAddress.Loopback, canvasPort))
+        .UseKestrel(_.Listen(System.Net.IPAddress.Loopback, canvasPort))
         .ConfigureServices(fun services ->
             services.AddRouting() |> ignore)
         .Configure(fun (app: IApplicationBuilder) ->
