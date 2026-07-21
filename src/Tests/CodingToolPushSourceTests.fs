@@ -31,13 +31,11 @@ let private stored
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status =
-        { Status = status
-          Skill = skill
-          Intent = None
-          Title = None
-          LastUserMessage = lastUser
-          LastAssistantMessage = lastAsst
-          ContextUsage = None }
+        { emptyStatus with
+            Status = status
+            Skill = skill
+            LastUserMessage = lastUser
+            LastAssistantMessage = lastAsst }
       UpdatedAt = ts seen
       LastSeen = ts seen
       ContextUsageAt = None }
