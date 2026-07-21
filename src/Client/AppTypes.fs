@@ -15,6 +15,10 @@ open OverviewPresentation
 open Elmish
 open Fable.Remoting.Client
 
+type OverviewHistoryRequest =
+    { Window: HistoryWindow
+      RequestedAt: System.DateTimeOffset }
+
 type Model =
     { Repos: RepoModel list
       IsLoading: bool
@@ -41,11 +45,12 @@ type Model =
       OverviewPanelOpen: bool
       SelectedOverviewGroup: OverviewSelection option
       // None is the client-only Hidden state; only a concrete shared HistoryWindow can cross the API.
-      // The response carries the server anchor used by the chart, while RequestedAt independently gates
-      // client refreshes and prevents the one-second poll from issuing overlapping requests.
+      // The response anchor drives normal refresh cadence. RequestedAt provides failure retry backoff,
+      // while the request identity prevents overlapping polls and stale completions.
       OverviewHistoryWindow: HistoryWindow option
       OverviewHistory: OverviewHistoryResponse option
-      OverviewHistoryRequestedAt: System.DateTimeOffset }
+      OverviewHistoryRequestedAt: System.DateTimeOffset
+      OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -90,9 +95,10 @@ type Msg =
     | SelectOverviewWorktree of scopedKey: string
     // In-band history chart (spec: docs/spec/overview-activity-history.md). CycleOverviewChart advances
     // Hidden -> 12h -> 24h -> 72h -> Hidden. The requested window travels with the response so a slower
-    // request for a previous selection can be ignored.
+    // request for a previous selection can be ignored. The request identity also distinguishes
+    // separate requests for the same window when the user cycles away and back.
     | CycleOverviewChart of now: System.DateTimeOffset
-    | OverviewHistoryLoaded of requestedWindow: HistoryWindow * response: OverviewHistoryResponse option
+    | OverviewHistoryLoaded of request: OverviewHistoryRequest * response: OverviewHistoryResponse option
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string

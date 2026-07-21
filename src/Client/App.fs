@@ -2,6 +2,7 @@ module App
 
 open Shared
 open Shared.EventUtils
+open OverviewData
 open Navigation
 open Elmish
 open Feliz
@@ -20,9 +21,9 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
-let fetchOverviewHistory window =
-    let loaded response = OverviewHistoryLoaded(window, Some response)
-    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory window loaded (fun _ -> OverviewHistoryLoaded(window, None))
+let fetchOverviewHistory request =
+    let loaded response = OverviewHistoryLoaded(request, Some response)
+    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
 
 // The in-band history chart is refreshed no more often than this while open. The poll ticks ~1/s and
 // getOverviewHistory reconstructs the whole agent timeline from the event window (hundreds of ms on a
@@ -30,14 +31,35 @@ let fetchOverviewHistory window =
 // sub-30s freshness.
 let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
 
-let shouldRefreshOverviewHistory panelOpen historyWindow lastRequestedAt now =
+let shouldRefreshOverviewHistory
+    panelOpen
+    historyWindow
+    requestInFlight
+    lastRequestedAt
+    (current: OverviewHistoryResponse option)
+    now
+    =
+    let cadenceAnchor =
+        current
+        |> Option.map _.Anchor
+        |> Option.defaultValue lastRequestedAt
+
     panelOpen
     && Option.isSome historyWindow
-    && now - lastRequestedAt >= overviewHistoryRefreshInterval
+    && Option.isNone requestInFlight
+    && now - cadenceAnchor >= overviewHistoryRefreshInterval
 
-let installOverviewHistory selectedWindow requestedWindow response current =
-    match selectedWindow, response with
-    | Some selected, Some loaded when selected = requestedWindow -> Some loaded
+let installOverviewHistory
+    selectedWindow
+    requestedWindow
+    (response: OverviewHistoryResponse option)
+    (current: OverviewHistoryResponse option)
+    =
+    match selectedWindow, response, current with
+    | Some selected, Some loaded, Some installed
+        when selected = requestedWindow && loaded.Anchor < installed.Anchor ->
+        current
+    | Some selected, _, _ when selected = requestedWindow -> response
     | _ -> current
 
 let hasSyncRunning (events: Map<string, CardEvent list>) =
@@ -74,7 +96,8 @@ let init () =
       SelectedOverviewGroup = None
       OverviewHistoryWindow = None
       OverviewHistory = None
-      OverviewHistoryRequestedAt = System.DateTimeOffset.Now },
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -321,24 +344,38 @@ let update msg model =
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
-        // Refresh the in-band history chart while it is open, but THROTTLED to
-        // overviewHistoryRefreshInterval. RequestedAt is bumped on dispatch so the one-second poll cannot
-        // stampede overlapping requests; the server response anchor separately fixes the chart's right edge.
+        // Refresh the in-band history chart while it is open. The in-flight request identity prevents
+        // overlapping polls, while the installed server anchor keeps a near-expiry cache hit from delaying
+        // the first post-expiry refresh. RequestedAt provides retry backoff when no response is installed.
         let shouldRefreshHistory =
             shouldRefreshOverviewHistory
                 model.OverviewPanelOpen
                 model.OverviewHistoryWindow
+                model.OverviewHistoryRequestInFlight
                 model.OverviewHistoryRequestedAt
+                model.OverviewHistory
                 nowDto
 
-        let historyCmd =
+        let historyRequest =
             match shouldRefreshHistory, model.OverviewHistoryWindow with
-            | true, Some window -> fetchOverviewHistory window
-            | _ -> Cmd.none
+            | true, Some window ->
+                Some
+                    { Window = window
+                      RequestedAt = nowDto }
+            | _ -> None
+
+        let historyCmd =
+            historyRequest
+            |> Option.map fetchOverviewHistory
+            |> Option.defaultValue Cmd.none
 
         let model =
-            if shouldRefreshHistory then { model with OverviewHistoryRequestedAt = nowDto }
-            else model
+            match historyRequest with
+            | Some request ->
+                { model with
+                    OverviewHistoryRequestedAt = request.RequestedAt
+                    OverviewHistoryRequestInFlight = Some request }
+            | None -> model
 
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
@@ -554,25 +591,38 @@ let update msg model =
 
         match next with
         | None ->
-            { model with OverviewHistoryWindow = None; OverviewHistory = None }, Cmd.none
+            { model with
+                OverviewHistoryWindow = None
+                OverviewHistory = None
+                OverviewHistoryRequestInFlight = None },
+            Cmd.none
         | Some window ->
+            let request =
+                { Window = window
+                  RequestedAt = now }
+
             // Opening or changing the history window clears drill-down and old chart data immediately.
             { model with
                 OverviewHistoryWindow = next
                 SelectedOverviewGroup = None
                 OverviewHistory = None
-                OverviewHistoryRequestedAt = now },
-            fetchOverviewHistory window
+                OverviewHistoryRequestedAt = now
+                OverviewHistoryRequestInFlight = Some request },
+            fetchOverviewHistory request
 
-    | OverviewHistoryLoaded (requestedWindow, response) ->
-        { model with
-            OverviewHistory =
-                installOverviewHistory
-                    model.OverviewHistoryWindow
-                    requestedWindow
-                    response
-                    model.OverviewHistory },
-        Cmd.none
+    | OverviewHistoryLoaded (request, response) ->
+        if model.OverviewHistoryRequestInFlight = Some request then
+            { model with
+                OverviewHistory =
+                    installOverviewHistory
+                        model.OverviewHistoryWindow
+                        request.Window
+                        response
+                        model.OverviewHistory
+                OverviewHistoryRequestInFlight = None },
+            Cmd.none
+        else
+            model, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and

@@ -134,7 +134,7 @@ corresponding live section.
 | Openness sweep | Coalesce dense observations into actual session-close boundaries; ignore a stale close after later liveness extends `LastSeen`. |
 | History read consistency | Read task, status, and liveness inputs in one SQLite transaction per uncached computation. |
 | Response anchor | Use the server computation anchor so cached callers render the same timeline edges. |
-| Client refresh gate | Track client request time separately from the server response anchor. |
+| Client refresh gate | Track the identified in-flight request separately; use the installed server anchor for normal cadence and the last request time only for failure retry backoff. |
 | Cache | Cache one in-flight/completed response per window until 30 seconds after its server anchor. |
 | Rendering | Hand-written stepped SVG with memoized static geometry and frame-coalesced hover. |
 | Client geometry key | Rebuild only when chart kind, selected window, server anchor, or snapshot-list identity changes; commit only the latest hover candidate per animation frame and suppress repeated sampled points. |

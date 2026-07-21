@@ -322,7 +322,7 @@ type OverviewChartTests() =
     member _.``history refresh is disabled while the Overview panel is closed`` () =
         let lastFetchedAt = now - App.overviewHistoryRefreshInterval
         Assert.That(
-            App.shouldRefreshOverviewHistory false (Some HistoryWindow.Hours24) lastFetchedAt now,
+            App.shouldRefreshOverviewHistory false (Some HistoryWindow.Hours24) None lastFetchedAt None now,
             Is.False
         )
 
@@ -333,7 +333,9 @@ type OverviewChartTests() =
                 App.shouldRefreshOverviewHistory
                     true
                     (Some HistoryWindow.Hours12)
+                    None
                     (now - TimeSpan.FromSeconds 29.0)
+                    None
                     now,
                 Is.False
             )
@@ -342,10 +344,49 @@ type OverviewChartTests() =
                 App.shouldRefreshOverviewHistory
                     true
                     (Some HistoryWindow.Hours12)
+                    None
                     (now - App.overviewHistoryRefreshInterval)
+                    None
                     now,
                 Is.True
             ))
+
+    [<Test>]
+    member _.``an in-flight history request blocks another refresh`` () =
+        let request: AppTypes.OverviewHistoryRequest =
+            { Window = HistoryWindow.Hours12
+              RequestedAt = now - App.overviewHistoryRefreshInterval }
+
+        Assert.That(
+            App.shouldRefreshOverviewHistory
+                true
+                (Some HistoryWindow.Hours12)
+                (Some request)
+                request.RequestedAt
+                None
+                now,
+            Is.False
+        )
+
+    [<Test>]
+    member _.``a just-before-expiry cache hit does not postpone the post-expiry refresh`` () =
+        let response =
+            { Anchor = now
+              Snapshots = [] }
+
+        let cacheHitCompletedAt = now + App.overviewHistoryRefreshInterval - TimeSpan.FromSeconds 1.0
+        let cacheExpiresAt = now + App.overviewHistoryRefreshInterval
+
+        Assert.That(
+            App.shouldRefreshOverviewHistory
+                true
+                (Some HistoryWindow.Hours24)
+                None
+                cacheHitCompletedAt
+                (Some response)
+                cacheExpiresAt,
+            Is.True
+        )
 
     [<Test>]
     member _.``history window cycle includes 12h before 24h and 72h`` () =
@@ -399,20 +440,56 @@ type OverviewChartTests() =
         Assert.That(installed |> Option.map _.Anchor, Is.EqualTo(Some serverAnchor))
 
     [<Test>]
-    member _.``response for a previous window cannot replace the selected window`` () =
+    member _.``matching failed refresh clears the selected chart`` () =
         let current =
             { Anchor = now
               Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
 
-        let stale =
+        let installed =
+            App.installOverviewHistory
+                (Some HistoryWindow.Hours24)
+                HistoryWindow.Hours24
+                None
+                (Some current)
+
+        Assert.That(installed, Is.EqualTo None)
+
+    [<Test>]
+    member _.``failed refresh for a stale or closed window keeps the current chart`` () =
+        let current =
+            { Anchor = now
+              Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                App.installOverviewHistory
+                    (Some HistoryWindow.Hours24)
+                    HistoryWindow.Hours12
+                    None
+                    (Some current),
+                Is.EqualTo(Some current)
+            )
+
+            Assert.That(
+                App.installOverviewHistory None HistoryWindow.Hours24 None (Some current),
+                Is.EqualTo(Some current)
+            ))
+
+    [<Test>]
+    member _.``older response for the selected window cannot replace a newer chart`` () =
+        let newer =
+            { Anchor = now
+              Snapshots = [ taskSnap now TaskBucketKind.Done 1 ] }
+
+        let older =
             { Anchor = now - TimeSpan.FromMinutes 1.0
               Snapshots = [ taskSnap now TaskBucketKind.Done 9 ] }
 
         let installed =
             App.installOverviewHistory
                 (Some HistoryWindow.Hours24)
-                HistoryWindow.Hours12
-                (Some stale)
-                (Some current)
+                HistoryWindow.Hours24
+                (Some older)
+                (Some newer)
 
-        Assert.That(installed, Is.EqualTo(Some current))
+        Assert.That(installed, Is.EqualTo(Some newer))

@@ -40,7 +40,8 @@ let private defaultModel : Model =
       SelectedOverviewGroup = None
       OverviewHistoryWindow = None
       OverviewHistory = None
-      OverviewHistoryRequestedAt = System.DateTimeOffset.Now }
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
