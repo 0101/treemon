@@ -163,31 +163,22 @@ function postReport(report) {
 
 // --- Event mapping -----------------------------------------------------------------------------
 
+function eventContext(event) {
+  return {
+    sessionId,
+    worktreePath,
+    provider: PROVIDER,
+    eventId: event.id,
+    occurredAt: event.timestamp,
+  };
+}
+
 function base(event, kind) {
-  return buildReport(
-    {
-      sessionId,
-      worktreePath,
-      provider: PROVIDER,
-      eventId: event.id,
-      occurredAt: event.timestamp,
-    },
-    kind,
-  );
+  return buildReport(eventContext(event), kind);
 }
 
 function messageReport(event, kind, text) {
-  return buildNonBlankMessageReport(
-    {
-      sessionId,
-      worktreePath,
-      provider: PROVIDER,
-      eventId: event.id,
-      occurredAt: event.timestamp,
-    },
-    kind,
-    text,
-  );
+  return buildNonBlankMessageReport(eventContext(event), kind, text);
 }
 
 // A skill's own context injection arrives as a `user.message` tagged with BOTH a `source` of
