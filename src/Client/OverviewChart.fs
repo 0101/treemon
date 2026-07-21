@@ -597,10 +597,11 @@ let private useChartGeometry input =
         setTrackedBuild nextBuild
         nextBuild
 
-let private useFrameCoalescedHover geometryBuildCount =
+let private useFrameCoalescedHover geometryBuildCount (hoverSamples: HoverSample array) =
     let hover, updateHover = React.useStateWithUpdater (None: HoverState option)
     let frameQueue = React.useRef<HoverFrameQueue<HoverSample>>(emptyHoverFrameQueue ())
     let scheduledFrame = React.useRef<ScheduledFrame option>(None)
+    let lastCursorFraction = React.useRef<float option>(None)
 
     let cancelFrame frame =
         Browser.Dom.window?cancelAnimationFrame(frame.Id)
@@ -636,7 +637,9 @@ let private useFrameCoalescedHover geometryBuildCount =
         frameQueue.current <- remaining
         sample |> Option.iter commitSample
 
-    let queueSample sample =
+    let queueSample cursorFraction sample =
+        lastCursorFraction.current <- Some cursorFraction
+
         match scheduledFrame.current with
         | Some frame when frame.GeometryBuildCount <> geometryBuildCount ->
             cancelFrame frame
@@ -657,9 +660,15 @@ let private useFrameCoalescedHover geometryBuildCount =
 
     let clearHover () =
         clearPendingFrame ()
+        lastCursorFraction.current <- None
         updateHover (fun current -> if current.IsSome then None else current)
 
-    hover |> Option.filter (fun state -> state.GeometryBuildCount = geometryBuildCount), queueSample, clearHover
+    let activeHover =
+        match hover, lastCursorFraction.current with
+        | Some _, Some cursorFraction -> sampleAt hoverSamples cursorFraction
+        | _ -> None
+
+    activeHover, queueSample, clearHover
 
 type private HistoryChartProps =
     {| ChartKindKey: int
@@ -693,7 +702,8 @@ let private HistoryChart (props: HistoryChartProps) : ReactElement =
 
     let geometryBuild = useChartGeometry input
     let geometry = geometryBuild.Geometry
-    let activeHover, queueSample, clearHover = useFrameCoalescedHover geometryBuild.BuildCount
+    let activeHover, queueSample, clearHover =
+        useFrameCoalescedHover geometryBuild.BuildCount geometry.HoverSamples
 
     let onMove (event: Browser.Types.MouseEvent) =
         if geometry.HoverSamples.Length > 0 then
@@ -706,7 +716,7 @@ let private HistoryChart (props: HistoryChartProps) : ReactElement =
             let cursorFraction = (cursorX - padL) / plotW
 
             match sampleAt geometry.HoverSamples cursorFraction with
-            | Some sample -> queueSample sample
+            | Some sample -> queueSample cursorFraction sample
             | None -> ()
 
     let onLeave (_: Browser.Types.MouseEvent) =
@@ -714,8 +724,8 @@ let private HistoryChart (props: HistoryChartProps) : ReactElement =
 
     let crosshairElements =
         activeHover
-        |> Option.map (fun state ->
-            let snappedX = xOf state.Sample.Fraction
+        |> Option.map (fun sample ->
+            let snappedX = xOf sample.Fraction
 
             [ Svg.line
                   [ svg.className "cursor-line"
@@ -740,8 +750,7 @@ let private HistoryChart (props: HistoryChartProps) : ReactElement =
 
     let tooltipElement =
         match activeHover with
-        | Some state ->
-            let sample = state.Sample
+        | Some sample ->
             let model = sample.Tooltip
 
             let rows =

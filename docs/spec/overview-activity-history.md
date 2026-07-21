@@ -144,6 +144,7 @@ corresponding live section.
 | Client geometry key | Rebuild only when chart kind, selected window, server anchor, or snapshot-list identity changes; commit only the latest hover candidate per animation frame and suppress repeated sampled points. |
 | Chart render boundary | Memoize each chart component by the same geometry inputs so one-second dashboard polling does not reconcile the static SVG subtree. |
 | Hover scheduler ownership | Keep animation-frame refs and cancellation inside a component-local hook; use functional React state updates for same-sample suppression. |
+| Hover refresh retention | Keep the latest unsnapped cursor fraction in a ref and re-sample it against replacement geometry so refreshes preserve the visible crosshair and tooltip without adding same-sample renders. |
 | Tooltip coordinates | Position the HTML tooltip in an unpadded chart stage shared with the responsive SVG so its anchor matches the SVG crosshair at both plot edges. |
 | Detail state | History and drill-down are ephemeral and mutually exclusive. |
 

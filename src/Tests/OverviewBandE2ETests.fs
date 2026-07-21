@@ -430,10 +430,15 @@ type OverviewBandE2ETests() =
             let isDashboardPoll (response: IResponse) =
                 response.Url.Contains("/IWorktreeApi/getWorktrees")
 
-            let! _ =
+            let! pollResponse =
                 this.Page.WaitForResponseAsync(
                     isDashboardPoll,
                     PageWaitForResponseOptions(Timeout = 5000.0f)
+                )
+            let! _ = pollResponse.FinishedAsync()
+            let! _ =
+                this.Page.EvaluateAsync<bool>(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))"
                 )
 
             let! afterPoll = firstChart.GetAttributeAsync("data-geometry-build-count")
@@ -564,6 +569,105 @@ type OverviewBandE2ETests() =
             do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-72h")
             do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
             do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-geometry-build-count", "2")
+        }
+
+    [<Test>]
+    member this.``History refresh preserves and re-samples the visible hover``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+            let firstChart = charts.First
+            let svg = firstChart.Locator("svg")
+            let cursor = firstChart.Locator(".cursor-line")
+            let total = firstChart.Locator(".tip-total")
+            let initialAnchor = DateTimeOffset.UtcNow - TimeSpan.FromSeconds 31.0
+            let refreshedAnchor = DateTimeOffset.UtcNow
+
+            let historyBody anchor changeAgo beforeCount changeCount latestCount =
+                let response: OverviewHistoryResponse =
+                    { Anchor = anchor
+                      Snapshots =
+                        [ { Timestamp = anchor - TimeSpan.FromHours 12.0
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = beforeCount } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = beforeCount } ] }
+                          { Timestamp = anchor - changeAgo
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = changeCount } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = changeCount } ] }
+                          { Timestamp = anchor
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = latestCount } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = latestCount } ] } ] }
+
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    response,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            let requestCount = ref 0
+            let delayedRefresh = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getOverviewHistory",
+                    fun route ->
+                        requestCount.Value <- requestCount.Value + 1
+
+                        match requestCount.Value with
+                        | 1 ->
+                            route.FulfillAsync(
+                                RouteFulfillOptions(
+                                    ContentType = "application/json",
+                                    Body = historyBody initialAnchor (TimeSpan.FromHours 6.0) 1 2 3
+                                )
+                            )
+                        | 2 ->
+                            delayedRefresh.TrySetResult(route) |> ignore
+                            System.Threading.Tasks.Task.CompletedTask
+                        | _ -> route.AbortAsync()
+                )
+
+            let initialResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do! toggle.ClickAsync()
+            let! _ = initialResponse
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+            let! refreshRoute = delayedRefresh.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! svg.ScrollIntoViewIfNeededAsync()
+            let! svgBox = svg.BoundingBoxAsync()
+            Assert.That(svgBox, Is.Not.Null)
+
+            do!
+                svg.HoverAsync(
+                    LocatorHoverOptions(
+                        Position =
+                            Microsoft.Playwright.Position(
+                                X = svgBox.Width * 0.65f,
+                                Y = svgBox.Height / 2.0f
+                            )
+                    )
+                )
+
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "393")
+            do! Assertions.Expect(total).ToHaveTextAsync("Total: 2")
+
+            let refreshedResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do!
+                refreshRoute.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = historyBody refreshedAnchor (TimeSpan.FromHours 4.8) 4 8 9
+                    )
+                )
+
+            let! _ = refreshedResponse
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-geometry-build-count", "2")
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "465")
+            do! Assertions.Expect(total).ToHaveTextAsync("Total: 8")
         }
 
     [<Test>]
