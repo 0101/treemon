@@ -840,76 +840,112 @@ let start
     |> Map.iter (fun repoId _ ->
         agent.Post(UpdateWorktreeList(repoId, [])))
 
-    /// Mutable ref for the latest canvas file watchers, shared between the reconcile
-    /// callback and the main scheduler loop so watcher updates are visible across iterations.
-    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) (lastLoggedTasks: OverviewData.TaskCount list option) =
+    // The registration owns the watcher set for the current recursive state. Reconciliation replaces
+    // the registration immutably, so cancellation always disposes the latest set without a shared cell.
+    let registerWatcherCleanup watchers =
+        ct.Register(fun () -> CanvasWatchers.disposeAll watchers)
+
+    let recoverIteration (ex: exn) =
         async {
-            // Run the whole per-iteration body inside a try/with so a transient failure
-            // (e.g. SessionManager.getActiveSessions raising TimeoutException when a slow
-            // Spawn/LaunchAction turn is queued ahead of its 10s reply timeout) degrades
-            // gracefully instead of unwinding the loop. If the body escaped uncaught, the
-            // exception would propagate out of `loop -> startup`, and Async.Start has no error
-            // continuation — the scheduler (watcher reconciliation, periodic refresh, and 24/7
-            // task-history logging) would stop permanently until process restart. On failure
-            // we log and continue the recursion with the previous accumulators. The recursion
-            // itself stays OUTSIDE the handler so handlers don't nest across iterations.
-            let! (nextRuns, nextWatchers, nextTasks) =
-                async {
-                    try
-                        let! state = agent.PostAndAsyncReply(GetState)
+            Log.log "Scheduler" $"Refresh iteration failed, continuing with last snapshot: {ex.Message}"
+            do! Async.Sleep 5000
+        }
 
-                        let repos =
-                            if Map.isEmpty state.Repos then initialRepos
-                            else state.Repos
+    let prepareIteration
+        (watchers: Map<string, FileSystemWatcher>)
+        (watcherCleanup: CancellationTokenRegistration)
+        =
+        async {
+            try
+                let! state = agent.PostAndAsyncReply(GetState)
 
-                        let! watchers = CanvasWatchers.reconcile agent repos watchers
-                        latestWatchers.Value <- watchers
+                let repos =
+                    if Map.isEmpty state.Repos then initialRepos
+                    else state.Repos
 
-                        // Optional task-history capture has its own failure boundary. A slow or failed
-                        // history read/write must never skip the core refresh task selected below.
-                        let! lastLoggedTasks = updateTaskHistory assembleTasks persistTasks state lastLoggedTasks
+                let! nextWatchers = CanvasWatchers.reconcile agent repos watchers
+                watcherCleanup.Dispose()
+                let nextCleanup = registerWatcherCleanup nextWatchers
+                return Some(state, repos, nextWatchers, nextCleanup)
+            with ex ->
+                do! recoverIteration ex
+                return None
+        }
 
-                        let archivedBranchSets = readArchivedBranchSets rootPaths
-                        let archivedPaths = resolveArchivedPaths archivedBranchSets repos
-                        let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
-                        let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
-                        let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
-                        let now = DateTimeOffset.UtcNow
-                        let activity = effectiveActivity now state
+    let runPreparedIteration
+        state
+        repos
+        watchers
+        watcherCleanup
+        lastRuns
+        lastLoggedTasks
+        =
+        async {
+            try
+                // Optional task-history capture has its own failure boundary. A slow or failed
+                // history read/write must never skip the core refresh task selected below.
+                let! lastLoggedTasks = updateTaskHistory assembleTasks persistTasks state lastLoggedTasks
 
-                        let effectiveLastRuns =
-                            tasks
-                            |> List.fold (fun runs task ->
-                                match task with
-                                | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
-                                    runs |> Map.remove task
-                                | _ -> runs) lastRuns
+                let archivedBranchSets = readArchivedBranchSets rootPaths
+                let archivedPaths = resolveArchivedPaths archivedBranchSets repos
+                let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+                let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
+                let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
+                let now = DateTimeOffset.UtcNow
+                let activity = effectiveActivity now state
 
-                        match pickMostOverdue activity now effectiveLastRuns tasks with
-                        | Some task ->
-                            let! result = executeWithTimeout agent rootPaths task
-                            logTaskResult agent task result
+                let effectiveLastRuns =
+                    tasks
+                    |> List.fold (fun runs task ->
+                        match task with
+                        | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                            runs |> Map.remove task
+                        | _ -> runs) lastRuns
 
-                            match task with
-                            | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
-                                agent.Post(ClearExpedite repoId)
-                            | _ -> ()
+                match pickMostOverdue activity now effectiveLastRuns tasks with
+                | Some task ->
+                    let! result = executeWithTimeout agent rootPaths task
+                    logTaskResult agent task result
 
-                            let updatedRuns = lastRuns |> Map.add task now
-                            return (updatedRuns, watchers, lastLoggedTasks)
-                        | None ->
-                            let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
-                            do! Async.Sleep sleepMs
-                            return (lastRuns, watchers, lastLoggedTasks)
-                    with ex ->
-                        // Transient failure — log and continue with the previous accumulators so the
-                        // scheduler survives. Sleep briefly to avoid a hot spin if the fault persists.
-                        Log.log "Scheduler" $"Refresh iteration failed, continuing with last snapshot: {ex.Message}"
-                        do! Async.Sleep 5000
-                        return (lastRuns, watchers, lastLoggedTasks)
-                }
+                    match task with
+                    | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                        agent.Post(ClearExpedite repoId)
+                    | _ -> ()
 
-            return! loop latestWatchers nextRuns nextWatchers nextTasks
+                    let updatedRuns = lastRuns |> Map.add task now
+                    return updatedRuns, watchers, watcherCleanup, lastLoggedTasks
+                | None ->
+                    let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
+                    do! Async.Sleep sleepMs
+                    return lastRuns, watchers, watcherCleanup, lastLoggedTasks
+            with ex ->
+                do! recoverIteration ex
+                return lastRuns, watchers, watcherCleanup, lastLoggedTasks
+        }
+
+    let rec loop
+        (lastRuns: Map<RefreshTask, DateTimeOffset>)
+        (watchers: Map<string, FileSystemWatcher>)
+        (watcherCleanup: CancellationTokenRegistration)
+        (lastLoggedTasks: OverviewData.TaskCount list option)
+        =
+        async {
+            let! prepared = prepareIteration watchers watcherCleanup
+
+            match prepared with
+            | None ->
+                return! loop lastRuns watchers watcherCleanup lastLoggedTasks
+            | Some(state, repos, nextWatchers, nextCleanup) ->
+                let! nextRuns, nextWatchers, nextCleanup, nextTasks =
+                    runPreparedIteration
+                        state
+                        repos
+                        nextWatchers
+                        nextCleanup
+                        lastRuns
+                        lastLoggedTasks
+
+                return! loop nextRuns nextWatchers nextCleanup nextTasks
         }
 
     let startup =
@@ -917,11 +953,8 @@ let start
             let! lastRuns = runInitialBurst agent rootPaths
             let! state = agent.PostAndAsyncReply(GetState)
             let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
-            let latestWatchers = ref initialWatchers
-            try
-                return! loop latestWatchers lastRuns latestWatchers.Value None
-            finally
-                CanvasWatchers.disposeAll latestWatchers.Value
+            let watcherCleanup = registerWatcherCleanup initialWatchers
+            return! loop lastRuns initialWatchers watcherCleanup None
         }
 
     Async.Start(startup, ct)
