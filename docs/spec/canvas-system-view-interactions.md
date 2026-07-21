@@ -24,10 +24,13 @@ Interaction ownership is stored separately from `CanvasDocOwnership` because gen
 
 The pending claim is in-memory and keyed by normalized worktree plus SystemView filename; the
 durable owner is persisted in `data/canvas-interaction-owners.json`. An identified bridge
-registration atomically claims all pending views for its worktree before queue draining. SystemView
-queue entries re-resolve the current interaction owner when drained, never drain anonymously while
-unclaimed, and therefore honor an explicit reassignment made after enqueue. Scheduler reconciliation
-prunes owners whose worktree is no longer known or whose generated view file no longer exists.
+registration for the session deliberately started or continued for the interaction atomically claims
+all pending views for its worktree before queue draining. Periodic heartbeat re-registration from an
+already-running co-located session must not steal a pending claim. SystemView queue entries re-resolve
+the current interaction owner when drained, never drain anonymously while unclaimed, and therefore
+honor an explicit reassignment made after enqueue. Scheduler reconciliation prunes owners whose
+worktree is no longer known or whose generated view file no longer exists. Explicit worktree-removal
+cleanup runs only after removal succeeds, so a failed removal attempt preserves ownership.
 
 `POST /api/canvas/attribute` and the existing `canvas_take_ownership` tool dispatch by document
 kind: AgentDocs assign author ownership, while SystemViews explicitly assign or reassign the
@@ -39,8 +42,9 @@ The selection runtime calls an optional `window.canvasSelectionMetadata` hook wi
 
 - SystemView interaction ownership is distinct from authored-file ownership so generated views do not acquire incorrect liveness, archive, share, or morph behavior.
 - Ownership persists until explicit reassignment or view/worktree removal; session termination alone does not release it.
-- The first identified bridge registration after an unclaimed interaction becomes pending claims
-  the view before draining; later registrations cannot overwrite it.
+- The session deliberately started or continued for an unclaimed interaction claims the view before
+  draining; heartbeat refreshes from other sessions cannot claim it, and later registrations cannot
+  overwrite it.
 - Explicit assignment uses the existing ownership endpoint/tool, but dispatches to the separate
   interaction store for SystemViews.
 - All SystemViews receive the generic runtime. View-specific behavior is limited to structured metadata enrichment.
