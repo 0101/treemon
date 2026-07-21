@@ -710,12 +710,13 @@ module CanvasWatchers =
         | [ single ] -> single.SessionId
         | _ -> None
 
-    /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. A doc is
+    /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is
     /// attributed to the worktree's single registered session only when it is new-or-changed
     /// (relative to the watcher's previous baseline) *and* has no declared owner. Ownership is
-    /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so a doc that already has an owner —
+    /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so an AgentDoc that already has an owner —
     /// declared via the endpoint or previously attributed — is skipped: the scanner never
-    /// overwrites it. With zero or many registered sessions, nothing is attributed.
+    /// overwrites it. SystemViews never participate. With zero or many registered sessions,
+    /// nothing is attributed.
     let attributeChangedDocs
         (sessions: CanvasBridge.SessionEntry list)
         (worktreePath: string)
@@ -733,7 +734,9 @@ module CanvasWatchers =
                     | None -> true
                     | Some prevHash -> prevHash <> doc.ContentHash
                 if isNewOrChanged && Option.isNone doc.OwnerSessionId then
-                    CanvasDocOwnership.attribute worktreePath doc.Filename sessionId)
+                    match doc.Kind with
+                    | AgentDoc -> CanvasDocOwnership.attribute worktreePath doc.Filename sessionId
+                    | SystemView -> ())
 
     let reconcile
         (agent: MailboxProcessor<StateMsg>)
@@ -746,6 +749,9 @@ module CanvasWatchers =
                 |> Map.toSeq
                 |> Seq.collect (fun (_, repo) -> repo.KnownPaths)
                 |> Set.ofSeq
+
+            if repos |> Map.forall (fun _ repo -> repo.IsReady) then
+                do! CanvasInteractionOwnership.prune allPaths
 
             let removed =
                 current

@@ -33,9 +33,10 @@
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
-    <Compile Include="CanvasBridge.fs" />
     <Compile Include="EmbeddedResource.fs" />
     <Compile Include="CanvasDocKinds.fs" />
+    <Compile Include="CanvasInteractionOwnership.fs" />
+    <Compile Include="CanvasBridge.fs" />
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />
     <Compile Include="DiffTemplate.fs" />

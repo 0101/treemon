@@ -138,6 +138,9 @@ Editing a doc another session created transfers ownership to you (most recent au
 
 **Claiming ownership explicitly.** If a canvas doc was written by a **script or unsupported tool** (so no supported write event fired to declare ownership), or its messages are reaching the **wrong session**, claim it directly: call the **`canvas_take_ownership`** tool with the doc's filename — e.g. `canvas_take_ownership({ filename: "review.html" })`. It stamps in your session ID without rewriting the file. When the user says something like "take ownership of the review doc," find which `.agents/canvas/*.html` they mean and call the tool with that filename.
 
+For generated SystemViews such as `diff.html` and `beads.html`, the same tool explicitly
+assigns/reassigns only the interaction target; it does not make the generated file an authored doc.
+
 ## Updating
 
 Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and sends you the browser URL as a separate session message right after a supported write updates a canvas file (open it for the user or share the ctrl+clickable URL). `canvasSend` interactions work identically in both modes — no changes needed in your HTML.

@@ -22,12 +22,27 @@
 
 Interaction ownership is stored separately from `CanvasDocOwnership` because generated views have no author. Message routing resolves authored ownership for AgentDocs and interaction ownership for SystemViews. An unclaimed SystemView interaction is queued while Treemon starts or continues a session for that view; the session claims the interaction target before the queued message is delivered. Ownership persists across restarts and is removed with the view or worktree.
 
+The pending claim is in-memory and keyed by normalized worktree plus SystemView filename; the
+durable owner is persisted in `data/canvas-interaction-owners.json`. An identified bridge
+registration atomically claims all pending views for its worktree before queue draining. SystemView
+queue entries re-resolve the current interaction owner when drained, never drain anonymously while
+unclaimed, and therefore honor an explicit reassignment made after enqueue. Scheduler reconciliation
+prunes owners whose worktree is no longer known or whose generated view file no longer exists.
+
+`POST /api/canvas/attribute` and the existing `canvas_take_ownership` tool dispatch by document
+kind: AgentDocs assign author ownership, while SystemViews explicitly assign or reassign the
+interaction owner. SystemView ownership is not surfaced through `CanvasDoc.OwnerSessionId`.
+
 The selection runtime calls an optional `window.canvasSelectionMetadata` hook with the captured selection context. The hook may return a plain JSON object only. The runtime nests the validated result under `sourceContext`, includes it in the existing 64,000-code-unit payload limit, and prevents it from overriding reserved message fields. Source metadata remains data and is never interpolated into `request`.
 
 ## Decisions
 
 - SystemView interaction ownership is distinct from authored-file ownership so generated views do not acquire incorrect liveness, archive, share, or morph behavior.
 - Ownership persists until explicit reassignment or view/worktree removal; session termination alone does not release it.
+- The first identified bridge registration after an unclaimed interaction becomes pending claims
+  the view before draining; later registrations cannot overwrite it.
+- Explicit assignment uses the existing ownership endpoint/tool, but dispatches to the separate
+  interaction store for SystemViews.
 - All SystemViews receive the generic runtime. View-specific behavior is limited to structured metadata enrichment.
 - Metadata is nested and non-instructional to preserve the existing prompt-injection boundary between selected content and the user's action request.
 

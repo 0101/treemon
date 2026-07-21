@@ -350,13 +350,13 @@ async function handleCanvasWrite(session, state, filename) {
 const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
 
-// Explicit ownership tool the agent can call on demand — for a doc produced by a script or
-// another tool (no supported write event fired to auto-declare), or one whose messages are reaching
-// the wrong session. It stamps THIS session's id, so the agent only supplies the filename.
+// Explicit routing tool the agent can call on demand. AgentDocs assign author ownership;
+// SystemViews assign/reassign their separate interaction target. It stamps THIS session's id,
+// so the agent only supplies the filename.
 const takeOwnershipTool = {
   name: "canvas_take_ownership",
   description:
-    "Declare THIS session as the owner of a canvas doc under .agents/canvas/, so replies from that doc route back to this session. Use it when a canvas doc was produced by a script or unsupported tool, or when a doc's messages are reaching the wrong session. Pass the doc's filename, e.g. \"review.html\".",
+    "Route a canvas doc's replies to THIS session. AgentDocs assign author ownership; SystemViews explicitly assign or reassign their interaction target. Pass the filename under .agents/canvas/, e.g. \"review.html\" or \"diff.html\".",
   parameters: {
     type: "object",
     properties: {
@@ -385,7 +385,7 @@ const takeOwnershipTool = {
     if (!result.attributed) {
       throw new Error(`Treemon is not monitoring this worktree, so ownership was not recorded for ${name}.`);
     }
-    return `This session now owns "${name}" — replies from that canvas doc will route here.`;
+    return `Replies from "${name}" now route to this session.`;
   },
 };
 

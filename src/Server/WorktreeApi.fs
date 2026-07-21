@@ -366,7 +366,9 @@ let private deleteWorktree
             return Error "Cannot delete the main worktree"
         | Some ctx ->
             agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
-            return! GitWorktree.removeWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
+            let! result = GitWorktree.removeWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
+            do! CanvasInteractionOwnership.removeWorktree ctx.Worktree.Path
+            return result
     }
 
 let private updateArchivedBranches
@@ -696,10 +698,18 @@ let worktreeApi
                   match result with
                   | CanvasMessageResult.Queued ->
                       let path = WorktreePath.value request.WorktreePath
+                      let kind = CanvasDocKinds.classify request.Filename
+                      let! owner =
+                          match kind with
+                          | AgentDoc -> CanvasBridge.getTargetOwner path request.Filename
+                          | SystemView ->
+                              // Mark an unclaimed generated view before launching. The first
+                              // identified bridge registration claims this exact view before
+                              // CanvasBridge drains its queued interaction.
+                              CanvasInteractionOwnership.beginClaim path request.Filename
                       let guardKey = path
                       if canvasSpawnInFlight.TryAdd(guardKey, true) then
                           try
-                              let! owner = CanvasDocOwnership.getOwner path request.Filename
                               let provider = CodingToolStatus.readConfiguredProvider path
                               // Open a new tab in the live session window when one is tracked, and
                               // spawn only when none exists (launchAction semantics). This path is
@@ -710,8 +720,7 @@ let worktreeApi
                                   async {
                                       let prompt = CanvasPrompt.continueWorking path request.Filename
                                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-                                      let! _ = SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString
-                                      ()
+                                      return! SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString
                                   }
                               match owner with
                               | Some ownerSessionId ->
@@ -726,11 +735,24 @@ let worktreeApi
                                   | Ok () ->
                                       Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
                                   | Error err ->
-                                      Log.log "API" $"sendCanvasMessage: resume failed ({err}), starting/continuing session for {request.Filename}"
-                                      do! startOrContinueSession ()
+                                      match kind with
+                                      | AgentDoc ->
+                                          Log.log "API" $"sendCanvasMessage: resume failed ({err}), starting/continuing session for {request.Filename}"
+                                          let! _ = startOrContinueSession ()
+                                          ()
+                                      | SystemView ->
+                                          // Interaction ownership is durable until explicit
+                                          // reassignment. A failed resume must not silently move
+                                          // the view to a different co-located session.
+                                          Log.log "API" $"sendCanvasMessage: interaction-owner resume failed ({err}); preserving owner {ownerSessionId} for {request.Filename}"
                               | None ->
                                   Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, starting/continuing session"
-                                  do! startOrContinueSession ()
+                                  let! launchResult = startOrContinueSession ()
+                                  match kind, launchResult with
+                                  | SystemView, Error err ->
+                                      do! CanvasInteractionOwnership.cancelClaim path request.Filename
+                                      Log.log "API" $"sendCanvasMessage: launch failed ({err}); cancelled pending claim for {request.Filename}"
+                                  | _ -> ()
                           finally
                               canvasSpawnInFlight.TryRemove(guardKey) |> ignore
                       else

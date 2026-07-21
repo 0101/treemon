@@ -15,13 +15,13 @@ type SessionEntry =
       SessionId: string option
       RegisteredAt: DateTime }
 
-// A queued canvas message. Owner is the doc's resolved owner sessionId captured at enqueue
-// time (None = no declared owner). The drain paths use it to avoid cross-routing an
-// owner-bound message to a co-located non-owner that re-registers or polls first. Filename is
-// retained for diagnostics.
+// A queued canvas message. AgentDoc Owner is captured at enqueue time. SystemViews instead
+// re-resolve their persistent interaction owner at drain time so pending claims and explicit
+// reassignment are honored before delivery.
 type QueuedMessage =
     { EnqueuedAt: DateTime
       Filename: string
+      Kind: CanvasDocKind
       Owner: string option
       Payload: string }
 
@@ -42,8 +42,13 @@ let private cleanExpired (messages: QueuedMessage list) =
     let cutoff = DateTime.UtcNow - queueTtl
     messages |> List.filter (fun m -> m.EnqueuedAt > cutoff)
 
-let private enqueue key filename (owner: string option) payload =
-    let msg = { EnqueuedAt = DateTime.UtcNow; Filename = filename; Owner = owner; Payload = payload }
+let private enqueue key filename kind (owner: string option) payload =
+    let msg =
+        { EnqueuedAt = DateTime.UtcNow
+          Filename = filename
+          Kind = kind
+          Owner = owner
+          Payload = payload }
 
     messageQueue.AddOrUpdate(
         key,
@@ -59,20 +64,20 @@ let private enqueue key filename (owner: string option) payload =
     )
     |> ignore
 
-/// Which queued messages a draining session may receive. An owner-BOUND message goes only to its
-/// owner — never cross-routed to a co-located non-owner that re-registers or polls first. An
-/// owner-UNKNOWN message (Owner = None) has no owner to route to, so it drains best-effort to
-/// whichever session takes it first (normally the resumed author, but possibly a co-located
-/// session): deliberate, since the send-time misroute is already prevented in `sendMessage` (it
-/// queues rather than hand an unowned doc to a live non-author), and strict routing resumes once
-/// the doc has a declared owner. An anonymous drainer (sessionId = None) matches only owner-unknown
-/// messages. Fully closing the owner-unknown case would require re-resolving ownership at drain
-/// time; that is intentionally out of scope — explicit ownership (auto-declared on write, or via
-/// the `canvas_take_ownership` tool) plus the 5-min TTL keep the window rare and bounded.
-let private deliverableTo (sessionId: string option) (msg: QueuedMessage) =
-    match msg.Owner with
-    | None -> true
-    | Some ownerId -> sessionId = Some ownerId
+/// AgentDoc queue entries preserve the author owner captured at enqueue time. Their existing
+/// owner-unknown fallback remains best-effort. SystemView entries instead re-resolve persistent
+/// interaction ownership at drain time: an unclaimed view is never deliverable, and after
+/// claim/reassignment only the current interaction owner may receive it.
+let private deliverableTo key (sessionId: string option) (msg: QueuedMessage) =
+    let owner =
+        match msg.Kind with
+        | AgentDoc -> msg.Owner
+        | SystemView -> CanvasInteractionOwnership.getOwnerSync key msg.Filename
+
+    match msg.Kind, owner with
+    | AgentDoc, None -> true
+    | SystemView, None -> false
+    | _, Some ownerId -> sessionId = Some ownerId
 
 /// Re-queue messages a drain did not deliver so their owner can collect them later. Survivors
 /// keep their original EnqueuedAt (TTL preserved) and are placed ahead of anything enqueued
@@ -96,9 +101,9 @@ let private drainQueue (key: string) (entry: SessionEntry) =
     | false, _ -> ()
     | true, queued ->
         let valid = cleanExpired queued
-        // Owner-aware drain: forward only what this session may receive (owner-unknown, or it
-        // is the owner); re-queue the rest so the rightful owner can drain them on re-register.
-        let deliver, requeued = valid |> List.partition (deliverableTo entry.SessionId)
+        // Forward only what this session may receive and re-queue the rest for the rightful
+        // owner. An unclaimed SystemView always stays queued.
+        let deliver, requeued = valid |> List.partition (deliverableTo key entry.SessionId)
         requeue key requeued
 
         if not (List.isEmpty deliver) then
@@ -171,6 +176,14 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
     let worktreeKey = normalizePath worktreePath
     let key = registryKeyFor worktreeKey sessionId
 
+    match sessionId with
+    | Some sid ->
+        let claimed = CanvasInteractionOwnership.claimPending worktreeKey sid
+        if not (List.isEmpty claimed) then
+            let names = String.concat ", " claimed
+            Log.log "CanvasBridge" $"Session {sid} claimed SystemView interaction target(s): {names}"
+    | None -> ()
+
     let entry =
         { WorktreePath = worktreeKey
           InjectUrl = injectUrl
@@ -238,14 +251,18 @@ let private postPayload (entry: SessionEntry) (payload: string) (key: string) : 
             return Error ex.Message
     }
 
-/// Route a canvas-doc message to the doc's owning session.
+let getTargetOwner (worktreePath: string) (filename: string) =
+    match CanvasDocKinds.classify filename with
+    | AgentDoc -> CanvasDocOwnership.getOwner worktreePath filename
+    | SystemView -> CanvasInteractionOwnership.getOwner worktreePath filename
+
+/// Route a canvas-doc message to its authored owner (AgentDoc) or persistent interaction owner
+/// (SystemView).
 ///
 /// The registry is sessionId-keyed, so two sessions can share one worktree; this
-/// resolves the doc's declared owner (`CanvasDocOwnership.getOwner`) and delivers only
-/// to that owner. On this send path a doc's message is never handed to a non-owner: an
-/// owner-bound message goes only to its owner, and an unowned doc is queued rather than
-/// delivered to a live non-author. (A queued owner-unknown message may later drain
-/// best-effort to any session — see `deliverableTo`.)
+/// resolves the appropriate owner and delivers only to it. AgentDoc owner-unknown queue entries
+/// retain their legacy best-effort drain; unclaimed SystemViews remain queued until an identified
+/// session claims them.
 ///
 /// 1. Owner has a live registry entry -> POST to it (HTTP failure -> queue for redelivery).
 /// 2. Owner offline/gone              -> queue (never fall back to a non-owner).
@@ -266,11 +283,12 @@ let sendMessage (request: CanvasMessageRequest) =
             |> List.filter isSessionAlive
             |> List.sortByDescending _.RegisteredAt
 
-        let! owner = CanvasDocOwnership.getOwner worktree request.Filename
+        let kind = CanvasDocKinds.classify request.Filename
+        let! owner = getTargetOwner worktree request.Filename
 
         let queueWith reason =
             Log.log "CanvasBridge" $"sendMessage: {reason} for {Path.GetFileName(key)}, message queued"
-            enqueue key request.Filename owner request.Payload
+            enqueue key request.Filename kind owner request.Payload
             CanvasMessageResult.Queued
 
         match owner with
@@ -289,11 +307,10 @@ let sendMessage (request: CanvasMessageRequest) =
                 // even if another session for the worktree is live.
                 return queueWith $"owner {ownerId} offline"
         | None ->
-            // No declared owner. Now that the authoring session declares ownership on every
-            // canvas write, an unowned doc has no identifiable recipient — delivering its
-            // message to whatever co-located session happens to be live misroutes it. Always
-            // queue; the send/resume flow starts or continues a session that drains it. The
-            // former "exactly one live session" fast-path is intentionally gone.
+            // An unowned AgentDoc or unclaimed SystemView has no deterministic recipient.
+            // Queue it; the send/resume flow starts or continues a session. For SystemViews,
+            // that session must claim the pending interaction target before registration drains
+            // the queue, so a co-located session cannot steal the message.
             match liveSessions with
             | [] ->
                 let reason = if pollRegistry.ContainsKey(key) then "no owner, poll-based bridge" else "no owner, no bridge"
@@ -302,16 +319,15 @@ let sendMessage (request: CanvasMessageRequest) =
                 return queueWith $"no owner with {List.length sessions} live session(s) — not delivering to a non-author"
     }
 
-/// Atomically drain pending messages for a worktree (used by heartbeat polling). The poll
-/// carries no sessionId, so it is an anonymous drainer: it may collect only owner-unknown
-/// messages. Owner-bound messages are re-queued for their owner to drain when it (re-)registers
-/// a push bridge (drainQueue), so an anonymous poll can never cross-route them to a non-owner.
+/// Atomically drain pending AgentDoc owner-unknown messages for a worktree (used by heartbeat
+/// polling). Owner-bound AgentDocs and every SystemView interaction are re-queued for an identified
+/// push bridge, so an anonymous poll cannot claim or cross-route them.
 let drainPending (worktreePath: string) : string list =
     let key = normalizePath worktreePath
     match messageQueue.TryRemove(key) with
     | true, queued ->
         let valid = cleanExpired queued
-        let deliver, requeued = valid |> List.partition (deliverableTo None)
+        let deliver, requeued = valid |> List.partition (deliverableTo key None)
         requeue key requeued
 
         if not (List.isEmpty deliver) then

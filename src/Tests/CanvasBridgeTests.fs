@@ -675,6 +675,84 @@ type OwnerRoutingTests() =
             Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner must receive its queued message on re-register")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner still must not have received it"))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type SystemViewInteractionRoutingTests() =
+
+    [<Test>]
+    member _.``unclaimed SystemView is claimed before drain and remains exclusive until reassigned``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use sinkA = new HttpSink(ports[0])
+            use sinkB = new HttpSink(ports[1])
+            sinkA.Start()
+            sinkB.Start()
+
+            let path = Path.Combine(Environment.CurrentDirectory, $"system-view-{Guid.NewGuid():N}")
+            let sidA = uniqueSid "system-a"
+            let sidB = uniqueSid "system-b"
+
+            registerSession path sinkB.Url (Some sidB)
+            Server.CanvasDocOwnership.attribute path "diff.html" sidB
+
+            let first =
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "diff.html"
+                          Payload = "p1" })
+
+            Assert.That(first, Is.EqualTo(CanvasMessageResult.Queued))
+
+            // A co-located registration before the launch flow marks a pending claim cannot
+            // collect an unclaimed SystemView interaction.
+            registerSession path sinkB.Url (Some sidB)
+            Assert.That(sinkB.Bodies, Is.Empty)
+
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.beginClaim path "diff.html"),
+                Is.EqualTo(None: string option))
+
+            // Registration claims the target synchronously before drainQueue runs.
+            registerSession path sinkA.Url (Some sidA)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> List.length sinkA.Bodies = 1), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The claiming session must receive the queued interaction")
+            Assert.That(sinkA.Bodies, Is.EqualTo([ "p1" ]))
+            Assert.That(sinkB.Bodies, Is.Empty)
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some sidA))
+
+            // The author-ownership store says B, but SystemView routing remains on the separate
+            // interaction owner A. Re-registering B cannot steal or duplicate the drained message.
+            registerSession path sinkB.Url (Some sidB)
+            let second =
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "diff.html"
+                          Payload = "p2" })
+
+            Assert.That(second, Is.EqualTo(CanvasMessageResult.Ok))
+            Assert.That(sinkA.Bodies, Is.EqualTo([ "p1"; "p2" ]))
+            Assert.That(sinkB.Bodies, Is.Empty)
+
+            runAsync (Server.CanvasInteractionOwnership.assign path "diff.html" sidB)
+            let third =
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "diff.html"
+                          Payload = "p3" })
+
+            Assert.That(third, Is.EqualTo(CanvasMessageResult.Ok))
+            Assert.That(sinkA.Bodies, Is.EqualTo([ "p1"; "p2" ]))
+            Assert.That(sinkB.Bodies, Is.EqualTo([ "p3" ])))
+
 
 // ── scanner fallback-only attribution (RefreshScheduler.CanvasWatchers) ──────
 // The scanner is the *fallback* attribution path only: it may attribute a no-owner changed
@@ -738,6 +816,41 @@ type ScannerFallbackAttributionTests() =
 
             Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some sid),
                 "A single registered session is the unambiguous fallback owner"))
+
+    [<Test>]
+    member _.``scanner fallback never assigns author ownership to a SystemView``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "scan-system"
+            registerSession path "http://localhost:1/inject" (Some(uniqueSid "solo"))
+
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "diff.html" ]
+
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option),
+                "Generated views must never route through CanvasDoc author ownership")
+            Assert.That(
+                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option),
+                "A file scan is not an explicit interaction claim"))
+
+    [<Test>]
+    member _.``CanvasScanner never surfaces a stale author owner on a SystemView``() =
+        withTempCwd (fun () ->
+            let path = Path.Combine(Environment.CurrentDirectory, $"scan-system-owner-{Guid.NewGuid():N}")
+            let canvasDir = Path.Combine(path, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(Path.Combine(canvasDir, "diff.html"), "<html></html>")
+            Server.CanvasDocOwnership.attribute path "diff.html" (uniqueSid "stale-author")
+
+            let docs = runAsync (Server.CanvasScanner.scan path)
+            let diff = docs |> List.find (fun doc -> doc.Filename = "diff.html")
+
+            Assert.That(diff.Kind, Is.EqualTo(SystemView))
+            Assert.That(
+                diff.OwnerSessionId,
+                Is.EqualTo(None: string option),
+                "SystemView interaction ownership must never leak through CanvasDoc.OwnerSessionId"))
 
     [<Test>]
     member _.``A pre-declared owner is never overwritten by the scanner``() =

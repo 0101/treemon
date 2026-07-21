@@ -105,10 +105,9 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
     }
 
-/// Validate a declared ownership and, only for a known (monitored) worktree, record it via
-/// CanvasDocOwnership.attribute. Returns the decision so canvasAttributeHandler can map it to an
-/// HTTP response and tests can assert it without HTTP plumbing. A missing field or an unmonitored
-/// worktree records nothing — the caller's getOwner stays None.
+/// Validate a declared target and, only for a known (monitored) worktree, record it in the store
+/// appropriate to the document kind. AgentDocs declare author ownership; SystemViews explicitly
+/// assign/reassign their separate interaction owner.
 let attributeOwnership
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (worktreePath: string)
@@ -131,13 +130,15 @@ let attributeOwnership
             if not isKnown then
                 return UnknownWorktree
             else
-                CanvasDocOwnership.attribute worktreePath filename sessionId
+                match CanvasDocKinds.classify filename with
+                | AgentDoc -> CanvasDocOwnership.attribute worktreePath filename sessionId
+                | SystemView -> do! CanvasInteractionOwnership.assign worktreePath filename sessionId
                 return Attributed
     }
 
 /// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
-/// extension declares which session owns a canvas doc. Validates the body and known-worktree
-/// guard exactly like canvasRegisterHandler, then records ownership for a monitored worktree.
+/// extension declares which session owns an AgentDoc or handles interactions for a SystemView.
+/// Repeating this call explicitly reassigns the target.
 let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
