@@ -38,6 +38,9 @@
     <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />
+    <Compile Include="DiffTemplate.fs" />
+    <Compile Include="DiffProvisioner.fs" />
+    <Compile Include="DiffAssets.fs" />
     <Compile Include="CanvasScanner.fs" />
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
@@ -61,6 +64,18 @@
          from disk; the two cannot drift. -->
     <EmbeddedResource Include="BeadspaceTemplate.html">
       <LogicalName>BeadspaceTemplate.html</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="DiffTemplate.html">
+      <LogicalName>DiffTemplate.html</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html.min.css">
+      <LogicalName>Diff2HtmlCss</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html.min.js">
+      <LogicalName>Diff2HtmlRenderer</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html-ui-slim.min.js">
+      <LogicalName>Diff2HtmlHighlighter</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="..\Extension\canvas-selection-context.js">
       <LogicalName>CanvasSelectionContext.js</LogicalName>

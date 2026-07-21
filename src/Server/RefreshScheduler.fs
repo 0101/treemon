@@ -521,6 +521,9 @@ let private executeTask
             let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
 
+            DiffProvisioner.provisionViewer path
+            |> Option.iter (Log.log "DiffProvisioner")
+
             let! canvasDocs = CanvasScanner.scan path
             let branch = Path.GetFileName(path)
             let previous = repo.CanvasData |> Map.tryFind path |> Option.defaultValue []

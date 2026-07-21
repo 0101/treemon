@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Worktree Diff</title>
+<link rel="stylesheet" href="/assets/diff2html/3.4.52/diff2html.min.css">
+<style>
+:root {
+    color-scheme: dark;
+    --bg-deep: #11111b;
+    --bg-surface: #181825;
+    --bg-elevated: #1e1e2e;
+    --bg-hover: #313244;
+    --border: #45475a;
+    --border-bright: #585b70;
+    --text-primary: #cdd6f4;
+    --text-secondary: #bac2de;
+    --text-muted: #9399b2;
+    --accent: #cba6f7;
+    --accent-bright: #b4befe;
+    --added: #a6e3a1;
+    --deleted: #f38ba8;
+    --modified: #f9e2af;
+    --renamed: #89b4fa;
+}
+
+* { box-sizing: border-box; }
+
+html, body { min-height: 100%; }
+
+body {
+    margin: 0;
+    padding: 0;
+    max-width: none;
+    overflow: hidden;
+    background: var(--bg-deep);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+button { font: inherit; }
+
+.shell {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100vh;
+}
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    min-height: 52px;
+    padding: .65rem .8rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-surface);
+}
+
+.title {
+    min-width: 0;
+    margin-right: auto;
+}
+
+.title strong {
+    display: block;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: .85rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.title span {
+    display: block;
+    color: var(--text-muted);
+    font-size: .7rem;
+}
+
+.view-toggle {
+    display: inline-flex;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-deep);
+}
+
+.view-toggle button,
+.refresh-button {
+    border: 0;
+    border-radius: 5px;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+    font-size: .72rem;
+    font-weight: 600;
+}
+
+.view-toggle button { padding: .38rem .62rem; }
+
+.view-toggle button[aria-pressed="true"] {
+    color: var(--bg-deep);
+    background: var(--accent);
+}
+
+.refresh-button {
+    padding: .45rem .65rem;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+}
+
+.view-toggle button:hover,
+.view-toggle button:focus-visible,
+.refresh-button:hover,
+.refresh-button:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.workspace {
+    display: grid;
+    grid-template-columns: minmax(220px, 290px) minmax(0, 1fr);
+    min-height: 0;
+}
+
+.navigator {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--bg-surface);
+}
+
+.navigator-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .75rem .8rem .5rem;
+    color: var(--text-muted);
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+}
+
+.file-list {
+    min-height: 0;
+    padding: 0 .45rem .7rem;
+    overflow: auto;
+}
+
+.file-entry {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: .3rem .5rem;
+    align-items: center;
+    margin: .15rem 0;
+    padding: .55rem .58rem;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    text-align: left;
+    color: var(--text-secondary);
+    background: transparent;
+    cursor: pointer;
+}
+
+.file-entry:hover,
+.file-entry:focus-visible {
+    outline: none;
+    border-color: var(--border);
+    background: var(--bg-elevated);
+}
+
+.file-entry.active {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, .12);
+}
+
+.file-path {
+    overflow: hidden;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: .72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.old-path {
+    grid-column: 1 / -1;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: .64rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.change-badge {
+    padding: .08rem .35rem;
+    border-radius: 999px;
+    font-size: .58rem;
+    font-weight: 800;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+}
+
+.change-badge.added,
+.change-badge.untracked { color: var(--added); background: rgba(166, 227, 161, .12); }
+.change-badge.deleted { color: var(--deleted); background: rgba(243, 139, 168, .12); }
+.change-badge.modified { color: var(--modified); background: rgba(249, 226, 175, .12); }
+.change-badge.renamed { color: var(--renamed); background: rgba(137, 180, 250, .12); }
+
+.content {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    background: var(--bg-deep);
+}
+
+.state-card {
+    display: grid;
+    min-height: 100%;
+    place-content: center;
+    gap: .45rem;
+    padding: 2rem;
+    text-align: center;
+}
+
+.state-card .state-title {
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.state-card .state-detail {
+    max-width: 520px;
+    color: var(--text-muted);
+    font-size: .8rem;
+    line-height: 1.5;
+}
+
+.spinner {
+    width: 25px;
+    height: 25px;
+    margin: 0 auto .35rem;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.plain-special {
+    min-height: 100%;
+    margin: 0;
+    padding: 1rem 1.2rem;
+    overflow: auto;
+    color: var(--text-secondary);
+    background: var(--bg-deep);
+    font: .76rem/1.55 Consolas, "Courier New", monospace;
+    white-space: pre;
+}
+
+#patch {
+    min-width: min-content;
+    padding: .75rem;
+}
+
+#patch .d2h-wrapper { color: var(--text-primary); }
+#patch .d2h-file-wrapper {
+    margin: 0;
+    border-color: var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+}
+#patch .d2h-file-header {
+    position: sticky;
+    top: -.75rem;
+    z-index: 2;
+    border-color: var(--border);
+    background: var(--bg-elevated);
+}
+#patch .d2h-file-name,
+#patch .d2h-file-stats,
+#patch .d2h-tag { color: var(--text-secondary); }
+#patch .d2h-file-collapse { display: none; }
+#patch .d2h-diff-table { font-family: Consolas, "Courier New", monospace; }
+#patch .d2h-code-line,
+#patch .d2h-code-side-line { font-size: .72rem; line-height: 1.45; }
+#patch .d2h-code-linenumber,
+#patch .d2h-code-side-linenumber {
+    border-color: var(--border);
+    color: var(--text-muted);
+    background: var(--bg-surface);
+}
+#patch .d2h-info {
+    border-color: var(--border);
+    color: var(--text-muted);
+    background: #1f2335;
+}
+#patch .d2h-cntx { color: var(--text-secondary); background: var(--bg-deep); }
+#patch .d2h-del { color: #f5c2c7; background: rgba(243, 139, 168, .13); }
+#patch .d2h-ins { color: #b5e8b0; background: rgba(166, 227, 161, .12); }
+#patch .d2h-change { background: rgba(249, 226, 175, .12); }
+#patch .d2h-code-line del,
+#patch .d2h-code-side-line del { background: rgba(243, 139, 168, .24); }
+#patch .d2h-code-line ins,
+#patch .d2h-code-side-line ins { background: rgba(166, 227, 161, .22); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { border-radius: 5px; background: var(--border); }
+
+@media (max-width: 720px) {
+    .toolbar { flex-wrap: wrap; }
+    .title { flex: 1 0 calc(100% - 80px); }
+    .workspace { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 28vh) minmax(0, 1fr); }
+    .navigator { border-right: 0; border-bottom: 1px solid var(--border); }
+}
+</style>
+<script src="/assets/diff2html/3.4.52/diff2html.min.js"></script>
+</head>
+<body>
+<div class="shell">
+    <header class="toolbar">
+        <div class="title">
+            <strong>Worktree diff</strong>
+            <span id="base-label">Loading comparison…</span>
+        </div>
+        <div class="view-toggle" role="group" aria-label="Diff layout">
+            <button id="unified-view" type="button" aria-pressed="true">Unified</button>
+            <button id="split-view" type="button" aria-pressed="false">Split</button>
+        </div>
+        <button id="refresh" class="refresh-button" type="button">Refresh</button>
+    </header>
+    <div class="workspace">
+        <aside class="navigator" aria-label="Changed files">
+            <div class="navigator-heading">
+                <span>Changed files</span>
+                <span id="file-count">0</span>
+            </div>
+            <div id="file-list" class="file-list"></div>
+        </aside>
+        <main id="content" class="content">
+            <div class="state-card" data-state="loading-summary">
+                <div class="spinner" aria-hidden="true"></div>
+                <div class="state-title">Loading changed files…</div>
+            </div>
+        </main>
+    </div>
+</div>
+
+<script>
+var VIEW_KEY = 'treemon.diff.view';
+var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/diff\.html$/, '');
+var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
+var state = {
+    summary: null,
+    selected: null,
+    currentResult: null,
+    currentPatch: null,
+    view: readViewPreference(),
+    fileRequest: 0,
+    fileAbort: null,
+    summaryRequest: 0
+};
+var highlighterPromise = null;
+
+function readStorage(key) {
+    try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function writeStorage(key, value) {
+    try { localStorage.setItem(key, value); } catch (_) {}
+}
+
+function readViewPreference() {
+    return readStorage(VIEW_KEY) === 'split' ? 'split' : 'unified';
+}
+
+function fileSelectionKey(file) {
+    return JSON.stringify([file.change, file.oldDisplayPath || null, file.displayPath]);
+}
+
+function configForView() {
+    return {
+        drawFileList: false,
+        matching: 'lines',
+        outputFormat: state.view === 'split' ? 'side-by-side' : 'line-by-line',
+        colorScheme: 'dark',
+        renderNothingWhenEmpty: false
+    };
+}
+
+function updateViewButtons() {
+    document.getElementById('unified-view').setAttribute('aria-pressed', String(state.view === 'unified'));
+    document.getElementById('split-view').setAttribute('aria-pressed', String(state.view === 'split'));
+}
+
+function setView(view) {
+    if (state.view === view) return;
+    state.view = view;
+    writeStorage(VIEW_KEY, view);
+    updateViewButtons();
+    if (state.currentResult && isRenderablePatch(state.currentResult)) renderPatch(state.currentResult.patch);
+}
+
+function replaceContent(node) {
+    document.getElementById('content').replaceChildren(node);
+}
+
+function renderState(status, title, detail, loading) {
+    state.currentResult = null;
+    state.currentPatch = null;
+    var card = document.createElement('div');
+    card.className = 'state-card';
+    card.dataset.state = status;
+    if (loading) {
+        var spinner = document.createElement('div');
+        spinner.className = 'spinner';
+        spinner.setAttribute('aria-hidden', 'true');
+        card.appendChild(spinner);
+    }
+    var heading = document.createElement('div');
+    heading.className = 'state-title';
+    heading.textContent = title;
+    card.appendChild(heading);
+    if (detail) {
+        var body = document.createElement('div');
+        body.className = 'state-detail';
+        body.textContent = detail;
+        card.appendChild(body);
+    }
+    replaceContent(card);
+}
+
+function clearNavigator() {
+    state.summary = null;
+    state.selected = null;
+    document.getElementById('file-list').replaceChildren();
+    document.getElementById('file-count').textContent = '0';
+}
+
+function changeLabel(change) {
+    return change === 'untracked' ? 'new' : change;
+}
+
+function renderFileList(files) {
+    var list = document.getElementById('file-list');
+    list.replaceChildren();
+    files.forEach(function(file) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'file-entry';
+        button.dataset.identity = file.identity;
+        button.title = file.oldDisplayPath
+            ? file.oldDisplayPath + ' → ' + file.displayPath
+            : file.displayPath;
+
+        var path = document.createElement('span');
+        path.className = 'file-path';
+        path.textContent = file.displayPath;
+        button.appendChild(path);
+
+        var badge = document.createElement('span');
+        badge.className = 'change-badge ' + file.change;
+        badge.textContent = changeLabel(file.change);
+        button.appendChild(badge);
+
+        if (file.oldDisplayPath) {
+            var oldPath = document.createElement('span');
+            oldPath.className = 'old-path';
+            oldPath.textContent = 'from ' + file.oldDisplayPath;
+            button.appendChild(oldPath);
+        }
+
+        button.addEventListener('click', function() { selectFile(file); });
+        list.appendChild(button);
+    });
+}
+
+function markActiveFile(identity) {
+    document.querySelectorAll('.file-entry').forEach(function(button) {
+        button.classList.toggle('active', button.dataset.identity === identity);
+    });
+}
+
+function selectFile(file) {
+    state.selected = file;
+    writeStorage(SELECTION_KEY, fileSelectionKey(file));
+    markActiveFile(file.identity);
+    loadFile(file);
+}
+
+function isRenderablePatch(result) {
+    return result.status === 'text' || result.status === 'deleted';
+}
+
+function plainSpecialState(result, title, detail) {
+    state.currentResult = result;
+    state.currentPatch = null;
+    if (result.patch) {
+        var pre = document.createElement('pre');
+        pre.className = 'plain-special';
+        pre.dataset.state = result.status;
+        pre.setAttribute('aria-label', title);
+        pre.textContent = result.patch;
+        replaceContent(pre);
+    } else {
+        renderState(result.status, title, detail, false);
+        state.currentResult = result;
+    }
+}
+
+function renderFileResult(result) {
+    state.currentResult = result;
+    switch (result.status) {
+        case 'text':
+        case 'deleted':
+            renderPatch(result.patch);
+            break;
+        case 'binary':
+            renderState('binary', 'Binary file', 'Binary content is not rendered.', false);
+            state.currentResult = result;
+            break;
+        case 'oversized':
+            renderState('oversized', 'File is too large', 'The patch exceeds the 2 MiB rendering limit.', false);
+            state.currentResult = result;
+            break;
+        case 'truncated':
+            renderState('truncated', 'Patch is too long', 'The patch exceeds the 20,000-line rendering limit.', false);
+            state.currentResult = result;
+            break;
+        case 'symlink':
+            plainSpecialState(result, 'Symbolic link', 'The link target is unavailable.');
+            break;
+        case 'unavailable':
+            renderState('unavailable', 'File unavailable', 'The selected file changed or is no longer available.', false);
+            state.currentResult = result;
+            break;
+        case 'git-error':
+            renderState('git-error', 'Could not load file diff', 'Git could not produce the selected patch.', false);
+            state.currentResult = result;
+            break;
+        default:
+            renderState('git-error', 'Could not load file diff', 'The server returned an unknown file state.', false);
+            state.currentResult = result;
+            break;
+    }
+}
+
+function lineNumber(text) {
+    var value = parseInt((text || '').trim(), 10);
+    return Number.isFinite(value) ? value : null;
+}
+
+function assignLine(row, name, value) {
+    if (row && value !== null) row.dataset[name] = String(value);
+}
+
+function annotateUnified(wrapper) {
+    var hunk = null;
+    wrapper.querySelectorAll('.d2h-file-diff tr').forEach(function(row) {
+        var header = row.querySelector('.d2h-info .d2h-code-line');
+        if (header && header.textContent.trim().startsWith('@@')) hunk = header.textContent.trim();
+        if (hunk) row.dataset.hunk = hunk;
+        var oldNumber = row.querySelector('.line-num1');
+        var newNumber = row.querySelector('.line-num2');
+        assignLine(row, 'oldLine', oldNumber ? lineNumber(oldNumber.textContent) : null);
+        assignLine(row, 'newLine', newNumber ? lineNumber(newNumber.textContent) : null);
+    });
+}
+
+function isContextRow(row) {
+    return Boolean(row && row.querySelector('td.d2h-cntx') && !row.querySelector('.d2h-emptyplaceholder'));
+}
+
+function sideNumber(row) {
+    var cell = row && row.querySelector('.d2h-code-side-linenumber');
+    return cell ? lineNumber(cell.textContent) : null;
+}
+
+function annotateSplit(wrapper) {
+    var sides = wrapper.querySelectorAll('.d2h-file-side-diff');
+    if (sides.length < 2) return;
+    var leftRows = Array.from(sides[0].querySelectorAll('tr'));
+    var rightRows = Array.from(sides[1].querySelectorAll('tr'));
+    var hunk = null;
+    var count = Math.max(leftRows.length, rightRows.length);
+    for (var index = 0; index < count; index += 1) {
+        var left = leftRows[index] || null;
+        var right = rightRows[index] || null;
+        var header = left && left.querySelector('.d2h-info .d2h-code-side-line');
+        if (header && header.textContent.trim().startsWith('@@')) hunk = header.textContent.trim();
+        if (hunk && left) left.dataset.hunk = hunk;
+        if (hunk && right) right.dataset.hunk = hunk;
+
+        var oldNumber = sideNumber(left);
+        var newNumber = sideNumber(right);
+        assignLine(left, 'oldLine', oldNumber);
+        assignLine(right, 'newLine', newNumber);
+
+        if (isContextRow(left) && isContextRow(right)) {
+            assignLine(left, 'newLine', newNumber);
+            assignLine(right, 'oldLine', oldNumber);
+        }
+    }
+}
+
+function annotateDiffRows(patch) {
+    patch.querySelectorAll('.d2h-file-wrapper').forEach(function(wrapper) {
+        annotateUnified(wrapper);
+        annotateSplit(wrapper);
+    });
+}
+
+function loadHighlighter() {
+    if (window.Diff2HtmlUI) return Promise.resolve(window.Diff2HtmlUI);
+    if (highlighterPromise) return highlighterPromise;
+    highlighterPromise = new Promise(function(resolve, reject) {
+        var script = document.createElement('script');
+        script.src = HIGHLIGHTER_URL;
+        script.onload = function() {
+            if (window.Diff2HtmlUI) resolve(window.Diff2HtmlUI);
+            else reject(new Error('Diff2HtmlUI was not registered'));
+        };
+        script.onerror = function() { reject(new Error('Syntax highlighter failed to load')); };
+        document.head.appendChild(script);
+    });
+    return highlighterPromise;
+}
+
+function highlightAfterPaint(patch, patchText) {
+    patch.dataset.highlightStatus = 'waiting';
+    requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+            if (!patch.isConnected || state.currentPatch !== patchText) return;
+            patch.dataset.highlightStatus = 'loading';
+            loadHighlighter()
+                .then(function(Diff2HtmlUI) {
+                    if (!patch.isConnected || state.currentPatch !== patchText) return;
+                    var ui = new Diff2HtmlUI(patch, patchText, configForView());
+                    ui.highlightCode();
+                    patch.dataset.highlightStatus = 'ready';
+                })
+                .catch(function() {
+                    if (patch.isConnected) patch.dataset.highlightStatus = 'failed';
+                });
+        });
+    });
+}
+
+function renderPatch(patchText) {
+    state.currentPatch = patchText;
+    var patch = document.createElement('div');
+    patch.id = 'patch';
+    patch.dataset.renderStatus = 'plain';
+    try {
+        patch.innerHTML = Diff2Html.html(patchText, configForView());
+        annotateDiffRows(patch);
+        replaceContent(patch);
+        highlightAfterPaint(patch, patchText);
+    } catch (_) {
+        var pre = document.createElement('pre');
+        pre.className = 'plain-special';
+        pre.dataset.state = 'renderer-fallback';
+        pre.textContent = patchText;
+        patch.replaceChildren(pre);
+        patch.dataset.highlightStatus = 'failed';
+        replaceContent(patch);
+    }
+}
+
+async function fetchJson(url, options) {
+    var response = await fetch(url, options);
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+}
+
+async function loadFile(file) {
+    if (state.fileAbort) state.fileAbort.abort();
+    var request = ++state.fileRequest;
+    var controller = new AbortController();
+    state.fileAbort = controller;
+    state.currentResult = null;
+    state.currentPatch = null;
+    renderState('loading-file', 'Loading ' + file.displayPath + '…', '', true);
+
+    try {
+        var result = await fetchJson(
+            'diff-file?identity=' + encodeURIComponent(file.identity),
+            { cache: 'no-store', signal: controller.signal }
+        );
+        if (request !== state.fileRequest) return;
+        renderFileResult(result);
+    } catch (error) {
+        if (error && error.name === 'AbortError') return;
+        if (request !== state.fileRequest) return;
+        renderState('git-error', 'Could not load file diff', 'The selected patch request failed.', false);
+    }
+}
+
+function renderSummaryState(summary) {
+    clearNavigator();
+    switch (summary.status) {
+        case 'clean':
+            document.getElementById('base-label').textContent = 'Compared with ' + summary.baseRef;
+            renderState('clean', 'No changes', 'The worktree matches ' + summary.baseRef + '.', false);
+            break;
+        case 'base-error':
+            document.getElementById('base-label').textContent = 'Comparison unavailable';
+            renderState('base-error', 'Comparison base unavailable', 'Treemon could not resolve the configured base branch.', false);
+            break;
+        case 'too-many-files':
+            document.getElementById('base-label').textContent = 'Comparison stopped';
+            renderState(
+                'too-many-files',
+                'Too many changed files',
+                'At least ' + summary.minimumFileCount + ' paths changed; the limit is 1,000.',
+                false
+            );
+            break;
+        case 'git-error':
+        default:
+            document.getElementById('base-label').textContent = 'Comparison failed';
+            renderState('git-error', 'Diff unavailable', 'Git could not produce a worktree summary.', false);
+            break;
+    }
+}
+
+function renderReadySummary(summary) {
+    var files = Array.isArray(summary.files) ? summary.files : [];
+    if (!files.length) {
+        renderSummaryState({ status: 'clean', baseRef: summary.baseRef || 'base' });
+        return;
+    }
+
+    state.summary = summary;
+    document.getElementById('base-label').textContent = 'Compared with ' + summary.baseRef;
+    document.getElementById('file-count').textContent = String(summary.fileCount);
+    renderFileList(files);
+
+    var stored = readStorage(SELECTION_KEY);
+    var selected = files.find(function(file) { return fileSelectionKey(file) === stored; }) || files[0];
+    selectFile(selected);
+}
+
+async function loadSummary() {
+    if (state.fileAbort) state.fileAbort.abort();
+    state.fileRequest += 1;
+    var request = ++state.summaryRequest;
+    clearNavigator();
+    document.getElementById('base-label').textContent = 'Loading comparison…';
+    renderState('loading-summary', 'Loading changed files…', '', true);
+
+    try {
+        var summary = await fetchJson('diff-summary', { cache: 'no-store' });
+        if (request !== state.summaryRequest) return;
+        if (summary.status === 'ready') renderReadySummary(summary);
+        else renderSummaryState(summary);
+    } catch (_) {
+        if (request !== state.summaryRequest) return;
+        renderSummaryState({ status: 'git-error' });
+    }
+}
+
+function rangeFor(rows, name) {
+    var values = rows
+        .map(function(row) { return lineNumber(row.dataset[name]); })
+        .filter(function(value) { return value !== null; });
+    if (!values.length) return null;
+    return { start: Math.min.apply(null, values), end: Math.max.apply(null, values) };
+}
+
+function intersectingRows(range) {
+    return Array.from(document.querySelectorAll('#patch tr[data-hunk]')).filter(function(row) {
+        try { return range.intersectsNode(row); } catch (_) { return false; }
+    });
+}
+
+window.canvasSelectionMetadata = function(selectionContext) {
+    if (!state.selected) return { kind: 'diff' };
+    var range = selectionContext && selectionContext.range;
+    var rows = range ? intersectingRows(range) : [];
+    var hunks = Array.from(new Set(rows.map(function(row) { return row.dataset.hunk; }).filter(Boolean)));
+    var hasExactHunk = hunks.length === 1;
+    return {
+        kind: 'diff',
+        fileIdentity: state.selected.identity,
+        displayPath: state.selected.displayPath,
+        oldDisplayPath: state.selected.oldDisplayPath || null,
+        hunkHeader: hasExactHunk ? hunks[0] : null,
+        oldLineRange: hasExactHunk ? rangeFor(rows, 'oldLine') : null,
+        newLineRange: hasExactHunk ? rangeFor(rows, 'newLine') : null
+    };
+};
+
+document.getElementById('unified-view').addEventListener('click', function() { setView('unified'); });
+document.getElementById('split-view').addEventListener('click', function() { setView('split'); });
+document.getElementById('refresh').addEventListener('click', loadSummary);
+updateViewButtons();
+loadSummary();
+</script>
+</body>
+</html>

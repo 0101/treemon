@@ -30,12 +30,13 @@ The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parame
 
 `ProcessRunner` provides an additive argument-list API with timeout and bounded stdout/stderr capture; its recursive capture drains streams even after a limit is reached so child processes cannot block on full pipes. Existing string-based callers do not need to migrate. Diff Git calls use `ProcessStartInfo.ArgumentList`, `--` before paths, NUL-delimited machine output, `--no-ext-diff`, `--no-textconv`, and rename detection.
 
-`diff.html` is provisioned and classified like the Beadspace SystemView. It uses self-hosted, version-pinned diff2html assets to render one bounded patch at a time, with a Treemon-owned file navigator and persisted view preference. Syntax highlighting is loaded lazily after the unhighlighted diff appears.
+`diff.html` is provisioned and classified like the Beadspace SystemView. It uses self-hosted diff2html 3.4.52 assets to render one bounded patch at a time, with a Treemon-owned file navigator and persisted view preference. The core renderer draws the unhighlighted patch first; the slim UI bundle is then loaded lazily for syntax highlighting. Since opaque identities change whenever the summary is refreshed, prior selection restoration matches the change kind plus old/new display paths and uses the newly issued identity.
 
 ## Decisions
 
 - diff2html is the MVP renderer because startup latency and implementation size matter more than editor-grade features.
 - Unified view is the default because it fits the canvas pane; split view remains available and persistent.
+- diff2html 3.4.52 is vendored and served from a versioned immutable local route; no renderer asset is fetched from a third-party origin.
 - Over-limit summaries and patches are rejected as explicit states; partial patches are not rendered because an incomplete patch is not reliable input for diff2html.
 - Agent-mediated review uses generic SystemView selection interactions rather than renderer-specific comment widgets.
 - The generated diff view remains a SystemView, not an AgentDoc, so it stays non-archivable, non-shareable, and independent of authored-document morphing.
@@ -51,6 +52,7 @@ The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parame
 | `src/Server/WorktreeDiff.fs` | Renderer-neutral diff types and exact live-worktree comparison |
 | `src/Server/WorktreeDiffApi.fs` | Opaque identity snapshots, tagged JSON mapping, and guarded diff route handlers |
 | `src/Server/CanvasDocServer.fs` | Known-worktree diff data routes and generated view serving |
+| `src/Server/DiffAssets.fs` | Versioned self-hosted renderer asset routes |
 | `src/Server/DiffProvisioner.fs` | Keeps `diff.html` synchronized with the embedded template |
 | `src/Server/DiffTemplate.html` | File navigator and diff2html rendering shell |
 | `src/Client/CardViews.fs` | Worktree-card Diff action |

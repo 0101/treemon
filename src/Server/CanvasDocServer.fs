@@ -425,6 +425,15 @@ let private handleCanvasRequest
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
 
+let private handleDiffAsset (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+    match DiffAssets.tryFind ctx.Request.Path.Value with
+    | Some asset ->
+        do! DiffAssets.writeResponse asset ctx
+    | None ->
+        ctx.Response.StatusCode <- 404
+        do! ctx.Response.WriteAsync("Asset not found")
+}
+
 let internal createHost
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (service: WorktreeDiffApi.Service)
@@ -443,6 +452,11 @@ let internal createHost
             app.UseRouting() |> ignore
             app.UseEndpoints(fun endpoints ->
                 endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
+                endpoints.MapGet(
+                    "/assets/diff2html/{version}/{filename}",
+                    RequestDelegate(handleDiffAsset)
+                )
+                |> ignore
                 endpoints.MapGet(
                     "/{**path}",
                     RequestDelegate(
