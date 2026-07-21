@@ -144,11 +144,13 @@ type UpsertStatusTests() =
             Assert.That((find "s1" rows).Status.Status, Is.EqualTo(SessionLevelStatus.Working)))
 
     [<Test>]
-    member _.``Skill and both messages round-trip through the store``() =
+    member _.``Skill, intent, title, and both messages round-trip through the store``() =
         withStore (fun store ->
             let rich =
                 { Status = SessionLevelStatus.WaitingForUser
                   Skill = Some "review"
+                  Intent = Some(msg "reviewing the auth changes" "2026-03-01T10:00:50Z")
+                  Title = Some(msg "Review the auth changes" "2026-03-01T10:00:55Z")
                   LastUserMessage = Some(msg "the auth module" "2026-03-01T10:01:00Z")
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z")
                   ContextUsage = None }
@@ -574,9 +576,9 @@ type LegacyDoneStatusTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type ContextUsageMigrationTests() =
+type AdditiveColumnMigrationTests() =
 
-    let createLegacyDatabase (dbPath: string) =
+    let seedLegacyDatabase (dbPath: string) =
         use conn = new SqliteConnection(connStr dbPath)
         conn.Open()
         use cmd = conn.CreateCommand()
@@ -599,33 +601,61 @@ CREATE TABLE session_status (
 INSERT INTO session_status
     (session_id, worktree_path, provider, status, updated_at, last_seen)
 VALUES
-    ('legacy', $wt, 'copilot_cli', 'working',
-     '2026-03-01T11:30:00.0000000+00:00', '2026-03-01T11:30:00.0000000+00:00');
+    ('legacy', $wt, 'copilot_cli', 'working', $ts, $ts);
 """
 
         cmd.Parameters.AddWithValue("$wt", contextWorktree) |> ignore
+        cmd.Parameters.AddWithValue("$ts", (ts "2026-03-01T11:30:00Z").ToUniversalTime().ToString("O")) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
     [<Test>]
-    member _.``Construction adds context columns to an old database without losing rows``() =
+    member _.``Construction adds metadata columns idempotently and preserves legacy rows``() =
         withDbPath (fun dbPath ->
-            createLegacyDatabase dbPath
+            seedLegacyDatabase dbPath
 
-            use store = new SessionActivityStore(dbPath)
-            let migrated = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
-            Assert.That(migrated.Status.ContextUsage, Is.EqualTo(None))
-            Assert.That(migrated.ContextUsageAt, Is.EqualTo(None))
+            (use store = new SessionActivityStore(dbPath)
+             let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+             Assert.That(legacy.Status.Intent, Is.EqualTo(None))
+             Assert.That(legacy.Status.Title, Is.EqualTo(None))
 
+             let intent = msg "investigating the fold" "2026-03-01T11:45:00Z"
+             let title = msg "Investigate the fold" "2026-03-01T11:46:00Z"
+
+             { legacy with
+                 Status.Intent = Some intent
+                 Status.Title = Some title
+                 UpdatedAt = ts "2026-03-01T11:46:00Z"
+                 LastSeen = ts "2026-03-01T11:50:00Z" }
+             |> store.UpsertStatus)
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+            Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z")))
+            Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z"))))
+
+    [<Test>]
+    member _.``Construction adds context columns idempotently and preserves legacy rows``() =
+        withDbPath (fun dbPath ->
+            seedLegacyDatabase dbPath
             let usage = { CurrentTokens = 50000; TokenLimit = 200000 }
             let usageAt = ts "2026-03-01T11:45:00Z"
 
-            { migrated with
-                Status.ContextUsage = Some usage
-                ContextUsageAt = Some usageAt
-                LastSeen = usageAt }
-            |> store.UpsertContextUsage
-            |> ignore
+            (use store = new SessionActivityStore(dbPath)
+             let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+             Assert.That(legacy.Status.ContextUsage, Is.EqualTo(None))
+             Assert.That(legacy.ContextUsageAt, Is.EqualTo(None))
 
-            let updated = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
-            Assert.That(updated.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(updated.ContextUsageAt, Is.EqualTo(Some usageAt)))
+             let persisted =
+                 { legacy with
+                     Status.ContextUsage = Some usage
+                     ContextUsageAt = Some usageAt
+                     LastSeen = usageAt }
+                 |> store.UpsertContextUsage
+
+             Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some usage))
+             Assert.That(persisted.ContextUsageAt, Is.EqualTo(Some usageAt)))
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+            Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(row.ContextUsageAt, Is.EqualTo(Some usageAt)))

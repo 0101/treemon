@@ -11,7 +11,7 @@ open Server.SessionActivityService
 open Tests.TestUtils
 
 // Covers the ingestion layer of the push status model: the wire-contract DTO → domain parse (the
-// nine kinds, unknown rejected, per-kind message/skill rules), the known-worktree guard
+// closed kind set, unknown rejected, per-kind message/skill rules), the known-worktree guard
 // (tryAcceptReport), and the single-writer mailbox flow (fold → append/dedupe → last-write-wins
 // upsert → feed RefreshScheduler), plus the restart rebuild from the store. Fast/in-process — no
 // HTTP; the handler is a thin wrapper over these tested seams (its known-worktree guard is exactly
@@ -139,6 +139,29 @@ type ParseReportTests() =
         Assert.That((parseOk req).Event, Is.EqualTo(AssistantMessage(msg "hi there" "2026-03-01T10:00:00Z")))
 
     [<Test>]
+    member _.``intent_reported with a message maps to IntentReported carrying that message``() =
+        let req = { baseReq "intent_reported" with message = msgDto "investigating the fold" "2026-03-01T10:00:00Z" }
+        Assert.That((parseOk req).Event, Is.EqualTo(IntentReported(msg "investigating the fold" "2026-03-01T10:00:00Z")))
+
+    [<Test>]
+    member _.``title_reported with a message maps to TitleReported carrying that message``() =
+        let req = { baseReq "title_reported" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
+        Assert.That((parseOk req).Event, Is.EqualTo(TitleReported(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")))
+
+    [<Test>]
+    member _.``title_bootstrap with a message maps to TitleBootstrap carrying that message``() =
+        let req = { baseReq "title_bootstrap" with message = msgDto "Investigate Work Item 261312" "2026-03-01T10:00:00Z" }
+        Assert.That((parseOk req).Event, Is.EqualTo(TitleBootstrap(msg "Investigate Work Item 261312" "2026-03-01T10:00:00Z")))
+
+    [<Test>]
+    member _.``intent_reported without a message is rejected (never regresses to blank)``() =
+        Assert.That(parseErr (baseReq "intent_reported"), Does.Contain "message")
+
+    [<Test>]
+    member _.``title_bootstrap without a message is rejected``() =
+        Assert.That(parseErr (baseReq "title_bootstrap"), Does.Contain "message")
+
+    [<Test>]
     member _.``skill_invoked with a skillName maps to SkillInvoked``() =
         let req = { baseReq "skill_invoked" with skillName = "investigate" }
         Assert.That((parseOk req).Event, Is.EqualTo(SkillInvoked "investigate"))
@@ -202,6 +225,43 @@ type ParseReportTests() =
         let within = "2026-03-01T10:07:00Z"
         let req = { baseReq "turn_started" with occurredAt = within }
         Assert.That((parseOk req).OccurredAt, Is.EqualTo(ts within))
+
+    [<TestCase("intent_reported")>]
+    [<TestCase("title_reported")>]
+    [<TestCase("title_bootstrap")>]
+    member _.``a future message timestamp is normalized to the clamped report timestamp``(kind: string) =
+        let req =
+            { baseReq kind with
+                occurredAt = "2999-01-01T00:00:00Z"
+                message = msgDto "future activity" "2999-01-01T00:00:00Z" }
+        let report = parseOk req
+        let messageAt =
+            match kind, report.Event with
+            | "intent_reported", IntentReported message
+            | "title_reported", TitleReported message
+            | "title_bootstrap", TitleBootstrap message -> message.At
+            | _ -> failwith $"unexpected parsed event for {kind}: {report.Event}"
+
+        Assert.Multiple(fun () ->
+            Assert.That(report.OccurredAt, Is.EqualTo refNow)
+            Assert.That(messageAt, Is.EqualTo report.OccurredAt))
+
+    [<Test>]
+    member _.``a future-skewed intent no longer permanently outranks a genuine later title in effectiveActivity``() =
+        let poisoned =
+            { baseReq "intent_reported" with
+                occurredAt = "2999-01-01T00:00:00Z"
+                message = msgDto "runaway clock intent" "2999-01-01T00:00:00Z" }
+        let corrected =
+            { baseReq "title_reported" with
+                occurredAt = "2026-03-01T10:06:00Z"
+                message = msgDto "Investigate Work Item 261312" "2026-03-01T10:06:00Z" }
+
+        let status = foldMany emptyStatus [ (parseOk poisoned).Event; (parseOk corrected).Event ]
+
+        Assert.That(
+            effectiveActivity status,
+            Is.EqualTo(Some(AgentActivity.SessionTitle("Investigate Work Item 261312", ts "2026-03-01T10:06:00Z"))))
 
     [<Test>]
     member _.``a blank sessionId is rejected``() =
@@ -354,6 +414,117 @@ type IngestTests() =
             Assert.That(events.Length, Is.EqualTo 2)
             let stored = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
             Assert.That(stored.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z")))
+
+    [<Test>]
+    member _.``title bootstrap persists without history and cannot block an earlier lifecycle event``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let title = msg "Investigate Intent Title Runtime" "2026-03-01T10:00:05Z"
+            svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap title))
+
+            let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
+            Assert.That(hydrated.UpdatedAt, Is.EqualTo(DateTimeOffset.MinValue), "bootstrap must not advance the lifecycle clock")
+            Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "a bootstrap-only session is retained durably")
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z"), Is.Empty, "bootstrap is not source history")
+            let durable = store.LoadLiveStatuses(ts "2026-03-01T09:00:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
+            Assert.That(durable.Status.Title, Is.EqualTo(Some title), "bootstrap title is persisted in session_status")
+
+            // A replayed lifecycle event has an older SDK timestamp but must still apply after the
+            // newer join-time hydration report.
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:03Z" TurnStarted)
+            let replayed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(replayed.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+            Assert.That(replayed.Status.Title, Is.EqualTo(Some title))
+            Assert.That(replayed.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:03Z"))
+            Assert.That(replayed.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "lifecycle replay must not regress join liveness")
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 1))
+
+    [<Test>]
+    member _.``title bootstrap revives a retained durable session without losing footer state``() =
+        let retained =
+            { SessionId = SessionId "s1"
+              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              Provider = CopilotCli
+              Status =
+                { Status = SessionLevelStatus.Working
+                  Skill = Some "review"
+                  Intent = Some(msg "reviewing the fix" "2026-03-01T07:58:00Z")
+                  Title = Some(msg "Old title" "2026-03-01T07:59:00Z")
+                  LastUserMessage = Some(msg "resume this" "2026-03-01T07:58:30Z")
+                  LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
+                  ContextUsage = None }
+              UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LastSeen = ts "2026-03-01T08:00:00Z"
+              ContextUsageAt = None }
+
+        withServiceSeeded
+            "C:/wt/a"
+            (fun store -> store.UpsertStatus retained)
+            (fun (svc, _, store) ->
+                let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
+                svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
+
+                let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+                Assert.Multiple(fun () ->
+                    Assert.That(hydrated.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                    Assert.That(hydrated.Status.Skill, Is.EqualTo(Some "review"))
+                    Assert.That(hydrated.Status.Intent, Is.EqualTo retained.Status.Intent)
+                    Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
+                    Assert.That(hydrated.Status.LastUserMessage, Is.EqualTo retained.Status.LastUserMessage)
+                    Assert.That(hydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
+                    Assert.That(hydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
+                    Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
+
+                let durable = store.StatusBySession(SessionId "s1") |> Option.get
+                Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row")
+                Assert.That(store.QueryWindow(ts "2026-03-01T07:00:00Z", ts "2026-03-01T11:00:00Z"), Is.Empty))
+
+    [<Test>]
+    member _.``an older title bootstrap cannot overwrite a newer live title``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let liveTitle = msg "New live title" "2026-03-01T10:00:10Z"
+            let staleSnapshot = msg "Old snapshot" "2026-03-01T10:00:05Z"
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:10Z" (TitleReported liveTitle))
+            svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:00:05Z" (TitleBootstrap staleSnapshot))
+
+            let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(s.Status.Title, Is.EqualTo(Some liveTitle))
+            Assert.That(s.UpdatedAt, Is.EqualTo DateTimeOffset.MinValue, "title reports do not advance the lifecycle clock")
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 1))
+
+    [<Test>]
+    member _.``a newer intent arriving first does not block an older lifecycle transition``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let intent = msg "Implementing the fix" "2026-03-01T10:00:06Z"
+            svc.Submit(mkReport "s1" "C:/wt/a" "i1" "2026-03-01T10:00:06Z" (IntentReported intent))
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:05Z" TurnStarted)
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.Multiple(fun () ->
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.Status.Intent, Is.EqualTo(Some intent))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "intent must not advance the lifecycle clock")
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "the newer report still advances openness"))
+            Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 2))
+
+    [<Test>]
+    member _.``a title arriving after a newer lifecycle event still updates the activity field``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let oldTitle = msg "Initial title" "2026-03-01T10:00:04Z"
+            let newTitle = msg "Updated title" "2026-03-01T10:00:05Z"
+            svc.Submit(mkReport "s1" "C:/wt/a" "t1" "2026-03-01T10:00:04Z" (TitleReported oldTitle))
+            svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:06Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "t2" "2026-03-01T10:00:05Z" (TitleReported newTitle))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.Multiple(fun () ->
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.Status.Title, Is.EqualTo(Some newTitle))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "title must preserve the lifecycle clock")
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z")))
+            Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
+            Assert.That(store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z").Length, Is.EqualTo 3))
 
     [<Test>]
     member _.``a heartbeat bumps last_seen for openness without appending, moving updated_at, or changing status``() =
@@ -566,13 +737,20 @@ type RestartRebuildTests() =
             Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt)))
 
     [<Test>]
-    member _.``A status event revives retained context outside the live restart window``() =
+    member _.``A status event revives all retained state outside the live restart window``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-retained-context-worktree")
         let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
         let usage = { CurrentTokens = 110000; TokenLimit = 200000 }
         let usageAt = now - idleWindow - TimeSpan.FromMinutes 5.0
-        let status = { emptyStatus with Status = SessionLevelStatus.Idle }
+        let status =
+            { Status = SessionLevelStatus.Idle
+              Skill = Some "investigate"
+              Intent = Some { Text = "diagnosing context persistence"; At = usageAt.AddMinutes(-4.0) }
+              Title = Some { Text = "Persist context info"; At = usageAt.AddMinutes(-3.0) }
+              LastUserMessage = Some { Text = "keep the context"; At = usageAt.AddMinutes(-2.0) }
+              LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
+              ContextUsage = None }
 
         let seed (store: SessionActivityStore) =
             storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt
@@ -593,6 +771,11 @@ type RestartRebuildTests() =
 
             let revived = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(revived.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
+            Assert.That(revived.Status.Skill, Is.EqualTo(status.Skill))
+            Assert.That(revived.Status.Intent, Is.EqualTo(status.Intent))
+            Assert.That(revived.Status.Title, Is.EqualTo(status.Title))
+            Assert.That(revived.Status.LastUserMessage, Is.EqualTo(status.LastUserMessage))
+            Assert.That(revived.Status.LastAssistantMessage, Is.EqualTo(status.LastAssistantMessage))
             Assert.That(revived.Status.ContextUsage, Is.EqualTo(Some usage))
             Assert.That(revived.ContextUsageAt, Is.EqualTo(Some usageAt))
             Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some revived)))

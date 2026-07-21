@@ -124,7 +124,7 @@ let private readOptMsg (r: SqliteDataReader) (iText: int) (iTs: int) : Message o
     | _ -> None
 
 let private readStored (r: SqliteDataReader) : StoredStatus =
-    let contextUsage, contextUsageAt = readContextUsage r 11 12 13
+    let contextUsage, contextUsageAt = readContextUsage r 15 16 17
 
     { SessionId = SessionId(r.GetString 0)
       WorktreePath = WorktreePath(r.GetString 1)
@@ -132,11 +132,13 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
       Status =
         { Status = parseStatus (r.GetString 3)
           Skill = readOptStr r 4
+          Intent = readOptMsg r 9 10
+          Title = readOptMsg r 11 12
           LastUserMessage = readOptMsg r 5 6
           LastAssistantMessage = readOptMsg r 7 8
           ContextUsage = contextUsage }
-      UpdatedAt = parseIso (r.GetString 9)
-      LastSeen = parseIso (r.GetString 10)
+      UpdatedAt = parseIso (r.GetString 13)
+      LastSeen = parseIso (r.GetString 14)
       ContextUsageAt = contextUsageAt }
 
 let private readEventRow (r: SqliteDataReader) : ActivityEventRow =
@@ -163,6 +165,10 @@ CREATE TABLE IF NOT EXISTS session_status (
     last_user_ts  TEXT,
     last_asst_msg TEXT,
     last_asst_ts  TEXT,
+    intent_text   TEXT,
+    intent_ts     TEXT,
+    title_text    TEXT,
+    title_ts      TEXT,
     updated_at    TEXT NOT NULL,
     last_seen     TEXT NOT NULL,
     context_current_tokens INTEGER,
@@ -184,10 +190,14 @@ CREATE TABLE IF NOT EXISTS activity_events (
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
 """
 
-let private contextUsageColumnMigrations =
-    [ "context_current_tokens", "ALTER TABLE session_status ADD COLUMN context_current_tokens INTEGER;"
-      "context_token_limit", "ALTER TABLE session_status ADD COLUMN context_token_limit INTEGER;"
-      "context_usage_at", "ALTER TABLE session_status ADD COLUMN context_usage_at TEXT;" ]
+let private additiveColumnMigrations =
+    [ "intent_text", "TEXT"
+      "intent_ts", "TEXT"
+      "title_text", "TEXT"
+      "title_ts", "TEXT"
+      "context_current_tokens", "INTEGER"
+      "context_token_limit", "INTEGER"
+      "context_usage_at", "TEXT" ]
 
 let rec private readColumnNames (reader: SqliteDataReader) names =
     if reader.Read() then
@@ -195,7 +205,7 @@ let rec private readColumnNames (reader: SqliteDataReader) names =
     else
         names
 
-let private ensureContextUsageColumns (conn: SqliteConnection) =
+let private ensureAdditiveColumns (conn: SqliteConnection) =
     let existingColumns =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- "PRAGMA table_info(session_status);"
@@ -203,9 +213,12 @@ let private ensureContextUsageColumns (conn: SqliteConnection) =
         readColumnNames reader Set.empty
 
     let migrationSql =
-        contextUsageColumnMigrations
-        |> List.choose (fun (columnName, sql) ->
-            if Set.contains columnName existingColumns then None else Some sql)
+        additiveColumnMigrations
+        |> List.choose (fun (columnName, declaration) ->
+            if Set.contains columnName existingColumns then
+                None
+            else
+                Some $"ALTER TABLE session_status ADD COLUMN %s{columnName} %s{declaration};")
         |> String.concat Environment.NewLine
 
     if migrationSql <> "" then
@@ -230,9 +243,11 @@ let private upsertSql =
     """
 INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+     intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
      context_current_tokens, context_token_limit, context_usage_at)
-VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $upd, $seen,
+VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
+        $it, $its, $tt, $tts, $upd, $seen,
         $contextCurrent, $contextLimit, $contextAt)
 ON CONFLICT(session_id) DO UPDATE SET
     worktree_path = excluded.worktree_path,
@@ -243,6 +258,10 @@ ON CONFLICT(session_id) DO UPDATE SET
     last_user_ts  = excluded.last_user_ts,
     last_asst_msg = excluded.last_asst_msg,
     last_asst_ts  = excluded.last_asst_ts,
+    intent_text   = excluded.intent_text,
+    intent_ts     = excluded.intent_ts,
+    title_text    = excluded.title_text,
+    title_ts      = excluded.title_ts,
     updated_at    = excluded.updated_at,
     last_seen     = excluded.last_seen
 WHERE excluded.updated_at >= session_status.updated_at;
@@ -270,9 +289,11 @@ let private upsertContextUsageSql =
     """
 INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+     intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
      context_current_tokens, context_token_limit, context_usage_at)
-VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats, $upd, $seen,
+VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
+        $it, $its, $tt, $tts, $upd, $seen,
         $contextCurrent, $contextLimit, $contextAt)
 ON CONFLICT(session_id) DO UPDATE SET
     context_current_tokens = excluded.context_current_tokens,
@@ -289,7 +310,8 @@ WHERE session_status.context_usage_at IS NULL
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 WHERE last_seen >= $cutoff
@@ -303,7 +325,8 @@ ORDER BY last_seen;
 let private worktreeStatusesSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 WHERE worktree_path = $wt
@@ -332,7 +355,8 @@ DELETE FROM session_status WHERE last_seen < $cutoff;
 let private allStatusesSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 ORDER BY last_seen;
@@ -341,10 +365,12 @@ ORDER BY last_seen;
 let private statusBySessionSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts, updated_at, last_seen,
+       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
-WHERE session_id = $sid;
+WHERE session_id = $sid
+LIMIT 1;
 """
 
 // --- Reader / binder helpers ------------------------------------------------------------------
@@ -372,6 +398,8 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     let s = stored.Status
     let umText, umTs = msgToDb s.LastUserMessage
     let amText, amTs = msgToDb s.LastAssistantMessage
+    let itText, itTs = msgToDb s.Intent
+    let ttText, ttTs = msgToDb s.Title
     let contextCurrent, contextLimit, contextAt = contextToDb stored
     cmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
     cmd.Parameters.AddWithValue("$wt", WorktreePath.value stored.WorktreePath) |> ignore
@@ -382,6 +410,10 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$uts", umTs) |> ignore
     cmd.Parameters.AddWithValue("$am", amText) |> ignore
     cmd.Parameters.AddWithValue("$ats", amTs) |> ignore
+    cmd.Parameters.AddWithValue("$it", itText) |> ignore
+    cmd.Parameters.AddWithValue("$its", itTs) |> ignore
+    cmd.Parameters.AddWithValue("$tt", ttText) |> ignore
+    cmd.Parameters.AddWithValue("$tts", ttTs) |> ignore
     cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
     cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
     cmd.Parameters.AddWithValue("$contextCurrent", contextCurrent) |> ignore
@@ -443,7 +475,7 @@ type SessionActivityStore(dbPath: string) =
         use cmd = c.CreateCommand()
         cmd.CommandText <- schemaSql + migrateSql
         cmd.ExecuteNonQuery() |> ignore
-        ensureContextUsageColumns c
+        ensureAdditiveColumns c
         c
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
@@ -517,6 +549,15 @@ type SessionActivityStore(dbPath: string) =
         let persisted = readStoredBySession conn tx stored.SessionId
         tx.Commit()
         persisted
+
+    /// Read one durable session row regardless of the live idle-window cutoff.
+    member _.StatusBySession(sessionId: SessionId) : StoredStatus option =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- statusBySessionSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        use reader = cmd.ExecuteReader()
+        if reader.Read() then Some(readStored reader) else None
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.

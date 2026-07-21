@@ -21,12 +21,11 @@ open Server.SessionActivityStore
 
 // --- Wire contract DTO ------------------------------------------------------------------------
 
-// The single coupling point with extension.mjs (producer). The POST body is one report; `kind` is one
-// of the eight kinds the fold consumes (mapping 1:1 onto SessionEvent) or the liveness-only
-// `heartbeat`. An unknown `kind` is a validation error (rejected), never silently dropped. `message`
-// is present for user_prompt / assistant_message / awaiting_user_input (the ask_user question);
-// `skillName` only for skill_invoked; `currentTokens`/`tokenLimit` only for usage_info (a
-// status-preserving context gauge); turn_started / turn_ended / went_idle / heartbeat carry none of these.
+// The single coupling point with extension.mjs (producer). The POST body accepts a closed set of
+// lifecycle/content kinds, the state-only title bootstrap and usage gauge, plus the liveness-only
+// heartbeat. Unknown kinds are rejected. `message` is present for user_prompt / assistant_message /
+// intent_reported / title_reported / title_bootstrap and optionally awaiting_user_input;
+// `skillName` is only for skill_invoked, and usage counters only for usage_info.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -91,9 +90,9 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
 /// Map the wire `kind` (+ its optional message / skillName / usage counters) onto a SessionEvent. The
-/// seven status kinds plus the usage_info gauge and the liveness-only `heartbeat` are the whole
-/// contract; anything else is rejected. message is mandatory for user_prompt / assistant_message,
-/// optional for awaiting_user_input (the ask_user question), absent otherwise.
+/// The lifecycle/fold kinds plus state-only bootstrap/gauge and liveness heartbeat are the whole
+/// contract. message is mandatory for user_prompt / assistant_message / intent_reported /
+/// title_reported / title_bootstrap, optional for awaiting_user_input, and absent otherwise.
 let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) (currentTokens: int) (tokenLimit: int) : Result<SessionEvent, string> =
     match kind with
     | "turn_started" -> Ok TurnStarted
@@ -102,6 +101,9 @@ let internal parseEvent (kind: string) (message: MessageDto) (skillName: string)
     | "heartbeat" -> Ok Heartbeat
     | "user_prompt" -> parseMessage message |> Result.map UserPrompt
     | "assistant_message" -> parseMessage message |> Result.map AssistantMessage
+    | "intent_reported" -> parseMessage message |> Result.map IntentReported
+    | "title_reported" -> parseMessage message |> Result.map TitleReported
+    | "title_bootstrap" -> parseMessage message |> Result.map TitleBootstrap
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
         else Ok(SkillInvoked(capText skillName))
@@ -125,6 +127,9 @@ let internal kindText =
     | TurnStarted -> "turn_started"
     | UserPrompt _ -> "user_prompt"
     | AssistantMessage _ -> "assistant_message"
+    | IntentReported _ -> "intent_reported"
+    | TitleReported _ -> "title_reported"
+    | TitleBootstrap _ -> "title_bootstrap"
     | SkillInvoked _ -> "skill_invoked"
     | AwaitingUserInput _ -> "awaiting_user_input"
     | TurnEnded -> "turn_ended"
@@ -132,11 +137,22 @@ let internal kindText =
     | Heartbeat -> "heartbeat"
     | UsageInfo _ -> "usage_info"
 
+let private withMessageTimestamp at =
+    function
+    | UserPrompt message -> UserPrompt { message with At = at }
+    | AssistantMessage message -> AssistantMessage { message with At = at }
+    | IntentReported message -> IntentReported { message with At = at }
+    | TitleReported message -> TitleReported { message with At = at }
+    | TitleBootstrap message -> TitleBootstrap { message with At = at }
+    | AwaitingUserInput (Some message) -> AwaitingUserInput(Some { message with At = at })
+    | event -> event
+
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
-/// is clamped against `now` so a future timestamp can't poison the freshness/staleness net. Pure
-/// (given `now`), so the whole contract (nine kinds, unknown rejected, per-kind message/skill rules,
-/// future-timestamp clamp) is unit-testable without HTTP plumbing.
+/// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
+/// Message-bearing events use that same normalized timestamp. Pure (given `now`), so the whole
+/// contract (12 kinds, unknown rejected, per-kind payload rules, future-timestamp clamp) is
+/// unit-testable without HTTP plumbing.
 let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
     elif String.IsNullOrWhiteSpace req.sessionId then Error "missing sessionId"
@@ -148,15 +164,16 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
         parseProvider req.provider
         |> Result.bind (fun provider ->
             tryParseTimestamp req.occurredAt
-            |> Result.bind (fun occurredAt ->
+            |> Result.bind (fun rawOccurredAt ->
+                let occurredAt = clampFutureTimestamp now rawOccurredAt
                 parseEvent req.kind req.message req.skillName req.currentTokens req.tokenLimit
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
                       Provider = provider
                       EventId = EventId req.eventId
-                      OccurredAt = clampFutureTimestamp now occurredAt
-                      Event = ev })))
+                      OccurredAt = occurredAt
+                      Event = withMessageTimestamp occurredAt ev })))
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
 
@@ -217,9 +234,9 @@ type private ServiceMsg =
 /// shutdown. Owns the store's lifetime — Dispose disposes it.
 type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
 
-    // Apply one report on the single writer. A liveness heartbeat only bumps last_seen (openness); a
-    // real event folds → appends (dedupe on event_id) → upserts (last-write-wins) → feeds the
-    // scheduler. Returns the new in-memory live map.
+    // Apply one report on the single writer. State-only reports have independent persistence/order
+    // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
+    // the scheduler. Returns the new in-memory live map.
     let apply (live: Map<SessionId, StoredStatus>) (report: SessionActivityReport) : Map<SessionId, StoredStatus> =
         match report.Event with
         | Heartbeat ->
@@ -266,8 +283,86 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                     let persisted = store.UpsertContextUsage bumped
                     scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
                     live |> Map.add report.SessionId persisted
+        | TitleBootstrap _ ->
+            // Metadata hydration is current state, not a source event. Persist the title without
+            // appending history or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
+            // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
+            // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
+            // until a real event/heartbeat takes over.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let status =
+                prior
+                |> Option.map _.Status
+                |> Option.defaultValue emptyStatus
+                |> fun current -> SessionActivity.fold current report.Event
+            let stored =
+                match prior with
+                | Some existing ->
+                    { existing with
+                        Status = status
+                        LastSeen = max existing.LastSeen report.OccurredAt }
+                | None ->
+                    { SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Status = status
+                      UpdatedAt = DateTimeOffset.MinValue
+                      LastSeen = report.OccurredAt
+                      ContextUsageAt = None }
+            store.UpsertStatus stored
+            scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
+            live |> Map.add report.SessionId stored
+        | IntentReported _
+        | TitleReported _ ->
+            // Activity fields are source events, but they are ordered independently from lifecycle
+            // status. Preserve UpdatedAt so a fire-and-forget report cannot block an older lifecycle
+            // transition or be discarded merely because a newer lifecycle event arrived first.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let status =
+                prior
+                |> Option.map _.Status
+                |> Option.defaultValue emptyStatus
+                |> fun current -> SessionActivity.fold current report.Event
+            let stored =
+                match prior with
+                | Some existing ->
+                    { existing with
+                        Status = status
+                        LastSeen = max existing.LastSeen report.OccurredAt }
+                | None ->
+                    { SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Status = status
+                      UpdatedAt = DateTimeOffset.MinValue
+                      LastSeen = report.OccurredAt
+                      ContextUsageAt = None }
+            let eventRow =
+                { EventId = report.EventId
+                  SessionId = report.SessionId
+                  WorktreePath = report.WorktreePath
+                  Provider = report.Provider
+                  Kind = kindText report.Event
+                  Status = status.Status
+                  Skill = status.Skill
+                  Ts = report.OccurredAt }
+
+            match store.AppendAndUpsert(eventRow, stored) with
+            | None -> live
+            | Some persisted ->
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                live |> Map.add report.SessionId persisted
         | _ ->
-            let prior = live |> Map.tryFind report.SessionId
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
             let newStatus = SessionActivity.fold priorStatus report.Event
 
