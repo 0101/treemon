@@ -9,6 +9,7 @@ open System.Threading
 open NUnit.Framework
 open Server
 open Server.GitWorktree
+open Server.WorktreeDiff
 open Tests.GitTestHelpers
 
 let private runGitArgs (workingDir: string) (arguments: string list) =
@@ -80,7 +81,7 @@ let private initializeDiffRepo repoDir =
 [<Category("Fast")>]
 type ProcessRunnerArgumentListTests() =
 
-    let mutable tempDir = ""
+    let mutable tempDir = "" // NUnit SetUp and TearDown must share the per-test directory through fixture state.
 
     [<SetUp>]
     member _.Setup() =
@@ -250,7 +251,7 @@ type ProcessRunnerArgumentListTests() =
 [<Category("Fast")>]
 type WorktreeDiffIntegrationTests() =
 
-    let mutable tempDir = ""
+    let mutable tempDir = "" // NUnit SetUp and TearDown must share the per-test directory through fixture state.
 
     [<SetUp>]
     member _.Setup() =

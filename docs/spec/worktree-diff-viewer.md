@@ -22,11 +22,11 @@
 
 ## Technical Approach
 
-Treemon reuses the existing upstream-remote and base-branch resolution, without fetching on a viewer request, computes `git merge-base HEAD <baseRef>`, and compares that commit to the live worktree. A single `git diff` from the merge base to the working tree includes committed, staged, and unstaged tracked changes. Untracked files come from `git ls-files --others --exclude-standard -z` and are represented as additions after binary, size, and symlink checks.
+`WorktreeDiff` owns the renderer-neutral result types and live comparison workflow. It reuses `GitWorktree`'s upstream-remote and base-ref selection rules, without fetching on a viewer request, computes `git merge-base HEAD <baseRef>`, and compares that commit to the live worktree. A single `git diff` from the merge base to the working tree includes committed, staged, and unstaged tracked changes. Untracked files come from `git ls-files --others --exclude-standard -z` and are represented as additions after binary, size, and symlink checks.
 
 The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` endpoints for known worktrees. The summary stores a bounded server-owned identity map for the worktree and returns opaque identities plus status metadata; the file endpoint resolves only through that map, never from a browser-supplied root, Git ref, or filesystem path. Refreshing the summary replaces the map, making old identities stale.
 
-`ProcessRunner` gains an additive argument-list API with timeout and bounded stdout/stderr capture; existing string-based callers do not need to migrate. Diff Git calls use `ProcessStartInfo.ArgumentList`, `--` before paths, NUL-delimited machine output, `--no-ext-diff`, `--no-textconv`, and rename detection.
+`ProcessRunner` provides an additive argument-list API with timeout and bounded stdout/stderr capture; its recursive capture drains streams even after a limit is reached so child processes cannot block on full pipes. Existing string-based callers do not need to migrate. Diff Git calls use `ProcessStartInfo.ArgumentList`, `--` before paths, NUL-delimited machine output, `--no-ext-diff`, `--no-textconv`, and rename detection.
 
 `diff.html` is provisioned and classified like the Beadspace SystemView. It uses self-hosted, version-pinned diff2html assets to render one bounded patch at a time, with a Treemon-owned file navigator and persisted view preference. Syntax highlighting is loaded lazily after the unhighlighted diff appears.
 
@@ -44,7 +44,8 @@ The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` en
 |---|---|
 | `src/Shared/Types.fs` | Diff summary/file result types and canvas document classification |
 | `src/Server/ProcessRunner.fs` | Argument-list process execution with bounded output and timeout |
-| `src/Server/GitWorktree.fs` | Base resolution and exact live-worktree comparison |
+| `src/Server/GitWorktree.fs` | Shared upstream-remote/base-ref selection and general worktree Git operations |
+| `src/Server/WorktreeDiff.fs` | Renderer-neutral diff types and exact live-worktree comparison |
 | `src/Server/CanvasDocServer.fs` | Known-worktree diff data routes and generated view serving |
 | `src/Server/DiffProvisioner.fs` | Keeps `diff.html` synchronized with the embedded template |
 | `src/Server/DiffTemplate.html` | File navigator and diff2html rendering shell |

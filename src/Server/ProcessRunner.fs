@@ -106,6 +106,39 @@ let runResultWithTimeout (timeoutMs: int) (context: string) (fileName: string) (
         return toResult result
     }
 
+let rec private drainBoundedCapture
+    (stream: Stream)
+    (maxBytes: int)
+    (cancellationToken: CancellationToken)
+    (captured: MemoryStream)
+    (buffer: byte[])
+    limitExceeded
+    =
+    task {
+        let! count = stream.ReadAsync(buffer.AsMemory(), cancellationToken)
+
+        if count = 0 then
+            return
+                { Bytes = captured.ToArray()
+                  LimitExceeded = limitExceeded }
+        else
+            let remaining = maxBytes - int captured.Length
+            let captureCount = min count (max 0 remaining)
+
+            if captureCount > 0 then
+                do! captured.WriteAsync(buffer.AsMemory(0, captureCount), cancellationToken)
+
+            // Continue draining after the cap so a producer cannot block on a full pipe.
+            return!
+                drainBoundedCapture
+                    stream
+                    maxBytes
+                    cancellationToken
+                    captured
+                    buffer
+                    (limitExceeded || count > captureCount)
+    }
+
 let private captureBounded
     (stream: Stream)
     (maxBytes: int)
@@ -114,28 +147,15 @@ let private captureBounded
     task {
         use captured = new MemoryStream(min maxBytes (64 * 1024))
         let buffer = Array.zeroCreate<byte> (64 * 1024)
-        // Stream reads are an impure boundary: these two mutable flags are the
-        // smallest state needed to drive the asynchronous drain loop.
-        let mutable reading = true
-        let mutable limitExceeded = false
 
-        while reading do
-            let! count = stream.ReadAsync(buffer.AsMemory(), cancellationToken)
-
-            if count = 0 then
-                reading <- false
-            else
-                let remaining = maxBytes - int captured.Length
-                let captureCount = min count (max 0 remaining)
-
-                if captureCount > 0 then
-                    do! captured.WriteAsync(buffer.AsMemory(0, captureCount), cancellationToken)
-
-                limitExceeded <- limitExceeded || count > captureCount
-
-        return
-            { Bytes = captured.ToArray()
-              LimitExceeded = limitExceeded }
+        return!
+            drainBoundedCapture
+                stream
+                maxBytes
+                cancellationToken
+                captured
+                buffer
+                false
     }
 
 let private killProcessTree (proc: Process) =
