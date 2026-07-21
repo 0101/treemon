@@ -197,16 +197,6 @@ type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)
 
-module CanvasDocKind =
-    /// Classify a canvas doc by filename. System views are server-generated, data-driven docs
-    /// with no owner session; currently only the beads dashboard (beads.html) is one. This is the
-    /// single place to register future generated views (e.g. a CI/build view), keeping the
-    /// discriminator out of CanvasScanner and CanvasDocServer.
-    let classify (filename: string) : CanvasDocKind =
-        match filename.ToLowerInvariant() with
-        | "beads.html" -> SystemView
-        | _ -> AgentDoc
-
 type CanvasDoc =
     { Filename: string
       ContentHash: string

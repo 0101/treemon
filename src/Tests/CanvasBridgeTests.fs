@@ -691,7 +691,7 @@ let private scannedDoc (owner: string option) filename : CanvasDoc =
       ContentHash = "h-" + filename
       LastModified = DateTimeOffset(DateTime(2026, 1, 1), TimeSpan.Zero)
       OwnerSessionId = owner
-      Kind = CanvasDocKind.classify filename }
+      Kind = Server.CanvasDocKinds.classify filename }
 
 [<TestFixture>]
 [<Category("Unit")>]

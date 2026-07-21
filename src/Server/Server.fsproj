@@ -32,6 +32,8 @@
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
     <Compile Include="CanvasBridge.fs" />
+    <Compile Include="EmbeddedResource.fs" />
+    <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />
     <Compile Include="CanvasScanner.fs" />
@@ -43,6 +45,8 @@
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="IdiomorphScript.fs" />
+    <Compile Include="CanvasSendScript.fs" />
+    <Compile Include="CanvasSelectionScript.fs" />
     <Compile Include="CanvasDocServer.fs" />
     <Compile Include="SessionActivityService.fs" />
     <Compile Include="HttpSecurity.fs" />
@@ -55,6 +59,15 @@
          from disk; the two cannot drift. -->
     <EmbeddedResource Include="BeadspaceTemplate.html">
       <LogicalName>BeadspaceTemplate.html</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-selection-context.js">
+      <LogicalName>CanvasSelectionContext.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-send.js">
+      <LogicalName>CanvasSend.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-doc-kinds.json">
+      <LogicalName>CanvasDocKinds.json</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
