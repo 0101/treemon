@@ -31,7 +31,8 @@ session registration may consume one. SystemView queue entries re-resolve
 the current interaction owner when drained, never drain anonymously while unclaimed, and therefore
 honor an explicit reassignment made after enqueue. Scheduler reconciliation prunes owners whose
 worktree is no longer known or whose generated view file no longer exists. Explicit worktree-removal
-cleanup runs only after removal succeeds, so a failed removal attempt preserves ownership.
+cleanup and scheduler-state removal run only after Git removal succeeds, so a failed removal attempt
+remains known to reconciliation and preserves ownership.
 
 `POST /api/canvas/attribute` and the existing `canvas_take_ownership` tool dispatch by document
 kind: AgentDocs assign author ownership, while SystemViews explicitly assign or reassign the
