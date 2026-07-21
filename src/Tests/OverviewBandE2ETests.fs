@@ -412,7 +412,7 @@ type OverviewBandE2ETests() =
         }
 
     [<Test>]
-    member this.``History geometry is reused across an unrelated dashboard poll``() =
+    member this.``History chart skips an unrelated dashboard poll``() =
         task {
             let toggle = this.Page.Locator(".overview-band .history-toggle")
             let charts = this.Page.Locator(".overview-band .history-charts")
@@ -423,7 +423,9 @@ type OverviewBandE2ETests() =
 
             let firstChart = charts.First
             let! beforePoll = firstChart.GetAttributeAsync("data-geometry-build-count")
+            let! rendersBeforePoll = firstChart.GetAttributeAsync("data-render-count")
             Assert.That(beforePoll, Is.EqualTo "1")
+            Assert.That(rendersBeforePoll, Is.EqualTo "1")
 
             let isDashboardPoll (response: IResponse) =
                 response.Url.Contains("/IWorktreeApi/getWorktrees")
@@ -435,7 +437,9 @@ type OverviewBandE2ETests() =
                 )
 
             let! afterPoll = firstChart.GetAttributeAsync("data-geometry-build-count")
+            let! rendersAfterPoll = firstChart.GetAttributeAsync("data-render-count")
             Assert.That(afterPoll, Is.EqualTo "1")
+            Assert.That(rendersAfterPoll, Is.EqualTo "1")
         }
 
     [<Test>]

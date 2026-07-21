@@ -661,22 +661,35 @@ let private useFrameCoalescedHover geometryBuildCount =
 
     hover |> Option.filter (fun state -> state.GeometryBuildCount = geometryBuildCount), queueSample, clearHover
 
-/// Render one stacked stepped-area chart with its legend and crosshair tooltip. Static paths, markers,
-/// axes, and legend elements are built only when the chart kind, selected window, server anchor, or
-/// snapshot-list identity changes. Hover commits at most the latest pointer candidate once per animation
-/// frame and ignores candidates that resolve to the already-visible sampled point.
-[<ReactComponent>]
-let HistoryChart
-    chartKind
-    (anchor: DateTimeOffset)
-    (historyWindow: HistoryWindow)
-    (snapshots: OverviewSnapshot list)
-    : ReactElement =
+type private HistoryChartProps =
+    {| ChartKindKey: int
+       Anchor: DateTimeOffset
+       HistoryWindow: HistoryWindow
+       Snapshots: OverviewSnapshot list |}
+
+let private chartKindOfKey =
+    function
+    | 0 -> ChartKind.Agents
+    | _ -> ChartKind.Tasks
+
+/// Render one stacked stepped-area chart with its legend and crosshair tooltip. The memoized component
+/// boundary skips unrelated dashboard polling renders entirely; static paths, markers, axes, and legend
+/// elements are rebuilt only when the chart kind, selected window, server anchor, or snapshot-list
+/// identity changes. ChartKindKey is deliberately primitive so React's shallow memo comparison does not
+/// see a freshly allocated discriminated-union value on every parent render. Local hover state still
+/// renders independently, committing at most the latest pointer candidate once per animation frame and
+/// ignoring candidates for the already-visible sampled point.
+[<ReactMemoComponent>]
+let private HistoryChart (props: HistoryChartProps) : ReactElement =
+    let chartKind = chartKindOfKey props.ChartKindKey
+    let renderCount = React.useRef 0
+    renderCount.current <- renderCount.current + 1
+
     let input =
         { ChartKind = chartKind
-          HistoryWindow = historyWindow
-          Anchor = anchor
-          Snapshots = snapshots }
+          HistoryWindow = props.HistoryWindow
+          Anchor = props.Anchor
+          Snapshots = props.Snapshots }
 
     let geometryBuild = useChartGeometry input
     let geometry = geometryBuild.Geometry
@@ -720,7 +733,7 @@ let HistoryChart
               svg.width w
               svg.height h
               svg.custom ("role", "img")
-              svg.custom ("aria-label", $"{title} over the last {historyWindowLabel historyWindow}")
+              svg.custom ("aria-label", $"{title} over the last {historyWindowLabel props.HistoryWindow}")
               svg.onMouseMove onMove
               svg.onMouseLeave onLeave
               svg.children (geometry.StaticSvgElements @ crosshairElements) ]
@@ -761,6 +774,7 @@ let HistoryChart
     Html.div
         [ prop.className "history-charts"
           prop.custom ("data-geometry-build-count", string geometryBuild.BuildCount)
+          prop.custom ("data-render-count", string renderCount.current)
           prop.children
               [ Html.figure
                     [ prop.children
@@ -770,7 +784,15 @@ let HistoryChart
                 Html.div [ prop.className "chart-legend"; prop.children geometry.LegendElements ] ] ]
 
 let agentsChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
-    HistoryChart ChartKind.Agents anchor window snapshots
+    HistoryChart
+        {| ChartKindKey = 0
+           Anchor = anchor
+           HistoryWindow = window
+           Snapshots = snapshots |}
 
 let tasksChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
-    HistoryChart ChartKind.Tasks anchor window snapshots
+    HistoryChart
+        {| ChartKindKey = 1
+           Anchor = anchor
+           HistoryWindow = window
+           Snapshots = snapshots |}
