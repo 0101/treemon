@@ -78,10 +78,6 @@ Before implementing a helper, utility, or any non-trivial logic, **search the co
 - E2E tests use Playwright + NUnit against live data
 - Tests should assert on CSS classes and DOM structure, not specific data values
 
-## Code Review
-
-Run [focused-review](https://github.com/0101/focused-review) after every code change as the complete fail-safe. Documentation and instruction-only changes do not require it unless explicitly requested. Better up-front instructions should reduce findings and follow-up fixes, but never replace, narrow, or skip review for code changes. The `review/` directory contains the implementation rules and review concerns.
-
 ## Ports
 
 | Environment | Port |
