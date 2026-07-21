@@ -347,7 +347,11 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + IdiomorphScript.idiomorphJs
         + IdiomorphScript.morphController
 
-let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+let private handleCanvasRequest
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (diffHandlers: WorktreeDiffApi.Handlers)
+    (ctx: HttpContext)
+    : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
     let lastSlash = catchAll.LastIndexOf('/')
     if lastSlash < 1 then
@@ -361,7 +365,11 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
 
         let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
 
-        if filename = "beads-data" then
+        if filename = "diff-summary" then
+            do! diffHandlers.Summary worktreePath isKnown ctx
+        elif filename = "diff-file" then
+            do! diffHandlers.File worktreePath isKnown ctx
+        elif filename = "beads-data" then
             if not isKnown then
                 ctx.Response.StatusCode <- 404
                 do! ctx.Response.WriteAsync("Unknown worktree")
@@ -412,19 +420,44 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
 
+let internal createHost
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (service: WorktreeDiffApi.Service)
+    newIdentity
+    (canvasPort: int)
+    =
+    let diffHandlers =
+        WorktreeDiffApi.createHandlers service newIdentity
+
+    Microsoft.AspNetCore.Hosting.WebHostBuilder()
+        .UseKestrel(fun opts ->
+            opts.Listen(System.Net.IPAddress.Loopback, canvasPort))
+        .ConfigureServices(fun services ->
+            services.AddRouting() |> ignore)
+        .Configure(fun (app: IApplicationBuilder) ->
+            app.UseRouting() |> ignore
+            app.UseEndpoints(fun endpoints ->
+                endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
+                endpoints.MapGet(
+                    "/{**path}",
+                    RequestDelegate(
+                        handleCanvasRequest
+                            agent
+                            diffHandlers
+                    )
+                )
+                |> ignore)
+            |> ignore)
+        .Build()
+
 let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) (cts: System.Threading.CancellationToken) =
     let host =
-        Microsoft.AspNetCore.Hosting.WebHostBuilder()
-            .UseKestrel(fun opts ->
-                opts.Listen(System.Net.IPAddress.Loopback, canvasPort))
-            .ConfigureServices(fun services ->
-                services.AddRouting() |> ignore)
-            .Configure(fun (app: IApplicationBuilder) ->
-                app.UseRouting() |> ignore
-                app.UseEndpoints(fun endpoints ->
-                    endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
-                    endpoints.MapGet("/{**path}", RequestDelegate(handleCanvasRequest agent)) |> ignore) |> ignore)
-            .Build()
+        createHost
+            agent
+            WorktreeDiffApi.liveService
+            WorktreeDiffApi.newOpaqueIdentity
+            canvasPort
+
     Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"
     host.StartAsync(cts).ContinueWith(fun (t: System.Threading.Tasks.Task) ->
         if t.IsFaulted then

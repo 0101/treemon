@@ -10,6 +10,7 @@
     <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
+    <Compile Include="DiffEndpointTests.fs" />
     <Compile Include="ServerFixture.fs" />
     <Compile Include="MultiRepoApiTests.fs" />
     <Compile Include="DashboardTests.fs" />

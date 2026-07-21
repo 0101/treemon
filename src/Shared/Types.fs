@@ -204,6 +204,44 @@ type CanvasDoc =
       OwnerSessionId: string option
       Kind: CanvasDocKind }
 
+[<RequireQualifiedAccess>]
+type DiffChangeKind =
+    | Added
+    | Modified
+    | Deleted
+    | Renamed
+    | Untracked
+
+type DiffFileSummary =
+    { Identity: string
+      DisplayPath: string
+      OldDisplayPath: string option
+      Change: DiffChangeKind }
+
+type DiffSummaryDetails =
+    { BaseRef: string
+      FileCount: int
+      Files: DiffFileSummary list }
+
+[<RequireQualifiedAccess>]
+type DiffSummaryResult =
+    | Ready of DiffSummaryDetails
+    | Clean of baseRef: string
+    | BaseError
+    | GitError
+    | TooManyFiles of minimumFileCount: int
+
+[<RequireQualifiedAccess>]
+type DiffFileResult =
+    | Text of file: DiffFileSummary * patch: string
+    | Deleted of file: DiffFileSummary * patch: string
+    | Binary of file: DiffFileSummary
+    | Oversized of file: DiffFileSummary
+    | Truncated of file: DiffFileSummary
+    | Symlink of file: DiffFileSummary * patch: string option
+    | Unavailable of file: DiffFileSummary
+    | GitError of file: DiffFileSummary
+
 /// Single source of truth for the canvas-session launch prompt, shared by the client
 /// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
 module CanvasPrompt =

@@ -26,6 +26,8 @@
 
 The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` endpoints for known worktrees. The summary stores a bounded server-owned identity map for the worktree and returns opaque identities plus status metadata; the file endpoint resolves only through that map, never from a browser-supplied root, Git ref, or filesystem path. Refreshing the summary replaces the map, making old identities stale.
 
+The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parameters and `GET /<encoded-known-worktree>/diff-file?identity=<opaque-id>` with no other parameters. Valid semantic results are tagged JSON responses; malformed queries return 400, while unknown worktrees and absent, forged, or stale identities return generic 404 responses without repository content. Clean and error summaries also clear the prior identity map.
+
 `ProcessRunner` provides an additive argument-list API with timeout and bounded stdout/stderr capture; its recursive capture drains streams even after a limit is reached so child processes cannot block on full pipes. Existing string-based callers do not need to migrate. Diff Git calls use `ProcessStartInfo.ArgumentList`, `--` before paths, NUL-delimited machine output, `--no-ext-diff`, `--no-textconv`, and rename detection.
 
 `diff.html` is provisioned and classified like the Beadspace SystemView. It uses self-hosted, version-pinned diff2html assets to render one bounded patch at a time, with a Treemon-owned file navigator and persisted view preference. Syntax highlighting is loaded lazily after the unhighlighted diff appears.
@@ -37,6 +39,7 @@ The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` en
 - Over-limit summaries and patches are rejected as explicit states; partial patches are not rendered because an incomplete patch is not reliable input for diff2html.
 - Agent-mediated review uses generic SystemView selection interactions rather than renderer-specific comment widgets.
 - The generated diff view remains a SystemView, not an AgentDoc, so it stays non-archivable, non-shareable, and independent of authored-document morphing.
+- Diff HTTP results use stable status-tagged JSON rather than serializing F# discriminated unions directly, keeping the browser contract explicit while the shared domain model remains strongly typed.
 
 ## Key Files
 
@@ -46,6 +49,7 @@ The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` en
 | `src/Server/ProcessRunner.fs` | Argument-list process execution with bounded output and timeout |
 | `src/Server/GitWorktree.fs` | Shared upstream-remote/base-ref selection and general worktree Git operations |
 | `src/Server/WorktreeDiff.fs` | Renderer-neutral diff types and exact live-worktree comparison |
+| `src/Server/WorktreeDiffApi.fs` | Opaque identity snapshots, tagged JSON mapping, and guarded diff route handlers |
 | `src/Server/CanvasDocServer.fs` | Known-worktree diff data routes and generated view serving |
 | `src/Server/DiffProvisioner.fs` | Keeps `diff.html` synchronized with the embedded template |
 | `src/Server/DiffTemplate.html` | File navigator and diff2html rendering shell |
