@@ -408,3 +408,30 @@ type OverviewBandE2ETests() =
             do! Assertions.Expect(charts).ToHaveCountAsync(0)
             do! Assertions.Expect(breakdown).ToHaveCountAsync(1)
         }
+
+    [<Test>]
+    member this.``History geometry is reused across an unrelated dashboard poll``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+
+            let firstChart = charts.First
+            let! beforePoll = firstChart.GetAttributeAsync("data-geometry-build-count")
+            Assert.That(beforePoll, Is.EqualTo "1")
+
+            let isDashboardPoll (response: IResponse) =
+                response.Url.Contains("/IWorktreeApi/getWorktrees")
+
+            let! _ =
+                this.Page.WaitForResponseAsync(
+                    isDashboardPoll,
+                    PageWaitForResponseOptions(Timeout = 5000.0f)
+                )
+
+            let! afterPoll = firstChart.GetAttributeAsync("data-geometry-build-count")
+            Assert.That(afterPoll, Is.EqualTo "1")
+        }

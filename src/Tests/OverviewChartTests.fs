@@ -181,6 +181,90 @@ type OverviewChartTests() =
 
         Assert.That(indices, Is.EqualTo [| 2; 4; 5; 6 |])
 
+    [<Test>]
+    member _.``component geometry memo rebuilds only for its four declared inputs`` () =
+        let snapshots = [ taskSnap (hoursAgo 1.0) TaskBucketKind.Done 2 ]
+
+        let input: OverviewChart.GeometryInput =
+            { ChartKind = OverviewChart.ChartKind.Tasks
+              HistoryWindow = HistoryWindow.Hours24
+              Anchor = now
+              Snapshots = snapshots }
+
+        let build (geometryInput: OverviewChart.GeometryInput) = geometryInput.Anchor
+        let first = OverviewChart.memoizedGeometry build input None
+
+        let afterUnrelatedRenders =
+            [ 1 .. 5 ]
+            |> List.fold
+                (fun memo _ -> OverviewChart.memoizedGeometry build input (Some memo))
+                first
+
+        Assert.That(OverviewChart.geometryBuildCount afterUnrelatedRenders, Is.EqualTo 1)
+        Assert.That(OverviewChart.geometryValue afterUnrelatedRenders, Is.EqualTo now)
+
+        let equalSnapshotsWithNewIdentity = snapshots |> List.map id
+        Assert.That(Object.ReferenceEquals(snapshots, equalSnapshotsWithNewIdentity), Is.False)
+
+        [ { input with ChartKind = OverviewChart.ChartKind.Agents }
+          { input with HistoryWindow = HistoryWindow.Hours72 }
+          { input with Anchor = now + TimeSpan.FromMinutes 1.0 }
+          { input with Snapshots = equalSnapshotsWithNewIdentity } ]
+        |> List.iter (fun changedInput ->
+            let rebuilt =
+                OverviewChart.memoizedGeometry build changedInput (Some afterUnrelatedRenders)
+
+            Assert.That(OverviewChart.geometryBuildCount rebuilt, Is.EqualTo 2))
+
+    [<Test>]
+    member _.``hover snapping returns the active stepped point index`` () =
+        let points =
+            OverviewChart.taskPoints
+                now
+                window
+                [ taskSnap (hoursAgo 12.0) TaskBucketKind.Done 2
+                  taskSnap (hoursAgo 2.0) TaskBucketKind.Done 7 ]
+
+        let beforeChange =
+            OverviewChart.hoverSampleAt OverviewChart.ChartKind.Tasks window points 0.6
+            |> Option.get
+
+        let afterChange =
+            OverviewChart.hoverSampleAt OverviewChart.ChartKind.Tasks window points 0.95
+            |> Option.get
+
+        Assert.Multiple(fun () ->
+            Assert.That(beforeChange.PointIndex, Is.EqualTo 1)
+            Assert.That(beforeChange.Fraction, Is.EqualTo(0.5).Within 1e-9)
+            Assert.That(beforeChange.Tooltip.Total, Is.EqualTo 2)
+            Assert.That(afterChange.PointIndex, Is.EqualTo 2)
+            Assert.That(afterChange.Tooltip.Total, Is.EqualTo 7))
+
+    [<Test>]
+    member _.``same sampled point suppresses a hover state update`` () =
+        Assert.Multiple(fun () ->
+            Assert.That(OverviewChart.shouldUpdateHover None 3, Is.True)
+            Assert.That(OverviewChart.shouldUpdateHover (Some 3) 3, Is.False)
+            Assert.That(OverviewChart.shouldUpdateHover (Some 3) 4, Is.True))
+
+    [<Test>]
+    member _.``hover frame queue schedules once and flushes only the latest move`` () =
+        let first, scheduleFirst =
+            OverviewChart.emptyHoverFrameQueue ()
+            |> OverviewChart.queueHoverFrame "first"
+
+        let second, scheduleSecond = first |> OverviewChart.queueHoverFrame "second"
+        let third, scheduleThird = second |> OverviewChart.queueHoverFrame "third"
+        let candidate, cleared = OverviewChart.takeHoverFrame third
+        let _, scheduleAfterFlush = cleared |> OverviewChart.queueHoverFrame "next"
+
+        Assert.Multiple(fun () ->
+            Assert.That(scheduleFirst, Is.True)
+            Assert.That(scheduleSecond, Is.False)
+            Assert.That(scheduleThird, Is.False)
+            Assert.That(candidate, Is.EqualTo(Some "third"))
+            Assert.That(scheduleAfterFlush, Is.True))
+
     // ── Crosshair tooltip seam (task tm-activity-history-zx6) ──
 
     [<Test>]

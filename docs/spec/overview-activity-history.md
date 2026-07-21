@@ -137,6 +137,7 @@ corresponding live section.
 | Client refresh gate | Track client request time separately from the server response anchor. |
 | Cache | Cache one in-flight/completed response per window until 30 seconds after its server anchor. |
 | Rendering | Hand-written stepped SVG with memoized static geometry and frame-coalesced hover. |
+| Client geometry key | Rebuild only when chart kind, selected window, server anchor, or snapshot-list identity changes; commit only the latest hover candidate per animation frame and suppress repeated sampled points. |
 | Detail state | History and drill-down are ephemeral and mutually exclusive. |
 
 ## Key Files

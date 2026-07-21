@@ -10,9 +10,9 @@ module OverviewChart
 // stacked areas (each value holds until the next logged change, so irregular gaps produce uneven step
 // widths), a RIGHT-EDGE HOLD flat to "now", and EMPTY SERIES OMITTED from both the chart and the legend.
 //
-// Pure and Fable-safe: no IO, no Model dependency — just data -> ReactElement. Inline SVG geometry is the
-// documented dynamic-value exception (same as the band's proportional bar widths). The crosshair tooltip is
-// a separate follow-up (task tm-activity-history-zx6); this module renders the static chart + legend only.
+// Pure and Fable-safe: no Model dependency. Inline SVG geometry is the documented dynamic-value exception
+// (same as the band's proportional bar widths). Static geometry is cached independently from the local,
+// frame-coalesced hover state so dashboard ticks and pointer movement only update the crosshair + tooltip.
 
 open System
 open Shared
@@ -145,6 +145,13 @@ type TooltipRow = { Label: string; Accent: string; Count: int }
 /// Fable-safe — the React component only positions and paints it.
 type TooltipModel = { RelativeLabel: string; Rows: TooltipRow list; Total: int }
 
+/// The active stepped point selected for a cursor position. PointIndex is stable for the lifetime of one
+/// geometry build and is the equality key used to suppress hover updates inside the same sampled interval.
+type HoverSample =
+    { PointIndex: int
+      Fraction: float
+      Tooltip: TooltipModel }
+
 // The relative-time header for a snapped point, derived from its window-fraction (minutes-ago =
 // window * (1 - fraction)); mirrors the prototype's "Hh Mm ago" / "Mm ago" ladder, with 0 -> "now".
 let private relativeLabel (window: TimeSpan) (fraction: float) =
@@ -155,29 +162,104 @@ let private relativeLabel (window: TimeSpan) (fraction: float) =
     elif minutesAgo = 0 then "now"
     else $"{mm}m ago"
 
-/// Snap to the ACTIVE stepped snapshot for a cursor fraction and project the crosshair tooltip model: the
-/// last point at or before the cursor (the value actually held then — matching the stepped rendering),
-/// its non-empty series as rows in canonical order, a total, and a relative-time header. Returns None when
-/// there is no history to snap to. `chartKind` selects the canonical series set (matching
-/// agentPoints/taskPoints). Pure test/reuse seam — the React component is the only impure caller.
+let private tooltipForPoint (defs: SeriesDef list) (window: TimeSpan) (point: Point) =
+    let rows =
+        List.zip defs point.Counts
+        |> List.choose (fun (d, c) ->
+            if c > 0 then Some { Label = d.Label; Accent = d.Accent; Count = c } else None)
+
+    { RelativeLabel = relativeLabel window point.Fraction
+      Rows = rows
+      Total = List.sum point.Counts }
+
+let private sampleAt (samples: HoverSample array) (cursorFraction: float) =
+    let rec search low high best =
+        if low > high then
+            best
+        else
+            let middle = low + (high - low) / 2
+
+            if samples[middle].Fraction <= cursorFraction then
+                search (middle + 1) high (Some samples[middle])
+            else
+                search low (middle - 1) best
+
+    match samples with
+    | [||] -> None
+    | _ -> search 0 (samples.Length - 1) None |> Option.orElse (Some samples[0])
+
+/// Snap to the ACTIVE stepped snapshot for a cursor fraction. The returned point index is the component's
+/// same-sample suppression key; the tooltip and crosshair both use the returned fraction.
+let hoverSampleAt chartKind (window: TimeSpan) (points: Point list) (cursorFraction: float) : HoverSample option =
+    let defs = definitions chartKind
+
+    points
+    |> List.mapi (fun index point ->
+        { PointIndex = index
+          Fraction = point.Fraction
+          Tooltip = tooltipForPoint defs window point })
+    |> List.toArray
+    |> fun samples -> sampleAt samples cursorFraction
+
+/// Tooltip-only compatibility seam over hoverSampleAt.
 let tooltipAt chartKind (window: TimeSpan) (points: Point list) (cursorFraction: float) : TooltipModel option =
-    match points with
-    | [] -> None
-    | head :: _ ->
-        let defs = definitions chartKind
-        let snap =
-            points
-            |> List.filter (fun p -> p.Fraction <= cursorFraction)
-            |> List.tryLast
-            |> Option.defaultValue head
-        let rows =
-            List.zip defs snap.Counts
-            |> List.choose (fun (d, c) ->
-                if c > 0 then Some { Label = d.Label; Accent = d.Accent; Count = c } else None)
-        Some
-            { RelativeLabel = relativeLabel window snap.Fraction
-              Rows = rows
-              Total = List.sum snap.Counts }
+    hoverSampleAt chartKind window points cursorFraction |> Option.map _.Tooltip
+
+/// The complete key for one static geometry build. Snapshot identity is intentionally significant: an
+/// unrelated parent render preserves the same list object, while a newly installed response supplies a new
+/// input even when its values happen to compare equal.
+type GeometryInput =
+    { ChartKind: ChartKind
+      HistoryWindow: HistoryWindow
+      Anchor: DateTimeOffset
+      Snapshots: OverviewSnapshot list }
+
+type GeometryMemo<'geometry> =
+    private
+        { Input: GeometryInput
+          Geometry: 'geometry
+          BuildCount: int }
+
+let private sameGeometryInput previous current =
+    previous.ChartKind = current.ChartKind
+    && previous.HistoryWindow = current.HistoryWindow
+    && previous.Anchor = current.Anchor
+    && Object.ReferenceEquals(box previous.Snapshots, box current.Snapshots)
+
+/// Component-facing memoization seam. Production stores the returned value in a React ref; tests can use a
+/// cheap fake builder and assert exactly when the build count changes.
+let memoizedGeometry build input current =
+    match current with
+    | Some memo when sameGeometryInput memo.Input input -> memo
+    | previous ->
+        { Input = input
+          Geometry = build input
+          BuildCount = previous |> Option.map (fun memo -> memo.BuildCount + 1) |> Option.defaultValue 1 }
+
+let geometryValue memo = memo.Geometry
+let geometryBuildCount memo = memo.BuildCount
+
+/// One pending requestAnimationFrame slot. Repeated pointer moves replace Pending without requesting a
+/// second frame; taking the frame returns only the latest candidate and opens the slot for the next frame.
+type HoverFrameQueue<'candidate> =
+    private
+        { Pending: 'candidate option
+          IsScheduled: bool }
+
+let emptyHoverFrameQueue () =
+    { Pending = None
+      IsScheduled = false }
+
+let queueHoverFrame candidate queue =
+    { Pending = Some candidate
+      IsScheduled = true },
+    not queue.IsScheduled
+
+let takeHoverFrame queue =
+    queue.Pending, emptyHoverFrameQueue ()
+
+let shouldUpdateHover currentPointIndex nextPointIndex =
+    currentPointIndex <> Some nextPointIndex
 
 // Round a coordinate to an integer string (culture-invariant — integers carry no decimal separator), so
 // the emitted path/attribute geometry is deterministic under both Fable and the .NET test compile.
@@ -300,137 +382,125 @@ let lastPointPerPixel (xs: float[]) : int[] =
     |> List.map snd
     |> List.toArray
 
-/// Ephemeral hover state for the crosshair tooltip (task tm-activity-history-zx6): the cursor's position
-/// in SVG-x (for the dashed guide line) and window-fraction (for snapping to the active snapshot), plus
-/// its pixel offset within the figure (for placing the HTML tooltip). Lives only while the pointer is
-/// over a chart — reset on mouse-leave, never persisted.
-type private HoverState =
-    { SvgX: float
-      Frac: float
-      Px: float
-      Py: float
-      RectWidth: float }
+type private ChartGeometry =
+    { HoverSamples: HoverSample array
+      StaticSvgElements: ReactElement list
+      LegendElements: ReactElement list }
 
-/// Render one stacked stepped-area chart with its legend and crosshair tooltip for the given series over
-/// the window (spec decision #8). `title` supplies the accessible section name ("Active agents" /
-/// "Tasks"); `chartKind` selects the canonical series set. When there is no history the chart degrades
-/// to a bare baseline (grid + axes, no areas, no hover) rather than erroring.
-///
-/// Hovering the plot shows a dashed vertical crosshair at the cursor and a tooltip SNAPPED to the active
-/// stepped snapshot — the last plotted point at or before the cursor time, matching the stepped rendering
-/// — listing each non-empty series as `label: count` with a colour swatch, plus a relative-time header
-/// and a total. Rendered as a Feliz React component so the hover state stays local & ephemeral; the pure
-/// geometry (buildPoints/agentDefs/taskDefs) is shared with the static path & legend builders above and
-/// with the `agentPoints`/`taskPoints` test seams.
-[<ReactComponent>]
-let HistoryChart
-    (title: string)
-    chartKind
-    (now: DateTimeOffset)
-    (historyWindow: HistoryWindow)
-    (snapshots: OverviewSnapshot list)
-    : ReactElement =
-    let window = HistoryWindow.duration historyWindow
-    let defs = definitions chartKind
-    let hover, setHover = React.useState (None: HoverState option)
-    let pts = buildPoints defs now window snapshots |> List.toArray
-    let n = pts.Length
+let private xOf (fraction: float) =
+    padL + fraction * plotW
+
+let private chartTitle =
+    function
+    | ChartKind.Agents -> "Active agents"
+    | ChartKind.Tasks -> "Tasks"
+
+let private buildChartGeometry input =
+    let window = HistoryWindow.duration input.HistoryWindow
+    let defs = definitions input.ChartKind
+    let points = buildPoints defs input.Anchor window input.Snapshots |> List.toArray
+    let pointCount = points.Length
 
     // Y scale: the tallest stacked total, rounded UP to an even number (so the mid gridline is a whole
     // number), floored at 2 so an all-empty window still draws a sane baseline.
-    let maxY = pts |> Array.map (fun p -> List.sum p.Counts) |> Array.fold max 0 |> max 1
+    let maxY = points |> Array.map (fun point -> List.sum point.Counts) |> Array.fold max 0 |> max 1
     let yTop = float (((maxY + 1) / 2) * 2)
-
-    let xOf (frac: float) = padL + frac * plotW
-    let yOf (v: float) = padT + plotH - (v / yTop) * plotH
+    let yOf value = padT + plotH - (value / yTop) * plotH
     let yOfHeight height = padT + plotH - height
-    let xs = pts |> Array.map (fun p -> xOf p.Fraction)
+    let xs = points |> Array.map (fun point -> xOf point.Fraction)
+
     let heights =
-        pts
+        points
         |> Array.map (fun point ->
             let totalHeight = float (List.sum point.Counts) / yTop * plotH
             seriesPixelHeights totalHeight point.Counts |> List.toArray)
 
-    // Horizontal gridlines + y labels at 0, mid, top.
-    let gridEls =
+    let gridElements =
         [ 0.0; yTop / 2.0; yTop ]
-        |> List.collect (fun gy ->
-            let yy = yOf gy
+        |> List.collect (fun gridValue ->
+            let y = yOf gridValue
+
             [ Svg.line
                   [ svg.className "grid-line"
                     svg.x1 (int (Math.Round padL))
-                    svg.y1 (int (Math.Round yy))
+                    svg.y1 (int (Math.Round y))
                     svg.x2 (int (Math.Round(w - padR)))
-                    svg.y2 (int (Math.Round yy)) ]
+                    svg.y2 (int (Math.Round y)) ]
               Svg.text
                   [ svg.className "axis-label"
                     svg.x (int (Math.Round(padL - 6.0)))
-                    svg.y (int (Math.Round(yy + 3.0)))
+                    svg.y (int (Math.Round(y + 3.0)))
                     svg.textAnchor.endOfText
-                    svg.text (string (int gy)) ] ])
+                    svg.text (string (int gridValue)) ] ])
 
-    // X labels at quarter points, adapting to the selected window.
-    let axisEls =
-        List.zip [ 0.0; 0.25; 0.5; 0.75; 1.0 ] (windowAxisLabels historyWindow)
-        |> List.map (fun (frac, label) ->
+    let axisElements =
+        List.zip [ 0.0; 0.25; 0.5; 0.75; 1.0 ] (windowAxisLabels input.HistoryWindow)
+        |> List.map (fun (fraction, label) ->
             let anchor =
-                if frac = 0.0 then svg.textAnchor.startOfText
-                elif frac = 1.0 then svg.textAnchor.endOfText
+                if fraction = 0.0 then svg.textAnchor.startOfText
+                elif fraction = 1.0 then svg.textAnchor.endOfText
                 else svg.textAnchor.middle
+
             Svg.text
                 [ svg.className "axis-label axis-label-x"
-                  svg.x (int (Math.Round(xOf frac)))
+                  svg.x (int (Math.Round(xOf fraction)))
                   svg.y (int (Math.Round(h - 6.0)))
                   anchor
                   svg.text label ])
 
-    // Stacked stepped areas, bottom series first so upper series paint on top. Values are pixel heights
-    // with a 2px minimum for each present series. Threads the running lower edge immutably and omits
-    // any series that is empty across the whole window.
     let buildPath (pathXs: float[]) (accent: string) (lower: float[]) (upper: float[]) =
         let pathLength = pathXs.Length
-        let stepSegs =
-            [ for i in 1 .. pathLength - 1 ->
-                  $"L {ix pathXs[i]} {ix (yOfHeight upper[i - 1])} L {ix pathXs[i]} {ix (yOfHeight upper[i])}" ]
-        let downSegs =
-            [ for i in pathLength - 1 .. -1 .. 1 ->
-                  $"L {ix pathXs[i]} {ix (yOfHeight lower[i])} L {ix pathXs[i]} {ix (yOfHeight lower[i - 1])}" ]
-        let d =
+
+        let stepSegments =
+            [ for index in 1 .. pathLength - 1 ->
+                  $"L {ix pathXs[index]} {ix (yOfHeight upper[index - 1])} L {ix pathXs[index]} {ix (yOfHeight upper[index])}" ]
+
+        let downSegments =
+            [ for index in pathLength - 1 .. -1 .. 1 ->
+                  $"L {ix pathXs[index]} {ix (yOfHeight lower[index])} L {ix pathXs[index]} {ix (yOfHeight lower[index - 1])}" ]
+
+        let path =
             String.concat
                 " "
                 ([ $"M {ix pathXs[0]} {ix (yOfHeight upper[0])}" ]
-                 @ stepSegs
-                 @ downSegs
+                 @ stepSegments
+                 @ downSegments
                  @ [ $"L {ix pathXs[0]} {ix (yOfHeight lower[0])} Z" ])
-        Svg.path [ svg.className accent; svg.d d; svg.fill "currentColor"; svg.fillOpacity 0.82 ]
+
+        Svg.path
+            [ svg.className accent
+              svg.d path
+              svg.fill "currentColor"
+              svg.fillOpacity 0.82 ]
 
     let stackedSeries =
-        if n = 0 then
+        if pointCount = 0 then
             []
         else
             let _, reversed =
                 defs
                 |> List.indexed
                 |> List.fold
-                    (fun (lower: float[], acc) (k, def) ->
-                        let vals = heights |> Array.map (fun point -> point[k])
-                        let upper = Array.init n (fun i -> lower[i] + vals[i])
-                        upper, (def.Accent, vals, lower, upper) :: acc)
-                    (Array.zeroCreate n, [])
+                    (fun (lower: float[], acc) (index, definition) ->
+                        let values = heights |> Array.map (fun point -> point[index])
+                        let upper = Array.init pointCount (fun pointIndex -> lower[pointIndex] + values[pointIndex])
+                        upper, (definition.Accent, values, lower, upper) :: acc)
+                    (Array.zeroCreate pointCount, [])
+
             reversed
             |> List.rev
-            |> List.filter (fun (_, vals, _, _) -> vals |> Array.exists (fun value -> value > 0.0))
+            |> List.filter (fun (_, values, _, _) -> values |> Array.exists (fun value -> value > 0.0))
 
     let renderIndices = lastPointPerPixel xs
     let renderXs = renderIndices |> Array.map (fun index -> xs[index])
     let atRenderPoints (values: float[]) = renderIndices |> Array.map (fun index -> values[index])
 
-    let areaEls =
+    let areaElements =
         stackedSeries
         |> List.map (fun (accent, _, lower, upper) ->
             buildPath renderXs accent (atRenderPoints lower) (atRenderPoints upper))
 
-    let markerEls =
+    let markerElements =
         stackedSeries
         |> List.collect (fun (accent, _, lower, upper) ->
             minimumIntervalMarkers padL (padL + plotW) xs lower upper
@@ -448,62 +518,177 @@ let HistoryChart
                       svg.custom ("strokeLinecap", "butt")
                       svg.custom ("vector-effect", "non-scaling-stroke") ]))
 
-    // Legend — one entry per series that is non-empty somewhere in the window (matches the omitted areas).
-    let legendEls =
-        if n = 0 then
+    let legendElements =
+        if pointCount = 0 then
             []
         else
             defs
             |> List.indexed
-            |> List.choose (fun (k, def) ->
-                let has = pts |> Array.exists (fun p -> List.item k p.Counts > 0)
-                if has then
+            |> List.choose (fun (index, definition) ->
+                if points |> Array.exists (fun point -> List.item index point.Counts > 0) then
                     Some(
                         Html.span
-                            [ prop.className def.Accent
+                            [ prop.className definition.Accent
                               prop.children
                                   [ Html.span [ prop.className "swatch" ]
-                                    Html.span [ prop.className "chart-legend-label"; prop.text def.Label ] ] ]
+                                    Html.span [ prop.className "chart-legend-label"; prop.text definition.Label ] ] ]
                     )
                 else
                     None)
 
-    // Map a pointer move over the whole SVG into SVG-x + window-fraction + figure-pixel offset (mirrors
-    // the prototype: cursor scaled by the viewBox width / rendered width, clamped to the plot). No-op when
-    // there is no history to snap to.
-    let onMove (ev: Browser.Types.MouseEvent) =
-        if n > 0 then
-            let rect = ev.currentTarget?getBoundingClientRect ()
+    let hoverSamples =
+        points
+        |> Array.mapi (fun index point ->
+            { PointIndex = index
+              Fraction = point.Fraction
+              Tooltip = tooltipForPoint defs window point })
+
+    { HoverSamples = hoverSamples
+      StaticSvgElements = gridElements @ areaElements @ markerElements @ axisElements
+      LegendElements = legendElements }
+
+type private HoverState =
+    { Sample: HoverSample
+      GeometryBuildCount: int
+      UpdateCount: int }
+
+type private ScheduledFrame =
+    { Id: float
+      GeometryBuildCount: int }
+
+/// Render one stacked stepped-area chart with its legend and crosshair tooltip. Static paths, markers,
+/// axes, and legend elements are built only when the chart kind, selected window, server anchor, or
+/// snapshot-list identity changes. Hover commits at most the latest pointer candidate once per animation
+/// frame and ignores candidates that resolve to the already-visible sampled point.
+[<ReactComponent>]
+let HistoryChart
+    chartKind
+    (anchor: DateTimeOffset)
+    (historyWindow: HistoryWindow)
+    (snapshots: OverviewSnapshot list)
+    : ReactElement =
+    let hover, setHover = React.useState (None: HoverState option)
+    let hoverRef = React.useRef<HoverState option>(None)
+    let frameQueueRef = React.useRef<HoverFrameQueue<HoverSample>>(emptyHoverFrameQueue ())
+    let frameRef = React.useRef<ScheduledFrame option>(None)
+    let geometryMemoRef = React.useRef<GeometryMemo<ChartGeometry> option>(None)
+
+    let input =
+        { ChartKind = chartKind
+          HistoryWindow = historyWindow
+          Anchor = anchor
+          Snapshots = snapshots }
+
+    let geometryMemo = memoizedGeometry buildChartGeometry input geometryMemoRef.current
+    geometryMemoRef.current <- Some geometryMemo
+    let geometry = geometryValue geometryMemo
+    let buildCount = geometryBuildCount geometryMemo
+
+    let cancelFrame frame =
+        Browser.Dom.window?cancelAnimationFrame(frame.Id)
+
+    let clearPendingGeneration generation =
+        match frameRef.current with
+        | Some frame when frame.GeometryBuildCount = generation ->
+            cancelFrame frame
+            frameRef.current <- None
+            frameQueueRef.current <- emptyHoverFrameQueue ()
+        | _ -> ()
+
+    let clearAllPendingHover () =
+        match frameRef.current with
+        | Some frame ->
+            cancelFrame frame
+            frameRef.current <- None
+        | None -> ()
+
+        frameQueueRef.current <- emptyHoverFrameQueue ()
+
+    React.useEffect(
+        (fun () ->
+            React.createDisposable (fun () -> clearPendingGeneration buildCount)),
+        [| box buildCount |]
+    )
+
+    let commitSample sample =
+        let current =
+            hoverRef.current
+            |> Option.filter (fun state -> state.GeometryBuildCount = buildCount)
+
+        let currentPointIndex = current |> Option.map _.Sample.PointIndex
+
+        if shouldUpdateHover currentPointIndex sample.PointIndex then
+            let next =
+                { Sample = sample
+                  GeometryBuildCount = buildCount
+                  UpdateCount = current |> Option.map _.UpdateCount |> Option.defaultValue 0 |> (+) 1 }
+
+            hoverRef.current <- Some next
+            setHover (Some next)
+
+    let flushHoverFrame (_: float) =
+        frameRef.current <- None
+        let sample, remaining = takeHoverFrame frameQueueRef.current
+        frameQueueRef.current <- remaining
+        sample |> Option.iter commitSample
+
+    let queueSample sample =
+        match frameRef.current with
+        | Some frame when frame.GeometryBuildCount <> buildCount ->
+            cancelFrame frame
+            frameRef.current <- None
+            frameQueueRef.current <- emptyHoverFrameQueue ()
+        | _ -> ()
+
+        let queue, shouldSchedule = queueHoverFrame sample frameQueueRef.current
+        frameQueueRef.current <- queue
+
+        if shouldSchedule then
+            let frameId: float = Browser.Dom.window?requestAnimationFrame(flushHoverFrame)
+            frameRef.current <-
+                Some
+                    { Id = frameId
+                      GeometryBuildCount = buildCount }
+
+    let onMove (event: Browser.Types.MouseEvent) =
+        if geometry.HoverSamples.Length > 0 then
+            let rect = event.currentTarget?getBoundingClientRect ()
             let rectLeft: float = rect?left
-            let rectTop: float = rect?top
             let rectWidth: float = rect?width
             let scaleX = if rectWidth > 0.0 then w / rectWidth else 1.0
-            let rawX = (ev.clientX - rectLeft) * scaleX
-            let svgX = max padL (min (padL + plotW) rawX)
-            let frac = (svgX - padL) / plotW
+            let rawX = (event.clientX - rectLeft) * scaleX
+            let cursorX = max padL (min (padL + plotW) rawX)
+            let cursorFraction = (cursorX - padL) / plotW
 
-            setHover (
-                Some
-                    { SvgX = svgX
-                      Frac = frac
-                      Px = ev.clientX - rectLeft
-                      Py = ev.clientY - rectTop
-                      RectWidth = rectWidth }
-            )
+            match sampleAt geometry.HoverSamples cursorFraction with
+            | Some sample -> queueSample sample
+            | None -> ()
 
-    // Dashed vertical guide line at the cursor (pointer-events:none via CSS so it never steals the move).
-    let crosshairEls =
-        match hover with
-        | Some hv when n > 0 ->
+    let onLeave (_: Browser.Types.MouseEvent) =
+        clearAllPendingHover ()
+        let hadHover = hoverRef.current.IsSome
+        hoverRef.current <- None
+        if hadHover then setHover None
+
+    let activeHover =
+        hover |> Option.filter (fun state -> state.GeometryBuildCount = buildCount)
+
+    let crosshairElements =
+        activeHover
+        |> Option.map (fun state ->
+            let snappedX = xOf state.Sample.Fraction
+
             [ Svg.line
                   [ svg.className "cursor-line"
-                    svg.x1 (int (Math.Round hv.SvgX))
+                    svg.x1 (int (Math.Round snappedX))
                     svg.y1 (int (Math.Round padT))
-                    svg.x2 (int (Math.Round hv.SvgX))
-                    svg.y2 (int (Math.Round(padT + plotH))) ] ]
-        | _ -> []
+                    svg.x2 (int (Math.Round snappedX))
+                    svg.y2 (int (Math.Round(padT + plotH))) ] ])
+        |> Option.defaultValue []
 
-    let svgEl =
+    let title = chartTitle chartKind
+
+    let svgElement =
         Svg.svg
             [ svg.viewBox (0, 0, int w, int h)
               svg.width w
@@ -511,53 +696,56 @@ let HistoryChart
               svg.custom ("role", "img")
               svg.custom ("aria-label", $"{title} over the last {historyWindowLabel historyWindow}")
               svg.onMouseMove onMove
-              svg.onMouseLeave (fun _ -> setHover None)
-              svg.children (gridEls @ areaEls @ markerEls @ axisEls @ crosshairEls) ]
+              svg.onMouseLeave onLeave
+              svg.children (geometry.StaticSvgElements @ crosshairElements) ]
 
-    // The snapped HTML tooltip, absolutely positioned within the figure. Rows/total/header come from the
-    // pure `tooltipAt` seam; the component only positions & paints. Flips left of the cursor near the right
-    // edge and sits above it (translateY(-100%)) so the tooltip size never has to be measured.
-    let tooltipEl =
-        match hover with
-        | Some hv ->
-            match tooltipAt chartKind window (List.ofArray pts) hv.Frac with
-            | Some model ->
-                let rows =
-                    model.Rows
-                    |> List.map (fun r ->
-                        Html.div
-                            [ prop.className "tip-row"
-                              prop.children
-                                  [ Html.span [ prop.className (r.Accent + " swatch") ]
-                                    Html.span [ prop.className "tip-label"; prop.text (r.Label + ": ") ]
-                                    Html.b [ prop.text (string r.Count) ] ] ])
+    let tooltipElement =
+        match activeHover with
+        | Some state ->
+            let sample = state.Sample
+            let model = sample.Tooltip
 
-                let flipLeft = hv.Px > hv.RectWidth * 0.62
-                let leftPx = if flipLeft then hv.Px - 12.0 else hv.Px + 12.0
-                let transformStr = if flipLeft then "translate(-100%, -100%)" else "translate(0, -100%)"
+            let rows =
+                model.Rows
+                |> List.map (fun row ->
+                    Html.div
+                        [ prop.className "tip-row"
+                          prop.children
+                              [ Html.span [ prop.className (row.Accent + " swatch") ]
+                                Html.span [ prop.className "tip-label"; prop.text (row.Label + ": ") ]
+                                Html.b [ prop.text (string row.Count) ] ] ])
 
-                Html.div
-                    [ prop.className "chart-tip"
-                      prop.style
-                          [ style.left (length.px (int (Math.Round leftPx)))
-                            style.top (length.px (int (Math.Round(hv.Py - 8.0))))
-                            style.custom ("transform", transformStr) ]
-                      prop.children (
-                          [ Html.div [ prop.className "tip-time"; prop.text model.RelativeLabel ] ]
-                          @ rows
-                          @ [ Html.div [ prop.className "tip-total"; prop.text $"Total: {model.Total}" ] ]
-                      ) ]
-            | None -> Html.none
+            let leftPercent = xOf sample.Fraction / w * 100.0
+            let flipLeft = leftPercent > 62.0
+            let transform = if flipLeft then "translateX(-100%)" else "translateX(0)"
+
+            Html.div
+                [ prop.className "chart-tip"
+                  prop.style
+                      [ style.left (length.percent leftPercent)
+                        style.top (length.px 12)
+                        style.custom ("transform", transform) ]
+                  prop.children (
+                      [ Html.div [ prop.className "tip-time"; prop.text model.RelativeLabel ] ]
+                      @ rows
+                      @ [ Html.div [ prop.className "tip-total"; prop.text $"Total: {model.Total}" ] ]
+                  ) ]
         | None -> Html.none
+
+    let hoverUpdateCount = activeHover |> Option.map _.UpdateCount |> Option.defaultValue 0
+    let hoverSampleIndex = activeHover |> Option.map _.Sample.PointIndex |> Option.defaultValue -1
 
     Html.div
         [ prop.className "history-charts"
+          prop.custom ("data-geometry-build-count", string buildCount)
+          prop.custom ("data-hover-update-count", string hoverUpdateCount)
+          prop.custom ("data-hover-sample-index", string hoverSampleIndex)
           prop.children
-              [ Html.figure [ prop.children [ svgEl; tooltipEl ] ]
-                Html.div [ prop.className "chart-legend"; prop.children legendEls ] ] ]
+              [ Html.figure [ prop.children [ svgElement; tooltipElement ] ]
+                Html.div [ prop.className "chart-legend"; prop.children geometry.LegendElements ] ] ]
 
 let agentsChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
-    HistoryChart "Active agents" ChartKind.Agents anchor window snapshots
+    HistoryChart ChartKind.Agents anchor window snapshots
 
 let tasksChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
-    HistoryChart "Tasks" ChartKind.Tasks anchor window snapshots
+    HistoryChart ChartKind.Tasks anchor window snapshots
