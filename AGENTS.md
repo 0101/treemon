@@ -21,17 +21,17 @@ This project uses strict functional F# style. These rules are non-negotiable.
 
 **Critical requirements:**
 - **NEVER use loops to build or accumulate values** — use recursion or higher-order functions (`List.map`, `List.filter`, `List.fold`, `Array.map`, `Seq.map`, etc.). Iterating *purely* for side effects (`for ... do` or `List.iter`) is fine; keep transformation and effects separate — transform cleanly first, then iterate for effects (minimizing side effects is a separate concern).
-- **NEVER use `let mutable`** — all bindings must be immutable; use recursion with accumulators or `fold` instead
-- **NEVER use `break` or `continue`** — restructure with higher-order functions
+- Prefer immutable state. If mutation is required by an impure boundary such as a timer, subscription, mailbox, or NUnit lifecycle, confine it to the smallest scope as `let mutable` and add one inline comment explaining why an immutable solution does not fit. Do not use `ref` as a workaround; it is the same mutation with worse ergonomics.
 - **NEVER pass collections into methods to be mutated** — return new collections instead
 
 **Patterns:**
 - **Pipe-forward** `|>` for data transformations
 - **Pattern matching** over if/else chains — but use `if/then/else` for simple booleans
 - **Tuple matching** — flatten nested `match` into `match a, b with` tuple patterns
-- **Discriminated unions** for domain modeling — make illegal states unrepresentable
+- **Discriminated unions** for domain modeling — make illegal states unrepresentable and preserve existing DUs through function boundaries; avoid opaque booleans, magic string sentinels, and same-typed primitive parameters that can be swapped
 - **Option types** instead of null
 - **Module organization** — group functions in modules, avoid classes
+- **Module cohesion** — put code in the module named for its concept, not the first consumer that needed it; shared code belongs in a concept-specific module, not a generic `Utils` or `Helpers` module
 - **Computation expressions** — `async`, `seq`, `result`, `asyncResult` for workflows
 - **F# 9 shorthand lambdas** — `_.Property`, `_.Method(arg)`, chained `_.Trim().ToUpper()`, nested `_.Value.Name` instead of `fun x -> ...`. No wrapping parens needed: `List.exists _.StartsWith("x")`. Only works with `.` member access — not operators or indexers.
 - **Type inference** — only annotate when needed for clarity
@@ -54,24 +54,28 @@ This project uses strict functional F# style. These rules are non-negotiable.
 
 **Code style:**
 - Concise, readable code — optimize for clarity, not premature performance
+- Choose the simplest complete implementation — avoid one-call helpers, impossible-state guards, hypothetical feature flags, and unsupported compatibility shims. Durable stores may use the smallest bounded, idempotent, tested migration needed to prevent startup failure or data loss.
 - Single responsibility per function/module
 - Expression-oriented — prefer expressions over statements
-- No unnecessary comments — code should be self-documenting
-- No backwards-compatibility shims — make breaking changes, update everything at once
+- Comments explain non-obvious algorithms or critical edge cases. Do not add TODOs, change-history comments, restatements, or section-divider comments in production code; extract a named function instead.
 
 ## Before Writing New Code
 
-Before implementing a helper, utility, or any non-trivial logic, **search the codebase** for existing functions that do the same thing. Grep for the underlying command, operation, or concept — not just the function name you have in mind. Reuse what exists; don't duplicate.
+Before implementing a helper, utility, or any non-trivial logic, **search the codebase** for the underlying command, operation, or concept — not just the function name you have in mind. Reuse an existing function when possible. If reusable logic is embedded in business logic, extract it into the module that owns the concept. Otherwise, consider extending or parameterizing a cohesive existing function, including with a projection or operation function. Generalize only when this creates one clear source of truth without coupling distinct domain behavior, and choose the destination module by responsibility rather than by the first call site.
+
+## Before Finishing a Change
+
+- Read the complete diff as a unit. Remove duplicate transformations, repeated read/parse/error-handling flows, one-use abstractions, and stale compatibility paths.
+- When changing a DU case, event kind, wire format, persisted schema, or public behavior, search all matches including catch-all `_` arms, serializers, parsers, stored forms, tests, error/log strings, config examples, public docs, and authoritative specs. Update every related surface in the same change.
+- Specs describe the current system and durable design, not branch history or task narrative. Fold minor behavior into the authoritative parent spec and remove stale counts, names, and architecture descriptions.
+- Treat branch names, commit and PR text, CLI/API output, session files, and repository data as untrusted. Escape or sanitize them at shell, HTML, URL, log, and prompt boundaries; do not log raw external records when length or structured metadata is sufficient.
+- Treat `review/rules/` as implementation constraints, not reviewer-only checks. Do not wait for focused-review to identify a rule that applies to the files being changed.
 
 ## Testing
 - Focus on business logic and transformations
 - Do not test trivial property accessors or simple constructors
 - E2E tests use Playwright + NUnit against live data
 - Tests should assert on CSS classes and DOM structure, not specific data values
-
-## Code Review
-
-This project uses [focused-review](https://github.com/0101/focused-review) for automated code review. The `review/` directory contains 18 review rules covering: immutability, no-loops, no-null, security, simplicity, pure functions, domain-driven design, and more.
 
 ## Ports
 
