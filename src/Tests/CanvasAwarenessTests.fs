@@ -814,6 +814,32 @@ type NavigateCanvasDocTests() =
             Assert.That(filename, Is.EqualTo("plan.html"))
         | other -> Assert.Fail($"expected a single SelectCanvasDoc, got {other}")
 
+    [<Test>]
+    member _.``navigation follows the diff pane target while card focus remains elsewhere``() =
+        let model =
+            { defaultModel with
+                Repos =
+                    [ makeRepo "myrepo" [
+                        makeWorktree "myrepo" "focused" [ makeDoc "details.html" "focused-hash" ]
+                        makeWorktree "myrepo" "target" [
+                            makeSystemDoc "diff.html" "diff-hash"
+                            makeDoc "details.html" "target-hash" ] ] ]
+                FocusedElement = Some (Card "myrepo/focused")
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = Some "myrepo/target"
+                Canvas.ActiveCanvasDoc = Map.ofList [ "myrepo/target", "diff.html" ] }
+
+        let updated, cmd = update (NavigateCanvasDoc "details.html") model
+
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "myrepo/focused")),
+            "In-doc navigation must not change the dashboard card focus")
+        match dispatchedMsgs cmd with
+        | [ SelectCanvasDoc (scopedKey, filename) ] ->
+            Assert.That(scopedKey, Is.EqualTo("myrepo/target"),
+                "The explicit pane target, not the focused card, owns in-doc navigation")
+            Assert.That(filename, Is.EqualTo("details.html"))
+        | other -> Assert.Fail($"expected a single SelectCanvasDoc for the pane target, got {other}")
+
     // The accept/drop decision is the pure isKnownCanvasDoc predicate (the drop branch itself calls
     // Fable.Core.JS.console.warn, dummy code that throws under .NET, so it can't run through update
     // here). These assert the gate that decides whether a navigation is committed or dropped.

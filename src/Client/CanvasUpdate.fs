@@ -295,10 +295,11 @@ let dismissShareNotice (model: Model) =
     { model with Canvas = { model.Canvas with ShareNotice = None } }, Cmd.none
 
 let navigateCanvasDoc (filename: string) (model: Model) =
-    match model.FocusedElement with
-    | Some (Card scopedKey) ->
+    match CanvasState.activeCanvasWorktree model.FocusedElement model.Canvas.TargetWorktree with
+    | Some scopedKey ->
         // Defense-in-depth: filename arrives via an in-iframe postMessage (untrusted, '*' origin).
-        // Only switch tabs when it names a real CanvasDoc of the focused worktree — committing an
+        // Only switch tabs when it names a real CanvasDoc of the worktree driving the pane —
+        // including an explicit SystemView target that differs from card focus. Committing an
         // unknown filename (e.g. one still carrying a ?query/#hash) to ActiveCanvasDoc would
         // silently fall back to the first doc (see activeVisibleDoc), landing on the wrong tab.
         if isKnownCanvasDoc model scopedKey filename then
@@ -307,7 +308,7 @@ let navigateCanvasDoc (filename: string) (model: Model) =
             Fable.Core.JS.console.warn ($"[canvas] navigate-canvas-doc DROPPED: unknown doc '{filename}'")
             model, Cmd.none
     | _ ->
-        Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no focused card"
+        Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no active canvas worktree"
         model, Cmd.none
 
 let canvasMessageReceived (payload: string) (model: Model) =

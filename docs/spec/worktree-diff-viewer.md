@@ -31,6 +31,7 @@ The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` en
 The canvas server applies a shared loopback-host predicate as middleware before routing. Host validation parses IP literals without DNS resolution and accepts only `localhost`, IPv4 loopback addresses, or IPv6 loopback addresses.
 
 The card Diff action sets an explicit canvas worktree target while leaving dashboard card focus unchanged. The normal pane behavior still follows the focused card; the next explicit card selection clears this target override.
+In-document canvas links resolve and validate their destination against that active pane target, so navigation remains within the targeted worktree when card focus differs.
 
 The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parameters and `GET /<encoded-known-worktree>/diff-file?identity=<opaque-id>` with no other parameters. Valid semantic results are tagged JSON responses; malformed queries return 400, while unknown worktrees and absent, forged, or stale identities return generic 404 responses without repository content. Clean and error summaries also clear the prior identity map.
 
