@@ -1,7 +1,6 @@
 ---
 name: canvas
 description: Creates and updates HTML documents displayed in the Treemon canvas pane. Use when building dashboards, status pages, interactive forms, or any visual content for an agent session.
-allowed-tools: canvas_take_ownership
 ---
 
 # Canvas Docs
@@ -100,11 +99,9 @@ Instead: write the doc, briefly tell the user it's ready for their input, then *
 
 When you create or update a canvas doc, your session is automatically recorded as that doc's **owner**. That ownership is what routes the user's message replies back to *your* session — even when several agent sessions are running in the same worktree.
 
-You never need to know or send your own session ID: writing the `.html` file with **`apply_patch`**, **create**, or **edit** *is* the ownership declaration — the extension stamps in the session ID and reports it to Treemon for you. One patch may create, update, or move multiple canvas docs; each resulting destination is attributed. Always author canvas docs with a supported write tool under `.agents/canvas/`. Don't shell out to write the file (e.g. redirecting command output into it); script writes have no authoring-session event, and without an explicit claim the doc's messages may reach the wrong session.
+You never need to know or send your own session ID: writing the `.html` file with **`apply_patch`**, **create**, or **edit** *is* the ownership declaration — the extension stamps in the session ID and reports it to Treemon for you. One patch may create, update, or move multiple canvas docs; each resulting destination is attributed. Always author canvas docs with a supported write tool under `.agents/canvas/` so ownership is recorded automatically.
 
 Editing a doc another session created transfers ownership to you (most recent author wins), so from then on its messages arrive in your session.
-
-**Claiming ownership explicitly.** If a canvas doc was written by a **script or unsupported tool** (so no supported write event fired to declare ownership), or its messages are reaching the **wrong session**, claim it directly: call the **`canvas_take_ownership`** tool with the doc's filename — e.g. `canvas_take_ownership({ filename: "review.html" })`. It stamps in your session ID without rewriting the file. This is an escape hatch, not a routine step after `apply_patch`. When the user says something like "take ownership of the review doc," find which `.agents/canvas/*.html` they mean and call the tool with that filename.
 
 ## Updating
 

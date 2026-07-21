@@ -127,7 +127,7 @@ enqueue and drain is not reconciled.)
 | `src/Server/RefreshScheduler.fs` | Fallback-only scanner attribution: credits a no-owner changed doc to the worktree's bridge session **only when exactly one is registered** (`CanvasWatchers.fallbackOwner`/`attributeChangedDocs`); never overwrites a declared owner |
 | `src/Server/CanvasBridge.fs` | sessionId-keyed registry; owner-based delivery routing; liveness |
 | `src/Extension/extension.mjs`, `src/Extension/canvas-ownership.mjs` | Detect canvas write destinations, stamp the session ID, and forward single-shot declarations to `/api/canvas/attribute`; also expose the `canvas_take_ownership` escape hatch |
-| `src/Extension/skill/SKILL.md` | Instructs the agent to declare ownership when writing a canvas doc, and to call `canvas_take_ownership` for script/tool-generated or misrouted docs |
+| `src/Extension/skill/SKILL.md` | Instructs the agent to use ownership-aware write tools when authoring canvas docs |
 | `src/Server/WorktreeApi.fs` | Queues canvas messages, resumes owner sessions, and falls back to new sessions |
 | `src/Server/Program.fs` | Calls `CanvasDocOwnership.load()` during startup |
 | `src/Client/CanvasPane.fs` | Shows per-doc liveness based on the owning session |
