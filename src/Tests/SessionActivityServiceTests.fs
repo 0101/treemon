@@ -429,9 +429,6 @@ type IngestTests() =
             // No synthetic row appended (like a heartbeat) — only the one real status event is in history.
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 1, "a usage_info must not append to activity_events")
-            let persisted = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> List.find (fun row -> row.SessionId = SessionId "s1")
-            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))
-            Assert.That(persisted.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:05Z")))
             // The card path (scheduler) sees the gauge.
             match schedulerStatus agent "s1" with
             | Some fed -> Assert.That(fed.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }))

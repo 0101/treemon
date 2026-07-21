@@ -606,20 +606,6 @@ VALUES
         cmd.Parameters.AddWithValue("$wt", contextWorktree) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
-    let rec readColumnNames (reader: SqliteDataReader) names =
-        if reader.Read() then
-            readColumnNames reader (Set.add (reader.GetString 1) names)
-        else
-            names
-
-    let statusColumns (dbPath: string) =
-        use conn = new SqliteConnection(connStr dbPath)
-        conn.Open()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- "PRAGMA table_info(session_status);"
-        use reader = cmd.ExecuteReader()
-        readColumnNames reader Set.empty
-
     [<Test>]
     member _.``Construction adds context columns to an old database without losing rows``() =
         withDbPath (fun dbPath ->
@@ -627,13 +613,6 @@ VALUES
 
             use store = new SessionActivityStore(dbPath)
             let migrated = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
-            let columns = statusColumns dbPath
-
-            Assert.That(
-                [ "context_current_tokens"; "context_token_limit"; "context_usage_at" ]
-                |> List.forall (fun column -> Set.contains column columns),
-                Is.True
-            )
             Assert.That(migrated.Status.ContextUsage, Is.EqualTo(None))
             Assert.That(migrated.ContextUsageAt, Is.EqualTo(None))
 

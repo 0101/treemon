@@ -440,13 +440,10 @@ type SessionActivityStore(dbPath: string) =
     // owns schema creation. Never used for queries (that would share one connection across threads).
     let keepAlive =
         let c = openConn ()
-        use schemaCmd = c.CreateCommand()
-        schemaCmd.CommandText <- schemaSql
-        schemaCmd.ExecuteNonQuery() |> ignore
+        use cmd = c.CreateCommand()
+        cmd.CommandText <- schemaSql + migrateSql
+        cmd.ExecuteNonQuery() |> ignore
         ensureContextUsageColumns c
-        use migrateCmd = c.CreateCommand()
-        migrateCmd.CommandText <- migrateSql
-        migrateCmd.ExecuteNonQuery() |> ignore
         c
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
