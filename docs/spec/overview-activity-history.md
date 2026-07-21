@@ -75,7 +75,8 @@ server-side sample anchor with the resulting `OverviewSnapshot` timeline.
 - Agents and Tasks each render a stepped stacked-area chart directly below their live section. A
   chart is omitted when that live section is empty.
 - The left edge carries the value active at the window start; the right edge holds the latest value
-  to the fetch time. Hover shows a snapped crosshair, non-empty series, total, and relative time.
+  to the fetch time. Hover shows a snapped crosshair, non-empty series, total, and absolute local
+  time; timestamps from the current local day show `HH:mm`, while earlier days add the weekday.
 - Static chart geometry is reused until the window, server anchor, or snapshots change. Hover updates
   are frame-coalesced and update only the crosshair and tooltip.
 

@@ -15,6 +15,7 @@ module OverviewChart
 // frame-coalesced hover state so dashboard ticks and pointer movement only update the crosshair + tooltip.
 
 open System
+open System.Globalization
 open Shared
 open OverviewData
 open OverviewPresentation
@@ -92,9 +93,12 @@ let windowAxisLabels window =
         let hoursAgo = int (Math.Round(hoursTotal * (1.0 - fraction)))
         if hoursAgo = 0 then "now" else $"-{hoursAgo}h")
 
-/// One plotted point: its fraction along the window (0 = window start, 1 = now) and its per-series counts
-/// aligned to the given `defs`.
-type Point = { Fraction: float; Counts: int list }
+/// One plotted point: its timestamp, fraction along the window (0 = window start, 1 = now), and
+/// per-series counts aligned to the given `defs`.
+type Point =
+    { Timestamp: DateTimeOffset
+      Fraction: float
+      Counts: int list }
 
 /// Scope the snapshots to the window [now - window, now], carrying the value active at the LEFT edge
 /// (stepped semantics — a window opening mid-gap starts from the last snapshot before it, or the first
@@ -118,12 +122,25 @@ let private buildPoints (defs: SeriesDef list) (now: DateTimeOffset) (window: Ti
     | Some head ->
         let clamp f = max 0.0 (min 1.0 f)
         let fracOf (t: DateTimeOffset) = clamp ((t - start).TotalMinutes / window.TotalMinutes)
-        let insidePts = inside |> List.map (fun s -> { Fraction = fracOf s.Timestamp; Counts = countsOf s })
+        let insidePts =
+            inside
+            |> List.map (fun s ->
+                { Timestamp = s.Timestamp
+                  Fraction = fracOf s.Timestamp
+                  Counts = countsOf s })
+
         let lastCounts =
             match List.tryLast insidePts with
             | Some p -> p.Counts
             | None -> head
-        { Fraction = 0.0; Counts = head } :: (insidePts @ [ { Fraction = 1.0; Counts = lastCounts } ])
+
+        { Timestamp = start
+          Fraction = 0.0
+          Counts = head }
+        :: (insidePts
+            @ [ { Timestamp = now
+                  Fraction = 1.0
+                  Counts = lastCounts } ])
 
 /// Windowed points for the AGENT series (counts aligned to the canonical agent order
 /// Investigating, Planning, Executing, Reviewing, PR, Working, Waiting). Pure test/reuse seam.
@@ -139,11 +156,11 @@ let taskPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnap
 /// label, the accent class that tints its swatch, and the count held at that instant.
 type TooltipRow = { Label: string; Accent: string; Count: int }
 
-/// The pure model behind the crosshair tooltip (task tm-activity-history-zx6): the series rows visible at
-/// the snapped snapshot (each non-empty, in canonical order), the running total, and the relative-time
-/// header. Derived purely from the windowed Point list + a cursor fraction so it is unit-testable and
-/// Fable-safe — the React component only positions and paints it.
-type TooltipModel = { RelativeLabel: string; Rows: TooltipRow list; Total: int }
+/// The pure model behind the crosshair tooltip: the series rows visible at the snapped snapshot (each
+/// non-empty, in canonical order), the running total, and its absolute local-time header. Derived purely
+/// from the anchored Point list + a cursor fraction so it is unit-testable and Fable-safe — the React
+/// component only positions and paints it.
+type TooltipModel = { TimeLabel: string; Rows: TooltipRow list; Total: int }
 
 /// The active stepped point selected for a cursor position. PointIndex is stable for the lifetime of one
 /// geometry build and is the equality key used to suppress hover updates inside the same sampled interval.
@@ -152,30 +169,26 @@ type HoverSample =
       Fraction: float
       Tooltip: TooltipModel }
 
-// The relative-time header for a snapped point, derived from its window-fraction (minutes-ago =
-// window * (1 - fraction)); mirrors the prototype's "Hh Mm ago" / "Mm ago" ladder, with 0 -> "now".
-let private relativeLabel (window: TimeSpan) (fraction: float) =
-    let minutesAgo = int (Math.Round(window.TotalMinutes * (1.0 - fraction)))
-    let hh = minutesAgo / 60
-    let mm = minutesAgo % 60
-    if hh > 0 then $"{hh}h {mm}m ago"
-    elif minutesAgo = 0 then "now"
-    else $"{mm}m ago"
+let private tooltipTimeLabel (anchor: DateTimeOffset) (timestamp: DateTimeOffset) =
+    let localAnchor = anchor.ToLocalTime()
+    let localTimestamp = timestamp.ToLocalTime()
+    let format = if localTimestamp.Date = localAnchor.Date then "HH:mm" else "dddd HH:mm"
+    localTimestamp.ToString(format, CultureInfo.InvariantCulture)
 
-let private tooltipForPoint (defs: SeriesDef list) (window: TimeSpan) (point: Point) =
+let private tooltipForPoint (defs: SeriesDef list) (anchor: DateTimeOffset) (point: Point) =
     let rows =
         List.zip defs point.Counts
         |> List.choose (fun (d, c) ->
             if c > 0 then Some { Label = d.Label; Accent = d.Accent; Count = c } else None)
 
-    { RelativeLabel = relativeLabel window point.Fraction
+    { TimeLabel = tooltipTimeLabel anchor point.Timestamp
       Rows = rows
       Total = List.sum point.Counts }
 
-let private hoverSampleForPoint defs window index (point: Point) =
+let private hoverSampleForPoint defs anchor index (point: Point) =
     { PointIndex = index
       Fraction = point.Fraction
-      Tooltip = tooltipForPoint defs window point }
+      Tooltip = tooltipForPoint defs anchor point }
 
 let private sampleAt (samples: HoverSample array) (cursorFraction: float) =
     let rec search low high best =
@@ -195,17 +208,17 @@ let private sampleAt (samples: HoverSample array) (cursorFraction: float) =
 
 /// Snap to the ACTIVE stepped snapshot for a cursor fraction. The returned point index is the component's
 /// same-sample suppression key; the tooltip and crosshair both use the returned fraction.
-let hoverSampleAt chartKind (window: TimeSpan) (points: Point list) (cursorFraction: float) : HoverSample option =
+let hoverSampleAt chartKind (anchor: DateTimeOffset) (points: Point list) (cursorFraction: float) : HoverSample option =
     let defs = definitions chartKind
 
     points
-    |> List.mapi (hoverSampleForPoint defs window)
+    |> List.mapi (hoverSampleForPoint defs anchor)
     |> List.toArray
     |> fun samples -> sampleAt samples cursorFraction
 
 /// Tooltip-only compatibility seam over hoverSampleAt.
-let tooltipAt chartKind (window: TimeSpan) (points: Point list) (cursorFraction: float) : TooltipModel option =
-    hoverSampleAt chartKind window points cursorFraction |> Option.map _.Tooltip
+let tooltipAt chartKind (anchor: DateTimeOffset) (points: Point list) (cursorFraction: float) : TooltipModel option =
+    hoverSampleAt chartKind anchor points cursorFraction |> Option.map _.Tooltip
 
 /// The complete key for one static geometry build. Snapshot identity is intentionally significant: an
 /// unrelated parent render preserves the same list object, while a newly installed response supplies a new
@@ -540,7 +553,7 @@ let private buildChartGeometry input =
 
     let hoverSamples =
         points
-        |> Array.mapi (hoverSampleForPoint defs window)
+        |> Array.mapi (hoverSampleForPoint defs input.Anchor)
 
     { HoverSamples = hoverSamples
       StaticSvgElements = gridElements @ areaElements @ markerElements @ axisElements
@@ -774,7 +787,7 @@ let private HistoryChart (props: HistoryChartProps) : ReactElement =
                         style.top (length.px 12)
                         style.custom ("transform", transform) ]
                   prop.children (
-                      [ Html.div [ prop.className "tip-time"; prop.text model.RelativeLabel ] ]
+                      [ Html.div [ prop.className "tip-time"; prop.text model.TimeLabel ] ]
                       @ rows
                       @ [ Html.div [ prop.className "tip-total"; prop.text $"Total: {model.Total}" ] ]
                   ) ]
