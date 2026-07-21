@@ -426,29 +426,24 @@ let private openTerminal
     }
 
 let internal deleteWorktreeWith
-    removeGitWorktree
-    removeInteractionOwnership
+    (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
+    (removeInteractionOwnership: string -> Async<unit>)
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
-    async {
+    asyncResult {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
         match tryResolveWorktreeContext rootPaths state path with
-        | None -> return Error $"No worktree found at path '{path}'"
+        | None -> return! Error $"No worktree found at path '{path}'"
         | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
-            return Error "Cannot delete the main worktree"
+            return! Error "Cannot delete the main worktree"
         | Some ctx ->
-            let! result = removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
-
-            match result with
-            | Error _ -> return result
-            | Ok () ->
-                agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
-                do! removeInteractionOwnership ctx.Worktree.Path
-                return result
+            do! removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
+            agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
+            do! removeInteractionOwnership ctx.Worktree.Path
     }
 
 let private deleteWorktree agent rootPaths wtPath =
