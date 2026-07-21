@@ -53,9 +53,9 @@
     <Compile Include="IdiomorphScript.fs" />
     <Compile Include="CanvasSendScript.fs" />
     <Compile Include="CanvasSelectionScript.fs" />
+    <Compile Include="HttpSecurity.fs" />
     <Compile Include="CanvasDocServer.fs" />
     <Compile Include="SessionActivityService.fs" />
-    <Compile Include="HttpSecurity.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

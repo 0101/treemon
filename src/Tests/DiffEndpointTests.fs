@@ -35,6 +35,18 @@ let private get
     |> Async.AwaitTask
     |> TestUtils.runAsync
 
+let private getWithHost
+    (client: HttpClient)
+    (host: string)
+    (url: string)
+    : HttpResponseMessage =
+    use request = new HttpRequestMessage(HttpMethod.Get, url)
+    request.Headers.Host <- host
+
+    client.SendAsync(request)
+    |> Async.AwaitTask
+    |> TestUtils.runAsync
+
 let private worktreeUrl
     (baseUrl: string)
     (worktreePath: string)
@@ -233,6 +245,106 @@ type DiffEndpointHttpTests() =
             Path.GetTempPath(),
             $"treemon-diff-endpoint-{name}-{Guid.NewGuid():N}"
         )
+
+    [<Test>]
+    member _.``loopback Host headers can access diff document and asset routes``() =
+        let worktree = fakePath "loopback-host"
+        let canvasDir = Path.Combine(worktree, ".agents", "canvas")
+        let filename = "secret.html"
+        let rawHtml = "<!doctype html><html><head><title>Secret</title></head><body>repository document</body></html>"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+
+        let service =
+            fakeService
+                (Ok(summary [ changed ]))
+                (fun _ -> Ok(WorktreeDiff.Text "repository patch"))
+
+        Directory.CreateDirectory(canvasDir) |> ignore
+        File.WriteAllText(Path.Combine(canvasDir, filename), rawHtml)
+
+        try
+            withDiffServer
+                [ worktree ]
+                service
+                (fun _ -> "issued-id")
+                (fun client baseUrl ->
+                    let port = Uri(baseUrl).Port
+                    let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+                    let fileUrl = worktreeUrl baseUrl worktree "diff-file"
+                    let documentUrl = worktreeUrl baseUrl worktree filename
+                    let assetUrl = baseUrl + DiffAssets.cssPath
+                    let expectedDocument =
+                        rawHtml
+                        |> CanvasExport.injectAtHead (CanvasDocServer.buildInjection AgentDoc filename)
+
+                    let expectedAsset =
+                        DiffAssets.tryFind DiffAssets.cssPath
+                        |> Option.map _.Content
+                        |> Option.defaultWith (fun () -> failwith "Expected diff CSS asset")
+
+                    [ $"127.0.0.1:{port}"; $"localhost:{port}" ]
+                    |> List.iter (fun host ->
+                        use summaryResponse = getWithHost client host summaryUrl
+                        Assert.That(summaryResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        summaryResponse
+                        |> getResponseBody
+                        |> assertJson
+                            """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+
+                        use fileResponse = getWithHost client host $"{fileUrl}?identity=issued-id"
+                        Assert.That(fileResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        fileResponse
+                        |> getResponseBody
+                        |> assertJson
+                            """{"status":"text","file":{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"},"patch":"repository patch"}"""
+
+                        use documentResponse = getWithHost client host documentUrl
+                        Assert.That(documentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        Assert.That(getResponseBody documentResponse, Is.EqualTo(expectedDocument))
+
+                        use assetResponse = getWithHost client host assetUrl
+                        Assert.That(assetResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        Assert.That(getResponseBody assetResponse, Is.EqualTo(expectedAsset))))
+        finally
+            if Directory.Exists(worktree) then
+                Directory.Delete(worktree, true)
+
+    [<Test>]
+    member _.``attacker Host header is rejected before diff document and asset handlers``() =
+        let worktree = fakePath "attacker-host"
+        let canvasDir = Path.Combine(worktree, ".agents", "canvas")
+        let filename = "secret.html"
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary = fun _ -> failwith "Attacker Host reached diff-summary"
+              GetFile = fun _ _ _ -> failwith "Attacker Host reached diff-file" }
+
+        Directory.CreateDirectory(canvasDir) |> ignore
+        File.WriteAllText(
+            Path.Combine(canvasDir, filename),
+            "<!doctype html><html><head></head><body>repository document</body></html>"
+        )
+
+        try
+            withDiffServer
+                [ worktree ]
+                service
+                (fun _ -> failwith "Attacker Host issued a diff identity")
+                (fun client baseUrl ->
+                    let port = Uri(baseUrl).Port
+                    let host = $"attacker.example:{port}"
+
+                    [ worktreeUrl baseUrl worktree "diff-summary"
+                      worktreeUrl baseUrl worktree "diff-file?identity=forged"
+                      worktreeUrl baseUrl worktree filename
+                      baseUrl + DiffAssets.cssPath ]
+                    |> List.iter (fun url ->
+                        use response = getWithHost client host url
+                        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                        Assert.That(getResponseBody response, Is.EqualTo("Invalid Host header"))))
+        finally
+            if Directory.Exists(worktree) then
+                Directory.Delete(worktree, true)
 
     [<Test>]
     member _.``summary issues opaque identities and file requests resolve only through them``() =

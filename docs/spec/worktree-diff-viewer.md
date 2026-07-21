@@ -19,12 +19,15 @@
 - Selecting diff text exposes the generic SystemView Explain, Remove, and Comment actions. The payload includes structured diff source context: file, hunk header, and old/new line ranges.
 - A summary with more than 1,000 changed paths returns a `too-many-files` state and no partial file list. A selected file returns at most 2 MiB and 20,000 diff lines. If either capture limit is reached, the server returns an explicit `oversized` or `truncated` state and does not send a partial patch to diff2html. Every Git operation times out after 10 seconds.
 - File requests accept only opaque identities issued by a summary for that known worktree. Unknown, forged, or stale identities return 404 without exposing repository paths or content.
+- The canvas server rejects every request whose `Host` is not `localhost` or a loopback IP address before dispatching document, diff-data, or renderer-asset routes.
 
 ## Technical Approach
 
 `WorktreeDiff` owns the renderer-neutral result types and live comparison workflow. It reuses `GitWorktree`'s upstream-remote and base-ref selection rules, without fetching on a viewer request, computes `git merge-base HEAD <baseRef>`, and compares that commit to the live worktree. A single `git diff` from the merge base to the working tree includes committed, staged, and unstaged tracked changes. Untracked files come from `git ls-files --others --exclude-standard -z` and are represented as additions after binary, size, and symlink checks.
 
 The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` endpoints for known worktrees. The summary stores a bounded server-owned identity map for the worktree and returns opaque identities plus status metadata; the file endpoint resolves only through that map, never from a browser-supplied root, Git ref, or filesystem path. Refreshing the summary replaces the map, making old identities stale.
+
+The canvas server applies a shared loopback-host predicate as middleware before routing. Host validation parses IP literals without DNS resolution and accepts only `localhost`, IPv4 loopback addresses, or IPv6 loopback addresses.
 
 The card Diff action sets an explicit canvas worktree target while leaving dashboard card focus unchanged. The normal pane behavior still follows the focused card; the next explicit card selection clears this target override.
 

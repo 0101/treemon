@@ -64,10 +64,7 @@ let isLoopbackInjectUrl (injectUrl: string) : bool =
     match System.Uri.TryCreate(injectUrl, System.UriKind.Absolute) with
     | true, uri ->
         (uri.Scheme = System.Uri.UriSchemeHttp || uri.Scheme = System.Uri.UriSchemeHttps)
-        && (System.String.Equals(uri.Host, "localhost", System.StringComparison.OrdinalIgnoreCase)
-            || (match System.Net.IPAddress.TryParse uri.Host with
-                | true, ip -> System.Net.IPAddress.IsLoopback ip
-                | false, _ -> false))
+        && HttpSecurity.isLoopbackHost uri.Host
     | false, _ -> false
 
 let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
@@ -435,6 +432,18 @@ let private handleDiffAsset (ctx: HttpContext) : System.Threading.Tasks.Task = t
         do! ctx.Response.WriteAsync("Asset not found")
 }
 
+let private requireLoopbackHost
+    (ctx: HttpContext)
+    (next: RequestDelegate)
+    : System.Threading.Tasks.Task = task {
+    if HttpSecurity.isLoopbackHost ctx.Request.Host.Host then
+        do! next.Invoke(ctx)
+    else
+        ctx.Response.StatusCode <- StatusCodes.Status400BadRequest
+        do! ctx.Response.WriteAsync("Invalid Host header")
+        Log.log "Canvas" "Rejected non-loopback Host header"
+}
+
 let internal createHost
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (service: WorktreeDiffApi.Service)
@@ -450,6 +459,7 @@ let internal createHost
         .ConfigureServices(fun services ->
             services.AddRouting() |> ignore)
         .Configure(fun (app: IApplicationBuilder) ->
+            app.Use(fun ctx next -> requireLoopbackHost ctx next) |> ignore
             app.UseRouting() |> ignore
             app.UseEndpoints(fun endpoints ->
                 endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
