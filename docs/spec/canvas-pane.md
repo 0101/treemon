@@ -14,7 +14,7 @@
 
 ### Canvas Doc Kinds
 
-Every `CanvasDoc` carries a `Kind` (`src/Shared/Types.fs`), set when `CanvasScanner` scans the file via `CanvasDocKind.classify filename`:
+Every `CanvasDoc` carries a `Kind` (`src/Shared/Types.fs`), set when `CanvasScanner` scans the file via `CanvasDocKinds.classify filename`. The classifier reads the shared `src/Extension/canvas-doc-kinds.json` list also used by browser fallback:
 
 - **`AgentDoc`** — authored and owned by a coding session; interactive and file-driven. This is the default for any `.html` an agent writes to `.agents/canvas/`.
 - **`SystemView`** — server-generated, data-driven, with no owner session. Currently only the beads dashboard (`beads.html`; see `docs/spec/beadspace-canvas.md`). `classify` is the single place to register future generated views (e.g. a CI/build view).
@@ -29,6 +29,7 @@ The session-document machinery exists for an interactive document authored and o
 | Liveness dot | yes | no |
 | `▶ Start session` button | yes | no |
 | Message bridge (heartbeat + session routing) | yes | no |
+| Selected-text Explain / Remove / Comment actions | yes | no |
 | DOM morph (idiomorph runtime + controller + signal) | yes | no |
 | Content-hash awareness (unviewed badge, auto-display, card notification) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
 | Archive button | yes | no (server-regenerated, not user-owned) |
@@ -100,7 +101,11 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 
 ### Message Flow
 
-- A canvas doc sends interaction data with `window.parent.postMessage(...)`.
+- A canvas doc normally sends interaction data with injected `window.canvasSend(...)`; raw
+  `window.parent.postMessage(...)` remains the underlying contract.
+- Selecting AgentDoc text emits `canvas-selection` with Explain/Remove/Comment intent and ordered
+  surrounding context. The selected range pulses until the document updates or another selection
+  starts.
 - The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
@@ -129,7 +134,11 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
 - Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
-- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds receive scrollbar CSS, the canvas link interceptor, and the Escape focus-reclaim bridge (`reclaimFocusScript`, which posts `reclaim-focus` to the pane); an `AgentDoc` additionally receives the bridge heartbeat script, the idiomorph runtime, and the morph controller, whereas a `SystemView` receives none of those three.
+- The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
+  receive the shared base style, link interceptor, and Escape focus-reclaim bridge. An `AgentDoc`
+  additionally receives the bridge heartbeat, `canvasSend`, `canvasExpand`, selected-text actions,
+  JS error reporting, idiomorph, and the morph controller. A `SystemView` receives none of that
+  owner-session machinery.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
@@ -174,7 +183,8 @@ Three layers of state preservation:
 
 | File | Purpose |
 |---|---|
-| `src/Shared/Types.fs` | Shared canvas domain types (incl. `CanvasDocKind` + `CanvasDocKind.classify`), API methods, bridge liveness, send results, pane position |
+| `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness, send results, pane position |
+| `src/Server/CanvasDocKinds.fs` | Server classifier backed by the shared browser/server SystemView filename list |
 | `src/Client/App.fs` | Elmish `init`/`update` logic and the top-level `view` wiring (the `Model`/`Msg` types and shared plumbing live in `AppTypes.fs`; the canvas model slice in `CanvasState.fs`; the canvas `update`-arm bodies in `CanvasUpdate.fs`; the canvas pane view wiring in `CanvasView.fs` — each canvas arm here is a one-line delegation) |
 | `src/Client/AppTypes.fs` | Foundation module: the Elmish `Model` + `Msg` types plus shared plumbing (`worktreeApi` lazy proxy, `findWorktree`, `saveCollapsedReposCmd`) used by both `App.fs` and the canvas update arms. Compiled after `CanvasState.fs` and before `CanvasUpdate.fs`/`App.fs` so canvas update logic can be lifted out of `App.fs` without a cyclic reference. Type relocation only — `update` stays a single function in `App.fs`. |
 | `src/Client/CanvasUpdate.fs` | Canvas `update`-arm bodies extracted from `App.fs` (Toggle/SetPosition/Select/Open/Archive(+Result)/Share(+Result)/ClipboardWriteResult/DismissShareNotice/Navigate/MessageReceived/SendResult/Dismiss/LaunchCanvasSession/Morph*), the shared canvas helpers (`activeVisibleDoc`, `isKnownCanvasDoc`, `markVisibleDocCmd`, `applyFocus`), and the `messageListener` subscription glue. App.fs delegates one arm → one function. Compiled after `AppTypes.fs` and before `App.fs`. Body extraction only — `update` stays one function (no sub-`Msg`/`Cmd.map`). |

@@ -13,8 +13,9 @@ Authoring DX + Pane UX detail: `docs/spec/canvas-authoring-dx.md`.
 ## Baseline — what already ships
 
 For context, the canvas pane already delivers: multi-doc pane with tab bar / dock positions,
-per-doc ownership + owner-aware routing, liveness + Start-session, archive, the Beadspace
-dashboard, in-place idiomorph morph on content change, and keep-iframes-alive across tab switches.
+per-doc ownership + owner-aware routing, liveness + Start-session, archive, selected-text
+Explain/Remove/Comment actions, the Beadspace dashboard, in-place idiomorph morph on content
+change, and keep-iframes-alive across tab switches.
 
 Every served canvas doc is rewritten at the `</head>` injection point in
 `CanvasDocServer.buildInjection`. Today that injection is:
@@ -22,7 +23,7 @@ Every served canvas doc is rewritten at the `</head>` injection point in
 | Doc kind | Injected today |
 |---|---|
 | `SystemView` (e.g. beads) | `baseStyle` (scrollbar + dark-theme typographic base: 15px/1.55 body, serif heading scale (h1 1.85rem), ~800px single-column page, `:where(:root)` design tokens, quiet table/blockquote/form-control defaults) + link interceptor + Escape focus-reclaim bridge |
-| `AgentDoc` | the above + bridge heartbeat + `canvasSend` helper + JS error overlay + idiomorph runtime + morph controller |
+| `AgentDoc` | the above + bridge heartbeat + `canvasSend`/`canvasExpand` helpers + selected-text contextual actions + JS error overlay + idiomorph runtime + morph controller |
 
 Phases 6 and 8 below have shipped (the table already reflects them); Phase 7 (the authoring
 ecosystem) is the remaining work.
