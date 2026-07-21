@@ -46,6 +46,10 @@ worktree is no longer known or whose generated view file no longer exists. Expli
 cleanup and scheduler-state removal run only after Git removal succeeds, so a failed removal attempt
 remains known to reconciliation and preserves ownership.
 
+Ownership pruning snapshots filesystem existence once for the union of durable-owner and pending
+view keys at the mailbox's async boundary. Pure transformations then apply that immutable snapshot
+to both maps, so duplicate keys observe one consistent existence result.
+
 `POST /api/canvas/attribute` and the existing `canvas_take_ownership` tool dispatch by document
 kind: AgentDocs assign author ownership, while SystemViews explicitly assign or reassign the
 interaction owner. SystemView ownership is not surfaced through `CanvasDoc.OwnerSessionId`.

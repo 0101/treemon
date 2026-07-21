@@ -69,31 +69,38 @@ let private removePendingView worktreeKey filename pending =
         if Map.isEmpty remaining then pending |> Map.remove worktreeKey
         else pending |> Map.add worktreeKey remaining
 
-let private viewExists worktreeKey filename =
-    match Server.PathUtils.validateCanvasPath worktreeKey filename with
-    | Ok path -> File.Exists path
-    | Error _ -> false
+let private trackedViewKeys knownWorktrees viewsByWorktree =
+    viewsByWorktree
+    |> Map.toSeq
+    |> Seq.filter (fun (worktreeKey, _) -> knownWorktrees |> Set.contains worktreeKey)
+    |> Seq.collect (fun (worktreeKey, views) ->
+        views
+        |> Map.toSeq
+        |> Seq.map (fun (filename, _) -> worktreeKey, filename))
+    |> Set.ofSeq
 
-let private pruneViews knownWorktrees viewsByWorktree =
+let private pruneViews existingViewKeys viewsByWorktree =
     viewsByWorktree
     |> Map.toSeq
     |> Seq.choose (fun (worktreeKey, views) ->
-        if knownWorktrees |> Set.contains worktreeKey then
-            let existing = views |> Map.filter (fun filename _ -> viewExists worktreeKey filename)
-            if Map.isEmpty existing then None else Some(worktreeKey, existing)
-        else
-            None)
+        let existing =
+            views
+            |> Map.filter (fun filename _ ->
+                existingViewKeys |> Set.contains (worktreeKey, filename))
+
+        if Map.isEmpty existing then None else Some(worktreeKey, existing))
     |> Map.ofSeq
 
-let private prunePending knownWorktrees pending =
+let private prunePending existingViewKeys pending =
     pending
     |> Map.toSeq
     |> Seq.choose (fun (worktreeKey, views) ->
-        if knownWorktrees |> Set.contains worktreeKey then
-            let existing = views |> Map.filter (fun filename _ -> viewExists worktreeKey filename)
-            if Map.isEmpty existing then None else Some(worktreeKey, existing)
-        else
-            None)
+        let existing =
+            views
+            |> Map.filter (fun filename _ ->
+                existingViewKeys |> Set.contains (worktreeKey, filename))
+
+        if Map.isEmpty existing then None else Some(worktreeKey, existing))
     |> Map.ofSeq
 
 let private persist (filePath: string) (owners: Map<string, Map<string, string>>) =
@@ -296,10 +303,27 @@ let private createAgent filePath owners =
                     return! loop state'
 
                 | Prune(knownWorktrees, reply) ->
-                    let owners = state.Owners |> pruneViews knownWorktrees
+                    let trackedKeys =
+                        Set.union
+                            (state.Owners |> trackedViewKeys knownWorktrees)
+                            (state.Pending |> trackedViewKeys knownWorktrees)
+
+                    let! existingKeys =
+                        trackedKeys
+                        |> Set.toList
+                        |> List.map (fun ((worktreeKey, filename) as key) ->
+                            async {
+                                match Server.PathUtils.validateCanvasPath worktreeKey filename with
+                                | Ok path when File.Exists path -> return Some key
+                                | _ -> return None
+                            })
+                        |> Async.Parallel
+
+                    let existingViewKeys = existingKeys |> Array.choose id |> Set.ofArray
+                    let owners = state.Owners |> pruneViews existingViewKeys
                     let state' =
                         { Owners = owners
-                          Pending = state.Pending |> prunePending knownWorktrees }
+                          Pending = state.Pending |> prunePending existingViewKeys }
 
                     if owners <> state.Owners then do! persist filePath owners
                     reply.Reply()

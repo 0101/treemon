@@ -293,3 +293,33 @@ type PersistenceTests() =
             Assert.That(runAsync (restarted.GetOwner(knownWorktree, "diff.html")), Is.EqualTo(Some "session-a"))
             Assert.That(runAsync (restarted.GetOwner(knownWorktree, "beads.html")), Is.EqualTo(None: string option))
             Assert.That(runAsync (restarted.GetOwner(removedWorktree, "diff.html")), Is.EqualTo(None: string option)))
+
+    [<Test>]
+    member _.``prune preserves an existing view shared by owner and pending state``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let canvasDir = Path.Combine(worktree, ".agents", "canvas")
+            let viewPath = Path.Combine(canvasDir, "diff.html")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(viewPath, "<html></html>")
+
+            let store = createStore filePath
+
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+            Assert.That(Result.isOk (runAsync (store.BeginReassignment(worktree, "diff.html"))), Is.True)
+
+            runAsync (store.Prune(Set.singleton worktree))
+
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
+            Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "diff.html" ])))
+
+    [<Test>]
+    member _.``prune removes a pending claim when its view is missing``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+
+            Assert.That(runAsync (store.BeginClaim(worktree, "diff.html")), Is.EqualTo(None: string option))
+            runAsync (store.Prune(Set.singleton worktree))
+
+            Assert.That(store.ClaimPending(worktree, "session-a"), Is.Empty))
