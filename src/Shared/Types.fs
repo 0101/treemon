@@ -401,4 +401,4 @@ type CanvasShareResult =
       Title: string }
 
 // IWorktreeApi (the Fable.Remoting contract) lives in WorktreeApi.fs, compiled after OverviewData.fs
-// so it can name OverviewData.OverviewSnapshot in getOverviewHistory.
+// so getOverviewHistory can use the history types defined in OverviewData.

@@ -41,21 +41,24 @@ let private newEntry compute =
     )
 
 let private removeIfCurrent
-    (entries: ConcurrentDictionary<HistoryWindow, Entry>)
+    (Cache entries)
     window
     entry
     =
+    // Keep this conditional mutation behind the cache boundary so a failed entry cannot evict a
+    // newer replacement installed for the same window.
     (entries :> ICollection<KeyValuePair<HistoryWindow, Entry>>)
         .Remove(KeyValuePair(window, entry))
     |> ignore
 
 let get
-    (Cache entries)
+    cache
     (now: DateTimeOffset)
     window
     (compute: unit -> Async<OverviewHistoryResponse>)
     =
     async {
+        let (Cache entries) = cache
         let candidate = newEntry compute
 
         let entry =
@@ -70,7 +73,7 @@ let get
         try
             return! entry.Value |> Async.AwaitTask
         with ex ->
-            removeIfCurrent entries window entry
+            removeIfCurrent cache window entry
 
             let surfaced =
                 match ex with

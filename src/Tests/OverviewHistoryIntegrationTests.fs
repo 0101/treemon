@@ -77,8 +77,10 @@ type OverviewHistoryIntegrationTests() =
           LastSeen = lastSeen
           ContextUsageAt = None }
 
-    let readHistory store window =
-        WorktreeApi.overviewHistoryAt store anchor window
+    let readHistory (store: SessionActivityStore) (window: HistoryWindow) =
+        let duration = HistoryWindow.duration window
+        let inputs = store.QueryOverviewHistoryInputs(anchor - duration, anchor)
+        WorktreeApi.buildOverviewHistoryResponse anchor window inputs
 
     [<Test>]
     member _.``task snapshots round trip as count only JSON``() =

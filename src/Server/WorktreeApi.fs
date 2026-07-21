@@ -14,14 +14,12 @@ open Server.SessionActivityStore
 
 let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 
-let internal overviewHistoryAt
-    (store: SessionActivityStore)
+let internal buildOverviewHistoryResponse
     (anchor: DateTimeOffset)
     (requestedWindow: OverviewData.HistoryWindow)
+    (inputs: OverviewHistoryInputs)
     =
     let window = OverviewData.HistoryWindow.duration requestedWindow
-    let start = anchor - window
-    let inputs = store.QueryOverviewHistoryInputs(start, anchor)
 
     let response: OverviewData.OverviewHistoryResponse =
         { Anchor = anchor
@@ -48,7 +46,10 @@ let internal overviewHistoryCachedAt
                 return
                     { OverviewData.OverviewHistoryResponse.Anchor = anchor
                       Snapshots = [] }
-            | Some store -> return overviewHistoryAt store anchor requestedWindow
+            | Some store ->
+                let window = OverviewData.HistoryWindow.duration requestedWindow
+                let inputs = store.QueryOverviewHistoryInputs(anchor - window, anchor)
+                return buildOverviewHistoryResponse anchor requestedWindow inputs
         })
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
