@@ -12,39 +12,6 @@ open Server.GitWorktree
 open Server.WorktreeDiff
 open Tests.GitTestHelpers
 
-let private runGitArgs (workingDir: string) (arguments: string list) =
-    let psi =
-        ProcessStartInfo(
-            FileName = "git",
-            WorkingDirectory = workingDir,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        )
-
-    arguments |> List.iter psi.ArgumentList.Add
-
-    use proc = Process.Start(psi)
-    let stdout = proc.StandardOutput.ReadToEnd()
-    let stderr = proc.StandardError.ReadToEnd()
-    proc.WaitForExit()
-    proc.ExitCode, stdout, stderr
-
-let private gitOk workingDir arguments =
-    let exitCode, _, stderr = runGitArgs workingDir arguments
-    Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
-
-let private gitText workingDir arguments =
-    let exitCode, stdout, stderr = runGitArgs workingDir arguments
-    Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
-    stdout.Trim()
-
-let private gitOutput workingDir arguments =
-    let exitCode, stdout, stderr = runGitArgs workingDir arguments
-    Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
-    stdout
-
 let private writeText (repoDir: string) (relativePath: string) (content: string) =
     let path = Path.Combine(repoDir, relativePath)
     Path.GetDirectoryName(path) |> Directory.CreateDirectory |> ignore

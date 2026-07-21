@@ -1,7 +1,6 @@
 module Tests.DiffEndpointTests
 
 open System
-open System.Diagnostics
 open System.IO
 open System.Net
 open System.Net.Http
@@ -777,26 +776,6 @@ type DiffEndpointHttpTests() =
 
         let repoDir = Path.Combine(tempDir, "repo")
 
-        let runGitArgs arguments =
-            let psi =
-                ProcessStartInfo(
-                    FileName = "git",
-                    WorkingDirectory = repoDir,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                )
-
-            arguments |> List.iter psi.ArgumentList.Add
-
-            use proc = Process.Start(psi)
-            let stdout = proc.StandardOutput.ReadToEnd()
-            let stderr = proc.StandardError.ReadToEnd()
-            proc.WaitForExit()
-            Assert.That(proc.ExitCode, Is.EqualTo(0), stderr)
-            stdout
-
         try
             GitTestHelpers.initRepoOnMain repoDir
             File.WriteAllText(Path.Combine(repoDir, "tracked.txt"), "base")
@@ -825,7 +804,8 @@ type DiffEndpointHttpTests() =
                     "merge-base HEAD main"
 
             let expectedPatch =
-                runGitArgs
+                GitTestHelpers.gitOutput
+                    repoDir
                     [ "-c"
                       "core.quotepath=false"
                       "diff"
