@@ -388,6 +388,7 @@ type DiffViewerE2ETests() =
 
     [<TestCase("clean", "No changes")>]
     [<TestCase("base-error", "Comparison base unavailable")>]
+    [<TestCase("timeout", "Diff timed out")>]
     [<TestCase("git-error", "Diff unavailable")>]
     [<TestCase("too-many-files", "Too many changed files")>]
     member this.``summary state is explicit``(status: string, expectedTitle: string) =
@@ -406,6 +407,7 @@ type DiffViewerE2ETests() =
     [<TestCase("truncated", "Patch is too long")>]
     [<TestCase("symlink", "Symbolic link")>]
     [<TestCase("unavailable", "File unavailable")>]
+    [<TestCase("timeout", "File diff timed out")>]
     [<TestCase("git-error", "Could not load file diff")>]
     member this.``every selected-file state renders explicitly``(status: string, expectedTitle: string) =
         task {
@@ -454,6 +456,7 @@ type DiffViewerE2ETests() =
                             { status: 'truncated', file },
                             { status: 'symlink', file, patch: 'src/target.txt' },
                             { status: 'unavailable', file },
+                            { status: 'timeout', file },
                             { status: 'git-error', file }
                         ].forEach(renderFileResult);
                         Diff2Html.html = original;
@@ -462,6 +465,40 @@ type DiffViewerE2ETests() =
                 )
 
             Assert.That(calls, Is.EqualTo(0))
+        }
+
+    [<Test>]
+    member this.``timeout states explain how to retry``() =
+        task {
+            do! this.RouteSummary(summaryStateJson "timeout")
+            do! this.Goto()
+
+            let summary = this.Page.Locator("[data-state='timeout']")
+            do! summary.WaitForAsync()
+            let! summaryText = summary.TextContentAsync()
+
+            do! this.Page.UnrouteAsync("**/diff-summary")
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RouteFileStatus("timeout")
+            let! _ = this.Page.ReloadAsync()
+
+            let file = this.Page.Locator("[data-state='timeout']")
+            do! file.WaitForAsync()
+            let! fileText = file.TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    summaryText,
+                    Is.EqualTo(
+                        "Diff timed outGit did not finish within 10 seconds. Use Refresh to try again."
+                    )
+                )
+                Assert.That(
+                    fileText,
+                    Is.EqualTo(
+                        "File diff timed outSelect the file again to retry, or use Refresh to reload the comparison."
+                    )
+                ))
         }
 
     [<Test>]

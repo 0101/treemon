@@ -141,6 +141,8 @@ let internal serializeSummaryResult =
         )
     | DiffSummaryResult.BaseError ->
         JsonSerializer.Serialize {| status = "base-error" |}
+    | DiffSummaryResult.TimedOut ->
+        JsonSerializer.Serialize {| status = "timeout" |}
     | DiffSummaryResult.GitError ->
         JsonSerializer.Serialize {| status = "git-error" |}
     | DiffSummaryResult.TooManyFiles minimumFileCount ->
@@ -187,6 +189,11 @@ let internal serializeFileResult =
     | DiffFileResult.Unavailable file ->
         JsonSerializer.Serialize(
             {| status = "unavailable"
+               file = diffFileJson file |}
+        )
+    | DiffFileResult.TimedOut file ->
+        JsonSerializer.Serialize(
+            {| status = "timeout"
                file = diffFileJson file |}
         )
     | DiffFileResult.GitError file ->
@@ -240,6 +247,7 @@ let private resolveIdentity
 let private summaryErrorResult =
     function
     | WorktreeDiff.BaseNotFound _ -> DiffSummaryResult.BaseError
+    | WorktreeDiff.GitTimedOut _ -> DiffSummaryResult.TimedOut
     | WorktreeDiff.TooManyFiles minimumCount ->
         DiffSummaryResult.TooManyFiles minimumCount
     | _ -> DiffSummaryResult.GitError
@@ -256,6 +264,8 @@ let private fileResult file =
         DiffFileResult.Symlink(file, patch)
     | Error WorktreeDiff.FileUnavailable ->
         DiffFileResult.Unavailable file
+    | Error(WorktreeDiff.GitTimedOut _) ->
+        DiffFileResult.TimedOut file
     | Error _ -> DiffFileResult.GitError file
 
 let private writeJson (ctx: HttpContext) json = task {

@@ -12,12 +12,12 @@
 
 - Every non-archived worktree card has a **Diff** action. It remains disabled with a "Diff view not ready" tooltip until the generated `diff.html` SystemView appears in the scanned canvas-doc inventory; activation revalidates that inventory before opening and targeting the view. The same view can open in a standalone browser tab.
 - The view loads a changed-file summary first, then restores the previous file selection or selects the first file. A clean worktree shows an explicit empty state.
-- The comparison base uses the repository's configured base branch and upstream-remote resolution: prefer the remote-tracking ref, then fall back to the local base branch. A missing base, failed merge-base, failed Git command, or timeout produces a visible error state and no partial summary.
+- The comparison base uses the repository's configured base branch and upstream-remote resolution: prefer the remote-tracking ref, then fall back to the local base branch. A missing base, failed merge-base, or failed Git command produces a visible error state and no partial summary. A timeout produces an explicit retry-oriented timeout state and no partial summary or patch.
 - The selected file renders as a unified diff by default. Users can switch to split view, and the preference persists.
 - Syntax highlighting loads after the plain patch is visible, so highlighting never blocks initial rendering.
 - Renamed entries expose old and new paths. Deleted, binary, oversized, truncated, untracked, and symlink entries have explicit states rather than disappearing or failing silently. Untracked symlinks are never dereferenced.
 - Selecting diff text exposes the generic SystemView Explain, Remove, and Comment actions. The payload includes structured diff source context: file, hunk header, and old/new line ranges.
-- A summary with more than 1,000 changed paths returns a `too-many-files` state and no partial file list. A selected file returns at most 2 MiB and 20,000 diff lines. If either capture limit is reached, the server returns an explicit `oversized` or `truncated` state and does not send a partial patch to diff2html. Every Git operation times out after 10 seconds.
+- A summary with more than 1,000 changed paths returns a `too-many-files` state and no partial file list. A selected file returns at most 2 MiB and 20,000 diff lines. If either capture limit is reached, the server returns an explicit `oversized` or `truncated` state and does not send a partial patch to diff2html. Every Git operation times out after 10 seconds, and the API preserves that outcome as a `timeout` state rather than collapsing it into `git-error`.
 - File requests accept only opaque identities issued by a summary for that known worktree. Unknown, forged, or stale identities return 404 without exposing repository paths or content.
 - The canvas server rejects every request whose `Host` is not `localhost` or a loopback IP address before dispatching document, diff-data, or renderer-asset routes.
 
@@ -47,6 +47,7 @@ The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parame
 - The generated diff view remains a SystemView, not an AgentDoc, so it stays non-archivable, non-shareable, and independent of authored-document morphing.
 - Diff HTTP results use stable status-tagged JSON rather than serializing F# discriminated unions directly, keeping the browser contract explicit while the shared domain model remains strongly typed.
 - Opening Diff targets the pane independently of dashboard card focus so action-event propagation cannot silently select or launch the card.
+- The uniform 10-second Git deadline remains the bounded-response contract. Timeout results are explicit and retry-oriented; operation-specific tuning should be introduced only if real-repository evidence shows the deadline is routinely too short.
 
 ## Key Files
 

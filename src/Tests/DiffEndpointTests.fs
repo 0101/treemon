@@ -194,6 +194,8 @@ type DiffSerializationTests() =
               """{"status":"clean","baseRef":"main","fileCount":0,"files":[]}"""
               DiffSummaryResult.BaseError,
               """{"status":"base-error"}"""
+              DiffSummaryResult.TimedOut,
+              """{"status":"timeout"}"""
               DiffSummaryResult.GitError,
               """{"status":"git-error"}"""
               DiffSummaryResult.TooManyFiles 1001,
@@ -224,6 +226,8 @@ type DiffSerializationTests() =
               """{"status":"symlink","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":null}"""
               DiffFileResult.Unavailable file,
               """{"status":"unavailable","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
+              DiffFileResult.TimedOut file,
+              """{"status":"timeout","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
               DiffFileResult.GitError file,
               """{"status":"git-error","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}""" ]
 
@@ -431,6 +435,16 @@ type DiffEndpointHttpTests() =
                   )
               ),
               """{"status":"git-error"}"""
+              Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveRemote),
+              """{"status":"timeout"}"""
+              Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveBase),
+              """{"status":"timeout"}"""
+              Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveMergeBase),
+              """{"status":"timeout"}"""
+              Error(WorktreeDiff.GitTimedOut WorktreeDiff.EnumerateTracked),
+              """{"status":"timeout"}"""
+              Error(WorktreeDiff.GitTimedOut WorktreeDiff.EnumerateUntracked),
+              """{"status":"timeout"}"""
               Error(WorktreeDiff.TooManyFiles 1001),
               """{"status":"too-many-files","minimumFileCount":1001}""" ]
 
@@ -507,6 +521,7 @@ type DiffEndpointHttpTests() =
               entry "truncated.txt" None WorktreeDiff.Modified
               entry "link.txt" None WorktreeDiff.Untracked
               entry "missing.txt" None WorktreeDiff.Untracked
+              entry "timeout.txt" None WorktreeDiff.Modified
               entry "git-error.txt" None WorktreeDiff.Modified ]
 
         let identityFor
@@ -528,6 +543,11 @@ type DiffEndpointHttpTests() =
                         Ok(WorktreeDiff.Symlink None)
                     | "missing.txt" ->
                         Error WorktreeDiff.FileUnavailable
+                    | "timeout.txt" ->
+                        Error(
+                            WorktreeDiff.GitTimedOut
+                                WorktreeDiff.LoadFile
+                        )
                     | "git-error.txt" ->
                         Error(
                             WorktreeDiff.GitFailed(
@@ -573,6 +593,8 @@ type DiffEndpointHttpTests() =
                 DiffFileResult.Symlink(descriptor, None)
             | "missing.txt" ->
                 DiffFileResult.Unavailable descriptor
+            | "timeout.txt" ->
+                DiffFileResult.TimedOut descriptor
             | "git-error.txt" ->
                 DiffFileResult.GitError descriptor
             | other -> failwith $"Unexpected file {other}"

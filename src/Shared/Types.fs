@@ -228,6 +228,7 @@ type DiffSummaryResult =
     | Ready of DiffSummaryDetails
     | Clean of baseRef: string
     | BaseError
+    | TimedOut
     | GitError
     | TooManyFiles of minimumFileCount: int
 
@@ -240,6 +241,7 @@ type DiffFileResult =
     | Truncated of file: DiffFileSummary
     | Symlink of file: DiffFileSummary * patch: string option
     | Unavailable of file: DiffFileSummary
+    | TimedOut of file: DiffFileSummary
     | GitError of file: DiffFileSummary
 
 /// Single source of truth for the canvas-session launch prompt, shared by the client
