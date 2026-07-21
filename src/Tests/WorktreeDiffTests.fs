@@ -20,6 +20,9 @@ let private writeText (repoDir: string) (relativePath: string) (content: string)
 let private normalizeNewlines (value: string) =
     value.Replace("\r\n", "\n").Replace("\r", "\n")
 
+let private generatedDiffViewerGitPath =
+    String.concat "/" [ ".agents"; "canvas"; "diff.html" ]
+
 let private assertSummaryOk result =
     match result with
     | Ok summary -> summary
@@ -318,6 +321,55 @@ type WorktreeDiffIntegrationTests() =
                 Is.EqualTo(normalizeNewlines directPatch)
             )
         | _ -> Assert.Fail($"Expected text patch, got {trackedPatch}")
+
+    [<Test>]
+    member _.``provisioned untracked diff viewer does not dirty a clean summary without an agents ignore``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+
+        DiffProvisioner.provisionViewer repoDir |> ignore
+
+        let directUntracked =
+            gitText
+                repoDir
+                [ "ls-files"
+                  "--others"
+                  "--exclude-standard"
+                  "--" ]
+
+        let summary =
+            getWorktreeDiffSummary repoDir
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        Assert.That(directUntracked, Is.EqualTo(generatedDiffViewerGitPath))
+        Assert.That(summary.Files, Is.Empty)
+
+    [<Test>]
+    member _.``provisioned tracked diff viewer does not dirty a clean summary``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        let relativeDiffPath = Path.Combine(".agents", "canvas", "diff.html")
+        let diffPath = Path.Combine(repoDir, relativeDiffPath)
+        writeText repoDir relativeDiffPath "stale"
+        gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
+        gitOk repoDir [ "commit"; "-m"; "track stale diff viewer" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+
+        DiffProvisioner.provisionViewer repoDir |> ignore
+
+        let directTracked =
+            gitText repoDir [ "diff"; "--name-only"; "main"; "--" ]
+
+        let summary =
+            getWorktreeDiffSummary repoDir
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        Assert.That(File.ReadAllText(diffPath), Is.EqualTo(DiffTemplate.html))
+        Assert.That(directTracked, Is.EqualTo(generatedDiffViewerGitPath))
+        Assert.That(summary.Files, Is.Empty)
 
     [<Test>]
     member _.``remote tracking base is preferred without fetching``() =

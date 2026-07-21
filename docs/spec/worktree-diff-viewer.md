@@ -12,6 +12,7 @@
 
 - Every non-archived worktree card has a **Diff** action. It remains disabled with a "Diff view not ready" tooltip until the generated `diff.html` SystemView appears in the scanned canvas-doc inventory; activation revalidates that inventory before opening and targeting the view. The same view can open in a standalone browser tab.
 - The view loads a changed-file summary first, then restores the previous file selection or selects the first file. A clean worktree shows an explicit empty state.
+- Treemon's generated `.agents/canvas/diff.html` is excluded from both tracked and untracked summary entries, so provisioning the viewer cannot make an otherwise clean worktree appear changed even when `.agents/` is not ignored.
 - The comparison base uses the repository's configured base branch and upstream-remote resolution: prefer the remote-tracking ref, then fall back to the local base branch. A missing base, failed merge-base, or failed Git command produces a visible error state and no partial summary. A timeout produces an explicit retry-oriented timeout state and no partial summary or patch.
 - The selected file renders as a unified diff by default. Users can switch to split view, and the preference persists.
 - Syntax highlighting loads after the plain patch is visible, so highlighting never blocks initial rendering.
@@ -23,7 +24,7 @@
 
 ## Technical Approach
 
-`WorktreeDiff` owns the renderer-neutral result types and live comparison workflow. It reuses `GitWorktree`'s upstream-remote and base-ref selection rules, without fetching on a viewer request, computes `git merge-base HEAD <baseRef>`, and compares that commit to the live worktree. A single `git diff` from the merge base to the working tree includes committed, staged, and unstaged tracked changes. Untracked files come from `git ls-files --others --exclude-standard -z` and are represented as additions after binary, size, and symlink checks.
+`WorktreeDiff` owns the renderer-neutral result types and live comparison workflow. It reuses `GitWorktree`'s upstream-remote and base-ref selection rules, without fetching on a viewer request, computes `git merge-base HEAD <baseRef>`, and compares that commit to the live worktree. A single `git diff` from the merge base to the working tree includes committed, staged, and unstaged tracked changes. Untracked files come from `git ls-files --others --exclude-standard -z` and are represented as additions after binary, size, and symlink checks. The exact generated viewer path is removed from both parsed result sets before file-count limits and identity issuance.
 
 The canvas doc server exposes renderer-neutral `diff-summary` and `diff-file` endpoints for known worktrees. The summary stores a bounded server-owned identity map for the worktree and returns opaque identities plus status metadata; the file endpoint resolves only through that map, never from a browser-supplied root, Git ref, or filesystem path. Refreshing the summary replaces the map, making old identities stale.
 
@@ -45,6 +46,7 @@ The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parame
 - Over-limit summaries and patches are rejected as explicit states; partial patches are not rendered because an incomplete patch is not reliable input for diff2html.
 - Agent-mediated review uses generic SystemView selection interactions rather than renderer-specific comment widgets.
 - The generated diff view remains a SystemView, not an AgentDoc, so it stays non-archivable, non-shareable, and independent of authored-document morphing.
+- Only the exact Treemon-owned `.agents/canvas/diff.html` artifact is excluded; other `.agents/` files remain visible worktree changes.
 - Diff HTTP results use stable status-tagged JSON rather than serializing F# discriminated unions directly, keeping the browser contract explicit while the shared domain model remains strongly typed.
 - Opening Diff targets the pane independently of dashboard card focus so action-event propagation cannot silently select or launch the card.
 - The uniform 10-second Git deadline remains the bounded-response contract. Timeout results are explicit and retry-oriented; operation-specific tuning should be introduced only if real-repository evidence shows the deadline is routinely too short.

@@ -61,6 +61,8 @@ let private diffStderrLimitBytes = 64 * 1024
 let private summaryCaptureLimitBytes = 16 * 1024 * 1024
 let private smallGitCaptureLimitBytes = 64 * 1024
 let private strictUtf8 = UTF8Encoding(false, true)
+let private generatedDiffViewerPath =
+    String.concat "/" [ ".agents"; "canvas"; "diff.html" ]
 
 let private mapDiffProcessFailure
     (operation: WorktreeDiffOperation)
@@ -271,6 +273,10 @@ let private sortDiffEntries (entries: WorktreeDiffEntry list) =
     |> List.sortWith (fun left right ->
         StringComparer.Ordinal.Compare(left.Path, right.Path))
 
+let private excludeGeneratedDiffViewer (entries: WorktreeDiffEntry list) =
+    entries
+    |> List.filter (fun entry -> entry.Path <> generatedDiffViewerPath)
+
 let getWorktreeDiffSummary
     (repoRoot: string)
     : Async<Result<WorktreeDiffSummary, WorktreeDiffError>> =
@@ -301,7 +307,9 @@ let getWorktreeDiffSummary
                   "--no-textconv"
                   mergeBase ]
 
-        let! tracked = parseTrackedEntries trackedBytes
+        let! tracked =
+            parseTrackedEntries trackedBytes
+            |> Result.map excludeGeneratedDiffViewer
 
         if tracked.Length > maxWorktreeDiffFiles then
             return! Error(TooManyFiles tracked.Length)
@@ -317,7 +325,10 @@ let getWorktreeDiffSummary
                   "-z"
                   "--" ]
 
-        let! untracked = parseUntrackedEntries untrackedBytes
+        let! untracked =
+            parseUntrackedEntries untrackedBytes
+            |> Result.map excludeGeneratedDiffViewer
+
         let files = tracked @ untracked
 
         if files.Length > maxWorktreeDiffFiles then
