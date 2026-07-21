@@ -351,18 +351,9 @@ let private openTerminal
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
     }
 
-let internal removeWorktreeAndOwnership removeGitWorktree removeInteractionOwnership repoRoot worktreePath branch =
-    async {
-        let! result = removeGitWorktree repoRoot worktreePath branch
-
-        match result with
-        | Error _ -> return result
-        | Ok () ->
-            do! removeInteractionOwnership worktreePath
-            return result
-    }
-
-let private deleteWorktree
+let internal deleteWorktreeWith
+    removeGitWorktree
+    removeInteractionOwnership
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (wtPath: WorktreePath)
@@ -376,15 +367,23 @@ let private deleteWorktree
         | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
             return Error "Cannot delete the main worktree"
         | Some ctx ->
-            agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
-            return!
-                removeWorktreeAndOwnership
-                    GitWorktree.removeWorktree
-                    CanvasInteractionOwnership.removeWorktree
-                    ctx.RepoRoot
-                    ctx.Worktree.Path
-                    ctx.Worktree.Branch
+            let! result = removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
+
+            match result with
+            | Error _ -> return result
+            | Ok () ->
+                agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
+                do! removeInteractionOwnership ctx.Worktree.Path
+                return result
     }
+
+let private deleteWorktree agent rootPaths wtPath =
+    deleteWorktreeWith
+        GitWorktree.removeWorktree
+        CanvasInteractionOwnership.removeWorktree
+        agent
+        rootPaths
+        wtPath
 
 let private updateArchivedBranches
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)

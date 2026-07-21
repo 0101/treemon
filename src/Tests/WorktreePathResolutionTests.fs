@@ -22,12 +22,19 @@ let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * 
         repos
         |> List.iter (fun (repoId, worktrees) ->
             agent.Post(UpdateWorktreeList(repoId, worktrees)))
-        do! Async.Sleep 100
+        do! agent.PostAndAsyncReply(GetState) |> Async.Ignore
     }
 
 let private getAgentState (agent: MailboxProcessor<StateMsg>) =
     agent.PostAndAsyncReply(GetState)
 
+let private deleteWorktree agent worktreeRoots wtPath =
+    WorktreeApi.deleteWorktreeWith
+        (fun _ _ _ -> async { return Ok () })
+        (fun _ -> async { return () })
+        agent
+        (RefreshScheduler.buildRootPaths worktreeRoots)
+        wtPath
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -65,12 +72,9 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let targetPath = normPath (Path.Combine(Path.GetFullPath tempDirA, "feature-x"))
+            let! _result = deleteWorktree agent [ tempDirA; tempDirB ] (PathUtils.toWorktreePath targetPath)
 
-            let targetPath = normPath $"{Path.GetFullPath tempDirA}/feature-x"
-            let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
-
-            do! Async.Sleep 50
             let! state = getAgentState agent
 
             let repoAWorktrees =
@@ -117,12 +121,9 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let targetPath = normPath (Path.Combine(Path.GetFullPath tempDirB, "main"))
+            let! _result = deleteWorktree agent [ tempDirA; tempDirB ] (PathUtils.toWorktreePath targetPath)
 
-            let targetPath = normPath $"{Path.GetFullPath tempDirB}/main"
-            let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
-
-            do! Async.Sleep 50
             let! state = getAgentState agent
 
             let repoBWorktrees =
@@ -159,9 +160,8 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = WorktreeApi.worktreeApi agent (createSyncAgent ()) (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
-
-            let! result = api.deleteWorktree (PathUtils.toWorktreePath "/nonexistent/path/main")
+            let unknownPath = Path.Combine(Path.GetTempPath(), $"treemon-missing-{Guid.NewGuid():N}", "main")
+            let! result = deleteWorktree agent [ tempDirA ] (PathUtils.toWorktreePath unknownPath)
 
             match result with
             | Error msg ->

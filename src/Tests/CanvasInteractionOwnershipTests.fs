@@ -16,6 +16,16 @@ let private withOwnershipFile action =
         try Directory.Delete(dir, recursive = true)
         with _ -> ()
 
+let private createDeleteContext repoRoot worktree =
+    let agent = Server.RefreshScheduler.createAgent ()
+    let repoId = Server.PathUtils.toRepoId repoRoot
+    let worktreeInfo : Server.GitWorktree.WorktreeInfo =
+        { Path = Server.PathUtils.normalizePath worktree
+          Head = "abc123"
+          Branch = Some "feature" }
+    agent.Post(Server.RefreshScheduler.UpdateWorktreeList(repoId, [ worktreeInfo ]))
+    agent, repoId, worktreeInfo, Server.RefreshScheduler.buildRootPaths [ repoRoot ]
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -94,48 +104,54 @@ type PersistenceTests() =
             Assert.That(runAsync (restarted.GetOwner(secondWorktree, "diff.html")), Is.EqualTo(Some "session-b")))
 
     [<Test>]
-    member _.``successful worktree deletion removes persisted owners and pending claims``() =
+    member _.``successful worktree deletion removes scheduler state, persisted owners, and pending claims``() =
         withOwnershipFile (fun dir filePath ->
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
+            let agent, repoId, _, rootPaths = createDeleteContext dir worktree
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
             Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
 
             let result =
-                Server.WorktreeApi.removeWorktreeAndOwnership
+                Server.WorktreeApi.deleteWorktreeWith
                     (fun _ _ _ -> async { return Ok () })
                     store.RemoveWorktree
-                    dir
-                    worktree
-                    (Some "feature")
+                    agent
+                    rootPaths
+                    (Server.PathUtils.toWorktreePath worktree)
                 |> runAsync
 
             assertOk result "Worktree deletion should succeed"
+            let state = runAsync (agent.PostAndAsyncReply(Server.RefreshScheduler.GetState))
+            Assert.That(state.Repos[repoId].WorktreeList, Is.Empty)
             let restarted = createStore filePath
             Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option))
             Assert.That(store.ClaimPending(worktree, "session-b"), Is.Empty))
 
     [<Test>]
-    member _.``failed worktree deletion preserves persisted owners and pending claims``() =
+    member _.``failed worktree deletion preserves scheduler state, persisted owners, and pending claims``() =
         withOwnershipFile (fun dir filePath ->
             let worktree = Path.Combine(dir, "worktree")
             let store = createStore filePath
+            let agent, repoId, worktreeInfo, rootPaths = createDeleteContext dir worktree
             runAsync (store.Assign(worktree, "diff.html", "session-a"))
             Assert.That(runAsync (store.BeginClaim(worktree, "beads.html")), Is.EqualTo(None: string option))
 
             let result =
-                Server.WorktreeApi.removeWorktreeAndOwnership
+                Server.WorktreeApi.deleteWorktreeWith
                     (fun _ _ _ -> async { return Error "remove failed" })
                     store.RemoveWorktree
-                    dir
-                    worktree
-                    (Some "feature")
+                    agent
+                    rootPaths
+                    (Server.PathUtils.toWorktreePath worktree)
                 |> runAsync
 
             match result with
             | Error "remove failed" -> ()
             | other -> Assert.Fail($"Expected deletion failure but got: {other}")
 
+            let state = runAsync (agent.PostAndAsyncReply(Server.RefreshScheduler.GetState))
+            Assert.That(state.Repos[repoId].WorktreeList, Is.EqualTo([ worktreeInfo ]))
             let restarted = createStore filePath
             Assert.That(runAsync (restarted.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
             Assert.That(store.ClaimPending(worktree, "session-b"), Is.EqualTo([ "beads.html" ])))
