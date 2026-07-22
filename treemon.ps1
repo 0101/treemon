@@ -368,7 +368,7 @@ function Stop-ProductionPortListeners {
 
     $listenerPids | ForEach-Object {
         Write-Host "Stopping process on production port $DefaultPort (PID: $_)..." -ForegroundColor Yellow
-        Stop-Process -Id $_ -Force
+        Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
     }
 
     Remove-Item $PidFile -ErrorAction SilentlyContinue

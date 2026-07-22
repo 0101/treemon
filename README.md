@@ -41,13 +41,13 @@ Prerequisites: [.NET SDK 9+](https://dotnet.microsoft.com/download), [Node.js](h
 git clone https://github.com/0101/treemon.git
 cd treemon
 npm install
-.\treemon.ps1 deploy                                                # build frontend
-.\treemon.ps1 start "C:\code\my-project" "C:\code\other-project"   # start on port 5000
+.\treemon.ps1 deploy                                                # build and start on port 5000
+.\treemon.ps1 add "C:\code\my-project" "C:\code\other-project"     # add monitored roots
 ```
 
 Open http://localhost:5000 — install as a PWA from the browser for a native app experience.
 
-The roots you pass to `start` are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so afterwards `start`, `restart`, and `dev` no longer need a path — omit it to use the saved roots. Manage roots live with the `tm` CLI (`tm add`, `tm remove`, `tm roots`) or the `.\treemon.ps1 add`/`remove` shims; changes apply on the next server restart.
+The roots you add are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so `start`, `restart`, and `dev` do not need a path — omit it to use the saved roots. Manage roots live with the `tm` CLI (`tm add`, `tm remove`, `tm roots`) or the `.\treemon.ps1 add`/`remove` shims; changes apply on the next server restart.
 
 ### Managing the server
 
