@@ -60,6 +60,12 @@ The selection runtime calls an optional `window.canvasSelectionMetadata` hook wi
 
 The shared transport treats `window.parent === window` as unavailable unless a top-level host explicitly advertises its forwarding shim through `window.__canvasTopLevelTransportAvailable`. The browser extension sets that capability before installing the canonical runtimes; direct standalone SystemViews do not.
 
+Full-stack verification waits for each generated view's own render completion before selecting text:
+the diff highlighter must reach `ready` or `failed`, while Beadspace must finish its initial data
+render. The target must remain connected and unchanged across animation frames. Programmatic
+selection explicitly emits `selectionchange`, and readiness/selection failures retain frame,
+target, toolbar, and render-state diagnostics.
+
 ## Decisions
 
 - SystemView interaction ownership is distinct from authored-file ownership so generated views do not acquire incorrect liveness, archive, share, or morph behavior.
