@@ -242,6 +242,7 @@ comparisons. Run it in Release with a `Category=Performance` test filter and det
 | `src/Server/SessionActivityService.fs` | Ingestion through the shared store. |
 | `src/Server/Program.fs` | Shared store and compactor lifecycle plus startup backfill. |
 | `src/Server/WorktreeApi.fs` | Published-rollup history query. |
+| `src/Tests/OverviewHistoryPublicationIntegrationTests.fs` | On-disk SQLite publication, recovery, restart, failure, retention, and startup-availability coverage. |
 | `src/Tests/OverviewHistoryPerformanceTests.fs` | Release-mode on-disk SQLite, API, serialization, cache, concurrency, allocation, and statement-access harness. |
 | `src/Client/App.fs` | Window state, fetching, and refresh throttle. |
 | `src/Client/OverviewChart.fs` | Stepped chart geometry, SVG, and tooltip. |

@@ -75,6 +75,7 @@
     <Compile Include="OverviewHistoryRollupWorkerTests.fs" />
     <Compile Include="OverviewHistoryCacheTests.fs" />
     <Compile Include="OverviewHistoryIntegrationTests.fs" />
+    <Compile Include="OverviewHistoryPublicationIntegrationTests.fs" />
     <Compile Include="OverviewHistoryPerformanceTests.fs" />
     <Compile Include="OverviewChartTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
