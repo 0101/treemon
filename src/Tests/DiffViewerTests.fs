@@ -140,6 +140,9 @@ let private summaryStateJson status =
     | _ ->
         JsonSerializer.Serialize {| status = status |}
 
+let private layerFilterQuery committed local untracked =
+    $"?committed={committed.ToString().ToLowerInvariant()}&local={local.ToString().ToLowerInvariant()}&untracked={untracked.ToString().ToLowerInvariant()}"
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -330,6 +333,77 @@ type DiffViewerE2ETests() =
                 )
 
             ()
+        }
+
+    member private this.SetupLayerFilterPage() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        let query = Uri(route.Request.Url).Query
+                        let body =
+                            if
+                                query
+                                = layerFilterQuery false false false
+                            then
+                                summaryStateJson "filtered-empty"
+                            else
+                                readySummaryJson [| firstFile |]
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+            do! this.RouteFiles()
+            do! this.Goto()
+        }
+
+    member private this.ApplyLayerFilters(committed, local, untracked) =
+        task {
+            let expected = layerFilterQuery committed local untracked
+
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """values => {
+                        document.getElementById('filter-committed').checked = values[0];
+                        document.getElementById('filter-local').checked = values[1];
+                        document.getElementById('filter-untracked').checked = values[2];
+                        document.getElementById('filter-untracked')
+                            .dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    [| committed; local; untracked |]
+                )
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "expected => window.__summaryQueries.at(-1) === expected",
+                    expected
+                )
+
+            if not committed && not local && not untracked then
+                do!
+                    this.Page.Locator("[data-state='filtered-empty']").WaitForAsync()
+            else
+                do! this.Page.Locator(".file-entry.active").WaitForAsync()
         }
 
     [<SetUp>]
@@ -615,78 +689,9 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
-    member this.``layer filters cover every combination and persist per worktree``() =
+    member this.``layer filters use defaults and cover every query-string combination``() =
         task {
-            do!
-                this.Page.AddInitScriptAsync(
-                    """(() => {
-                        window.__summaryQueries = [];
-                        const originalFetch = window.fetch;
-                        window.fetch = function(input) {
-                            const url = typeof input === 'string' ? input : input.url;
-                            if (url.includes('diff-summary')) {
-                                window.__summaryQueries.push(new URL(url, location.href).search);
-                            }
-                            return originalFetch.apply(this, arguments);
-                        };
-                    })()"""
-                )
-
-            do!
-                this.Page.RouteAsync(
-                    "**/diff-summary?*",
-                    fun route ->
-                        let query = Uri(route.Request.Url).Query
-                        let body =
-                            if
-                                query
-                                = "?committed=false&local=false&untracked=false"
-                            then
-                                summaryStateJson "filtered-empty"
-                            else
-                                readySummaryJson [| firstFile |]
-
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body = body
-                            )
-                        )
-                )
-            do! this.RouteFiles()
-            do! this.Goto()
-
-            let query committed local untracked =
-                $"?committed={committed.ToString().ToLowerInvariant()}&local={local.ToString().ToLowerInvariant()}&untracked={untracked.ToString().ToLowerInvariant()}"
-
-            let applyFilters committed local untracked =
-                task {
-                    let expected = query committed local untracked
-
-                    let! _ =
-                        this.Page.EvaluateAsync<obj>(
-                            """values => {
-                                document.getElementById('filter-committed').checked = values[0];
-                                document.getElementById('filter-local').checked = values[1];
-                                document.getElementById('filter-untracked').checked = values[2];
-                                document.getElementById('filter-untracked')
-                                    .dispatchEvent(new Event('change', { bubbles: true }));
-                            }""",
-                            [| committed; local; untracked |]
-                        )
-
-                    let! _ =
-                        this.Page.WaitForFunctionAsync(
-                            "expected => window.__summaryQueries.at(-1) === expected",
-                            expected
-                        )
-
-                    if not committed && not local && not untracked then
-                        do!
-                            this.Page.Locator("[data-state='filtered-empty']").WaitForAsync()
-                    else
-                        do! this.Page.Locator(".file-entry.active").WaitForAsync()
-                }
+            do! this.SetupLayerFilterPage()
 
             let! defaults =
                 this.Page.EvaluateAsync<bool array>(
@@ -708,12 +713,18 @@ type DiffViewerE2ETests() =
                   true, false, true
                   true, true, false
                   true, true, true ] do
-                do! applyFilters committed local untracked
+                do! this.ApplyLayerFilters(committed, local, untracked)
+        }
 
-            do! applyFilters false true true
+    [<Test>]
+    member this.``layer filters persist per worktree across reload``() =
+        task {
+            do! this.SetupLayerFilterPage()
+            do! this.ApplyLayerFilters(false, true, true)
+
             let! _ = this.Page.ReloadAsync()
 
-            let expectedPersistedQuery = query false true true
+            let expectedPersistedQuery = layerFilterQuery false true true
 
             let! _ =
                 this.Page.WaitForFunctionAsync(
