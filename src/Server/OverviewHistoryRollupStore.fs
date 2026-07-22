@@ -386,19 +386,17 @@ ORDER BY bucket;
         []
 
 let private publicationRangeIsValid state candidate =
-    match state.CompleteThrough with
-    | None -> true
-    | Some completeThrough
+    match state.CompleteThrough, state.EarliestDirty with
+    | None, _ -> true
+    | Some completeThrough, earliestDirty
         when candidate.StartBoundary = completeThrough + resolution
-             && (state.EarliestDirty |> Option.forall (fun dirty -> dirty > completeThrough)) ->
+             && (earliestDirty |> Option.forall (fun dirty -> dirty > completeThrough)) ->
         true
-    | Some completeThrough ->
-        match state.EarliestDirty with
-        | Some dirty ->
-            dirty <= completeThrough
-            && candidate.StartBoundary = dirty
-            && candidate.EndBoundary >= completeThrough
-        | None -> false
+    | Some completeThrough, Some dirty ->
+        dirty <= completeThrough
+        && candidate.StartBoundary = dirty
+        && candidate.EndBoundary >= completeThrough
+    | Some _, None -> false
 
 type private PublicationMode =
     | Incremental
