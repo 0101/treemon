@@ -116,7 +116,7 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
         // Sharing is AgentDoc-only per spec (a SystemView like beads.html is server-generated,
         // data-driven, and not shareable). The client only shows the Share button for AgentDocs;
         // this gate enforces the same contract when the endpoint is called directly.
-        if CanvasDocKind.classify request.Filename <> AgentDoc then
+        if CanvasDocKinds.classify request.Filename <> AgentDoc then
             return! Error $"Cannot share system view: {request.Filename}"
 
         if not (File.Exists sourcePath) then

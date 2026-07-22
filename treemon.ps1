@@ -558,19 +558,30 @@ function Install-Skill {
     }
 }
 
-function Install-CopilotExtension([string]$SrcDir, [string]$DestName, [string]$FriendlyName) {
+function Install-CopilotExtension(
+    [string]$SrcDir,
+    [string]$DestName,
+    [string]$FriendlyName,
+    [string[]]$RequiredFiles
+) {
     $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
         Where-Object { $_.Name -notlike "*.test.mjs" } |
         Copy-Item -Destination $dest -Force
-    Copy-Item (Join-Path $SrcDir "package.json") $dest -Force
+    $RequiredFiles | ForEach-Object { Copy-Item (Join-Path $SrcDir $_) $dest -Force }
     Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
 }
 
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
-    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension"
+    $requiredFiles = @(
+        "package.json",
+        "canvas-doc-kinds.json",
+        "canvas-send.js",
+        "canvas-selection-context.js"
+    )
+    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension" $requiredFiles
 
     # Install canvas authoring skill
     $skillSource = Join-Path $src "skill" "SKILL.md"
@@ -604,7 +615,7 @@ function Install-ReportingExtension {
     # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
     # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
     $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
-    Install-CopilotExtension $src "treemon-reporting" "Reporting extension"
+    Install-CopilotExtension $src "treemon-reporting" "Reporting extension" @("package.json")
 }
 
 function Test-WorktreeRootPaths([string[]]$Roots) {
