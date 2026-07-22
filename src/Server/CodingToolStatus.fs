@@ -42,9 +42,7 @@ type CodingToolResult =
       AgentActivity: AgentActivity option
       LastUserMessage: (string * DateTimeOffset) option
       LastAssistantMessage: (string * DateTimeOffset) option
-      /// Mtime of the active session surface that won status resolution (its last write) — the best
-      /// available "the agent last did something" time, and the value the scheduler freezes as the
-      /// state-transition timestamp. None when every surface is Idle.
+      /// `LastSeen` of the active session that won status resolution. None when every session is Idle.
       LastActivity: DateTimeOffset option }
 
 let configureTestsPrompt (repoRoot: string) =
@@ -138,15 +136,14 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
 
     let activeWinner =
         adjustedOpen
-        |> List.map (fun s -> s.Status, StoredStatus.activityOrderKey s)
-        |> SessionActivity.pickActive
+        |> SessionActivity.pickActive _.Status StoredStatus.activityOrderKey
 
     let status =
         match openSessions with
         | [] -> NoSession
         | _ ->
             activeWinner
-            |> Option.map (fun w -> SessionActivity.toCodingToolStatus w.Status)
+            |> Option.map (fun winner -> SessionActivity.toCodingToolStatus winner.Status.Status)
             |> Option.defaultValue Idle
 
     // Per-session dots: every open session's freshness-adjusted status paired with its own running
@@ -173,22 +170,11 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     // their last messages + skill), NOT a freshness-adjusted one — freshness only rewrites the dot.
     let footer =
         activeWinner
+        |> Option.map _.Status
         |> Option.orElse (
             sessions
             |> StoredStatus.tryMostRecentActivity
             |> Option.map _.Status)
-
-    // "Last did something" time: the newest active open last_seen when an active session is displayed,
-    // else None (an idle/no-session worktree has no active surface).
-    let lastActivity =
-        if activeWinner.IsSome then
-            adjustedOpen
-            |> List.filter (fun s -> s.Status.Status <> SessionLevelStatus.Idle)
-            |> List.map _.LastSeen
-            |> List.max
-            |> Some
-        else
-            None
 
     { Status = status
       SessionStatuses = sessionStatuses
@@ -207,7 +193,19 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
         footer
         |> Option.bind _.LastAssistantMessage
         |> Option.map (toFooterMessage 80)
-      LastActivity = lastActivity }
+      LastActivity = activeWinner |> Option.map _.LastSeen }
+
+/// Add each worktree's durable representative to the live candidate set. Live rows win duplicate
+/// session ids; retained rows with distinct ids remain available for footer selection, while their
+/// own `LastSeen` still independently determines whether they contribute an open status dot.
+let includeRetainedSessions (retained: Map<string, StoredStatus>) (live: StoredStatus seq) : StoredStatus seq =
+    let addSession (sessions: Map<SessionId, StoredStatus>) (session: StoredStatus) =
+        Map.add session.SessionId session sessions
+    let retainedBySession = retained |> Map.values |> Seq.fold addSession Map.empty
+    live
+    |> Seq.fold addSession retainedBySession
+    |> Map.toSeq
+    |> Seq.map snd
 
 /// Group a flat set of live push session-statuses by worktree path and collapse each group into the
 /// card's coding-tool fields (the openness-driven status dot + the decoupled footer). Keyed by the
@@ -219,39 +217,6 @@ let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<
     |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
     |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
     |> Map.ofSeq
-
-/// A durable-store fallback card for a worktree whose sessions have ALL aged out of the live idle
-/// window (e.g. after a restart, last active >2h ago). The status dot stays `NoSession` (grey) — no
-/// OPEN session exists — but the retained footer/resume metadata (skill, last user/assistant message,
-/// provider) is surfaced from its most-recent stored session, so the footer still renders and the
-/// resume button stays reachable (`CardViews.canResumeSession` requires a `LastUserMessage`). Without
-/// this the durable `--resume <id>` path is UI-unreachable for exactly the sessions it was built for.
-let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
-    let s = stored.Status
-    let hasFooter = s.Skill.IsSome || s.Intent.IsSome || s.Title.IsSome || s.LastUserMessage.IsSome || s.LastAssistantMessage.IsSome
-
-    { Status = NoSession
-      SessionStatuses = []
-      Provider = if hasFooter then Some CopilotCli else None
-      CurrentSkill = s.Skill
-      AgentActivity =
-        SessionActivity.effectiveActivity s
-        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
-      LastUserMessage = s.LastUserMessage |> Option.map (toFooterMessage 120)
-      LastAssistantMessage = s.LastAssistantMessage |> Option.map (toFooterMessage 80)
-      LastActivity = None }
-
-/// Fill gaps in the live collapse with the durable retained fallback: a worktree present in `live`
-/// keeps its live result (openness dot + footer); one absent from it (all its sessions aged out of the
-/// idle window) takes the retained `NoSession`-with-footer card, so its footer and resume button
-/// survive a restart. `retained` is keyed by worktree path (from `RetainedByWorktree`).
-let withRetainedFallback (retained: Map<string, StoredStatus>) (live: Map<string, CodingToolResult>) : Map<string, CodingToolResult> =
-    retained
-    |> Map.fold
-        (fun acc path stored ->
-            if Map.containsKey path acc then acc
-            else Map.add path (retainedFooterResult stored) acc)
-        live
 
 /// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recently-active session for
 /// the worktree regardless of active/idle (the session the user last touched). Reads the id from the

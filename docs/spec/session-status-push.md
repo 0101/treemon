@@ -260,9 +260,12 @@ only in the real monitoring path — demo/fixture mode serves synthetic data and
 
 ### Collapse to card fields (`CodingToolStatus.fs`)
 
-`collapseByWorktree` groups the live session-statuses by worktree path; `fromPushSessions` collapses
-each group with the two decoupled picks (openness-driven status dot + `UpdatedAt`-ordered active
-winner/fallback footer, above).
+Each worktree's durable `UpdatedAt` winner is merged into the live candidate set by session id before
+`collapseByWorktree` groups statuses by worktree path. The row's own `LastSeen` still determines
+whether it contributes an open dot; independently, it remains eligible for the fallback footer when
+a heartbeat-kept live sibling is not the representative session. `fromPushSessions` then applies
+the two decoupled picks (openness-driven status dot + `UpdatedAt`-ordered active winner/fallback
+footer, above).
 It also exposes every open session as its own status marker with that session's skill and optional
 `ContextUsage`; a reported gauge renders as a context-window donut, while `None` renders as a plain
 status dot. Persisted gauges restore donuts after a server restart without waiting for a fresh
