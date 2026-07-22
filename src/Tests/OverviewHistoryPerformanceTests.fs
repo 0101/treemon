@@ -467,10 +467,7 @@ let private measureRequest cache store =
       SnapshotsOrdered = snapshotsOrdered response
       PayloadBytes = payloadBytes }
 
-let private medianFloat values =
-    values |> List.sort |> fun sorted -> sorted[sorted.Length / 2]
-
-let private medianInt64 values =
+let private median values =
     values |> List.sort |> fun sorted -> sorted[sorted.Length / 2]
 
 let private normalizeSql (statement: string) =
@@ -605,9 +602,9 @@ let private measureVolume (prepared: PreparedVolume) : VolumeMeasurements =
       CompleteThrough = prepared.CompleteThrough
       UncachedSamples = uncached
       UncachedMedianMilliseconds =
-        uncached |> List.map _.ElapsedMilliseconds |> medianFloat
+        uncached |> List.map _.ElapsedMilliseconds |> median
       UncachedMedianAllocatedBytes =
-        uncached |> List.map _.AllocatedBytes |> medianInt64
+        uncached |> List.map _.AllocatedBytes |> median
       CachedSamples = cached
       CachedMaximumMilliseconds =
         cached |> List.map _.ElapsedMilliseconds |> List.max
@@ -632,7 +629,7 @@ let private assertVolume expectedRawEvents (volume: VolumeMeasurements) =
         )
         Assert.That(volume.CachedMaximumMilliseconds, Is.LessThan maximumCachedMilliseconds)
         Assert.That(
-            volume.UncachedSamples |> List.forall (fun sample -> sample.SnapshotsOrdered),
+            volume.UncachedSamples |> List.forall _.SnapshotsOrdered,
             Is.True
         )
         Assert.That(
