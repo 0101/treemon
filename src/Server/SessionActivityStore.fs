@@ -73,20 +73,6 @@ let internal isoUtc (dto: DateTimeOffset) =
 let internal parseIso (s: string) =
     DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
 
-// Task-snapshot rows persist the count-only `TaskCount list` as a JSON blob, using the SAME
-// Fable.Remoting converter the getOverviewHistory wire uses (matching the former JSONL history), so a
-// stored snapshot round-trips byte-identically to what the client later receives via OverviewSnapshot.
-let private countConverter: Newtonsoft.Json.JsonConverter = Fable.Remoting.Json.FableJsonConverter()
-
-let private serializeTasks (tasks: OverviewData.TaskCount list) : string =
-    Newtonsoft.Json.JsonConvert.SerializeObject(tasks, Newtonsoft.Json.Formatting.None, [| countConverter |])
-
-let internal parseTasks (s: string) : OverviewData.TaskCount list =
-    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.TaskCount list>(s, [| countConverter |])
-
-let private parseAgents (s: string) : OverviewData.AgentCount list =
-    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.AgentCount list>(s, [| countConverter |])
-
 let private statusText =
     function
     | SessionLevelStatus.Working -> "working"
@@ -667,101 +653,6 @@ let private executeSql (conn: SqliteConnection) sql =
     cmd.CommandText <- sql
     cmd.ExecuteNonQuery() |> ignore
 
-let private readPublicationState (conn: SqliteConnection) : PublicationState option =
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <-
-        """
-SELECT id, schema_version, resolution_seconds, source_generation, published_generation,
-       complete_through, earliest_dirty
-FROM overview_history_state
-ORDER BY id;
-"""
-    use reader = cmd.ExecuteReader()
-
-    if not (reader.Read()) then
-        None
-    else
-        let boundaryAt index =
-            if reader.IsDBNull index then None
-            else tryFromBucket (reader.GetInt64 index)
-
-        let id = reader.GetInt64 0
-        let completeThrough = boundaryAt 5
-        let earliestDirty = boundaryAt 6
-        let completeThroughWasNull = reader.IsDBNull 5
-        let earliestDirtyWasNull = reader.IsDBNull 6
-        let state =
-            { SchemaVersion = reader.GetInt32 1
-              ResolutionSeconds = reader.GetInt32 2
-              SourceGeneration = reader.GetInt64 3
-              PublishedGeneration = reader.GetInt64 4
-              CompleteThrough = completeThrough
-              EarliestDirty = earliestDirty }
-        let hasExtraRow = reader.Read()
-
-        if id = 1L
-           && not hasExtraRow
-           && (completeThroughWasNull || completeThrough.IsSome)
-           && (earliestDirtyWasNull || earliestDirty.IsSome) then
-            Some state
-        else
-            None
-
-let private countJsonIsValid tasksJson agentsJson =
-    try
-        let tasks = parseTasks tasksJson
-        let agents = parseAgents agentsJson
-
-        let taskKinds = tasks |> List.map _.Kind
-        let agentKinds = agents |> List.map _.Kind
-
-        tasks |> List.forall (fun count -> count.Count > 0)
-        && agents |> List.forall (fun count -> count.Count > 0)
-        && Set.count (Set.ofList taskKinds) = taskKinds.Length
-        && Set.count (Set.ofList agentKinds) = agentKinds.Length
-    with _ ->
-        false
-
-let private publishedRowsAreValid (conn: SqliteConnection) state =
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- "SELECT bucket, tasks, agents FROM overview_history_rows ORDER BY bucket;"
-    use reader = cmd.ExecuteReader()
-
-    let rows =
-        readRows reader (fun row -> row.GetInt64 0, row.GetString 1, row.GetString 2) []
-
-    let rowsValid =
-        rows
-        |> List.forall (fun (bucket, tasks, agents) ->
-            tryFromBucket bucket |> Option.isSome
-            && countJsonIsValid tasks agents)
-
-    let dense =
-        rows
-        |> List.map (fun (bucket, _, _) -> bucket)
-        |> List.pairwise
-        |> List.forall (fun (left, right) -> right - left = int64 resolutionSeconds)
-
-    match state.CompleteThrough, rows with
-    | None, [] -> rowsValid && state.PublishedGeneration = 0L
-    | Some completeThrough, _ :: _ ->
-        rowsValid
-        && dense
-        && rows |> List.last |> fun (bucket, _, _) -> bucket = toBucket completeThrough
-    | _ -> false
-
-let private stagingRowsAreValid (conn: SqliteConnection) sourceGeneration =
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- "SELECT generation, bucket, tasks, agents FROM overview_history_staging;"
-    use reader = cmd.ExecuteReader()
-
-    readRows reader (fun row -> row.GetInt64 0, row.GetInt64 1, row.GetString 2, row.GetString 3) []
-    |> List.forall (fun (generation, bucket, tasks, agents) ->
-        generation >= 0L
-        && generation <= sourceGeneration
-        && tryFromBucket bucket |> Option.isSome
-        && countJsonIsValid tasks agents)
-
 let private observationBoundsAreValid (conn: SqliteConnection) =
     use cmd = conn.CreateCommand()
     cmd.CommandText <-
@@ -779,7 +670,7 @@ let private observationBoundsAreValid (conn: SqliteConnection) =
 
 let private derivedDataIsValid conn =
     try
-        match readPublicationState conn with
+        match readPublicationState conn None with
         | Some state when isSupportedState state ->
             publishedRowsAreValid conn state
             && stagingRowsAreValid conn state.SourceGeneration
@@ -861,7 +752,7 @@ type SessionActivityStore(dbPath: string) =
     member internal _.OverviewRollupState() : PublicationState =
         use conn = openConn ()
 
-        match readPublicationState conn with
+        match readPublicationState conn None with
         | Some state when isSupportedState state -> state
         | _ ->
             raise (
@@ -869,6 +760,35 @@ type SessionActivityStore(dbPath: string) =
                     "Overview history publication state has an unsupported schema or resolution."
                 )
             )
+
+    /// Append one exact dense batch to the single-generation durable candidate range.
+    member internal _.StageOverviewRollup
+        (
+            candidate: RollupCandidate,
+            rows: StagedRollupRow list
+        ) : StagingResult =
+        stageCandidate openConn candidate rows
+
+    /// Atomically replace the candidate range only while its source generation is still current.
+    member internal _.PublishOverviewRollup(candidate: RollupCandidate) : PublicationResult =
+        publishCandidate openConn candidate
+
+    member internal _.DiscardOverviewRollupStaging() : unit =
+        discardStaging openConn
+
+    /// Read publication metadata and rows from one WAL snapshot. The callback is a deterministic
+    /// test seam for committing a publisher after metadata is read but before rows are read.
+    member internal _.ReadPublishedOverviewRollup
+        (
+            startBoundary: DateTimeOffset,
+            endBoundary: DateTimeOffset,
+            ?afterStateRead: unit -> unit
+        ) : PublicationState * RollupRow list =
+        readPublishedSnapshot
+            openConn
+            startBoundary
+            endBoundary
+            (defaultArg afterStateRead ignore)
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).

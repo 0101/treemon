@@ -174,8 +174,9 @@ sessions through the same shared agent classifier as live Overview.
 Initial startup rebuilds the full exposed horizon before API availability. Later work incrementally
 fills new boundaries and repairs dirty history in batches of at most 512 boundaries. Each batch gets
 its own stable read snapshot; generation tagging plus the final transactional check makes the whole
-candidate range coherent. The worker retries generation conflicts and keeps the last published
-generation readable on runtime failure.
+candidate range coherent. Durable staging holds one generation and one dense range; later batches
+must append contiguously, and stale staging is explicitly discarded before restaging. The worker
+retries generation conflicts and keeps the last published generation readable on runtime failure.
 
 ### Lifecycle, API, and cache
 

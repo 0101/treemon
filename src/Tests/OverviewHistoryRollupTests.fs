@@ -81,6 +81,59 @@ let private stored sessionId observedAt =
       LastSeen = observedAt
       ContextUsageAt = None }
 
+let private taskCount count : TaskCount list =
+    if count = 0 then []
+    else [ { Kind = TaskBucketKind.Planned; Count = count } ]
+
+let private agentCount count : AgentCount list =
+    if count = 0 then []
+    else
+        [ { Kind = AgentGroupKind.Activity CurrentActivity.Executing
+            Count = count } ]
+
+let private rollupRow boundary count : RollupRow =
+    { Boundary = boundary
+      Tasks = taskCount count
+      Agents = agentCount count }
+
+let private candidate generation startBoundary endBoundary : RollupCandidate =
+    { Generation = generation
+      StartBoundary = startBoundary
+      EndBoundary = endBoundary }
+
+let private staged generation (rows: RollupRow list) : StagedRollupRow list =
+    rows
+    |> List.map (fun row ->
+        { Generation = generation
+          Row = row })
+
+let private requireStaged =
+    function
+    | StagingResult.Staged -> ()
+    | StagingResult.SourceGenerationChanged current ->
+        failwith $"Expected staging generation to be current, but source generation is {current}."
+
+let private requirePublished =
+    function
+    | PublicationResult.Published state -> state
+    | PublicationResult.SourceGenerationChanged current ->
+        failwith $"Expected publication generation to be current, but source generation is {current}."
+
+let private publishInitial
+    (store: SessionActivityStore)
+    (startBoundary: DateTimeOffset)
+    (counts: int list)
+    =
+    let rows =
+        counts
+        |> List.mapi (fun index count ->
+            rollupRow (startBoundary.AddSeconds(float index * 30.0)) count)
+    let ending = rows |> List.last |> _.Boundary
+    let range = candidate 0L startBoundary ending
+    store.StageOverviewRollup(range, staged 0L rows) |> requireStaged
+    store.PublishOverviewRollup range |> requirePublished |> ignore
+    range, rows
+
 let private columns path table =
     use connection = openConnection path
     use command = connection.CreateCommand()
@@ -473,3 +526,302 @@ type OverviewHistorySourceInvalidationTests() =
                 Assert.That(store.QueryLatestTaskSnapshot(), Is.EqualTo None)
                 Assert.That(state.SourceGeneration, Is.Zero)
                 Assert.That(state.EarliestDirty, Is.EqualTo None)))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type OverviewHistoryPublicationTests() =
+
+    [<Test>]
+    member _.``staging accepts exact contiguous batches and rejects gaps overlaps and mixed generations``() =
+        withDbPath (fun path ->
+            use store = new SessionActivityStore(path)
+            let start = latestCompleteBoundary DateTimeOffset.UtcNow |> _.AddMinutes(-4.0)
+            let b0 = start
+            let b1 = b0 + resolution
+            let b2 = b1 + resolution
+            let b3 = b2 + resolution
+            let first = candidate 0L b0 b1
+
+            store.StageOverviewRollup(
+                first,
+                staged 0L [ rollupRow b0 1; rollupRow b1 2 ]
+            )
+            |> requireStaged
+
+            Assert.Multiple(fun () ->
+                Assert.Throws<ArgumentException>(fun () ->
+                    store.StageOverviewRollup(
+                        candidate 0L b2 b3,
+                        [ { Generation = 0L; Row = rollupRow b2 3 }
+                          { Generation = 1L; Row = rollupRow b3 4 } ]
+                    )
+                    |> ignore)
+                |> ignore
+
+                Assert.Throws<InvalidOperationException>(fun () ->
+                    store.StageOverviewRollup(
+                        candidate 0L b1 b2,
+                        staged 0L [ rollupRow b1 3; rollupRow b2 4 ]
+                    )
+                    |> ignore)
+                |> ignore
+
+                Assert.Throws<InvalidOperationException>(fun () ->
+                    store.StageOverviewRollup(
+                        candidate 0L b3 b3,
+                        staged 0L [ rollupRow b3 4 ]
+                    )
+                    |> ignore)
+                |> ignore)
+
+            store.StageOverviewRollup(
+                candidate 0L b2 b3,
+                staged 0L [ rollupRow b2 3; rollupRow b3 4 ]
+            )
+            |> requireStaged
+
+            let full = candidate 0L b0 b3
+            let published = store.PublishOverviewRollup full |> requirePublished
+            let _, rows = store.ReadPublishedOverviewRollup(b0, b3)
+
+            Assert.Multiple(fun () ->
+                Assert.That(published.CompleteThrough, Is.EqualTo(Some b3))
+                Assert.That(rows |> List.map _.Boundary, Is.EqualTo [ b0; b1; b2; b3 ])
+                Assert.That(
+                    scalarInt path "SELECT count(*) FROM overview_history_staging;",
+                    Is.Zero
+                )))
+
+    [<Test>]
+    member _.``publication requires contiguous forward progress and a complete dirty repair``() =
+        withDbPath (fun path ->
+            use store = new SessionActivityStore(path)
+            let start = latestCompleteBoundary DateTimeOffset.UtcNow |> _.AddMinutes(-4.0)
+            let initial, oldRows = publishInitial store start [ 1; 2; 3 ]
+            let b0 = initial.StartBoundary
+            let b1 = b0 + resolution
+            let b2 = b1 + resolution
+            let b3 = b2 + resolution
+            let b4 = b3 + resolution
+            let beforeGap = store.ReadPublishedOverviewRollup(b0, b4)
+            let gap = candidate 0L b4 b4
+
+            store.StageOverviewRollup(gap, staged 0L [ rollupRow b4 9 ])
+            |> requireStaged
+
+            Assert.Throws<InvalidOperationException>(fun () ->
+                store.PublishOverviewRollup gap |> ignore)
+            |> ignore
+
+            Assert.That(
+                store.ReadPublishedOverviewRollup(b0, b4),
+                Is.EqualTo beforeGap
+            )
+
+            store.DiscardOverviewRollupStaging()
+            let forward = candidate 0L b3 b3
+            store.StageOverviewRollup(forward, staged 0L [ rollupRow b3 4 ])
+            |> requireStaged
+            let forwardState = store.PublishOverviewRollup forward |> requirePublished
+            Assert.That(forwardState.CompleteThrough, Is.EqualTo(Some b3))
+
+            store.AppendTaskSnapshot(b1, taskCount 20)
+            let repairGeneration = store.OverviewRollupState().SourceGeneration
+            let partialRepair = candidate repairGeneration b1 b2
+            let beforeRepair = store.ReadPublishedOverviewRollup(b0, b3)
+
+            store.StageOverviewRollup(
+                partialRepair,
+                staged repairGeneration [ rollupRow b1 20; rollupRow b2 30 ]
+            )
+            |> requireStaged
+
+            Assert.Throws<InvalidOperationException>(fun () ->
+                store.PublishOverviewRollup partialRepair |> ignore)
+            |> ignore
+
+            Assert.That(
+                store.ReadPublishedOverviewRollup(b0, b3),
+                Is.EqualTo beforeRepair
+            )
+
+            store.DiscardOverviewRollupStaging()
+            let fullRepair = candidate repairGeneration b1 b3
+            let repairedRows =
+                [ rollupRow b1 20
+                  rollupRow b2 30
+                  rollupRow b3 40 ]
+            store.StageOverviewRollup(fullRepair, staged repairGeneration repairedRows)
+            |> requireStaged
+            let repairedState = store.PublishOverviewRollup fullRepair |> requirePublished
+            let _, actualRows = store.ReadPublishedOverviewRollup(b0, b3)
+
+            Assert.Multiple(fun () ->
+                Assert.That(repairedState.PublishedGeneration, Is.EqualTo repairGeneration)
+                Assert.That(repairedState.CompleteThrough, Is.EqualTo(Some b3))
+                Assert.That(repairedState.EarliestDirty, Is.EqualTo None)
+                Assert.That(actualRows, Is.EqualTo(oldRows.Head :: repairedRows))))
+
+    [<Test>]
+    member _.``forward publication clears dirty state only when its generation covers the boundary``() =
+        withDbPath (fun path ->
+            use store = new SessionActivityStore(path)
+            let start = latestCompleteBoundary DateTimeOffset.UtcNow |> _.AddMinutes(-4.0)
+            let initial, _ = publishInitial store start [ 1; 2 ]
+            let b2 = initial.EndBoundary + resolution
+            let dirty = b2 + resolution
+
+            store.AppendTaskSnapshot(dirty, taskCount 9)
+            let generation = store.OverviewRollupState().SourceGeneration
+            let beforeDirty = candidate generation b2 b2
+            store.StageOverviewRollup(beforeDirty, staged generation [ rollupRow b2 3 ])
+            |> requireStaged
+            let partialState = store.PublishOverviewRollup beforeDirty |> requirePublished
+
+            let covering = candidate generation dirty dirty
+            store.StageOverviewRollup(covering, staged generation [ rollupRow dirty 9 ])
+            |> requireStaged
+            let coveredState = store.PublishOverviewRollup covering |> requirePublished
+
+            Assert.Multiple(fun () ->
+                Assert.That(partialState.CompleteThrough, Is.EqualTo(Some b2))
+                Assert.That(partialState.EarliestDirty, Is.EqualTo(Some dirty))
+                Assert.That(coveredState.CompleteThrough, Is.EqualTo(Some dirty))
+                Assert.That(coveredState.EarliestDirty, Is.EqualTo None)))
+
+    [<Test>]
+    member _.``generation conflict is a publication no-op``() =
+        withDbPath (fun path ->
+            use store = new SessionActivityStore(path)
+            let start = latestCompleteBoundary DateTimeOffset.UtcNow |> _.AddMinutes(-3.0)
+            let initial, _ = publishInitial store start [ 1; 2; 3 ]
+            let b0 = initial.StartBoundary
+            let b2 = initial.EndBoundary
+
+            store.AppendTaskSnapshot(b0, taskCount 10)
+            let stagedGeneration = store.OverviewRollupState().SourceGeneration
+            let repair = candidate stagedGeneration b0 b2
+            store.StageOverviewRollup(
+                repair,
+                staged stagedGeneration [ rollupRow b0 10; rollupRow (b0 + resolution) 20; rollupRow b2 30 ]
+            )
+            |> requireStaged
+
+            store.AppendTaskSnapshot(b0.AddTicks 1L, taskCount 11)
+            let before = store.ReadPublishedOverviewRollup(b0, b2)
+            let stagedCount =
+                scalarInt path "SELECT count(*) FROM overview_history_staging;"
+            let staleBoundary = b2 + resolution
+            let stagingResult =
+                store.StageOverviewRollup(
+                    candidate stagedGeneration staleBoundary staleBoundary,
+                    staged stagedGeneration [ rollupRow staleBoundary 40 ]
+                )
+
+            let result = store.PublishOverviewRollup repair
+            let after = store.ReadPublishedOverviewRollup(b0, b2)
+
+            Assert.Multiple(fun () ->
+                match stagingResult with
+                | StagingResult.SourceGenerationChanged current ->
+                    Assert.That(current, Is.EqualTo(before |> fst |> _.SourceGeneration))
+                | StagingResult.Staged ->
+                    Assert.Fail("A stale candidate generation must not stage.")
+
+                match result with
+                | PublicationResult.SourceGenerationChanged current ->
+                    Assert.That(current, Is.EqualTo(before |> fst |> _.SourceGeneration))
+                | PublicationResult.Published _ ->
+                    Assert.Fail("A stale candidate generation must not publish.")
+
+                Assert.That(after, Is.EqualTo before)
+                Assert.That(
+                    scalarInt path "SELECT count(*) FROM overview_history_staging;",
+                    Is.EqualTo stagedCount
+                )))
+
+    [<Test>]
+    member _.``publication failure rolls back metadata rows and staging deletion``() =
+        withDbPath (fun path ->
+            use store = new SessionActivityStore(path)
+            let start = latestCompleteBoundary DateTimeOffset.UtcNow |> _.AddMinutes(-3.0)
+            let initial, _ = publishInitial store start [ 1; 2; 3 ]
+            let b0 = initial.StartBoundary
+            let b2 = initial.EndBoundary
+
+            store.AppendTaskSnapshot(b0, taskCount 10)
+            let generation = store.OverviewRollupState().SourceGeneration
+            let repair = candidate generation b0 b2
+            store.StageOverviewRollup(
+                repair,
+                staged generation [ rollupRow b0 10; rollupRow (b0 + resolution) 20; rollupRow b2 30 ]
+            )
+            |> requireStaged
+
+            let before = store.ReadPublishedOverviewRollup(b0, b2)
+            let stagedCount =
+                scalarInt path "SELECT count(*) FROM overview_history_staging;"
+
+            execute
+                path
+                """
+CREATE TRIGGER fail_overview_publication
+BEFORE INSERT ON overview_history_rows
+BEGIN
+    SELECT RAISE(ABORT, 'forced overview publication failure');
+END;
+"""
+
+            Assert.Throws<SqliteException>(fun () ->
+                store.PublishOverviewRollup repair |> ignore)
+            |> ignore
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    store.ReadPublishedOverviewRollup(b0, b2),
+                    Is.EqualTo before
+                )
+                Assert.That(
+                    scalarInt path "SELECT count(*) FROM overview_history_staging;",
+                    Is.EqualTo stagedCount
+                )))
+
+    [<Test>]
+    member _.``reader sees the old snapshot while publication installs the complete replacement``() =
+        withDbPath (fun path ->
+            use store = new SessionActivityStore(path)
+            let start = latestCompleteBoundary DateTimeOffset.UtcNow |> _.AddMinutes(-3.0)
+            let initial, oldRows = publishInitial store start [ 1; 2; 3 ]
+            let b0 = initial.StartBoundary
+            let b2 = initial.EndBoundary
+
+            store.AppendTaskSnapshot(b0, taskCount 10)
+            let generation = store.OverviewRollupState().SourceGeneration
+            let repair = candidate generation b0 b2
+            let newRows =
+                [ rollupRow b0 10
+                  rollupRow (b0 + resolution) 20
+                  rollupRow b2 30 ]
+            store.StageOverviewRollup(repair, staged generation newRows)
+            |> requireStaged
+
+            let oldState, visibleDuringPublish =
+                store.ReadPublishedOverviewRollup(
+                    b0,
+                    b2,
+                    afterStateRead =
+                        (fun () ->
+                            store.PublishOverviewRollup repair
+                            |> requirePublished
+                            |> ignore)
+                )
+
+            let newState, visibleAfterPublish =
+                store.ReadPublishedOverviewRollup(b0, b2)
+
+            Assert.Multiple(fun () ->
+                Assert.That(oldState.PublishedGeneration, Is.EqualTo 0L)
+                Assert.That(visibleDuringPublish, Is.EqualTo oldRows)
+                Assert.That(newState.PublishedGeneration, Is.EqualTo generation)
+                Assert.That(visibleAfterPublish, Is.EqualTo newRows)))
