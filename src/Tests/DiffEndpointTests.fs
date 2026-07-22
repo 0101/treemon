@@ -8,6 +8,7 @@ open System.Net.Http
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
+open System.Threading.Tasks
 open NUnit.Framework
 open Shared
 open global.Server
@@ -147,8 +148,8 @@ let private fakeService
                 WorktreeDiff.WorktreeDiffError
              >)
     : WorktreeDiffApi.Service =
-    { GetSummary = fun _ _ -> async.Return summary
-      GetFile = fun _ _ _ entry -> async.Return(file entry) }
+    { GetSummary = fun _ _ _ -> async.Return summary
+      GetFile = fun _ _ _ _ entry -> async.Return(file entry) }
 
 let private summaryIdentity
     (displayPath: string)
@@ -162,6 +163,18 @@ let private summaryIdentity
             file.GetProperty("displayPath").GetString() = displayPath)
 
     file.GetProperty("identity").GetString()
+
+let private summaryPaths (json: string) =
+    use doc = JsonDocument.Parse(json)
+
+    doc.RootElement.GetProperty("files").EnumerateArray()
+    |> Seq.map _.GetProperty("displayPath").GetString()
+    |> Set.ofSeq
+
+let private layerQuery committed local untracked =
+    let value enabled = if enabled then "true" else "false"
+
+    $"?committed={value committed}&local={value local}&untracked={value untracked}"
 
 let private entry
     (path: string)
@@ -360,6 +373,8 @@ type DiffSerializationTests() =
               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}]}"""
               DiffSummaryResult.Clean "main",
               """{"status":"clean","baseRef":"main","fileCount":0,"files":[]}"""
+              DiffSummaryResult.FilteredEmpty,
+              """{"status":"filtered-empty","fileCount":0,"files":[]}"""
               DiffSummaryResult.BaseError,
               """{"status":"base-error"}"""
               DiffSummaryResult.TimedOut,
@@ -418,6 +433,267 @@ type DiffEndpointHttpTests() =
         )
 
     [<Test>]
+    member _.``summary accepts every fixed layer combination and applies server defaults``() =
+        let worktree = fakePath "layers"
+        let committed = entry "committed.txt" None WorktreeDiff.Modified
+        let local = entry "local.txt" None WorktreeDiff.Modified
+        let untracked = entry "untracked.txt" None WorktreeDiff.Untracked
+
+        let filesFor (layers: WorktreeDiff.WorktreeDiffLayers) =
+            [ if layers.AlreadyCommitted then committed
+              if layers.LocalChanges then local
+              if layers.Untracked then untracked ]
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ layers ->
+                    async.Return(Ok(summary (filesFor layers)))
+              GetFile =
+                fun _ _ _ _ _ ->
+                    failwith "Layer summary test does not load files" }
+
+        withDiffServer
+            [ worktree ]
+            service
+            _.Path
+            (fun client baseUrl ->
+                let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+
+                use defaultResponse = get client summaryUrl
+                let defaultBody = getResponseBody defaultResponse
+
+                Assert.Multiple(fun () ->
+                    Assert.That(defaultResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(
+                        summaryPaths defaultBody,
+                        Is.EqualTo(Set.ofList [ committed.Path; local.Path ])
+                    ))
+
+                [ false, false, false
+                  false, false, true
+                  false, true, false
+                  false, true, true
+                  true, false, false
+                  true, false, true
+                  true, true, false
+                  true, true, true ]
+                |> List.iter (fun (includeCommitted, includeLocal, includeUntracked) ->
+                    use response =
+                        get
+                            client
+                            (summaryUrl
+                             + layerQuery
+                                 includeCommitted
+                                 includeLocal
+                                 includeUntracked)
+
+                    let body = getResponseBody response
+                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+
+                    if
+                        not includeCommitted
+                        && not includeLocal
+                        && not includeUntracked
+                    then
+                        body
+                        |> assertJson
+                            """{"status":"filtered-empty","fileCount":0,"files":[]}"""
+                    else
+                        let expected =
+                            filesFor
+                                { AlreadyCommitted = includeCommitted
+                                  LocalChanges = includeLocal
+                                  Untracked = includeUntracked }
+                            |> List.map _.Path
+                            |> Set.ofList
+
+                        Assert.That(summaryPaths body, Is.EqualTo(expected))))
+
+    [<Test>]
+    member _.``filter refresh makes prior identities stale and preserves selected patch layers``() =
+        let worktree = fakePath "filter-stale"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ _ ->
+                    async.Return(Ok(summary [ changed ]))
+              GetFile =
+                fun _ _ _ layers _ ->
+                    let patch =
+                        $"{layers.AlreadyCommitted},{layers.LocalChanges},{layers.Untracked}"
+
+                    async.Return(Ok(WorktreeDiff.Text patch)) }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun client baseUrl ->
+                let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+                let fileUrl = worktreeUrl baseUrl worktree "diff-file"
+
+                use committedResponse =
+                    get client (summaryUrl + layerQuery true false false)
+
+                let committedIdentity =
+                    committedResponse
+                    |> getResponseBody
+                    |> summaryIdentity changed.Path
+
+                use localResponse =
+                    get client (summaryUrl + layerQuery false true false)
+
+                let localIdentity =
+                    localResponse
+                    |> getResponseBody
+                    |> summaryIdentity changed.Path
+
+                use staleResponse =
+                    get client $"{fileUrl}?identity={committedIdentity}"
+
+                use currentResponse =
+                    get client $"{fileUrl}?identity={localIdentity}"
+
+                Assert.Multiple(fun () ->
+                    Assert.That(localIdentity, Is.Not.EqualTo(committedIdentity))
+                    Assert.That(staleResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody staleResponse, Is.EqualTo("Unknown diff identity"))
+                    Assert.That(currentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
+
+                currentResponse
+                |> getResponseBody
+                |> assertJson (
+                    DiffFileResult.Text(
+                        fileSummary
+                            localIdentity
+                            changed.Path
+                            None
+                            DiffChangeKind.Modified,
+                        "False,True,False"
+                    )
+                    |> WorktreeDiffApi.serializeFileResult
+                ))
+
+    [<Test>]
+    member _.``out-of-order filter summaries retain only the latest-started snapshot``() =
+        let worktree = fakePath "filter-race"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+        let firstStarted =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let releaseFirst =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ layers ->
+                    async {
+                        if layers.AlreadyCommitted && not layers.LocalChanges then
+                            firstStarted.TrySetResult(true) |> ignore
+                            let! _ = releaseFirst.Task |> Async.AwaitTask
+                            ()
+
+                        return Ok(summary [ changed ])
+                    }
+              GetFile =
+                fun _ _ _ layers _ ->
+                    let patch =
+                        $"{layers.AlreadyCommitted},{layers.LocalChanges},{layers.Untracked}"
+
+                    async.Return(Ok(WorktreeDiff.Text patch)) }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun client baseUrl ->
+                let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+                let fileUrl = worktreeUrl baseUrl worktree "diff-file"
+
+                let firstTask =
+                    client.GetAsync(summaryUrl + layerQuery true false false)
+
+                firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+                |> Async.AwaitTask
+                |> TestUtils.runAsync
+                |> ignore
+
+                use secondResponse =
+                    get client (summaryUrl + layerQuery false true false)
+
+                let secondIdentity =
+                    secondResponse
+                    |> getResponseBody
+                    |> summaryIdentity changed.Path
+
+                releaseFirst.TrySetResult(true) |> ignore
+                use firstResponse = firstTask.GetAwaiter().GetResult()
+
+                let firstIdentity =
+                    firstResponse
+                    |> getResponseBody
+                    |> summaryIdentity changed.Path
+
+                use staleResponse =
+                    get client $"{fileUrl}?identity={firstIdentity}"
+
+                use currentResponse =
+                    get client $"{fileUrl}?identity={secondIdentity}"
+
+                Assert.Multiple(fun () ->
+                    Assert.That(firstResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(secondResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(staleResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                    Assert.That(getResponseBody staleResponse, Is.EqualTo("Unknown diff identity"))
+                    Assert.That(currentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
+
+                currentResponse
+                |> getResponseBody
+                |> assertJson (
+                    DiffFileResult.Text(
+                        fileSummary
+                            secondIdentity
+                            changed.Path
+                            None
+                            DiffChangeKind.Modified,
+                        "False,True,False"
+                    )
+                    |> WorktreeDiffApi.serializeFileResult
+                ))
+
+    [<Test>]
+    member _.``malformed and unsupported summary filters are rejected before Git``() =
+        let worktree = fakePath "invalid-layers"
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ _ ->
+                    failwith "Invalid filters reached diff summary"
+              GetFile =
+                fun _ _ _ _ _ ->
+                    failwith "Invalid filters reached diff file" }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> failwith "Invalid filters issued an identity")
+            (fun client baseUrl ->
+                let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+
+                [ "?committed=true&local=true"
+                  "?committed=yes&local=true&untracked=false"
+                  "?committed=true&local=true&untracked=false&path=secret"
+                  "?committed=true&committed=false&local=true&untracked=false"
+                  "?layer=committed" ]
+                |> List.iter (fun query ->
+                    use response = get client (summaryUrl + query)
+                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                    Assert.That(
+                        getResponseBody response,
+                        Is.EqualTo("Invalid diff-summary query")
+                    )))
+
+    [<Test>]
     member _.``earlier Git work consumes the shared deadline before a later command times out``() =
         let worktree = fakePath "timeout-deadline"
         let responseDeadlineMs = 3_000
@@ -436,7 +712,7 @@ type DiffEndpointHttpTests() =
 
         let service: WorktreeDiffApi.Service =
             { GetSummary =
-                fun deadline _ ->
+                fun deadline _ _ ->
                     async {
                         let! earlier = runDelayedGit deadline 1
 
@@ -458,7 +734,7 @@ type DiffEndpointHttpTests() =
                                 failwith $"Expected earlier Git success, got {other}"
                     }
               GetFile =
-                fun _ _ _ _ ->
+                fun _ _ _ _ _ ->
                     failwith "File endpoint was not expected" }
 
         withDiffServerDeadline
@@ -555,10 +831,10 @@ type DiffEndpointHttpTests() =
 
         let service: WorktreeDiffApi.Service =
             { GetSummary =
-                fun _ _ ->
+                fun _ _ _ ->
                     failwith "Attacker Host reached diff-summary"
               GetFile =
-                fun _ _ _ _ ->
+                fun _ _ _ _ _ ->
                     failwith "Attacker Host reached diff-file" }
 
         Directory.CreateDirectory(canvasDir) |> ignore
@@ -1061,10 +1337,10 @@ type DiffEndpointHttpTests() =
 
         let neverCallService: WorktreeDiffApi.Service =
             { GetSummary =
-                fun _ _ ->
+                fun _ _ _ ->
                     failwith "Unknown worktree reached diff summary"
               GetFile =
-                fun _ _ _ _ ->
+                fun _ _ _ _ _ ->
                     failwith "Unknown identity reached diff file" }
 
         withDiffServer
@@ -1103,7 +1379,7 @@ type DiffEndpointHttpTests() =
                 |> List.iter (fun query ->
                     use response = get client (summaryUrl + query)
                     Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
-                    Assert.That(getResponseBody response, Is.EqualTo("Unexpected query parameters")))
+                    Assert.That(getResponseBody response, Is.EqualTo("Invalid diff-summary query")))
 
                 use beforeSummary =
                     get

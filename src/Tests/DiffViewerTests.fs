@@ -133,6 +133,8 @@ let private summaryStateJson status =
     match status with
     | "clean" ->
         """{"status":"clean","baseRef":"origin/main","fileCount":0,"files":[]}"""
+    | "filtered-empty" ->
+        """{"status":"filtered-empty","fileCount":0,"files":[]}"""
     | "too-many-files" ->
         """{"status":"too-many-files","minimumFileCount":1001}"""
     | _ ->
@@ -238,7 +240,7 @@ type DiffViewerE2ETests() =
         )
 
     member private this.RouteSummary(body) =
-        this.RouteBody("**/diff-summary", "application/json", body)
+        this.RouteBody("**/diff-summary?*", "application/json", body)
 
     member private this.RouteFiles() =
         this.Page.RouteAsync(
@@ -451,7 +453,7 @@ type DiffViewerE2ETests() =
                 Assert.That(
                     requestPaths,
                     Is.EqualTo(
-                        [| "/e2e-diff-worktree/diff-summary"
+                        [| "/e2e-diff-worktree/diff-summary?committed=true&local=true&untracked=false"
                            "/e2e-diff-worktree/diff-file?identity=id-js" |]
                     )
                 )
@@ -541,6 +543,134 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``layer filters cover every combination and persist per worktree``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__summaryQueries = [];
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            if (url.includes('diff-summary')) {
+                                window.__summaryQueries.push(new URL(url, location.href).search);
+                            }
+                            return originalFetch.apply(this, arguments);
+                        };
+                    })()"""
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        let query = Uri(route.Request.Url).Query
+                        let body =
+                            if
+                                query
+                                = "?committed=false&local=false&untracked=false"
+                            then
+                                summaryStateJson "filtered-empty"
+                            else
+                                readySummaryJson [| firstFile |]
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+            do! this.RouteFiles()
+            do! this.Goto()
+
+            let query committed local untracked =
+                $"?committed={committed.ToString().ToLowerInvariant()}&local={local.ToString().ToLowerInvariant()}&untracked={untracked.ToString().ToLowerInvariant()}"
+
+            let applyFilters committed local untracked =
+                task {
+                    let expected = query committed local untracked
+
+                    let! _ =
+                        this.Page.EvaluateAsync<obj>(
+                            """values => {
+                                document.getElementById('filter-committed').checked = values[0];
+                                document.getElementById('filter-local').checked = values[1];
+                                document.getElementById('filter-untracked').checked = values[2];
+                                document.getElementById('filter-untracked')
+                                    .dispatchEvent(new Event('change', { bubbles: true }));
+                            }""",
+                            [| committed; local; untracked |]
+                        )
+
+                    let! _ =
+                        this.Page.WaitForFunctionAsync(
+                            "expected => window.__summaryQueries.at(-1) === expected",
+                            expected
+                        )
+
+                    if not committed && not local && not untracked then
+                        do!
+                            this.Page.Locator("[data-state='filtered-empty']").WaitForAsync()
+                    else
+                        do! this.Page.Locator(".file-entry.active").WaitForAsync()
+                }
+
+            let! defaults =
+                this.Page.EvaluateAsync<bool array>(
+                    """() => [
+                        document.getElementById('filter-committed').checked,
+                        document.getElementById('filter-local').checked,
+                        document.getElementById('filter-untracked').checked
+                    ]"""
+                )
+
+            Assert.That(defaults, Is.EqualTo([| true; true; false |]))
+
+            for (committed, local, untracked) in
+                [ false, false, false
+                  false, false, true
+                  false, true, false
+                  false, true, true
+                  true, false, false
+                  true, false, true
+                  true, true, false
+                  true, true, true ] do
+                do! applyFilters committed local untracked
+
+            do! applyFilters false true true
+            let! _ = this.Page.ReloadAsync()
+
+            let expectedPersistedQuery = query false true true
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "expected => window.__summaryQueries.at(-1) === expected",
+                    expectedPersistedQuery
+                )
+
+            let! persisted =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        String(document.getElementById('filter-committed').checked),
+                        String(document.getElementById('filter-local').checked),
+                        String(document.getElementById('filter-untracked').checked),
+                        localStorage.getItem('treemon.diff.layers:/e2e-diff-worktree')
+                    ]"""
+                )
+
+            Assert.That(
+                persisted,
+                Is.EqualTo(
+                    [| "false"
+                       "true"
+                       "true"
+                       """{"committed":false,"local":true,"untracked":true}""" |]
+                )
+            )
+        }
+
+    [<Test>]
     member this.``pointer and keyboard switching replace the single expanded patch``() =
         task {
             do! this.RouteHighlighter()
@@ -596,7 +726,7 @@ type DiffViewerE2ETests() =
             do! this.RouteHighlighter()
             do!
                 this.Page.RouteAsync(
-                    "**/diff-summary",
+                    "**/diff-summary?*",
                     fun route ->
                         let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
                         summaryIndex <- summaryIndex + 1
@@ -735,6 +865,7 @@ type DiffViewerE2ETests() =
         }
 
     [<TestCase("clean", "No changes")>]
+    [<TestCase("filtered-empty", "No change layers selected")>]
     [<TestCase("base-error", "Comparison base unavailable")>]
     [<TestCase("timeout", "Diff timed out")>]
     [<TestCase("git-error", "Diff unavailable")>]
@@ -836,7 +967,7 @@ type DiffViewerE2ETests() =
             do! summary.WaitForAsync()
             let! summaryText = summary.TextContentAsync()
 
-            do! this.Page.UnrouteAsync("**/diff-summary")
+            do! this.Page.UnrouteAsync("**/diff-summary?*")
             do! this.RouteSummary(readySummaryJson [| firstFile |])
             do! this.RouteFileStatus("timeout")
             let! _ = this.Page.ReloadAsync()

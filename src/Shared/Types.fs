@@ -227,6 +227,7 @@ type DiffSummaryDetails =
 type DiffSummaryResult =
     | Ready of DiffSummaryDetails
     | Clean of baseRef: string
+    | FilteredEmpty
     | BaseError
     | TimedOut
     | GitError

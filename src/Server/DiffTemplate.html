@@ -124,6 +124,43 @@ button { font: inherit; }
     background: var(--bg-deep);
 }
 
+.layer-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .55rem 1rem;
+    margin: 0;
+    padding: .65rem .8rem;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+}
+
+.layer-filters legend {
+    width: 100%;
+    padding: 0;
+    color: var(--text-muted);
+    font-size: .62rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+}
+
+.layer-filter {
+    display: inline-flex;
+    gap: .38rem;
+    align-items: center;
+    font-size: .72rem;
+    cursor: pointer;
+}
+
+.layer-filter input {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    accent-color: var(--accent);
+}
+
 .navigator-heading {
     position: sticky;
     top: 0;
@@ -453,6 +490,21 @@ button { font: inherit; }
     </header>
     <div class="workspace">
         <main id="content" class="content" aria-label="Changed files">
+            <fieldset id="layer-filters" class="layer-filters">
+                <legend>Include changes</legend>
+                <label class="layer-filter">
+                    <input id="filter-committed" type="checkbox">
+                    <span>Already committed</span>
+                </label>
+                <label class="layer-filter">
+                    <input id="filter-local" type="checkbox">
+                    <span>Local changes</span>
+                </label>
+                <label class="layer-filter">
+                    <input id="filter-untracked" type="checkbox">
+                    <span>Untracked</span>
+                </label>
+            </fieldset>
             <div class="navigator-heading">
                 <span>Changed files</span>
                 <span id="file-count">0</span>
@@ -471,6 +523,7 @@ button { font: inherit; }
 <script>
 var VIEW_KEY = 'treemon.diff.view';
 var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/diff\.html$/, '');
+var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.html$/, '');
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
 var VIEWER_ID = crypto.randomUUID();
 var state = {
@@ -479,6 +532,7 @@ var state = {
     currentResult: null,
     currentPatch: null,
     view: readViewPreference(),
+    filters: readFilterPreference(),
     fileRequest: 0,
     fileAbort: null,
     summaryRequest: 0,
@@ -497,6 +551,55 @@ function writeStorage(key, value) {
 
 function readViewPreference() {
     return readStorage(VIEW_KEY) === 'split' ? 'split' : 'unified';
+}
+
+function defaultFilters() {
+    return { committed: true, local: true, untracked: false };
+}
+
+function readFilterPreference() {
+    var stored = readStorage(FILTER_KEY);
+    if (!stored) return defaultFilters();
+    try {
+        var parsed = JSON.parse(stored);
+        if (
+            typeof parsed.committed === 'boolean' &&
+            typeof parsed.local === 'boolean' &&
+            typeof parsed.untracked === 'boolean'
+        ) {
+            return {
+                committed: parsed.committed,
+                local: parsed.local,
+                untracked: parsed.untracked
+            };
+        }
+    } catch (_) {}
+    return defaultFilters();
+}
+
+function updateFilterInputs() {
+    document.getElementById('filter-committed').checked = state.filters.committed;
+    document.getElementById('filter-local').checked = state.filters.local;
+    document.getElementById('filter-untracked').checked = state.filters.untracked;
+}
+
+function summaryUrl() {
+    var query = new URLSearchParams({
+        committed: String(state.filters.committed),
+        local: String(state.filters.local),
+        untracked: String(state.filters.untracked)
+    });
+    return 'diff-summary?' + query.toString();
+}
+
+function filtersChanged() {
+    state.filters = {
+        committed: document.getElementById('filter-committed').checked,
+        local: document.getElementById('filter-local').checked,
+        untracked: document.getElementById('filter-untracked').checked
+    };
+    writeStorage(FILTER_KEY, JSON.stringify(state.filters));
+    loadSummary();
 }
 
 function fileSelectionKey(file) {
@@ -892,12 +995,34 @@ async function loadFile(file) {
     }
 }
 
+function comparisonLabel(baseRef) {
+    if (state.filters.committed) return 'Compared with ' + baseRef;
+    if (state.filters.local) return 'Local changes from HEAD';
+    return 'Untracked files';
+}
+
 function renderSummaryState(summary) {
     clearNavigator();
     switch (summary.status) {
         case 'clean':
-            document.getElementById('base-label').textContent = 'Compared with ' + summary.baseRef;
-            renderState('clean', 'No changes', 'The worktree matches ' + summary.baseRef + '.', false);
+            document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
+            renderState(
+                'clean',
+                'No changes',
+                state.filters.untracked && !state.filters.committed && !state.filters.local
+                    ? 'There are no untracked files.'
+                    : 'The selected tracked layers contain no changes.',
+                false
+            );
+            break;
+        case 'filtered-empty':
+            document.getElementById('base-label').textContent = 'All change layers hidden';
+            renderState(
+                'filtered-empty',
+                'No change layers selected',
+                'Select at least one inclusion filter to show changed files.',
+                false
+            );
             break;
         case 'base-error':
             document.getElementById('base-label').textContent = 'Comparison unavailable';
@@ -937,7 +1062,7 @@ function renderReadySummary(summary) {
     }
 
     state.summary = summary;
-    document.getElementById('base-label').textContent = 'Compared with ' + summary.baseRef;
+    document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
     document.getElementById('file-count').textContent = String(summary.fileCount);
     renderFileList(files);
 
@@ -957,7 +1082,7 @@ async function loadSummary() {
     renderState('loading-summary', 'Loading changed files…', '', true);
 
     try {
-        var summary = await fetchJson('diff-summary', { cache: 'no-store' });
+        var summary = await fetchJson(summaryUrl(), { cache: 'no-store' });
         if (request !== state.summaryRequest) return;
         if (summary.status === 'ready') renderReadySummary(summary);
         else renderSummaryState(summary);
@@ -1001,7 +1126,11 @@ window.canvasSelectionMetadata = function(selectionContext) {
 document.getElementById('unified-view').addEventListener('click', function() { setView('unified'); });
 document.getElementById('split-view').addEventListener('click', function() { setView('split'); });
 document.getElementById('refresh').addEventListener('click', loadSummary);
+document.getElementById('filter-committed').addEventListener('change', filtersChanged);
+document.getElementById('filter-local').addEventListener('change', filtersChanged);
+document.getElementById('filter-untracked').addEventListener('change', filtersChanged);
 updateViewButtons();
+updateFilterInputs();
 loadSummary();
 </script>
 </body>

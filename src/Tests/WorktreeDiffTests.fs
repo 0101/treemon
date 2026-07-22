@@ -23,6 +23,11 @@ let private normalizeNewlines (value: string) =
 let private generatedDiffViewerGitPath =
     String.concat "/" [ ".agents"; "canvas"; "diff.html" ]
 
+let private layers committed local untracked : WorktreeDiffLayers =
+    { AlreadyCommitted = committed
+      LocalChanges = local
+      Untracked = untracked }
+
 let private assertSummaryOk result =
     match result with
     | Ok summary -> summary
@@ -323,6 +328,103 @@ type WorktreeDiffIntegrationTests() =
         | _ -> Assert.Fail($"Expected text patch, got {trackedPatch}")
 
     [<Test>]
+    member _.``layer selections compose exact tracked ranges without duplicate paths``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+
+        writeText repoDir "committed.txt" "committed"
+        writeText repoDir "tracked.txt" "committed version"
+        gitOk repoDir [ "add"; "--"; "committed.txt"; "tracked.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "committed layer" ]
+
+        writeText repoDir "staged.txt" "staged"
+        gitOk repoDir [ "add"; "--"; "staged.txt" ]
+        writeText repoDir "tracked.txt" "local version"
+        writeText repoDir "rename-old.txt" "unstaged"
+        writeText repoDir "untracked.txt" "untracked"
+
+        let expectedCommitted = Set.ofList [ "committed.txt"; "tracked.txt" ]
+        let expectedLocal = Set.ofList [ "rename-old.txt"; "staged.txt"; "tracked.txt" ]
+        let expectedUntracked = Set.singleton "untracked.txt"
+
+        [ false, false, false
+          false, false, true
+          false, true, false
+          false, true, true
+          true, false, false
+          true, false, true
+          true, true, false
+          true, true, true ]
+        |> List.iter (fun (committed, local, untracked) ->
+            let selected = layers committed local untracked
+
+            let summary =
+                getFilteredWorktreeDiffSummary repoDir selected
+                |> TestUtils.runAsync
+                |> assertSummaryOk
+
+            let expected =
+                [ if committed then expectedCommitted
+                  if local then expectedLocal
+                  if untracked then expectedUntracked ]
+                |> Set.unionMany
+
+            let actual = summary.Files |> List.map _.Path
+
+            Assert.Multiple(fun () ->
+                Assert.That(Set.ofList actual, Is.EqualTo(expected), $"{selected}")
+                Assert.That(actual.Length, Is.EqualTo(Set.count expected), $"{selected}")))
+
+        let assertTrackedPatch selected comparison =
+            let summary =
+                getFilteredWorktreeDiffSummary repoDir selected
+                |> TestUtils.runAsync
+                |> assertSummaryOk
+
+            let result =
+                getFilteredWorktreeDiffFile
+                    repoDir
+                    summary.MergeBase
+                    selected
+                    (findEntry "tracked.txt" summary)
+                |> TestUtils.runAsync
+
+            let direct =
+                gitOutput
+                    repoDir
+                    ([ "-c"
+                       "core.quotepath=false"
+                       "diff"
+                       "--no-ext-diff"
+                       "--no-textconv"
+                       "--find-renames"
+                       "--full-index"
+                       "--no-color" ]
+                     @ comparison summary.MergeBase
+                     @ [ "--"; "tracked.txt" ])
+
+            match result with
+            | Ok(Text patch) ->
+                Assert.That(
+                    normalizeNewlines patch,
+                    Is.EqualTo(normalizeNewlines direct),
+                    $"{selected}"
+                )
+            | _ -> Assert.Fail($"Expected text patch for {selected}, got {result}")
+
+        assertTrackedPatch
+            (layers true false false)
+            (fun mergeBase -> [ mergeBase; "HEAD" ])
+
+        assertTrackedPatch
+            (layers false true false)
+            (fun _ -> [ "HEAD" ])
+
+        assertTrackedPatch
+            (layers true true false)
+            (fun mergeBase -> [ mergeBase ])
+
+    [<Test>]
     member _.``provisioned untracked diff viewer does not dirty a clean summary without an agents ignore``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
@@ -411,6 +513,45 @@ type WorktreeDiffIntegrationTests() =
             Is.True,
             $"Expected missing base, got {result}"
         )
+
+    [<Test>]
+    member _.``local and untracked layers do not require a configured base``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writeText repoDir "tracked.txt" "base"
+        gitOk repoDir [ "add"; "--"; "tracked.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "base" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+
+        File.WriteAllText(
+            Path.Combine(repoDir, ".treemon.json"),
+            """{ "baseBranch": "missing" }"""
+        )
+        gitOk repoDir [ "add"; "--"; ".treemon.json" ]
+        gitOk repoDir [ "commit"; "-m"; "configure missing base" ]
+
+        writeText repoDir "tracked.txt" "local"
+        writeText repoDir "untracked.txt" "untracked"
+
+        let localSummary =
+            getFilteredWorktreeDiffSummary
+                repoDir
+                (layers false true false)
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        let untrackedSummary =
+            getFilteredWorktreeDiffSummary
+                repoDir
+                (layers false false true)
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        Assert.Multiple(fun () ->
+            Assert.That(localSummary.BaseRef, Is.EqualTo("HEAD"))
+            Assert.That(localSummary.Files |> List.map _.Path, Is.EqualTo([ "tracked.txt" ]))
+            Assert.That(untrackedSummary.BaseRef, Is.EqualTo("working tree"))
+            Assert.That(untrackedSummary.Files |> List.map _.Path, Is.EqualTo([ "untracked.txt" ])))
 
     [<Test>]
     member _.``Git command failure is typed and does not produce a partial summary``() =
