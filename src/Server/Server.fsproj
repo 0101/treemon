@@ -22,6 +22,7 @@
     <Compile Include="TreemonConfig.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="JsonHelpers.fs" />
+    <Compile Include="CanvasMessageFormatting.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />

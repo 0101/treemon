@@ -267,7 +267,13 @@ status dot. Persisted gauges restore donuts after a server restart without waiti
 The footer exposes `AgentActivity` as a source-tagged union: the freshest intent/title value keeps
 its original source while the card renders either as the activity line with its relative time and an
 optional running-skill pill. An activity identical to the last user message is suppressed rather
-than duplicated. Assistant footer messages use a direct `(text, timestamp)` value; the enclosing
+than duplicated. The last user message crosses the dashboard wire as
+`UserFooterMessage { Glyph; Text; Timestamp }`. `CanvasMessageFormatting` recognizes the
+`[canvas] ` transport prefix, preserves the semantic Canvas glyph, prioritizes the `request` from
+first-party `canvas-selection` actions, summarizes known actions, and formats unknown valid JSON
+structurally without rewriting punctuation inside string values. The same display-text projection
+is applied to `AgentActivity` before truncation, so duplicate suppression compares equivalent
+representations. Assistant footer messages use a direct `(text, timestamp)` value; the enclosing
 `CodingToolProvider` supplies the rendered provider label. The push provider is Copilot-only today,
 so an active card reads `Copilot`.
 
@@ -386,6 +392,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 | `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
 | `src/Server/SessionActivityStore.fs` | SQLite (WAL) schema + additive metadata/context migration + authoritative aggregate persistence + restart load / pruning / history queries. |
 | `src/Server/SessionActivityService.fs` | Single-writer mailbox; independent lifecycle, metadata, context, and liveness paths; endpoint + startup rebuild + retention. |
+| `src/Server/CanvasMessageFormatting.fs` | Canvas prompt parsing and stable dashboard display projection for activity and last-user messages. |
 | `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `getLastSessionId` (resume), `readConfiguredProvider`. |
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |
 | `src/Server/WorktreeApi.fs` | Builds the card's coding-tool fields + `CodingToolSince` from push state. |

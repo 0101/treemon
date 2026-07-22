@@ -84,7 +84,14 @@ worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). See
   `<skill-context>` injection), and the last assistant message tagged with its coding-tool provider.
   The title is bootstrapped from session metadata on join/rejoin when the ephemeral
   `session.title_changed` event was missed; `assistant.intent` remains optional enrichment when the
-  CLI emits it. Canvas notifications render alongside all footer lines rather than replacing them.
+  CLI emits it. The last-user line is serialized as
+  `UserFooterMessage { Glyph; Text; Timestamp }`. Canvas prompts are projected by
+  `CanvasMessageFormatting` into concise display text plus `MessageGlyph.Canvas`; built-in
+  selection actions show their `request`, known actions get action-specific summaries, and unknown
+  valid JSON is formatted structurally without changing string values. Activity titles use the same
+  text projection before duplicate suppression, so a raw canvas title cannot reappear beside its
+  formatted user-message line. Canvas notifications render alongside all footer lines rather than
+  replacing them.
 
 ### Create Worktree
 
@@ -196,6 +203,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
+| `src/Server/CanvasMessageFormatting.fs` | Canvas prompt-to-dashboard projection shared by activity and last-user footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |

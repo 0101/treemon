@@ -3,7 +3,6 @@ module Server.CodingToolStatus
 open System
 open System.IO
 open System.Text.Json
-open System.Text.RegularExpressions
 open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
@@ -102,79 +101,12 @@ let noSessionPushResult: CodingToolResult =
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
 
-let private canvasPrefix = "[canvas] "
-
-let private identifierWords (identifier: string) =
-    identifier.Replace('-', ' ').Replace('_', ' ')
-        .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-    |> Array.map (fun word ->
-        if String.Equals(word, "cli", StringComparison.OrdinalIgnoreCase) then "CLI"
-        else word.ToLowerInvariant())
-    |> String.concat " "
-
-let private humanizeIdentifier identifier =
-    let words = identifierWords identifier
-    if words = "" || Char.IsUpper words[0] then words
-    else string (Char.ToUpperInvariant words[0]) + words.Substring(1)
-
-let private tryStringProperty name (element: JsonElement) =
-    if element.ValueKind <> JsonValueKind.Object then
-        None
-    else
-        match element.TryGetProperty name with
-        | true, value when value.ValueKind = JsonValueKind.String ->
-            value.GetString()
-            |> Option.ofObj
-            |> Option.map _.Trim()
-            |> Option.filter (String.IsNullOrWhiteSpace >> not)
-        | _ -> None
-
-let private readableCanvasPayload (payload: string) =
-    payload
-        .Replace("{", "")
-        .Replace("}", "")
-        .Replace("[", "")
-        .Replace("]", "")
-        .Replace("\"", "")
-    |> fun text -> Regex.Replace(text, @"\s*:\s*", ": ")
-    |> fun text -> Regex.Replace(text, @"\s*,\s*", ", ")
-    |> fun text -> Regex.Replace(text, @"\s+", " ")
-    |> _.Trim()
-    |> function
-        | "" -> "Canvas interaction"
-        | text -> text
-
-let private formatCanvasPayload payload =
-    let fallback () = readableCanvasPayload payload
-
-    try
-        use document = JsonDocument.Parse payload
-        let root = document.RootElement
-
-        match tryStringProperty "text" root with
-        | Some text -> text
-        | None ->
-            match tryStringProperty "action" root with
-            | Some "decision" ->
-                match tryStringProperty "topic" root, tryStringProperty "choice" root with
-                | Some topic, Some choice -> $"{humanizeIdentifier topic}: {humanizeIdentifier choice}"
-                | _ -> fallback ()
-            | Some "expand-section" ->
-                match tryStringProperty "section" root with
-                | Some section -> $"Expand {identifierWords section}"
-                | None -> fallback ()
-            | _ -> fallback ()
-    with :? JsonException ->
-        fallback ()
-
-let internal formatUserMessage (text: string) : MessageGlyph option * string =
-    if text.StartsWith(canvasPrefix, StringComparison.Ordinal) then
-        Some MessageGlyph.Canvas, formatCanvasPayload text[canvasPrefix.Length..]
-    else
-        None, text
+let private formatActivityText text =
+    let _, displayText = CanvasMessageFormatting.formatUserMessage text
+    FileUtils.truncateMessage 120 displayText
 
 let private toUserFooterMessage (message: Message) =
-    let glyph, text = formatUserMessage message.Text
+    let glyph, text = CanvasMessageFormatting.formatUserMessage message.Text
     { Glyph = glyph
       Text = FileUtils.truncateMessage 120 text
       Timestamp = message.At }
@@ -274,7 +206,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       AgentActivity =
         footer
         |> Option.bind SessionActivity.effectiveActivity
-        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
+        |> Option.map (AgentActivity.mapText formatActivityText)
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
@@ -312,7 +244,7 @@ let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
       CurrentSkill = s.Skill
       AgentActivity =
         SessionActivity.effectiveActivity s
-        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
+        |> Option.map (AgentActivity.mapText formatActivityText)
       LastUserMessage = s.LastUserMessage |> Option.map toUserFooterMessage
       LastAssistantMessage = s.LastAssistantMessage |> Option.map (toFooterMessage 80)
       LastActivity = None }
