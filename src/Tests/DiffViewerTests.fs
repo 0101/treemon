@@ -410,6 +410,53 @@ type DiffViewerE2ETests() =
             highlighter
         )
 
+    member private this.RouteDashboardWithDiffDoc(branch: string) =
+        let converter = Fable.Remoting.Json.FableJsonConverter()
+        let diffDoc: CanvasDoc =
+            { Filename = "diff.html"
+              ContentHash = "e2e-diff"
+              LastModified = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero)
+              OwnerSessionId = None
+              Kind = CanvasDocKind.SystemView }
+
+        let routeHandler =
+            Func<IRoute, Task>(fun route ->
+                (task {
+                    let! upstream = route.FetchAsync()
+                    let! json = upstream.TextAsync()
+                    let response =
+                        Newtonsoft.Json.JsonConvert.DeserializeObject<DashboardResponse>(json, converter)
+
+                    let addDiff (worktree: WorktreeStatus) =
+                        if worktree.Branch <> branch
+                           || worktree.CanvasDocs |> List.exists _.Filename.Equals(diffDoc.Filename, StringComparison.OrdinalIgnoreCase)
+                        then
+                            worktree
+                        else
+                            { worktree with
+                                CanvasDocs = worktree.CanvasDocs @ [ diffDoc ] }
+
+                    let withDiff =
+                        { response with
+                            Repos =
+                                response.Repos
+                                |> List.map (fun repo ->
+                                    { repo with
+                                        Worktrees = repo.Worktrees |> List.map addDiff }) }
+
+                    let body =
+                        Newtonsoft.Json.JsonConvert.SerializeObject(withDiff, converter)
+                    do!
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                } :> Task))
+
+        this.Page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler)
+
     member private this.Goto() =
         task {
             let! _ =
@@ -677,6 +724,250 @@ type DiffViewerE2ETests() =
                 ).WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
             let codeLine = this.Page.Locator("#patch .d2h-code-line-ctn").First
             do! CanvasTestHelpers.assertStandaloneSelectionUnavailable this.Page codeLine
+        }
+
+    [<Test>]
+    member this.``pane-hosted diff selection exposes and emits all generic actions with exact source context``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        if (window.top !== window) return;
+                        window.__paneSelectionMessages = [];
+                        window.addEventListener('message', event => {
+                            const active = document.querySelector('.canvas-iframe-active');
+                            if (
+                                active &&
+                                event.source === active.contentWindow &&
+                                event.data?.action === 'canvas-selection'
+                            ) {
+                                window.__paneSelectionMessages.push(event.data);
+                            }
+                        });
+                    })()"""
+                )
+
+            do! this.RouteDashboardWithDiffDoc("feature-active")
+
+            let forwardedRequests =
+                Array.init 3 (fun _ ->
+                    TaskCompletionSource<string>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    ))
+            // Playwright invokes this impure route callback for each pane-to-server delivery.
+            let mutable forwardedIndex = 0
+            let successBody =
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    CanvasMessageResult.Ok,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/sendCanvasMessage",
+                    fun route ->
+                        task {
+                            let index = forwardedIndex
+                            forwardedIndex <- forwardedIndex + 1
+
+                            if index < forwardedRequests.Length then
+                                let postData =
+                                    route.Request.PostData
+                                    |> Option.ofObj
+                                    |> Option.defaultValue ""
+                                forwardedRequests[index].TrySetResult(postData)
+                                |> ignore
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = successBody
+                                    )
+                                )
+                        }
+                        :> Task
+                )
+
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RouteFiles()
+
+            let! _ =
+                this.Page.GotoAsync(
+                    ServerFixture.viteUrl,
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load)
+                )
+
+            let card =
+                this.Page.Locator(
+                    ".wt-card",
+                    PageLocatorOptions(
+                        Has =
+                            this.Page.Locator(
+                                ".branch-name",
+                                PageLocatorOptions(HasText = "feature-active")
+                            )
+                    )
+                )
+
+            do! card.Locator(".diff-btn").ClickAsync()
+
+            let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
+            do!
+                activeIframe.WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 10000.0f)
+                )
+
+            let diffFrame =
+                this.Page.FrameLocator(".canvas-pane .canvas-iframe-active")
+
+            do!
+                diffFrame.Locator(
+                    "#patch[data-highlight-status='ready'], #patch[data-highlight-status='plain'], #patch[data-highlight-status='failed']"
+                ).WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let selectChangedLines () =
+                task {
+                    let deletion =
+                        diffFrame.Locator(
+                            "tr[data-old-line='2']:not([data-new-line]) .d2h-code-line-ctn"
+                        )
+
+                    do! deletion.WaitForAsync()
+                    let! _ =
+                        deletion.EvaluateAsync(
+                            """start => {
+                                const end = document.querySelector(
+                                    "tr[data-new-line='2']:not([data-old-line]) .d2h-code-line-ctn"
+                                );
+                                const range = document.createRange();
+                                range.setStartBefore(start);
+                                range.setEndAfter(end);
+                                const selection = window.getSelection();
+                                selection.removeAllRanges();
+                                selection.addRange(range);
+                                document.dispatchEvent(new Event('selectionchange'));
+                            }"""
+                        )
+
+                    do!
+                        diffFrame.Locator(
+                            "canvas-selection-context button[data-intent='explain']"
+                        ).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+                }
+
+            do! selectChangedLines ()
+
+            let explain =
+                diffFrame.Locator(
+                    "canvas-selection-context button[data-intent='explain']"
+                )
+            let remove =
+                diffFrame.Locator(
+                    "canvas-selection-context button[data-intent='remove']"
+                )
+            let comment =
+                diffFrame.Locator("canvas-selection-context button[data-comment]")
+            let actionButtons =
+                diffFrame.Locator("canvas-selection-context .actions button")
+
+            let! actionLabels = actionButtons.AllTextContentsAsync()
+            let! explainVisible = explain.IsVisibleAsync()
+            let! removeVisible = remove.IsVisibleAsync()
+            let! commentVisible = comment.IsVisibleAsync()
+            let! isPaneHosted =
+                diffFrame.Locator("body").EvaluateAsync<bool>(
+                    "body => window.top !== window && window.parent === window.top"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(isPaneHosted, Is.True)
+                Assert.That(
+                    actionLabels,
+                    Is.EqualTo([| "Explain"; "Remove"; "Comment" |])
+                )
+                Assert.That(explainVisible, Is.True)
+                Assert.That(removeVisible, Is.True)
+                Assert.That(commentVisible, Is.True))
+
+            do! explain.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__paneSelectionMessages.length === 1",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+            let! firstForwarded =
+                forwardedRequests[0].Task.WaitAsync(TimeSpan.FromSeconds(5.0))
+
+            do! selectChangedLines ()
+            do! remove.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__paneSelectionMessages.length === 2",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+            let! secondForwarded =
+                forwardedRequests[1].Task.WaitAsync(TimeSpan.FromSeconds(5.0))
+
+            do! selectChangedLines ()
+            do! comment.ClickAsync()
+            let commentInput =
+                diffFrame.Locator("canvas-selection-context input")
+            do! commentInput.FillAsync("Verify this change")
+            do! commentInput.PressAsync("Enter")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__paneSelectionMessages.length === 3",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+            let! thirdForwarded =
+                forwardedRequests[2].Task.WaitAsync(TimeSpan.FromSeconds(5.0))
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+                )
+
+            let! rawMessages =
+                this.Page.EvaluateAsync<string>(
+                    "() => JSON.stringify(window.__paneSelectionMessages)"
+                )
+            TestContext.Out.WriteLine(
+                $"Pane-hosted diff selection payloads:{Environment.NewLine}{rawMessages}"
+            )
+            TestContext.Out.WriteLine(
+                $"Pane-forwarded selection requests:{Environment.NewLine}{JsonSerializer.Serialize([| firstForwarded; secondForwarded; thirdForwarded |])}"
+            )
+
+            let! evidence =
+                this.Page.EvaluateAsync<string>(
+                    """() => JSON.stringify(window.__paneSelectionMessages.map(message => ({
+                        intent: message.intent,
+                        doc: message.doc,
+                        request: message.request,
+                        action: message.action,
+                        sourceContext: message.sourceContext
+                    })))"""
+                )
+
+            let sourceContext =
+                """{"kind":"diff","fileIdentity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"hunkHeader":"@@ -1,3 +1,4 @@","oldLineRange":{"start":2,"end":2},"newLineRange":{"start":2,"end":2}}"""
+
+            let expected =
+                "["
+                + $"""{{"intent":"explain","doc":"diff.html","request":"User asked to explain/expand this","action":"canvas-selection","sourceContext":{sourceContext}}}"""
+                + ","
+                + $"""{{"intent":"remove","doc":"diff.html","request":"User asked to remove this","action":"canvas-selection","sourceContext":{sourceContext}}}"""
+                + ","
+                + $"""{{"intent":"comment","doc":"diff.html","request":"User commented: Verify this change","action":"canvas-selection","sourceContext":{sourceContext}}}"""
+                + "]"
+
+            Assert.Multiple(fun () ->
+                Assert.That(evidence, Is.EqualTo(expected))
+                Assert.That(forwardedIndex, Is.EqualTo(3)))
         }
 
     [<Test>]
