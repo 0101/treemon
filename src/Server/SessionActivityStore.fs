@@ -6,14 +6,19 @@ open System.Globalization
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
+open Server.OverviewHistoryRollup
 
 // The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
-// upserts the per-session fold result and appends the raw event to two tables:
+// upserts the per-session fold result and appends the raw event to the authoritative source tables:
 //
 //   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
 //                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
 //   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
 //                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
+//
+// The overview_history_* tables are disposable count-only rollups and reconstruction metadata.
+// Construction validates their schema and invariants, replacing only those derived tables when they
+// cannot be trusted; the source tables above remain intact for rebuilding.
 //
 // WAL journalling lets queryWindow / loadLiveStatuses read concurrently with the mailbox writer with
 // no lock contention; the writer being single means status upserts never race each other. The SQLite
@@ -71,13 +76,16 @@ let private parseIso (s: string) =
 // Task-snapshot rows persist the count-only `TaskCount list` as a JSON blob, using the SAME
 // Fable.Remoting converter the getOverviewHistory wire uses (matching the former JSONL history), so a
 // stored snapshot round-trips byte-identically to what the client later receives via OverviewSnapshot.
-let private taskConverter: Newtonsoft.Json.JsonConverter = Fable.Remoting.Json.FableJsonConverter()
+let private countConverter: Newtonsoft.Json.JsonConverter = Fable.Remoting.Json.FableJsonConverter()
 
 let private serializeTasks (tasks: OverviewData.TaskCount list) : string =
-    Newtonsoft.Json.JsonConvert.SerializeObject(tasks, Newtonsoft.Json.Formatting.None, [| taskConverter |])
+    Newtonsoft.Json.JsonConvert.SerializeObject(tasks, Newtonsoft.Json.Formatting.None, [| countConverter |])
 
 let private parseTasks (s: string) : OverviewData.TaskCount list =
-    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.TaskCount list>(s, [| taskConverter |])
+    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.TaskCount list>(s, [| countConverter |])
+
+let private parseAgents (s: string) : OverviewData.AgentCount list =
+    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.AgentCount list>(s, [| countConverter |])
 
 let private statusText =
     function
@@ -198,6 +206,64 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
     tasks TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_task_snapshots_ts ON task_snapshots(ts);
+"""
+
+let private derivedSchemaSql =
+    $"""
+CREATE TABLE IF NOT EXISTS overview_history_rows (
+    bucket INTEGER PRIMARY KEY CHECK (bucket %% {resolutionSeconds} = 0),
+    tasks  TEXT NOT NULL,
+    agents TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS overview_history_state (
+    id                   INTEGER PRIMARY KEY CHECK (id = 1),
+    schema_version       INTEGER NOT NULL CHECK (schema_version = {schemaVersion}),
+    resolution_seconds   INTEGER NOT NULL CHECK (resolution_seconds = {resolutionSeconds}),
+    source_generation    INTEGER NOT NULL CHECK (source_generation >= 0),
+    published_generation INTEGER NOT NULL CHECK (
+        published_generation >= 0 AND published_generation <= source_generation
+    ),
+    complete_through     INTEGER CHECK (
+        complete_through IS NULL OR complete_through %% resolution_seconds = 0
+    ),
+    earliest_dirty       INTEGER CHECK (
+        earliest_dirty IS NULL OR earliest_dirty %% resolution_seconds = 0
+    )
+);
+
+INSERT OR IGNORE INTO overview_history_state
+    (id, schema_version, resolution_seconds, source_generation, published_generation)
+VALUES (1, {schemaVersion}, {resolutionSeconds}, 0, 0);
+
+CREATE TABLE IF NOT EXISTS overview_history_staging (
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    bucket     INTEGER NOT NULL CHECK (bucket %% {resolutionSeconds} = 0),
+    tasks      TEXT NOT NULL,
+    agents     TEXT NOT NULL,
+    PRIMARY KEY (generation, bucket)
+);
+CREATE INDEX IF NOT EXISTS ix_overview_staging_bucket
+    ON overview_history_staging(bucket, generation);
+
+CREATE TABLE IF NOT EXISTS overview_history_session_bounds (
+    session_id        TEXT PRIMARY KEY,
+    first_observed_at TEXT NOT NULL,
+    last_observed_at  TEXT NOT NULL,
+    CHECK (first_observed_at <= last_observed_at)
+);
+CREATE INDEX IF NOT EXISTS ix_overview_bounds_last_first
+    ON overview_history_session_bounds(last_observed_at, first_observed_at);
+CREATE INDEX IF NOT EXISTS ix_overview_bounds_first_last
+    ON overview_history_session_bounds(first_observed_at, last_observed_at);
+"""
+
+let private dropDerivedSchemaSql =
+    """
+DROP TABLE IF EXISTS overview_history_staging;
+DROP TABLE IF EXISTS overview_history_rows;
+DROP TABLE IF EXISTS overview_history_session_bounds;
+DROP TABLE IF EXISTS overview_history_state;
 """
 
 // One-time normalisation of legacy rows: pre-idle-only builds persisted the retired "done" status, so
@@ -480,6 +546,172 @@ let private addColumnIfMissing (conn: SqliteConnection) (table: string) (col: st
         cmd.CommandText <- $"ALTER TABLE %s{table} ADD COLUMN %s{col} %s{decl};"
         cmd.ExecuteNonQuery() |> ignore
 
+let private derivedTableShapes =
+    [ "overview_history_rows", [ "bucket"; "tasks"; "agents" ]
+      "overview_history_state",
+      [ "id"
+        "schema_version"
+        "resolution_seconds"
+        "source_generation"
+        "published_generation"
+        "complete_through"
+        "earliest_dirty" ]
+      "overview_history_staging", [ "generation"; "bucket"; "tasks"; "agents" ]
+      "overview_history_session_bounds", [ "session_id"; "first_observed_at"; "last_observed_at" ] ]
+
+let private tableColumns (conn: SqliteConnection) table =
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- $"PRAGMA table_info(%s{table});"
+    use reader = cmd.ExecuteReader()
+    readRows reader (fun row -> row.GetString 1) []
+
+let private derivedShapesAreCurrent conn =
+    derivedTableShapes
+    |> List.forall (fun (table, expected) -> tableColumns conn table = expected)
+
+let private executeSql (conn: SqliteConnection) sql =
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- sql
+    cmd.ExecuteNonQuery() |> ignore
+
+let private readPublicationState (conn: SqliteConnection) : PublicationState option =
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <-
+        """
+SELECT id, schema_version, resolution_seconds, source_generation, published_generation,
+       complete_through, earliest_dirty
+FROM overview_history_state
+ORDER BY id;
+"""
+    use reader = cmd.ExecuteReader()
+
+    if not (reader.Read()) then
+        None
+    else
+        let boundaryAt index =
+            if reader.IsDBNull index then None
+            else tryFromBucket (reader.GetInt64 index)
+
+        let id = reader.GetInt64 0
+        let completeThrough = boundaryAt 5
+        let earliestDirty = boundaryAt 6
+        let completeThroughWasNull = reader.IsDBNull 5
+        let earliestDirtyWasNull = reader.IsDBNull 6
+        let state =
+            { SchemaVersion = reader.GetInt32 1
+              ResolutionSeconds = reader.GetInt32 2
+              SourceGeneration = reader.GetInt64 3
+              PublishedGeneration = reader.GetInt64 4
+              CompleteThrough = completeThrough
+              EarliestDirty = earliestDirty }
+        let hasExtraRow = reader.Read()
+
+        if id = 1L
+           && not hasExtraRow
+           && (completeThroughWasNull || completeThrough.IsSome)
+           && (earliestDirtyWasNull || earliestDirty.IsSome) then
+            Some state
+        else
+            None
+
+let private countJsonIsValid tasksJson agentsJson =
+    try
+        let tasks = parseTasks tasksJson
+        let agents = parseAgents agentsJson
+
+        let taskKinds = tasks |> List.map _.Kind
+        let agentKinds = agents |> List.map _.Kind
+
+        tasks |> List.forall (fun count -> count.Count > 0)
+        && agents |> List.forall (fun count -> count.Count > 0)
+        && Set.count (Set.ofList taskKinds) = taskKinds.Length
+        && Set.count (Set.ofList agentKinds) = agentKinds.Length
+    with _ ->
+        false
+
+let private publishedRowsAreValid (conn: SqliteConnection) state =
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- "SELECT bucket, tasks, agents FROM overview_history_rows ORDER BY bucket;"
+    use reader = cmd.ExecuteReader()
+
+    let rows =
+        readRows reader (fun row -> row.GetInt64 0, row.GetString 1, row.GetString 2) []
+
+    let rowsValid =
+        rows
+        |> List.forall (fun (bucket, tasks, agents) ->
+            tryFromBucket bucket |> Option.isSome
+            && countJsonIsValid tasks agents)
+
+    let dense =
+        rows
+        |> List.map (fun (bucket, _, _) -> bucket)
+        |> List.pairwise
+        |> List.forall (fun (left, right) -> right - left = int64 resolutionSeconds)
+
+    match state.CompleteThrough, rows with
+    | None, [] -> rowsValid && state.PublishedGeneration = 0L
+    | Some completeThrough, _ :: _ ->
+        rowsValid
+        && dense
+        && rows |> List.last |> fun (bucket, _, _) -> bucket = toBucket completeThrough
+    | _ -> false
+
+let private stagingRowsAreValid (conn: SqliteConnection) sourceGeneration =
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- "SELECT generation, bucket, tasks, agents FROM overview_history_staging;"
+    use reader = cmd.ExecuteReader()
+
+    readRows reader (fun row -> row.GetInt64 0, row.GetInt64 1, row.GetString 2, row.GetString 3) []
+    |> List.forall (fun (generation, bucket, tasks, agents) ->
+        generation >= 0L
+        && generation <= sourceGeneration
+        && tryFromBucket bucket |> Option.isSome
+        && countJsonIsValid tasks agents)
+
+let private observationBoundsAreValid (conn: SqliteConnection) =
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <-
+        "SELECT first_observed_at, last_observed_at FROM overview_history_session_bounds;"
+    use reader = cmd.ExecuteReader()
+
+    readRows reader (fun row -> row.GetString 0, row.GetString 1) []
+    |> List.forall (fun (firstText, lastText) ->
+        try
+            let first = parseIso firstText
+            let last = parseIso lastText
+            isoUtc first = firstText && isoUtc last = lastText && first <= last
+        with _ ->
+            false)
+
+let private derivedDataIsValid conn =
+    try
+        match readPublicationState conn with
+        | Some state when isSupportedState state ->
+            publishedRowsAreValid conn state
+            && stagingRowsAreValid conn state.SourceGeneration
+            && observationBoundsAreValid conn
+        | _ -> false
+    with _ ->
+        false
+
+let private resetDerivedSchema (conn: SqliteConnection) =
+    use tx = conn.BeginTransaction()
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- dropDerivedSchemaSql + derivedSchemaSql
+    cmd.ExecuteNonQuery() |> ignore
+    tx.Commit()
+
+let private ensureDerivedSchema conn =
+    if derivedShapesAreCurrent conn then
+        executeSql conn derivedSchemaSql
+
+        if not (derivedDataIsValid conn) then
+            resetDerivedSchema conn
+    else
+        resetDerivedSchema conn
+
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
 /// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
@@ -522,7 +754,20 @@ type SessionActivityStore(dbPath: string) =
         addColumnIfMissing c "session_status" "intent_ts" "TEXT"
         addColumnIfMissing c "session_status" "title_text" "TEXT"
         addColumnIfMissing c "session_status" "title_ts" "TEXT"
+        ensureDerivedSchema c
         c
+
+    member internal _.OverviewRollupState() : PublicationState =
+        use conn = openConn ()
+
+        match readPublicationState conn with
+        | Some state when isSupportedState state -> state
+        | _ ->
+            raise (
+                InvalidDataException(
+                    "Overview history publication state has an unsupported schema or resolution."
+                )
+            )
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).
