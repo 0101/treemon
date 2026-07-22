@@ -64,7 +64,8 @@ let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
 
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
-/// the restart-rebuild test). Disposing the service disposes the store; the dir is then removed.
+/// the restart-rebuild test). Program owns the shared store, so the fixture disposes it after the
+/// service.
 let private withServiceSeeded
     (knownWorktree: string)
     (seed: SessionActivityStore -> unit)
@@ -90,6 +91,7 @@ let private withServiceSeeded
         action (svc, agent, store)
     finally
         (svc :> IDisposable).Dispose()
+        (store :> IDisposable).Dispose()
         try Directory.Delete(dir, true) with _ -> ()
 
 let private withService knownWorktree action = withServiceSeeded knownWorktree ignore action

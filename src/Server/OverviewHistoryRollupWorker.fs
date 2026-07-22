@@ -244,6 +244,8 @@ type OverviewHistoryRollupWorker internal
                 runGate.Release() |> ignore
         }
 
+    member internal _.Store = store
+
     interface IDisposable with
         member _.Dispose() =
             lock dispositionGate (fun () ->

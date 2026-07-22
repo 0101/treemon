@@ -48,6 +48,7 @@
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="ServerStartupResolutionTests.fs" />
+    <Compile Include="ServerLifecycleTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="OverviewBandE2ETests.fs" />
