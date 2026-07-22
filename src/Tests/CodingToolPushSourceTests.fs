@@ -16,16 +16,15 @@ open Server.CodingToolStatus
 let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
 let private msg text t : Message = { Text = text; At = ts t }
 
-/// A stored live session for one worktree. `UpdatedAt` and `LastSeen` are set together (an event is
-/// also the heartbeat), exactly as the ingestion service writes them.
-let private stored
+let private storedWithClocks
     (sid: string)
     (wt: string)
     (status: SessionLevelStatus)
     (skill: string option)
     (lastUser: Message option)
     (lastAsst: Message option)
-    (seen: string)
+    (updatedAt: string)
+    (lastSeen: string)
     : StoredStatus =
     { SessionId = SessionId sid
       WorktreePath = WorktreePath wt
@@ -36,9 +35,12 @@ let private stored
             Skill = skill
             LastUserMessage = lastUser
             LastAssistantMessage = lastAsst }
-      UpdatedAt = ts seen
-      LastSeen = ts seen
+      UpdatedAt = ts updatedAt
+      LastSeen = ts lastSeen
       ContextUsageAt = None }
+
+let private stored sid wt status skill lastUser lastAsst seen =
+    storedWithClocks sid wt status skill lastUser lastAsst seen seen
 
 let private now = ts "2026-03-01T12:00:00Z"
 
@@ -136,6 +138,50 @@ type FromPushSessionsTests() =
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
         Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "the auth module"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
+
+    [<Test>]
+    member _.``A heartbeat cannot replace the most-recent active session``() =
+        let heartbeatNewest =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Working (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
+                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:59:30Z"
+        let activityNewest =
+            storedWithClocks "activity" "wt" SessionLevelStatus.WaitingForUser (Some "new-skill")
+                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
+                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
+                "2026-03-01T11:59:00Z"
+                "2026-03-01T11:59:00Z"
+
+        let result = fromPushSessions now [ heartbeatNewest; activityNewest ]
+
+        Assert.That(result.Status, Is.EqualTo WaitingForUser)
+        Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some("new prompt", ts "2026-03-01T11:58:30Z")))
+        Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
+
+    [<Test>]
+    member _.``A heartbeat cannot replace the most-recent idle footer``() =
+        let heartbeatNewest =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
+                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:59:30Z"
+        let activityNewest =
+            storedWithClocks "activity" "wt" SessionLevelStatus.Idle (Some "new-skill")
+                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
+                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
+                "2026-03-01T11:59:00Z"
+                "2026-03-01T11:59:00Z"
+
+        let result = fromPushSessions now [ heartbeatNewest; activityNewest ]
+
+        Assert.That(result.Status, Is.EqualTo Idle)
+        Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some("new prompt", ts "2026-03-01T11:58:30Z")))
+        Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
 
     [<Test>]
     member _.``A just-idled newer session does not hide an actively-working sibling``() =
@@ -362,3 +408,29 @@ type GetLastSessionIdTests() =
 
         Assert.That(display.Status, Is.EqualTo Working, "display pick is the active session")
         Assert.That(resume, Is.EqualTo(Some "idled"), "resume pick is the most-recent (idle) session")
+
+    [<Test>]
+    member _.``A heartbeat cannot replace the most-recent resume session``() =
+        let heartbeatNewest =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:00:00Z"
+                "2026-03-01T11:59:00Z"
+        let activityNewest =
+            storedWithClocks "activity" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:58:00Z"
+
+        Assert.That(getLastSessionId [ heartbeatNewest; activityNewest ], Is.EqualTo(Some "activity"))
+
+    [<Test>]
+    member _.``Equal activity timestamps use session id instead of heartbeat recency``() =
+        let a =
+            storedWithClocks "a" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:59:00Z"
+        let b =
+            storedWithClocks "b" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:58:00Z"
+
+        Assert.That(getLastSessionId [ a; b ], Is.EqualTo(Some "b"))

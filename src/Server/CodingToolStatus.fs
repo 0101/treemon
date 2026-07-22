@@ -79,9 +79,9 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 //   * the STATUS dot is driven by OPENNESS (only sessions still heartbeating count): open-active →
 //     Working/WaitingForUser, open-but-idle → Idle (blue), no open session → NoSession (grey);
 //   * the FOOTER (activity / skill / last-user / last-assistant) comes from the active winner when
-//     one runs, else the most-recent session of ANY status, so it survives Idle / NoSession.
-// Resume is a THIRD, distinct pick (getLastSessionId): the most-recent session regardless of
-// active/idle (the session the user last touched).
+//     one runs, else the session with the most-recent activity, so it survives Idle / NoSession.
+// Resume is a THIRD, distinct pick (getLastSessionId): the most-recently-active session regardless
+// of active/idle (the session the user last touched).
 
 /// The blank grey card a worktree shows when it has NO push session at all (never reported, or its
 /// rows pruned). The `fromPushSessions` collapse below reproduces this exact value for an empty
@@ -110,11 +110,10 @@ let private toFooterMessage maxLength (message: Message) =
 ///   `stalenessTimeout`, so a dead Working session drops out of openness (→ grey) before the crash-net
 ///   would rewrite it to Idle — it never lingers blue.
 /// * **Footer** (activity / skill / last user / last assistant) — DECOUPLED from the dot: the active
-///   winner when one is running, otherwise the MOST-RECENT session of ANY status (the same pick
-///   `getLastSessionId` uses for resume). Going Idle or losing the open session therefore does NOT
+///   winner when one is running, otherwise the session with the MOST-RECENT ACTIVITY of ANY status
+///   (the same pick `getLastSessionId` uses for resume). Going Idle or losing the open session does NOT
 ///   blank the footer: it stays populated while any session for the worktree remains in the store
-///   (retention / `idleWindow`). This is the fix for the idle-only worktree whose footer/event-log
-///   used to vanish because the old `pickActive`-only collapse dropped every Idle session.
+///   (retention / `idleWindow`).
 /// Render order for the per-session dots: Working first, then WaitingForUser, then Idle. NoSession is
 /// never a per-session status (it is the worktree-level collapse of an empty session set).
 let private sessionStatusOrder =
@@ -134,9 +133,13 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     // Working/WaitingForUser open session past the staleness timeout still reads as Idle.
     let adjustedOpen =
         openSessions
-        |> List.map (fun s -> SessionActivity.freshnessAdjusted now s.LastSeen s.Status, s.LastSeen)
+        |> List.map (fun s ->
+            { s with Status = SessionActivity.freshnessAdjusted now s.LastSeen s.Status })
 
-    let activeWinner = SessionActivity.pickActive adjustedOpen
+    let activeWinner =
+        adjustedOpen
+        |> List.map (fun s -> s.Status, StoredStatus.activityOrderKey s)
+        |> SessionActivity.pickActive
 
     let status =
         match openSessions with
@@ -154,26 +157,25 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     // ⇔ status = NoSession, so the client reproduces the single grey dot from an empty list.
     let sessionStatuses =
         adjustedOpen
-        |> List.map (fun (s, seen) ->
-            { Status = SessionActivity.toCodingToolStatus s.Status
-              Skill = s.Skill
-              ContextUsage = s.ContextUsage },
-            seen)
+        |> List.map (fun s ->
+            { Status = SessionActivity.toCodingToolStatus s.Status.Status
+              Skill = s.Status.Skill
+              ContextUsage = s.Status.ContextUsage },
+            s.LastSeen)
         |> List.sortWith (fun (a, aSeen) (b, bSeen) ->
             match compare (sessionStatusOrder a.Status) (sessionStatusOrder b.Status) with
             | 0 -> compare bSeen aSeen
             | c -> c)
         |> List.map fst
 
-    // Footer source: the active winner if running, else the most-recent session of ANY status so the
-    // footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain their last
-    // messages + skill), NOT a freshness-adjusted one — freshness only rewrites the status dot.
+    // Footer source: the active winner if running, else the most-recently-active session of ANY
+    // status so the footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain
+    // their last messages + skill), NOT a freshness-adjusted one — freshness only rewrites the dot.
     let footer =
         activeWinner
         |> Option.orElse (
             sessions
-            |> List.sortByDescending _.LastSeen
-            |> List.tryHead
+            |> StoredStatus.tryMostRecentActivity
             |> Option.map _.Status)
 
     // "Last did something" time: the newest active open last_seen when an active session is displayed,
@@ -181,8 +183,8 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     let lastActivity =
         if activeWinner.IsSome then
             adjustedOpen
-            |> List.filter (fun (st, _) -> st.Status <> SessionLevelStatus.Idle)
-            |> List.map snd
+            |> List.filter (fun s -> s.Status.Status <> SessionLevelStatus.Idle)
+            |> List.map _.LastSeen
             |> List.max
             |> Some
         else
@@ -251,12 +253,11 @@ let withRetainedFallback (retained: Map<string, StoredStatus>) (live: Map<string
             else Map.add path (retainedFooterResult stored) acc)
         live
 
-/// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recent session for the
-/// worktree regardless of active/idle (the session the user last touched). Reads the id from the
+/// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recently-active session for
+/// the worktree regardless of active/idle (the session the user last touched). Reads the id from the
 /// push live state (the store's in-memory reflection) instead of scanning log directories. `None`
 /// when the worktree has never reported (→ the CLI `--continue` fallback in CodingToolCli).
 let getLastSessionId (sessions: StoredStatus list) : string option =
     sessions
-    |> List.sortByDescending _.LastSeen
-    |> List.tryHead
+    |> StoredStatus.tryMostRecentActivity
     |> Option.map (_.SessionId >> SessionId.value)

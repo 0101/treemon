@@ -234,15 +234,15 @@ let debounceIdle
 
 // --- Multi-session collapse -------------------------------------------------------------------
 
-/// Collapse a worktree's live sessions to one winning record: drop Idle, then the most-recent (by
-/// `last_seen`) active session wins; all Idle → None. NOT raw latest-update — a session that just went
-/// Idle must not hide an actively-Working sibling. Every displayed field (status, skill, last user,
-/// last assistant) is read from that one record, so per-field cherry-picking is unrepresentable.
+/// Collapse a worktree's live sessions to one winning record: drop Idle, then the active session with
+/// the greatest caller-provided activity key wins; all Idle → None. A session that just went Idle
+/// must not hide an actively-Working sibling. Every displayed field (status, skill, last user, last
+/// assistant) is read from that one record, so per-field cherry-picking is unrepresentable.
 ///
 /// This is `CodingToolStatus.mostRecentActive` reused across a worktree's sessions rather than across
 /// three detector surfaces. Callers freshness-adjust each session first (so stale ones read as Idle
 /// and drop out here).
-let pickActive (sessions: (SessionStatus * DateTimeOffset) list) : SessionStatus option =
+let pickActive sessions : SessionStatus option =
     sessions
     |> List.filter (fun (s, _) -> s.Status <> SessionLevelStatus.Idle)
     |> List.sortByDescending snd
