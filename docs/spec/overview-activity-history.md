@@ -164,6 +164,8 @@ Event and liveness mutations maintain session observation bounds; task mutations
 
 `OverviewHistory` remains the pure correctness oracle. `OverviewHistoryRollup` owns grid arithmetic,
 bounded backfill/repair, staging, publication, retention, and recovery.
+`OverviewHistoryReconstruction` owns the background-only indexed source reads and dense boundary
+projection, keeping raw reconstruction separate from both request handling and store persistence.
 
 The background reconstruction query seeks task, status, and latest-observation predecessors at each
 boundary. It may read raw history because it is outside the request path. It maps reconstructed open
@@ -214,8 +216,9 @@ anchor age.
 | `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract. |
 | `src/Server/OverviewHistory.fs` | Pure sampler oracle and response collapsing. |
 | `src/Server/OverviewHistoryRollup.fs` | Grid arithmetic, reconstruction orchestration, staging, publication, repair, and retention. |
+| `src/Server/OverviewHistoryReconstruction.fs` | Stable-snapshot indexed source reads and dense count reconstruction. |
 | `src/Server/OverviewHistoryCache.fs` | Publication-keyed cache and in-flight request deduplication. |
-| `src/Server/SessionActivityStore.fs` | Raw persistence, derived schema, transactional invalidation, indexed reconstruction queries, and rollup reads/writes. |
+| `src/Server/SessionActivityStore.fs` | Raw persistence, derived schema, transactional invalidation, and rollup reads/writes. |
 | `src/Server/SessionActivityService.fs` | Ingestion through the shared store. |
 | `src/Server/Program.fs` | Shared store and compactor lifecycle plus startup backfill. |
 | `src/Server/WorktreeApi.fs` | Published-rollup history query. |

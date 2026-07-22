@@ -67,10 +67,10 @@ type internal OverviewHistoryInputs =
 // Timestamps are stored as UTC round-trip ("O") strings. Normalising to UTC gives every value the
 // same fixed-width "+00:00" suffix, so lexical string comparison equals chronological order — which
 // is what the `ts >= $start` window query and the `last_seen >= $cutoff` live filter rely on.
-let private isoUtc (dto: DateTimeOffset) =
+let internal isoUtc (dto: DateTimeOffset) =
     dto.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
 
-let private parseIso (s: string) =
+let internal parseIso (s: string) =
     DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
 
 // Task-snapshot rows persist the count-only `TaskCount list` as a JSON blob, using the SAME
@@ -81,7 +81,7 @@ let private countConverter: Newtonsoft.Json.JsonConverter = Fable.Remoting.Json.
 let private serializeTasks (tasks: OverviewData.TaskCount list) : string =
     Newtonsoft.Json.JsonConvert.SerializeObject(tasks, Newtonsoft.Json.Formatting.None, [| countConverter |])
 
-let private parseTasks (s: string) : OverviewData.TaskCount list =
+let internal parseTasks (s: string) : OverviewData.TaskCount list =
     Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.TaskCount list>(s, [| countConverter |])
 
 let private parseAgents (s: string) : OverviewData.AgentCount list =
@@ -147,7 +147,7 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
       LastSeen = parseIso (r.GetString 12)
       ContextUsageAt = None }
 
-let private readEventRow (r: SqliteDataReader) : ActivityEventRow =
+let internal readEventRow (r: SqliteDataReader) : ActivityEventRow =
     { EventId = EventId(r.GetString 0)
       SessionId = SessionId(r.GetString 1)
       WorktreePath = WorktreePath(r.GetString 2)
@@ -487,7 +487,7 @@ ORDER BY last_seen;
 
 // Drain the reader through an immutable recursive accumulator instead of a mutable list-building
 // loop, then restore source order.
-let rec private readRows (reader: SqliteDataReader) (map: SqliteDataReader -> 'T) (acc: 'T list) : 'T list =
+let rec internal readRows (reader: SqliteDataReader) (map: SqliteDataReader -> 'T) (acc: 'T list) : 'T list =
     if reader.Read() then readRows reader map (map reader :: acc) else List.rev acc
 
 // Bind an activity_events row's parameters onto a prepared command — shared by AppendEvent and the
@@ -756,6 +756,14 @@ type SessionActivityStore(dbPath: string) =
         addColumnIfMissing c "session_status" "title_ts" "TEXT"
         ensureDerivedSchema c
         c
+
+    /// Run a related group of internal reads against one stable deferred WAL snapshot.
+    member internal _.ReadSnapshot(read: SqliteConnection -> SqliteTransaction -> 'T) : 'T =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction(deferred = true)
+        let result = read conn tx
+        tx.Commit()
+        result
 
     member internal _.OverviewRollupState() : PublicationState =
         use conn = openConn ()
