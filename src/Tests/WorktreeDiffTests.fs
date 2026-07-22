@@ -879,7 +879,7 @@ type WorktreeDiffIntegrationTests() =
 
         [ 1..maxWorktreeDiffFiles ]
         |> List.iter (fun index ->
-            writeText repoDir $"many/file-{index:D4}.txt" "")
+            writeText repoDir (Path.Combine("many", $"file-{index:D4}.txt")) "")
 
         gitOk repoDir [ "add"; "--"; "many" ]
         gitOk repoDir [ "commit"; "-m"; "base files" ]
@@ -890,7 +890,7 @@ type WorktreeDiffIntegrationTests() =
 
         [ 1..maxWorktreeDiffFiles ]
         |> List.iter (fun index ->
-            writeText repoDir $"many/file-{index:D4}.txt" "")
+            writeText repoDir (Path.Combine("many", $"file-{index:D4}.txt")) "")
 
         let atLimit =
             getWorktreeDiffSummary repoDir
