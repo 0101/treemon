@@ -11,6 +11,7 @@ type WorktreeDiffStatus =
     | Deleted
     | Renamed
     | Untracked
+    | TrackedAndUntracked of trackedStatus: WorktreeDiffStatus
 
 type WorktreeDiffEntry =
     { Path: string
@@ -315,6 +316,25 @@ let private excludeGeneratedDiffViewer (entries: WorktreeDiffEntry list) =
     entries
     |> List.filter (fun entry -> entry.Path <> generatedDiffViewerPath)
 
+let private composeTrackedAndUntracked tracked untracked =
+    let trackedPaths = tracked |> List.map _.Path |> Set.ofList
+    let untrackedPaths = untracked |> List.map _.Path |> Set.ofList
+
+    let composedTracked =
+        tracked
+        |> List.map (fun entry ->
+            if Set.contains entry.Path untrackedPaths then
+                { entry with
+                    Status = TrackedAndUntracked entry.Status }
+            else
+                entry)
+
+    let untrackedOnly =
+        untracked
+        |> List.filter (fun entry -> not (Set.contains entry.Path trackedPaths))
+
+    composedTracked @ untrackedOnly
+
 let private trackedDiffArguments mergeBase layers =
     match layers.AlreadyCommitted, layers.LocalChanges with
     | true, true -> Some [ mergeBase ]
@@ -388,9 +408,6 @@ let internal getWorktreeDiffSummaryWithinDeadline
                         |> Result.map excludeGeneratedDiffViewer
                 }
 
-        if tracked.Length > maxWorktreeDiffFiles then
-            return! Error(TooManyFiles tracked.Length)
-
         let! untracked =
             if not layers.Untracked then
                 async.Return(Ok [])
@@ -413,7 +430,7 @@ let internal getWorktreeDiffSummaryWithinDeadline
                         |> Result.map excludeGeneratedDiffViewer
                 }
 
-        let files = tracked @ untracked
+        let files = composeTrackedAndUntracked tracked untracked
 
         if files.Length > maxWorktreeDiffFiles then
             return! Error(TooManyFiles files.Length)
@@ -479,6 +496,41 @@ let private classifyTrackedPatch entry bytes =
         | Ok patch when entry.Status = Deleted -> Ok(DeletedFile patch)
         | Ok patch when isSymlinkPatch patch -> Ok(Symlink(Some patch))
         | Ok patch -> Ok(Text patch)
+
+let private combinePatchText (trackedPatch: string) (untrackedPatch: string) =
+    let separator =
+        if trackedPatch.EndsWith("\n", StringComparison.Ordinal) then
+            ""
+        else
+            "\n"
+
+    let patch = trackedPatch + separator + untrackedPatch
+    let bytes = Encoding.UTF8.GetBytes(patch)
+
+    if bytes.Length > maxWorktreeDiffBytes then
+        Oversized
+    elif diffLineCount bytes > maxWorktreeDiffLines then
+        Truncated
+    else
+        Text patch
+
+let private combineTrackedAndUntrackedFiles tracked untracked =
+    match tracked, untracked with
+    | Oversized, _
+    | _, Oversized -> Oversized
+    | Truncated, _
+    | _, Truncated -> Truncated
+    | Binary, _
+    | _, Binary -> Binary
+    | Symlink None, _
+    | _, Symlink None -> Symlink None
+    | (Text trackedPatch
+      | DeletedFile trackedPatch
+      | Symlink(Some trackedPatch)),
+      (Text untrackedPatch
+      | DeletedFile untrackedPatch
+      | Symlink(Some untrackedPatch)) ->
+        combinePatchText trackedPatch untrackedPatch
 
 let private trackedDiffPaths entry =
     match entry.OldPath with
@@ -692,6 +744,36 @@ let private getUntrackedDiffFile (repoRoot: string) (entry: WorktreeDiffEntry) =
                     | FileReadFailed -> Error FileUnavailable)
     }
 
+let private getTrackedAndUntrackedDiffFile
+    (deadline: ProcessRunner.ResponseDeadline)
+    (repoRoot: string)
+    (mergeBase: string)
+    (layers: WorktreeDiffLayers)
+    (entry: WorktreeDiffEntry)
+    (trackedStatus: WorktreeDiffStatus)
+    =
+    asyncResult {
+        let trackedEntry =
+            { entry with
+                Status = trackedStatus }
+
+        let untrackedEntry =
+            { entry with
+                OldPath = None
+                Status = Untracked }
+
+        let! tracked =
+            getTrackedDiffFile
+                deadline
+                repoRoot
+                mergeBase
+                layers
+                trackedEntry
+
+        let! untracked = getUntrackedDiffFile repoRoot untrackedEntry
+        return combineTrackedAndUntrackedFiles tracked untracked
+    }
+
 let internal getWorktreeDiffFileWithinDeadline
     (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
@@ -701,6 +783,14 @@ let internal getWorktreeDiffFileWithinDeadline
     : Async<Result<WorktreeDiffFile, WorktreeDiffError>> =
     match entry.Status with
     | Untracked -> getUntrackedDiffFile repoRoot entry
+    | TrackedAndUntracked trackedStatus ->
+        getTrackedAndUntrackedDiffFile
+            deadline
+            repoRoot
+            mergeBase
+            layers
+            entry
+            trackedStatus
     | _ -> getTrackedDiffFile deadline repoRoot mergeBase layers entry
 
 let getWorktreeDiffFile

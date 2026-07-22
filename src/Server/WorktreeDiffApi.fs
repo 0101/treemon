@@ -443,6 +443,7 @@ let private diffChangeKind =
     | WorktreeDiff.Deleted -> DiffChangeKind.Deleted
     | WorktreeDiff.Renamed -> DiffChangeKind.Renamed
     | WorktreeDiff.Untracked -> DiffChangeKind.Untracked
+    | WorktreeDiff.TrackedAndUntracked _ -> DiffChangeKind.Modified
 
 let private diffChangeName =
     function

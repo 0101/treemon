@@ -425,6 +425,77 @@ type WorktreeDiffIntegrationTests() =
             (fun mergeBase -> [ mergeBase ])
 
     [<Test>]
+    member _.``tracked deletion recreated as untracked composes into one modified file``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+        File.Delete(Path.Combine(repoDir, "delete.txt"))
+        gitOk repoDir [ "add"; "--"; "delete.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "delete tracked file" ]
+        writeText repoDir "delete.txt" "replacement"
+
+        let summary =
+            getWorktreeDiffSummary repoDir
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        let entries =
+            summary.Files
+            |> List.filter (fun entry -> entry.Path = "delete.txt")
+
+        let entry =
+            entries
+            |> List.tryExactlyOne
+            |> Option.defaultWith (fun () ->
+                Assert.Fail($"Expected one composed entry, got {entries}")
+                Unchecked.defaultof<_>)
+
+        Assert.That(
+            entry.Status,
+            Is.EqualTo(TrackedAndUntracked Deleted)
+        )
+
+        let result =
+            getWorktreeDiffFile repoDir summary.MergeBase entry
+            |> TestUtils.runAsync
+
+        let trackedPatch =
+            gitOutput
+                repoDir
+                [ "-c"
+                  "core.quotepath=false"
+                  "diff"
+                  "--no-ext-diff"
+                  "--no-textconv"
+                  "--find-renames"
+                  "--full-index"
+                  "--no-color"
+                  summary.MergeBase
+                  "--"
+                  "delete.txt" ]
+
+        let untrackedPatch =
+            String.concat
+                Environment.NewLine
+                [ "diff --git a/delete.txt b/delete.txt"
+                  "new file mode 100644"
+                  "--- /dev/null"
+                  "+++ b/delete.txt"
+                  "@@ -0,0 +1,1 @@"
+                  "+replacement"
+                  "\\ No newline at end of file"
+                  "" ]
+
+        let expected = trackedPatch + untrackedPatch
+
+        match result with
+        | Ok(Text patch) ->
+            Assert.That(
+                normalizeNewlines patch,
+                Is.EqualTo(normalizeNewlines expected)
+            )
+        | _ -> Assert.Fail($"Expected composed text patch, got {result}")
+
+    [<Test>]
     member _.``provisioned untracked diff viewer does not dirty a clean summary without an agents ignore``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
@@ -802,9 +873,20 @@ type WorktreeDiffIntegrationTests() =
         )
 
     [<Test>]
-    member _.``summary accepts one thousand paths and rejects one thousand and one``() =
+    member _.``summary counts composed replacements once before enforcing file limit``() =
         let repoDir = Path.Combine(tempDir, "repo")
-        initializeDiffRepo repoDir
+        initRepoOnMain repoDir
+
+        [ 1..maxWorktreeDiffFiles ]
+        |> List.iter (fun index ->
+            writeText repoDir $"many/file-{index:D4}.txt" "")
+
+        gitOk repoDir [ "add"; "--"; "many" ]
+        gitOk repoDir [ "commit"; "-m"; "base files" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+        Directory.Delete(Path.Combine(repoDir, "many"), recursive = true)
+        gitOk repoDir [ "add"; "--all"; "--"; "many" ]
+        gitOk repoDir [ "commit"; "-m"; "delete tracked files" ]
 
         [ 1..maxWorktreeDiffFiles ]
         |> List.iter (fun index ->
@@ -816,6 +898,10 @@ type WorktreeDiffIntegrationTests() =
             |> assertSummaryOk
 
         Assert.That(atLimit.Files.Length, Is.EqualTo(maxWorktreeDiffFiles))
+        Assert.That(
+            atLimit.Files |> List.map _.Status |> Set.ofList,
+            Is.EqualTo(Set.singleton (TrackedAndUntracked Deleted))
+        )
 
         writeText repoDir "many/one-too-many.txt" ""
         let overLimit = getWorktreeDiffSummary repoDir |> TestUtils.runAsync

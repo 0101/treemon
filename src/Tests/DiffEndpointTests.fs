@@ -880,20 +880,29 @@ type DiffEndpointHttpTests() =
                 None
                 WorktreeDiff.Untracked
 
+        let replaced =
+            entry
+                "replaced.txt"
+                None
+                (WorktreeDiff.TrackedAndUntracked WorktreeDiff.Deleted)
+
         let service =
             fakeService
-                (Ok(summary [ renamed; untracked ]))
+                (Ok(summary [ renamed; replaced; untracked ]))
                 (fun file ->
                     match file.Status with
                     | WorktreeDiff.Renamed ->
                         Ok(WorktreeDiff.Text "rename patch")
                     | WorktreeDiff.Untracked ->
                         Ok(WorktreeDiff.Text "untracked patch")
+                    | WorktreeDiff.TrackedAndUntracked _ ->
+                        Ok(WorktreeDiff.Text "replacement patch")
                     | _ -> failwith "Unexpected file")
 
         let identities =
             Map.ofList
                 [ "new.txt", "rename-id"
+                  "replaced.txt", "replacement-id"
                   "untracked.txt", "untracked-id" ]
 
         withDiffServer
@@ -912,7 +921,7 @@ type DiffEndpointHttpTests() =
                 Assert.That(summaryResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
 
                 assertJson
-                    """{"status":"ready","baseRef":"origin/main","fileCount":2,"files":[{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
+                    """{"status":"ready","baseRef":"origin/main","fileCount":3,"files":[{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"change":"modified"},{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
                     summaryBody
 
                 use renameResponse =
@@ -922,6 +931,14 @@ type DiffEndpointHttpTests() =
                 |> getResponseBody
                 |> assertJson
                     """{"status":"text","file":{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"rename patch"}"""
+
+                use replacementResponse =
+                    get client $"{fileUrl}?identity=replacement-id"
+
+                replacementResponse
+                |> getResponseBody
+                |> assertJson
+                    """{"status":"text","file":{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"change":"modified"},"patch":"replacement patch"}"""
 
                 use untrackedResponse =
                     get client $"{fileUrl}?identity=untracked-id"
@@ -1090,7 +1107,9 @@ type DiffEndpointHttpTests() =
                      | WorktreeDiff.Renamed ->
                          DiffChangeKind.Renamed
                      | WorktreeDiff.Untracked ->
-                         DiffChangeKind.Untracked)
+                         DiffChangeKind.Untracked
+                     | WorktreeDiff.TrackedAndUntracked _ ->
+                         DiffChangeKind.Modified)
 
             match file.Path with
             | "deleted.txt" ->

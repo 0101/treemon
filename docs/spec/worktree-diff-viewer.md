@@ -60,6 +60,7 @@ The summary route is `GET /<encoded-known-worktree>/diff-summary?committed=<bool
 - The uniform 10-second Git deadline is one request-scoped monotonic budget measured through the complete API response. Sequential Git commands receive only the remaining portion of the 9.25-second maximum execution window, reserving up to 250 ms for process-tree termination and stream draining and 500 ms for API serialization and response completion. Process startup is charged to the execution window. Timeout results remain explicit and retry-oriented; operation-specific tuning should be introduced only if real-repository evidence shows the deadline is routinely too short.
 - Viewer identity is an in-memory page UUID rather than persisted browser state, because pane and standalone page instances must remain independent. Eight snapshots per worktree bound retained identity maps while allowing the pane and several standalone tabs to coexist.
 - Layer filters are fixed booleans rather than browser-supplied Git refs or paths. This keeps Git semantics server-owned while allowing all eight inclusion combinations, including an explicit all-unchecked state.
+- When tracked and untracked enumeration returns the same path, the summary classifies the composed entry as modified and the file response concatenates the exact tracked patch with the synthesized untracked addition. Composition happens before file-count limiting and identity issuance.
 
 ## Verification
 
