@@ -643,10 +643,14 @@ type SessionActivityStore(dbPath: string) =
     /// total number of rows deleted across both tables.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
         use conn = openConn ()
+        use tx = conn.BeginTransaction()
         use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
         cmd.CommandText <- pruneSql
         cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        cmd.ExecuteNonQuery()
+        let deleted = cmd.ExecuteNonQuery()
+        tx.Commit()
+        deleted
 
     /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
     /// run concurrently with the mailbox writer.
@@ -778,8 +782,7 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
         use reader = cmd.ExecuteReader()
 
-        [ while reader.Read() do
-              yield parseIso (reader.GetString 0), parseTasks (reader.GetString 1) ]
+        readRows reader (fun row -> parseIso (row.GetString 0), parseTasks (row.GetString 1)) []
 
     member _.QueryLatestTaskSnapshot() : (DateTimeOffset * OverviewData.TaskCount list) option =
         use conn = openConn ()

@@ -526,7 +526,8 @@ type OverviewBandE2ETests() =
                     Fable.Remoting.Json.FableJsonConverter()
                 )
 
-            let requestCount = ref 0
+            // Playwright invokes this route callback repeatedly, so the request sequence is callback-local mutation.
+            let mutable requestCount = 0
             let delayed24 = System.Threading.Tasks.TaskCompletionSource<IRoute>()
             let delayed72 = System.Threading.Tasks.TaskCompletionSource<IRoute>()
 
@@ -534,9 +535,9 @@ type OverviewBandE2ETests() =
                 this.Page.RouteAsync(
                     "**/IWorktreeApi/getOverviewHistory",
                     fun route ->
-                        requestCount.Value <- requestCount.Value + 1
+                        requestCount <- requestCount + 1
 
-                        match requestCount.Value with
+                        match requestCount with
                         | 1 ->
                             route.FulfillAsync(
                                 RouteFulfillOptions(
@@ -657,16 +658,17 @@ type OverviewBandE2ETests() =
                     Fable.Remoting.Json.FableJsonConverter()
                 )
 
-            let requestCount = ref 0
+            // Playwright invokes this route callback repeatedly, so the request sequence is callback-local mutation.
+            let mutable requestCount = 0
             let delayedRefresh = System.Threading.Tasks.TaskCompletionSource<IRoute>()
 
             do!
                 this.Page.RouteAsync(
                     "**/IWorktreeApi/getOverviewHistory",
                     fun route ->
-                        requestCount.Value <- requestCount.Value + 1
+                        requestCount <- requestCount + 1
 
-                        match requestCount.Value with
+                        match requestCount with
                         | 1 ->
                             route.FulfillAsync(
                                 RouteFulfillOptions(

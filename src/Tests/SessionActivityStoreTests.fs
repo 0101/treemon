@@ -440,6 +440,39 @@ type PruneOldTests() =
         withStore (fun store -> Assert.That(store.PruneOld(ts "2026-03-01T12:00:00Z"), Is.EqualTo(0)))
 
     [<Test>]
+    member _.``pruneOld rolls back every delete when a later statement fails``() =
+        withDbPath (fun dbPath ->
+            use store = new SessionActivityStore(dbPath)
+            let old = ts "2026-03-01T01:00:00Z"
+            let cutoff = ts "2026-03-02T00:00:00Z"
+            let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z"
+
+            store.AppendEvent oldEvent |> ignore
+            store.UpsertStatus(storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
+            store.RecordLiveness(SessionId "s1", old)
+
+            let connectionString =
+                SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+
+            use conn = new SqliteConnection(connectionString)
+            conn.Open()
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """
+CREATE TRIGGER fail_liveness_prune
+BEFORE DELETE ON session_liveness
+BEGIN
+    SELECT RAISE(ABORT, 'forced prune failure');
+END;
+"""
+            cmd.ExecuteNonQuery() |> ignore
+
+            Assert.Throws<SqliteException>(fun () -> store.PruneOld cutoff |> ignore) |> ignore
+            Assert.That(store.QueryWindow(old.AddHours(-1.0), cutoff), Is.EqualTo [ oldEvent ])
+            Assert.That(store.QueryLiveness(old.AddHours(-1.0), cutoff), Is.EqualTo [ SessionId "s1", old ])
+            Assert.That(store.StatusBySession(SessionId "s1").IsSome, Is.True))
+
+    [<Test>]
     member _.``pruneOld keeps the latest old event for a session whose liveness is retained``() =
         withStore (fun store ->
             let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2025-12-01T10:00:00Z"
