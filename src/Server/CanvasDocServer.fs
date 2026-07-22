@@ -412,7 +412,7 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
 
-let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) (cts: System.Threading.CancellationToken) =
+let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) =
     let host =
         Microsoft.AspNetCore.Hosting.WebHostBuilder()
             .UseKestrel(fun opts ->
@@ -426,7 +426,5 @@ let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int)
                     endpoints.MapGet("/{**path}", RequestDelegate(handleCanvasRequest agent)) |> ignore) |> ignore)
             .Build()
     Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"
-    host.StartAsync(cts).ContinueWith(fun (t: System.Threading.Tasks.Task) ->
-        if t.IsFaulted then
-            Log.log "Canvas" $"Canvas doc server failed to start: {t.Exception.InnerException.Message}")
-    |> ignore
+    host.Start()
+    host

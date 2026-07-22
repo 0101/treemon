@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
+    <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
     <Compile Include="ServerFixture.fs" />
@@ -48,6 +49,7 @@
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="ServerStartupResolutionTests.fs" />
+    <Compile Include="ServerLifecycleTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="OverviewBandE2ETests.fs" />
@@ -67,9 +69,15 @@
     <Compile Include="OverviewDataTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
     <Compile Include="OverviewTestHelpers.fs" />
+    <Compile Include="OverviewHistoryRollupTests.fs" />
     <Compile Include="OverviewHistoryTests.fs" />
+    <Compile Include="OverviewHistoryReconstructionTests.fs" />
+    <Compile Include="OverviewHistoryRollupOracleTests.fs" />
+    <Compile Include="OverviewHistoryRollupWorkerTests.fs" />
     <Compile Include="OverviewHistoryCacheTests.fs" />
     <Compile Include="OverviewHistoryIntegrationTests.fs" />
+    <Compile Include="OverviewHistoryPublicationIntegrationTests.fs" />
+    <Compile Include="OverviewHistoryPerformanceTests.fs" />
     <Compile Include="OverviewChartTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />

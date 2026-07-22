@@ -444,12 +444,13 @@ type PruneOldTests() =
         withDbPath (fun dbPath ->
             use store = new SessionActivityStore(dbPath)
             let old = ts "2026-03-01T01:00:00Z"
+            let livenessAt = old.AddMinutes 1.0
             let cutoff = ts "2026-03-02T00:00:00Z"
             let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z"
 
             store.AppendEvent oldEvent |> ignore
             store.UpsertStatus(storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
-            store.RecordLiveness(SessionId "s1", old)
+            store.RecordLiveness(SessionId "s1", livenessAt)
 
             let connectionString =
                 SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
@@ -469,7 +470,10 @@ END;
 
             Assert.Throws<SqliteException>(fun () -> store.PruneOld cutoff |> ignore) |> ignore
             Assert.That(store.QueryWindow(old.AddHours(-1.0), cutoff), Is.EqualTo [ oldEvent ])
-            Assert.That(store.QueryLiveness(old.AddHours(-1.0), cutoff), Is.EqualTo [ SessionId "s1", old ])
+            Assert.That(
+                store.QueryLiveness(old.AddHours(-1.0), cutoff),
+                Is.EqualTo [ SessionId "s1", livenessAt ]
+            )
             Assert.That(store.StatusBySession(SessionId "s1").IsSome, Is.True))
 
     [<Test>]
@@ -483,7 +487,7 @@ END;
                     "C:/wt/a"
                     { emptyStatus with Status = SessionLevelStatus.Working }
                     "2025-12-01T10:00:00Z"
-                    "2026-03-01T11:59:00Z"
+                    "2025-12-01T10:00:00Z"
             )
             store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:59:00Z")
 

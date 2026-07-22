@@ -10,7 +10,7 @@ open OverviewData
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-let sampleBucketCount = 288
+let sampleBucketCount = OverviewHistoryRollup.sampleIntervalCount
 
 let tasksChanged (last: TaskCount list option) (current: TaskCount list) : bool =
     match last with
@@ -112,19 +112,21 @@ let private snapshotAt (timestamp: DateTimeOffset) (state: SweepState) : Overvie
 let private sameValues (left: OverviewSnapshot) (right: OverviewSnapshot) =
     left.Tasks = right.Tasks && left.Agents = right.Agents
 
-/// Sample the complete Tasks and Agents state at the left edge and 288 bucket right edges. Every
-/// source change timestamped at or before a boundary is applied first. Consecutive equal snapshots
-/// retain their earliest timestamp, so the result is ordered, left-edge carried, and bounded to 289.
-let sample
-    (anchor: DateTimeOffset)
-    (window: TimeSpan)
+/// Reconstruct one complete snapshot at every supplied boundary without collapsing equal values.
+let internal reconstructAt
+    (boundaries: DateTimeOffset list)
     (taskSnapshots: (DateTimeOffset * TaskCount list) list)
     (events: ActivityEventRow list)
     (liveness: (SessionId * DateTimeOffset) list)
     : OverviewSnapshot list =
-    let start = anchor - window
-    let events = events |> List.filter (fun row -> row.Ts <= anchor)
-    let liveness = liveness |> List.filter (fun (_, observedAt) -> observedAt <= anchor)
+    let anchor = boundaries |> List.tryLast
+    let throughAnchor rows timestampOf =
+        match anchor with
+        | Some last -> rows |> List.filter (fun row -> timestampOf row <= last)
+        | None -> []
+
+    let events = throughAnchor events _.Ts
+    let liveness = throughAnchor liveness snd
     let observations = (events |> List.map (fun row -> row.SessionId, row.Ts)) @ liveness
 
     let changes =
@@ -141,14 +143,14 @@ let sample
                 Sequence = sequence
                 Change = ObserveLiveness sessionId })
           taskSnapshots
-          |> List.filter (fun (at, _) -> at <= anchor)
+          |> fun rows -> throughAnchor rows fst
           |> List.mapi (fun sequence (at, tasks) ->
               { At = at
                 Priority = 3
                 Sequence = sequence
                 Change = SetTasks tasks })
           closeBoundaries observations
-          |> List.filter (fun (_, closesAt) -> closesAt <= anchor)
+          |> fun rows -> throughAnchor rows snd
           |> List.mapi (fun sequence (sessionId, closesAt) ->
               { At = closesAt
                 Priority = 0
@@ -156,15 +158,6 @@ let sample
                 Change = CloseSession sessionId }) ]
         |> List.concat
         |> List.sortBy (fun change -> change.At, change.Priority, change.Sequence)
-
-    let boundaries =
-        [ 0 .. sampleBucketCount ]
-        |> List.map (fun bucket ->
-            if bucket = sampleBucketCount then anchor
-            else
-                start.AddTicks(
-                    window.Ticks * int64 bucket / int64 sampleBucketCount
-                ))
 
     let rec applyThrough boundary state =
         function
@@ -175,13 +168,50 @@ let sample
     boundaries
     |> List.fold (fun (state, remaining, snapshots) boundary ->
         let state, remaining = applyThrough boundary state remaining
-        let snapshot = snapshotAt boundary state
-
-        let snapshots =
-            match snapshots with
-            | previous :: _ when sameValues previous snapshot -> snapshots
-            | _ -> snapshot :: snapshots
-
-        state, remaining, snapshots
+        state, remaining, snapshotAt boundary state :: snapshots
     ) ({ Tasks = []; Sessions = Map.empty; OpenSessions = Set.empty }, changes, [])
     |> fun (_, _, snapshots) -> List.rev snapshots
+
+let private collapseEqualSnapshots snapshots =
+    snapshots
+    |> List.fold (fun collapsed snapshot ->
+        match collapsed with
+        | previous :: _ when sameValues previous snapshot -> collapsed
+        | _ -> snapshot :: collapsed
+    ) []
+    |> List.rev
+
+/// Sample the complete Tasks and Agents state at the left edge and 288 bucket right edges. Every
+/// source change timestamped at or before a boundary is applied first. Consecutive equal snapshots
+/// retain their earliest timestamp, so the result is ordered, left-edge carried, and bounded to 289.
+let sample
+    (anchor: DateTimeOffset)
+    (window: TimeSpan)
+    (taskSnapshots: (DateTimeOffset * TaskCount list) list)
+    (events: ActivityEventRow list)
+    (liveness: (SessionId * DateTimeOffset) list)
+    : OverviewSnapshot list =
+    let start = anchor - window
+
+    [ 0 .. sampleBucketCount ]
+    |> List.map (fun bucket ->
+        if bucket = sampleBucketCount then anchor
+        else
+            start.AddTicks(
+                window.Ticks * int64 bucket / int64 sampleBucketCount
+            ))
+    |> fun boundaries -> reconstructAt boundaries taskSnapshots events liveness
+    |> collapseEqualSnapshots
+
+let fromPublishedRows
+    anchor
+    (rows: OverviewHistoryRollup.RollupRow list)
+    : OverviewHistoryResponse =
+    { Anchor = anchor
+      Snapshots =
+        rows
+        |> List.map (fun row ->
+            { Timestamp = row.Boundary
+              Tasks = row.Tasks
+              Agents = row.Agents })
+        |> collapseEqualSnapshots }

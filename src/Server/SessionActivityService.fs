@@ -17,7 +17,7 @@ open Server.SessionActivityStore
 // CanvasDocServer.canvasRegisterHandler (JSON DTO → domain, validate, known-worktree guard); the
 // csrfGuard is composed in front of it in the route (Program.fs). The service owns its lifecycle:
 // on Start it rebuilds live state from the store and arms a retention timer; on Dispose it stops
-// the timer, the mailbox, and the store.
+// the timer and drains the mailbox. Program owns and disposes the shared store.
 
 // --- Wire contract DTO ------------------------------------------------------------------------
 
@@ -226,13 +226,23 @@ type private ServiceMsg =
     | Ingest of SessionActivityReport
     | Seed of StoredStatus list
     | Snapshot of AsyncReplyChannel<Map<SessionId, StoredStatus>>
+    | Stop of AsyncReplyChannel<unit>
 
 /// The SessionActivity ingestion service: the single-writer mailbox, the POST handler, and the
 /// start/stop lifecycle (restart rebuild + retention timer). Construct with an instance-specific
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
 /// never collides) and the scheduler agent it feeds. Call Start once before serving; Dispose on
-/// shutdown. Owns the store's lifetime — Dispose disposes it.
+/// shutdown. The store is borrowed from Program; Dispose stops only this service.
 type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
+
+    let dispositionGate = obj ()
+    // Service disposal is a lifetime boundary: mark it once so no work can be queued behind Stop.
+    let mutable disposed = false
+
+    let ensureActive () =
+        lock dispositionGate (fun () ->
+            if disposed then
+                raise (ObjectDisposedException(nameof SessionActivityService)))
 
     // Apply one report on the single writer. State-only reports have independent persistence/order
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
@@ -429,6 +439,8 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 | Snapshot reply ->
                     reply.Reply live
                     return! loop live
+                | Stop reply ->
+                    reply.Reply()
             }
 
             loop Map.empty)
@@ -473,12 +485,15 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
     /// Hand an already-validated + monitored report to the single-writer mailbox. Used by the
     /// handler and by tests (which drive the fold/persist/feed path without HTTP plumbing).
-    member internal _.Submit(report: SessionActivityReport) = mailbox.Post(Ingest report)
+    member internal _.Submit(report: SessionActivityReport) =
+        ensureActive ()
+        mailbox.Post(Ingest report)
 
     /// Restart rebuild + retention timer. Loads every still-live session (last_seen within the idle
     /// window) from the store, feeds it to the scheduler and primes the in-memory fold map, so cards
     /// are correct before any new event arrives; then arms the retention timer.
     member _.Start() =
+        ensureActive ()
         let loaded = store.LoadLiveStatuses DateTimeOffset.UtcNow
         // Seed the scheduler in ONE batch so the time-since-idle chip is stamped from each worktree's
         // NEWEST session rather than the oldest-replayed row (LoadLiveStatuses is ordered oldest-first);
@@ -489,10 +504,23 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         pruneTimer.Change(pruneInterval, pruneInterval) |> ignore
 
     /// The current in-memory live map (test seam; live reads for cards go via the scheduler).
-    member _.LiveSnapshot() : Map<SessionId, StoredStatus> = mailbox.PostAndReply Snapshot
+    member _.LiveSnapshot() : Map<SessionId, StoredStatus> =
+        ensureActive ()
+        mailbox.PostAndReply Snapshot
+
+    member internal _.Store = store
 
     interface IDisposable with
         member _.Dispose() =
-            pruneTimer.Dispose()
-            (mailbox :> IDisposable).Dispose()
-            (store :> IDisposable).Dispose()
+            let shouldStop =
+                lock dispositionGate (fun () ->
+                    if disposed then
+                        false
+                    else
+                        disposed <- true
+                        true)
+
+            if shouldStop then
+                pruneTimer.DisposeAsync().AsTask().GetAwaiter().GetResult()
+                mailbox.PostAndReply Stop
+                (mailbox :> IDisposable).Dispose()

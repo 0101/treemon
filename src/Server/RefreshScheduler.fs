@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Threading
+open System.Threading.Tasks
 open Shared
 open Shared.EventUtils
 
@@ -957,4 +958,4 @@ let start
             return! loop lastRuns initialWatchers watcherCleanup None
         }
 
-    Async.Start(startup, ct)
+    Async.StartAsTask(startup, cancellationToken = ct) :> Task

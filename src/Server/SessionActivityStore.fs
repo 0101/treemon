@@ -2,18 +2,24 @@ module Server.SessionActivityStore
 
 open System
 open System.IO
-open System.Globalization
+open System.Threading
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
+open Server.OverviewHistoryRollup
+open Server.SqliteStorage
 
 // The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
-// upserts the per-session fold result and appends the raw event to two tables:
+// upserts the per-session fold result and appends the raw event to the authoritative source tables:
 //
 //   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
 //                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
 //   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
 //                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
+//
+// The overview_history_* tables are disposable count-only rollups and reconstruction metadata.
+// Construction validates their schema and invariants, replacing only those derived tables when they
+// cannot be trusted; the source tables above remain intact for rebuilding.
 //
 // WAL journalling lets queryWindow / loadLiveStatuses read concurrently with the mailbox writer with
 // no lock contention; the writer being single means status upserts never race each other. The SQLite
@@ -58,26 +64,6 @@ type internal OverviewHistoryInputs =
       Liveness: (SessionId * DateTimeOffset) list }
 
 // --- Serialisation helpers --------------------------------------------------------------------
-
-// Timestamps are stored as UTC round-trip ("O") strings. Normalising to UTC gives every value the
-// same fixed-width "+00:00" suffix, so lexical string comparison equals chronological order — which
-// is what the `ts >= $start` window query and the `last_seen >= $cutoff` live filter rely on.
-let private isoUtc (dto: DateTimeOffset) =
-    dto.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
-
-let private parseIso (s: string) =
-    DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
-
-// Task-snapshot rows persist the count-only `TaskCount list` as a JSON blob, using the SAME
-// Fable.Remoting converter the getOverviewHistory wire uses (matching the former JSONL history), so a
-// stored snapshot round-trips byte-identically to what the client later receives via OverviewSnapshot.
-let private taskConverter: Newtonsoft.Json.JsonConverter = Fable.Remoting.Json.FableJsonConverter()
-
-let private serializeTasks (tasks: OverviewData.TaskCount list) : string =
-    Newtonsoft.Json.JsonConvert.SerializeObject(tasks, Newtonsoft.Json.Formatting.None, [| taskConverter |])
-
-let private parseTasks (s: string) : OverviewData.TaskCount list =
-    Newtonsoft.Json.JsonConvert.DeserializeObject<OverviewData.TaskCount list>(s, [| taskConverter |])
 
 let private statusText =
     function
@@ -139,7 +125,7 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
       LastSeen = parseIso (r.GetString 12)
       ContextUsageAt = None }
 
-let private readEventRow (r: SqliteDataReader) : ActivityEventRow =
+let internal readEventRow (r: SqliteDataReader) : ActivityEventRow =
     { EventId = EventId(r.GetString 0)
       SessionId = SessionId(r.GetString 1)
       WorktreePath = WorktreePath(r.GetString 2)
@@ -419,11 +405,6 @@ ORDER BY last_seen;
 
 // --- Reader / binder helpers ------------------------------------------------------------------
 
-// Drain the reader through an immutable recursive accumulator instead of a mutable list-building
-// loop, then restore source order.
-let rec private readRows (reader: SqliteDataReader) (map: SqliteDataReader -> 'T) (acc: 'T list) : 'T list =
-    if reader.Read() then readRows reader map (map reader :: acc) else List.rev acc
-
 // Bind an activity_events row's parameters onto a prepared command — shared by AppendEvent and the
 // transactional AppendAndUpsert so the two paths can never drift.
 let private bindAppend (cmd: SqliteCommand) (row: ActivityEventRow) =
@@ -460,6 +441,51 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
     cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
 
+let private appendEvent (conn: SqliteConnection) (tx: SqliteTransaction) row =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- appendSql
+    bindAppend cmd row
+    cmd.ExecuteNonQuery() = 1
+
+let private appendTaskSnapshot
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    ts
+    tasks
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- appendTaskSnapshotSql
+    cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
+    cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
+let private queryLatestTaskSnapshot
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- queryLatestTaskSnapshotSql
+    use reader = cmd.ExecuteReader()
+
+    if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
+    else None
+
+let private appendTaskSnapshotIfChanged
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    ts
+    tasks
+    =
+    match queryLatestTaskSnapshot conn tx with
+    | Some (_, previous) when previous = tasks -> false
+    | _ ->
+        appendTaskSnapshot conn tx ts tasks
+        OverviewHistoryRollupStore.invalidateOverviewRollup conn tx ts
+        true
+
 // --- Store ------------------------------------------------------------------------------------
 
 /// True when `table` already has a column named `col`. Read via PRAGMA table_info (column index 1 is
@@ -483,14 +509,22 @@ let private addColumnIfMissing (conn: SqliteConnection) (table: string) (col: st
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
 /// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
-/// (restart rebuild, Overview history, prune timer) never share a connection. Dispose on shutdown.
-type SessionActivityStore(dbPath: string) =
+/// (restart rebuild, Overview history, prune timer) never share a connection. The optional observer
+/// runs after connection-local PRAGMAs and before store SQL so diagnostics can attach per connection
+/// without changing production callers. Dispose on shutdown.
+type SessionActivityStore
+    (
+        dbPath: string,
+        ?connectionOpened: SqliteConnection -> unit
+    ) =
 
     do
         let dir = Path.GetDirectoryName dbPath
 
         if not (String.IsNullOrEmpty dir) then
             Directory.CreateDirectory dir |> ignore
+
+    let connectionOpened = defaultArg connectionOpened ignore
 
     // Pooling is off so each connection fully releases its file handle on close — reliable teardown on
     // Windows (which locks open DB files) and no pooled-connection surprises. The keep-alive below
@@ -507,7 +541,16 @@ type SessionActivityStore(dbPath: string) =
         use cmd = c.CreateCommand()
         cmd.CommandText <- "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;"
         cmd.ExecuteNonQuery() |> ignore
-        c
+
+        try
+            connectionOpened c
+            c
+        with _ ->
+            c.Dispose()
+            reraise ()
+
+    let overviewMaintenanceGate = obj ()
+    let overviewWorkerLease = new SemaphoreSlim(1, 1)
 
     // Held open for the store's lifetime: keeps the DB file (and its WAL) live between operations and
     // owns schema creation. Never used for queries (that would share one connection across threads).
@@ -522,7 +565,97 @@ type SessionActivityStore(dbPath: string) =
         addColumnIfMissing c "session_status" "intent_ts" "TEXT"
         addColumnIfMissing c "session_status" "title_text" "TEXT"
         addColumnIfMissing c "session_status" "title_ts" "TEXT"
+        OverviewHistoryRollupStore.ensureSchema c
         c
+
+    /// Run a related group of internal reads against one stable deferred WAL snapshot.
+    member internal _.ReadSnapshot(read: SqliteConnection -> SqliteTransaction -> 'T) : 'T =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction(deferred = true)
+        let result = read conn tx
+        tx.Commit()
+        result
+
+    /// Keep raw retention outside a multi-batch reconstruction and allow only one worker per store.
+    member internal _.WithOverviewRollupMaintenance(work: unit -> 'T) : 'T =
+        lock overviewMaintenanceGate work
+
+    member internal _.ClaimOverviewRollupWorker() : IDisposable =
+        if not (overviewWorkerLease.Wait 0) then
+            invalidOp "Only one Overview history rollup worker may run for a store."
+
+        let releaseGate = obj ()
+        // Lease disposal is an impure lifetime boundary; this flag makes repeated Dispose calls safe.
+        let mutable released = false
+
+        { new IDisposable with
+            member _.Dispose() =
+                lock releaseGate (fun () ->
+                    if not released then
+                        released <- true
+                        overviewWorkerLease.Release() |> ignore) }
+
+    member internal _.RebuildOverviewRollupObservationBounds() : unit =
+        OverviewHistoryRollupStore.rebuildObservationBounds openConn
+
+    member internal _.OverviewRollupState() : PublicationState =
+        OverviewHistoryRollupStore.publicationState openConn
+
+    /// Append one exact dense batch to the single-generation durable candidate range.
+    member internal _.StageOverviewRollup
+        (
+            candidate: RollupCandidate,
+            rows: StagedRollupRow list
+        ) : StagingResult =
+        OverviewHistoryRollupStore.stageCandidate openConn candidate rows
+
+    /// Atomically replace the candidate range only while its source generation is still current.
+    member internal _.PublishOverviewRollup(candidate: RollupCandidate) : PublicationResult =
+        OverviewHistoryRollupStore.publishCandidate openConn candidate
+
+    /// Atomically replace every published row with one complete retained-horizon rebuild.
+    member internal _.ReplaceOverviewRollup(candidate: RollupCandidate) : PublicationResult =
+        OverviewHistoryRollupStore.replacePublishedCandidate openConn candidate
+
+    member internal _.DiscardOverviewRollupStaging() : unit =
+        OverviewHistoryRollupStore.discardStaging openConn
+
+    member internal _.PruneOverviewRollup(oldestRetained: DateTimeOffset) : int =
+        OverviewHistoryRollupStore.prunePublishedRows openConn oldestRetained
+
+    /// Read publication metadata and rows from one WAL snapshot. The callback is a deterministic
+    /// test seam for committing a publisher after metadata is read but before rows are read.
+    member internal _.ReadPublishedOverviewRollup
+        (
+            startBoundary: DateTimeOffset,
+            endBoundary: DateTimeOffset,
+            ?afterStateRead: unit -> unit
+        ) : PublicationState * RollupRow list =
+        OverviewHistoryRollupStore.readPublishedSnapshot
+            openConn
+            startBoundary
+            endBoundary
+            (defaultArg afterStateRead ignore)
+
+    /// Read publication identity and, on a cache miss, only the selected rows for one history
+    /// window from the same deferred WAL snapshot.
+    member internal _.UsePublishedOverviewRollupSnapshot
+        (
+            window: OverviewData.HistoryWindow,
+            useSnapshot:
+                PublicationState ->
+                DateTimeOffset ->
+                (unit -> RollupRow list) ->
+                Async<'T>,
+            ?afterStateRead: unit -> unit,
+            ?beforeRowsRead: unit -> unit
+        ) : Async<'T> =
+        OverviewHistoryRollupStore.usePublishedSnapshot
+            openConn
+            window
+            (defaultArg afterStateRead ignore)
+            (defaultArg beforeRowsRead ignore)
+            useSnapshot
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).
@@ -537,10 +670,15 @@ type SessionActivityStore(dbPath: string) =
     /// (INSERT OR IGNORE dedupe).
     member _.AppendEvent(row: ActivityEventRow) : bool =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- appendSql
-        bindAppend cmd row
-        cmd.ExecuteNonQuery() = 1
+        use tx = conn.BeginTransaction()
+        let inserted = appendEvent conn tx row
+
+        if inserted then
+            OverviewHistoryRollupStore.upsertObservationBounds conn tx row.SessionId row.Ts
+            OverviewHistoryRollupStore.invalidateOverviewRollup conn tx row.Ts
+
+        tx.Commit()
+        inserted
 
     /// Atomically append the raw event AND upsert the session's live row in ONE transaction on ONE
     /// connection, so the durable status can never diverge from the appended history. With the two on
@@ -551,11 +689,7 @@ type SessionActivityStore(dbPath: string) =
     member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : bool =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
-        use appendCmd = conn.CreateCommand()
-        appendCmd.Transaction <- tx
-        appendCmd.CommandText <- appendSql
-        bindAppend appendCmd row
-        let inserted = appendCmd.ExecuteNonQuery() = 1
+        let inserted = appendEvent conn tx row
 
         if inserted then
             use upsertCmd = conn.CreateCommand()
@@ -563,12 +697,15 @@ type SessionActivityStore(dbPath: string) =
             upsertCmd.CommandText <- upsertSql
             bindUpsert upsertCmd stored
             upsertCmd.ExecuteNonQuery() |> ignore
+            OverviewHistoryRollupStore.upsertObservationBounds conn tx row.SessionId row.Ts
+            OverviewHistoryRollupStore.invalidateOverviewRollup conn tx row.Ts
 
         tx.Commit()
         inserted
 
     /// Advance `last_seen` and append the compact liveness point used by historical openness
-    /// reconstruction. Both writes share one transaction so live state and history cannot diverge.
+    /// reconstruction. Both writes share one transaction so live state and history cannot diverge;
+    /// stale or equal observations are a full no-op.
     member _.RecordLiveness(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
@@ -580,12 +717,18 @@ type SessionActivityStore(dbPath: string) =
         use touchCmd = conn.CreateCommand()
         touchCmd.CommandText <- touchSql
         bind touchCmd
-        touchCmd.ExecuteNonQuery() |> ignore
+        let advanced = touchCmd.ExecuteNonQuery() = 1
 
-        use livenessCmd = conn.CreateCommand()
-        livenessCmd.CommandText <- appendLivenessSql
-        bind livenessCmd
-        livenessCmd.ExecuteNonQuery() |> ignore
+        if advanced then
+            use livenessCmd = conn.CreateCommand()
+            livenessCmd.CommandText <- appendLivenessSql
+            bind livenessCmd
+            let inserted = livenessCmd.ExecuteNonQuery() = 1
+
+            if inserted then
+                OverviewHistoryRollupStore.upsertObservationBounds conn tx sessionId lastSeen
+                OverviewHistoryRollupStore.invalidateOverviewRollup conn tx lastSeen
+
         tx.Commit()
 
     /// Read one durable session row regardless of the live idle-window cutoff.
@@ -642,15 +785,16 @@ type SessionActivityStore(dbPath: string) =
     /// Retention: drop events older than `cutoff` and session rows last seen before it. Returns the
     /// total number of rows deleted across both tables.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- pruneSql
-        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        let deleted = cmd.ExecuteNonQuery()
-        tx.Commit()
-        deleted
+        lock overviewMaintenanceGate (fun () ->
+            use conn = openConn ()
+            use tx = conn.BeginTransaction()
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- pruneSql
+            cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+            let deleted = cmd.ExecuteNonQuery()
+            tx.Commit()
+            deleted)
 
     /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
     /// run concurrently with the mailbox writer.
@@ -759,18 +903,17 @@ type SessionActivityStore(dbPath: string) =
     /// `activity_events` (the push event stream), so only Tasks are snapshot-based.
     member _.AppendTaskSnapshot(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : unit =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- appendTaskSnapshotSql
-        cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
-        cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
-        cmd.ExecuteNonQuery() |> ignore
+        use tx = conn.BeginTransaction()
+        appendTaskSnapshot conn tx ts tasks
+        OverviewHistoryRollupStore.invalidateOverviewRollup conn tx ts
+        tx.Commit()
 
-    member this.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =
-        match this.QueryLatestTaskSnapshot() with
-        | Some (_, previous) when previous = tasks -> false
-        | _ ->
-            this.AppendTaskSnapshot(ts, tasks)
-            true
+    member _.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction()
+        let appended = appendTaskSnapshotIfChanged conn tx ts tasks
+        tx.Commit()
+        appended
 
     /// The Tasks history substrate: task snapshots with `ts` in [startTime, endTime], oldest first.
     /// Merged with the event-derived Agents history into the OverviewSnapshot stream on read.

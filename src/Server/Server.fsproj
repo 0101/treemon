@@ -25,6 +25,9 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
+    <Compile Include="SqliteStorage.fs" />
+    <Compile Include="OverviewHistoryRollup.fs" />
+    <Compile Include="OverviewHistoryRollupStore.fs" />
     <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
@@ -40,6 +43,8 @@
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
     <Compile Include="OverviewHistory.fs" />
+    <Compile Include="OverviewHistoryReconstruction.fs" />
+    <Compile Include="OverviewHistoryRollupWorker.fs" />
     <Compile Include="OverviewHistoryCache.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />

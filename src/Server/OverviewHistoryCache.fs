@@ -6,29 +6,25 @@ open System.Collections.Generic
 open System.Threading
 open System.Threading.Tasks
 open OverviewData
+open Server.OverviewHistoryRollup
 
-let private lifetime = TimeSpan.FromSeconds 30.0
+type Key =
+    { Window: HistoryWindow
+      PublishedGeneration: int64
+      CompleteThroughBucket: int64 }
 
 type private Entry = Lazy<Task<OverviewHistoryResponse>>
 
 type Cache =
     private
-        Cache of ConcurrentDictionary<HistoryWindow, Entry>
+        Cache of ConcurrentDictionary<Key, Entry>
 
 let create () = Cache(ConcurrentDictionary())
 
-let private reusableAt now (entry: Entry) =
-    if not entry.IsValueCreated then
-        true
-    else
-        let computation = entry.Value
-
-        if not computation.IsCompleted then
-            true
-        elif computation.IsCompletedSuccessfully then
-            now < computation.Result.Anchor + lifetime
-        else
-            false
+let key window publishedGeneration completeThrough =
+    { Window = window
+      PublishedGeneration = publishedGeneration
+      CompleteThroughBucket = toBucket completeThrough }
 
 let private newEntry compute =
     Lazy<Task<OverviewHistoryResponse>>(
@@ -42,38 +38,49 @@ let private newEntry compute =
 
 let private removeIfCurrent
     (Cache entries)
-    window
+    cacheKey
     entry
     =
-    // Keep this conditional mutation behind the cache boundary so a failed entry cannot evict a
-    // newer replacement installed for the same window.
-    (entries :> ICollection<KeyValuePair<HistoryWindow, Entry>>)
-        .Remove(KeyValuePair(window, entry))
+    // The ConcurrentDictionary is the cache's synchronized mutable boundary; pairwise removal is
+    // required to evict only the observed entry without deleting a newer concurrent replacement.
+    (entries :> ICollection<KeyValuePair<Key, Entry>>)
+        .Remove(KeyValuePair(cacheKey, entry))
     |> ignore
 
+let private identity cacheKey =
+    cacheKey.PublishedGeneration, cacheKey.CompleteThroughBucket
+
+let private completedSuccessfully (entry: Entry) =
+    entry.IsValueCreated && entry.Value.IsCompletedSuccessfully
+
+let private trimWindow
+    (Cache entries as cache)
+    cacheKey
+    entry
+    =
+    entries
+    |> Seq.filter (fun pair -> pair.Key.Window = cacheKey.Window && pair.Key <> cacheKey)
+    |> Seq.iter (fun pair ->
+        if identity pair.Key < identity cacheKey then
+            removeIfCurrent cache pair.Key pair.Value
+        elif completedSuccessfully pair.Value then
+            removeIfCurrent cache cacheKey entry)
+
 let get
-    cache
-    (now: DateTimeOffset)
-    window
+    (Cache entries as cache)
+    cacheKey
     (compute: unit -> Async<OverviewHistoryResponse>)
     =
     async {
-        let (Cache entries) = cache
         let candidate = newEntry compute
-
-        let entry =
-            entries.AddOrUpdate(
-                window,
-                candidate,
-                fun _ current ->
-                    if reusableAt now current then current
-                    else candidate
-            )
+        let entry = entries.GetOrAdd(cacheKey, candidate)
 
         try
-            return! entry.Value |> Async.AwaitTask
+            let! response = entry.Value |> Async.AwaitTask
+            trimWindow cache cacheKey entry
+            return response
         with ex ->
-            removeIfCurrent cache window entry
+            removeIfCurrent cache cacheKey entry
 
             let surfaced =
                 match ex with

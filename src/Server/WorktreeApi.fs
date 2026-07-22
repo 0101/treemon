@@ -14,43 +14,30 @@ open Server.SessionActivityStore
 
 let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 
-let internal buildOverviewHistoryResponse
-    (anchor: DateTimeOffset)
-    (requestedWindow: OverviewData.HistoryWindow)
-    (inputs: OverviewHistoryInputs)
-    =
-    let window = OverviewData.HistoryWindow.duration requestedWindow
-
-    let response: OverviewData.OverviewHistoryResponse =
-        { Anchor = anchor
-          Snapshots =
-            OverviewHistory.sample
-                anchor
-                window
-                inputs.TaskSnapshots
-                inputs.Events
-                inputs.Liveness }
-
-    response
-
-let internal overviewHistoryCachedAt
+let internal overviewHistoryCachedWith
+    beforeRowsRead
     cache
-    (activityStore: SessionActivityStore option)
-    (anchor: DateTimeOffset)
+    (activityStore: SessionActivityStore)
     requestedWindow
     =
-    OverviewHistoryCache.get cache anchor requestedWindow (fun () ->
-        async {
-            match activityStore with
-            | None ->
-                return
-                    { OverviewData.OverviewHistoryResponse.Anchor = anchor
-                      Snapshots = [] }
-            | Some store ->
-                let window = OverviewData.HistoryWindow.duration requestedWindow
-                let inputs = store.QueryOverviewHistoryInputs(anchor - window, anchor)
-                return buildOverviewHistoryResponse anchor requestedWindow inputs
-        })
+    activityStore.UsePublishedOverviewRollupSnapshot(
+        requestedWindow,
+        (fun state anchor readRows ->
+            let cacheKey =
+                OverviewHistoryCache.key
+                    requestedWindow
+                    state.PublishedGeneration
+                    anchor
+
+            OverviewHistoryCache.get cache cacheKey (fun () ->
+                async {
+                    return OverviewHistory.fromPublishedRows anchor (readRows ())
+                })),
+        beforeRowsRead = beforeRowsRead
+    )
+
+let internal overviewHistoryCached cache activityStore requestedWindow =
+    overviewHistoryCachedWith ignore cache activityStore requestedWindow
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
@@ -828,12 +815,20 @@ let worktreeApi
           addRoot = fun path -> async { return addRootToConfig path }
           removeRoot = fun path -> async { return removeRootFromConfig path }
           getRoots = fun () -> async { return readWorktreeRootsConfig () }
-          // Tasks come from the store's snapshot table; Agents are derived on read from status events
-          // plus the liveness timeline, carrying the state active at the requested window's left edge.
           getOverviewHistory =
             fun requestedWindow ->
-                overviewHistoryCachedAt
-                    overviewHistoryCache
-                    activityStore
-                    DateTimeOffset.UtcNow
-                    requestedWindow }
+                match activityStore with
+                | Some store ->
+                    overviewHistoryCached
+                        overviewHistoryCache
+                        store
+                        requestedWindow
+                | None ->
+                    async {
+                        return
+                            raise (
+                                InvalidOperationException(
+                                    "Overview history store is required outside demo and fixture modes."
+                                )
+                            )
+                    } }
