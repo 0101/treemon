@@ -177,6 +177,9 @@ its own stable read snapshot; generation tagging plus the final transactional ch
 candidate range coherent. Durable staging holds one generation and one dense range; later batches
 must append contiguously, and stale staging is explicitly discarded before restaging. The worker
 retries generation conflicts and keeps the last published generation readable on runtime failure.
+Missing or out-of-retention publication state rebuilds observation bounds, stages only the current
+retained horizon, and atomically replaces all published rows instead of filling an unbounded gap.
+The store serializes raw-source retention with active multi-batch reconstruction.
 
 ### Lifecycle, API, and cache
 
@@ -205,6 +208,7 @@ anchor age.
 | Initial failure | Fail real-mode startup before binding rather than serve empty, partial, or raw-reconstructed history. |
 | Publication | Generation check plus transactional candidate publication and dirty-marker update. |
 | Repair consistency | Keep the prior coherent generation visible until the complete affected range is ready. |
+| Stale publication | Atomically replace it with a current retained-horizon rebuild rather than reconstruct an unbounded downtime gap. |
 | Reconstruction batch | At most 512 canonical boundaries per stable read snapshot. |
 | Retention | Exposed 72-hour rollup horizon plus predecessor; raw retention remains authoritative. |
 | Cache | Key by window, published generation, and complete-through bucket. |
@@ -219,6 +223,7 @@ anchor age.
 | `src/Server/OverviewHistory.fs` | Pure sampler oracle and response collapsing. |
 | `src/Server/OverviewHistoryRollup.fs` | Grid arithmetic, reconstruction orchestration, staging, publication, repair, and retention. |
 | `src/Server/OverviewHistoryReconstruction.fs` | Stable-snapshot indexed source reads and dense count reconstruction. |
+| `src/Server/OverviewHistoryRollupWorker.fs` | Serialized startup backfill, boundary wake loop, conflict recovery, and retention coordination. |
 | `src/Server/OverviewHistoryCache.fs` | Publication-keyed cache and in-flight request deduplication. |
 | `src/Server/SessionActivityStore.fs` | Raw persistence, derived schema, transactional invalidation, and rollup reads/writes. |
 | `src/Server/SessionActivityService.fs` | Ingestion through the shared store. |

@@ -3,6 +3,7 @@ module Server.SessionActivityStore
 open System
 open System.IO
 open System.Globalization
+open System.Threading
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
@@ -725,6 +726,9 @@ type SessionActivityStore(dbPath: string) =
         cmd.ExecuteNonQuery() |> ignore
         c
 
+    let overviewMaintenanceGate = obj ()
+    let overviewWorkerLease = new SemaphoreSlim(1, 1)
+
     // Held open for the store's lifetime: keeps the DB file (and its WAL) live between operations and
     // owns schema creation. Never used for queries (that would share one connection across threads).
     let keepAlive =
@@ -748,6 +752,46 @@ type SessionActivityStore(dbPath: string) =
         let result = read conn tx
         tx.Commit()
         result
+
+    /// Keep raw retention outside a multi-batch reconstruction and allow only one worker per store.
+    member internal _.WithOverviewRollupMaintenance(work: unit -> 'T) : 'T =
+        lock overviewMaintenanceGate work
+
+    member internal _.ClaimOverviewRollupWorker() : IDisposable =
+        if not (overviewWorkerLease.Wait 0) then
+            invalidOp "Only one Overview history rollup worker may run for a store."
+
+        let releaseGate = obj ()
+        // Lease disposal is an impure lifetime boundary; this flag makes repeated Dispose calls safe.
+        let mutable released = false
+
+        { new IDisposable with
+            member _.Dispose() =
+                lock releaseGate (fun () ->
+                    if not released then
+                        released <- true
+                        overviewWorkerLease.Release() |> ignore) }
+
+    member internal _.RebuildOverviewRollupObservationBounds() : unit =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction(deferred = false)
+        use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
+        cmd.CommandText <-
+            """
+DELETE FROM overview_history_session_bounds;
+INSERT INTO overview_history_session_bounds
+    (session_id, first_observed_at, last_observed_at)
+SELECT session_id, min(ts), max(ts)
+FROM (
+    SELECT session_id, ts FROM activity_events
+    UNION ALL
+    SELECT session_id, ts FROM session_liveness
+)
+GROUP BY session_id;
+"""
+        cmd.ExecuteNonQuery() |> ignore
+        tx.Commit()
 
     member internal _.OverviewRollupState() : PublicationState =
         use conn = openConn ()
@@ -773,8 +817,15 @@ type SessionActivityStore(dbPath: string) =
     member internal _.PublishOverviewRollup(candidate: RollupCandidate) : PublicationResult =
         publishCandidate openConn candidate
 
+    /// Atomically replace every published row with one complete retained-horizon rebuild.
+    member internal _.ReplaceOverviewRollup(candidate: RollupCandidate) : PublicationResult =
+        replacePublishedCandidate openConn candidate
+
     member internal _.DiscardOverviewRollupStaging() : unit =
         discardStaging openConn
+
+    member internal _.PruneOverviewRollup(oldestRetained: DateTimeOffset) : int =
+        prunePublishedRows openConn oldestRetained
 
     /// Read publication metadata and rows from one WAL snapshot. The callback is a deterministic
     /// test seam for committing a publisher after metadata is read but before rows are read.
@@ -918,15 +969,16 @@ type SessionActivityStore(dbPath: string) =
     /// Retention: drop events older than `cutoff` and session rows last seen before it. Returns the
     /// total number of rows deleted across both tables.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- pruneSql
-        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        let deleted = cmd.ExecuteNonQuery()
-        tx.Commit()
-        deleted
+        lock overviewMaintenanceGate (fun () ->
+            use conn = openConn ()
+            use tx = conn.BeginTransaction()
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- pruneSql
+            cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+            let deleted = cmd.ExecuteNonQuery()
+            tx.Commit()
+            deleted)
 
     /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
     /// run concurrently with the mailbox writer.

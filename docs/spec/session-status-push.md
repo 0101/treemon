@@ -117,7 +117,8 @@ Store construction applies additive schema changes idempotently. Context usage v
 absent from the schema, but their liveness timestamps use `session_liveness`. Event append/status
 upsert and liveness/status updates are transactional. Hourly retention removes redundant rows older
 than 60 days while preserving the latest old status event for each retained session and the latest old
-task snapshot as history baselines.
+task snapshot as history baselines. Raw retention is serialized with active Overview rollup
+reconstruction so a multi-batch rebuild cannot lose inputs between snapshots.
 
 ### Worktree projection
 

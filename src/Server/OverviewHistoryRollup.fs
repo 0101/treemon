@@ -419,6 +419,10 @@ let private publicationRangeIsValid state candidate =
             && candidate.EndBoundary >= completeThrough
         | None -> false
 
+type private PublicationMode =
+    | Incremental
+    | ReplaceAll
+
 let private deletePublishedRange
     (conn: SqliteConnection)
     (tx: SqliteTransaction)
@@ -430,6 +434,15 @@ let private deletePublishedRange
         "DELETE FROM overview_history_rows WHERE bucket >= $start AND bucket <= $end;"
     cmd.Parameters.AddWithValue("$start", toBucket candidate.StartBoundary) |> ignore
     cmd.Parameters.AddWithValue("$end", toBucket candidate.EndBoundary) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
+let private deleteAllPublishedRows
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- "DELETE FROM overview_history_rows;"
     cmd.ExecuteNonQuery() |> ignore
 
 let private insertPublishedRange
@@ -475,6 +488,28 @@ WHERE id = 1 AND source_generation = $generation;
     cmd.Parameters.AddWithValue("$end", toBucket candidate.EndBoundary) |> ignore
     cmd.ExecuteNonQuery() = 1
 
+let private advanceReplacement
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    candidate
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <-
+        """
+UPDATE overview_history_state
+SET published_generation = $generation,
+    complete_through = $end,
+    earliest_dirty = CASE
+        WHEN earliest_dirty <= $end THEN NULL
+        ELSE earliest_dirty
+    END
+WHERE id = 1 AND source_generation = $generation;
+"""
+    cmd.Parameters.AddWithValue("$generation", candidate.Generation) |> ignore
+    cmd.Parameters.AddWithValue("$end", toBucket candidate.EndBoundary) |> ignore
+    cmd.ExecuteNonQuery() = 1
+
 let private clearStaging
     (conn: SqliteConnection)
     (tx: SqliteTransaction)
@@ -484,7 +519,8 @@ let private clearStaging
     cmd.CommandText <- "DELETE FROM overview_history_staging;"
     cmd.ExecuteNonQuery() |> ignore
 
-let internal publishCandidate
+let private publish
+    mode
     (openConnection: unit -> SqliteConnection)
     (candidate: RollupCandidate)
     =
@@ -504,16 +540,24 @@ let internal publishCandidate
         if not (candidateRowsAreExact candidate stagedRows) then
             invalidOp "Overview history staging does not exactly match the requested publication range."
 
-        if not (publicationRangeIsValid state candidate) then
+        if mode = Incremental && not (publicationRangeIsValid state candidate) then
             invalidOp "Overview history publication must be contiguous or fully repair the published dirty range."
 
-        deletePublishedRange conn tx candidate
+        match mode with
+        | Incremental -> deletePublishedRange conn tx candidate
+        | ReplaceAll -> deleteAllPublishedRows conn tx
+
         let inserted = insertPublishedRange conn tx candidate
 
         if inserted <> stagedRows.Length then
             raise (InvalidDataException("Overview history publication did not insert the complete staged range."))
 
-        if not (advancePublication conn tx candidate) then
+        let advanced =
+            match mode with
+            | Incremental -> advancePublication conn tx candidate
+            | ReplaceAll -> advanceReplacement conn tx candidate
+
+        if not advanced then
             tx.Rollback()
             PublicationResult.SourceGenerationChanged state.SourceGeneration
         else
@@ -522,11 +566,41 @@ let internal publishCandidate
             tx.Commit()
             PublicationResult.Published publishedState
 
+let internal publishCandidate openConnection candidate =
+    publish Incremental openConnection candidate
+
+let internal replacePublishedCandidate openConnection candidate =
+    publish ReplaceAll openConnection candidate
+
 let internal discardStaging (openConnection: unit -> SqliteConnection) =
     use conn = openConnection ()
     use tx = conn.BeginTransaction(deferred = false)
     clearStaging conn tx
     tx.Commit()
+
+let internal prunePublishedRows
+    (openConnection: unit -> SqliteConnection)
+    oldestRetained
+    =
+    if not (isBoundary oldestRetained) then
+        invalidArg (nameof oldestRetained) "Overview history retention requires a canonical boundary."
+
+    use conn = openConnection ()
+    use tx = conn.BeginTransaction(deferred = false)
+    let state = requirePublicationState conn tx
+
+    let deleted =
+        match state.CompleteThrough with
+        | Some completeThrough when oldestRetained <= completeThrough ->
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- "DELETE FROM overview_history_rows WHERE bucket < $oldest;"
+            cmd.Parameters.AddWithValue("$oldest", toBucket oldestRetained) |> ignore
+            cmd.ExecuteNonQuery()
+        | _ -> 0
+
+    tx.Commit()
+    deleted
 
 let private readPublishedRows
     (conn: SqliteConnection)

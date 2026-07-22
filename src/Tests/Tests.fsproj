@@ -70,6 +70,7 @@
     <Compile Include="OverviewHistoryRollupTests.fs" />
     <Compile Include="OverviewHistoryTests.fs" />
     <Compile Include="OverviewHistoryReconstructionTests.fs" />
+    <Compile Include="OverviewHistoryRollupWorkerTests.fs" />
     <Compile Include="OverviewHistoryCacheTests.fs" />
     <Compile Include="OverviewHistoryIntegrationTests.fs" />
     <Compile Include="OverviewChartTests.fs" />
