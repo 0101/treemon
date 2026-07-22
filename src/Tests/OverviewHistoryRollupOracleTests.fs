@@ -444,7 +444,6 @@ let private persistScenario
     path
     (store: SessionActivityStore)
     (sources: Sources)
-    (anchor: DateTimeOffset)
     =
     sources.Tasks
     |> List.iter (fun (at, tasks) ->
@@ -452,20 +451,6 @@ let private persistScenario
             store.AppendTaskSnapshotIfChanged(at, tasks),
             Is.True,
             $"seed={seed}; task change at {at:O} was not appended."
-        )
-
-        let afterInsert = store.OverviewRollupState()
-
-        Assert.That(
-            store.AppendTaskSnapshotIfChanged(at, tasks),
-            Is.False,
-            $"seed={seed}; duplicate task change at {at:O} was not a no-op."
-        )
-
-        Assert.That(
-            store.OverviewRollupState(),
-            Is.EqualTo afterInsert,
-            $"seed={seed}; duplicate task change at {at:O} changed rollup metadata."
         ))
 
     sources.Events
@@ -474,30 +459,7 @@ let private persistScenario
             store.AppendEvent row,
             Is.True,
             $"seed={seed}; event {EventId.value row.EventId} was not appended."
-        )
-
-        let afterInsert = store.OverviewRollupState()
-
-        Assert.That(
-            store.AppendEvent row,
-            Is.False,
-            $"seed={seed}; duplicate event {EventId.value row.EventId} was not a no-op."
-        )
-
-        Assert.That(
-            store.OverviewRollupState(),
-            Is.EqualTo afterInsert,
-            $"seed={seed}; duplicate event {EventId.value row.EventId} changed rollup metadata."
         ))
-
-    let beforeUnknownLiveness = store.OverviewRollupState()
-    store.RecordLiveness(SessionId $"api-unknown-{seed}", anchor)
-
-    Assert.That(
-        store.OverviewRollupState(),
-        Is.EqualTo beforeUnknownLiveness,
-        $"seed={seed}; unknown liveness changed rollup metadata."
-    )
 
     insertLiveness path sources.Liveness
     store.RebuildOverviewRollupObservationBounds()
@@ -572,7 +534,7 @@ type OverviewHistoryRollupOracleTests() =
             let anchor = latestCompleteBoundary DateTimeOffset.UtcNow
             let startBoundary = oldestRetainedBoundary anchor
             let sources = scenario seed anchor
-            persistScenario seed path store sources anchor
+            persistScenario seed path store sources
 
             let state, published, partitions =
                 reconstructStageAndPublish seed store sources startBoundary anchor
@@ -589,6 +551,35 @@ type OverviewHistoryRollupOracleTests() =
                 Assert.That(state.EarliestDirty, Is.EqualTo None))
 
             assertSupportedWindows seed partitions anchor sources published)
+
+    [<Test>]
+    member _.``duplicate source writes and unknown liveness preserve rollup metadata``() =
+        withStore (fun _ store ->
+            let at = latestCompleteBoundary DateTimeOffset.UtcNow
+            let tasks = [ tc TaskBucketKind.InProgress 2 ]
+
+            Assert.That(store.AppendTaskSnapshotIfChanged(at, tasks), Is.True)
+            let afterTaskInsert = store.OverviewRollupState()
+            Assert.That(store.AppendTaskSnapshotIfChanged(at, tasks), Is.False)
+            Assert.That(store.OverviewRollupState(), Is.EqualTo afterTaskInsert)
+
+            let row =
+                evt
+                    "oracle-duplicate-event"
+                    "oracle-duplicate-session"
+                    "oracle-duplicate-worktree"
+                    SessionLevelStatus.Working
+                    (Some "bd-execute")
+                    at
+
+            Assert.That(store.AppendEvent row, Is.True)
+            let afterEventInsert = store.OverviewRollupState()
+            Assert.That(store.AppendEvent row, Is.False)
+            Assert.That(store.OverviewRollupState(), Is.EqualTo afterEventInsert)
+
+            let beforeUnknownLiveness = store.OverviewRollupState()
+            store.RecordLiveness(SessionId "oracle-api-unknown", at)
+            Assert.That(store.OverviewRollupState(), Is.EqualTo beforeUnknownLiveness))
 
     [<Test>]
     member _.``exact ceiling and clamped repairs match the oracle at every exposed boundary``() =
