@@ -53,6 +53,10 @@ The routes are `GET /<encoded-known-worktree>/diff-summary` with no query parame
 - The uniform 10-second Git deadline is one request-scoped monotonic budget measured through the complete API response. Sequential Git commands receive only the remaining portion of the 9.25-second maximum execution window, reserving up to 250 ms for process-tree termination and stream draining and 500 ms for API serialization and response completion. Process startup is charged to the execution window. Timeout results remain explicit and retry-oriented; operation-specific tuning should be introduced only if real-repository evidence shows the deadline is routinely too short.
 - Viewer identity is an in-memory page UUID rather than persisted browser state, because pane and standalone page instances must remain independent. Eight snapshots per worktree bound retained identity maps while allowing the pane and several standalone tabs to coexist.
 
+## Verification
+
+Run `dotnet test src/Tests/Tests.fsproj --filter "FullyQualifiedName~DiffIdentityLifecycleHttpTests" --logger "console;verbosity=normal"` to exercise the bounded identity-snapshot lifecycle through the real HTTP routes. The fixture drives nine viewer UUIDs, successful deletion cleanup, and all-repositories-ready scheduler reconciliation; its output records the raw status and body for identities removed by each lifecycle rule.
+
 ## Key Files
 
 | File | Purpose |

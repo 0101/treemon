@@ -1256,3 +1256,361 @@ type DiffEndpointHttpTests() =
                     Directory.Delete(tempDir, recursive = true)
                 with _ ->
                     ()
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type DiffIdentityLifecycleHttpTests() =
+
+    let fakePath name =
+        Path.Combine(
+            Path.GetTempPath(),
+            $"treemon-diff-lifecycle-{name}-{Guid.NewGuid():N}"
+        )
+
+    let changed =
+        entry "changed.txt" None WorktreeDiff.Modified
+
+    let service repositorySecret =
+        fakeService
+            (Ok(summary [ changed ]))
+            (fun _ -> Ok(WorktreeDiff.Text repositorySecret))
+
+    let newViewerClient () =
+        let client = new HttpClient()
+
+        client.DefaultRequestHeaders.Add(
+            WorktreeDiffApi.viewerHeaderName,
+            Guid.NewGuid().ToString("D")
+        )
+
+        client
+
+    let issueIdentity client summaryUrl =
+        use response = get client summaryUrl
+        let body = getResponseBody response
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+        summaryIdentity changed.Path body
+
+    let assertFileResponse repositorySecret identity response =
+        let body = getResponseBody response
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+
+        body
+        |> assertJson (
+            DiffFileResult.Text(
+                fileSummary
+                    identity
+                    changed.Path
+                    None
+                    DiffChangeKind.Modified,
+                repositorySecret
+            )
+            |> WorktreeDiffApi.serializeFileResult
+        )
+
+    let assertGenericIdentityNotFound
+        (scenario: string)
+        (worktree: string)
+        (repositorySecret: string)
+        (response: HttpResponseMessage)
+        =
+        let body = getResponseBody response
+
+        Assert.Multiple(fun () ->
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+            Assert.That(body, Is.EqualTo("Unknown diff identity")))
+
+        let repositoryContentLeaked =
+            body.Contains(worktree, StringComparison.OrdinalIgnoreCase)
+            || body.Contains(repositorySecret, StringComparison.Ordinal)
+
+        TestContext.Out.WriteLine(
+            JsonSerializer.Serialize(
+                {| scenario = scenario
+                   httpStatus = int response.StatusCode
+                   body = body
+                   repositoryContentLeaked = repositoryContentLeaked |}
+            )
+        )
+
+    [<Test>]
+    member _.``HTTP lifecycle retains eight snapshots and evicts the least recently used ninth``() =
+        let worktree = fakePath "lru"
+        let repositorySecret = "lru repository-only patch"
+
+        withDiffServer
+            [ worktree ]
+            (service repositorySecret)
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun firstClient baseUrl ->
+                let additionalClients =
+                    [ 2..WorktreeDiffApi.maxViewerSnapshotsPerWorktree ]
+                    |> List.map (fun _ -> newViewerClient ())
+
+                use newestClient = newViewerClient ()
+
+                try
+                    let initialClients =
+                        firstClient :: additionalClients
+
+                    let summaryUrl =
+                        worktreeUrl baseUrl worktree "diff-summary"
+
+                    let fileUrl =
+                        worktreeUrl baseUrl worktree "diff-file"
+
+                    let initialIdentities =
+                        initialClients
+                        |> List.map (fun client ->
+                            issueIdentity client summaryUrl)
+
+                    Assert.That(
+                        initialIdentities.Length,
+                        Is.EqualTo(
+                            WorktreeDiffApi.maxViewerSnapshotsPerWorktree
+                        )
+                    )
+
+                    List.zip initialClients initialIdentities
+                    |> List.iter (fun (client, identity) ->
+                        use response =
+                            get client $"{fileUrl}?identity={identity}"
+
+                        assertFileResponse repositorySecret identity response)
+
+                    let firstIdentity = initialIdentities[0]
+                    let evictedIdentity = initialIdentities[1]
+
+                    use touchedResponse =
+                        get
+                            initialClients[0]
+                            $"{fileUrl}?identity={firstIdentity}"
+
+                    assertFileResponse
+                        repositorySecret
+                        firstIdentity
+                        touchedResponse
+
+                    let newestIdentity =
+                        issueIdentity newestClient summaryUrl
+
+                    use evictedResponse =
+                        get
+                            initialClients[1]
+                            $"{fileUrl}?identity={evictedIdentity}"
+
+                    assertGenericIdentityNotFound
+                        "lru-eviction-at-nine-viewers"
+                        worktree
+                        repositorySecret
+                        evictedResponse
+
+                    let retained =
+                        List.zip initialClients initialIdentities
+                        |> List.indexed
+                        |> List.choose (fun (index, pair) ->
+                            if index = 1 then None else Some pair)
+                        |> fun existing ->
+                            existing
+                            @ [ newestClient, newestIdentity ]
+
+                    Assert.That(
+                        retained.Length,
+                        Is.EqualTo(
+                            WorktreeDiffApi.maxViewerSnapshotsPerWorktree
+                        )
+                    )
+
+                    retained
+                    |> List.iter (fun (client, identity) ->
+                        use response =
+                            get client $"{fileUrl}?identity={identity}"
+
+                        assertFileResponse repositorySecret identity response)
+                finally
+                    additionalClients |> List.iter _.Dispose())
+
+    [<Test>]
+    member _.``successful worktree deletion makes the issued identity a generic HTTP 404``() =
+        let repoRoot = fakePath "delete-root"
+        let worktree = Path.Combine(repoRoot, "worktree")
+        let repositorySecret = "deleted worktree repository-only patch"
+
+        withDiffServer
+            [ worktree ]
+            (service repositorySecret)
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun client baseUrl ->
+                let summaryUrl =
+                    worktreeUrl baseUrl worktree "diff-summary"
+
+                let fileUrl =
+                    worktreeUrl baseUrl worktree "diff-file"
+
+                let identity =
+                    issueIdentity client summaryUrl
+
+                let deleteAgent = RefreshScheduler.createAgent ()
+                let repoId = PathUtils.toRepoId repoRoot
+
+                let worktreeInfo: GitWorktree.WorktreeInfo =
+                    { Path = PathUtils.normalizePath worktree
+                      Head = "abc123"
+                      Branch = Some "feature" }
+
+                deleteAgent.Post(
+                    RefreshScheduler.UpdateWorktreeList(
+                        repoId,
+                        [ worktreeInfo ]
+                    )
+                )
+
+                let result =
+                    WorktreeApi.deleteWorktreeWith
+                        (fun _ _ _ -> async.Return(Ok()))
+                        WorktreeDiffApi.removeWorktree
+                        deleteAgent
+                        (RefreshScheduler.buildRootPaths [ repoRoot ])
+                        (PathUtils.toWorktreePath worktree)
+                    |> TestUtils.runAsync
+
+                match result with
+                | Ok () -> ()
+                | Error error ->
+                    Assert.Fail(
+                        $"Expected successful worktree deletion, got {error}"
+                    )
+
+                use removedResponse =
+                    get client $"{fileUrl}?identity={identity}"
+
+                assertGenericIdentityNotFound
+                    "successful-worktree-deletion"
+                    worktree
+                    repositorySecret
+                    removedResponse)
+
+    [<Test>]
+    member _.``all-ready scheduler reconciliation prunes identities absent from known worktrees``() =
+        let retainedWorktree = fakePath "reconcile-retained"
+        let removedWorktree = fakePath "reconcile-removed"
+        let repositorySecret = "reconciled worktree repository-only patch"
+
+        withDiffServer
+            [ retainedWorktree; removedWorktree ]
+            (service repositorySecret)
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun client baseUrl ->
+                let retainedSummaryUrl =
+                    worktreeUrl
+                        baseUrl
+                        retainedWorktree
+                        "diff-summary"
+
+                let removedSummaryUrl =
+                    worktreeUrl
+                        baseUrl
+                        removedWorktree
+                        "diff-summary"
+
+                let retainedFileUrl =
+                    worktreeUrl
+                        baseUrl
+                        retainedWorktree
+                        "diff-file"
+
+                let removedFileUrl =
+                    worktreeUrl
+                        baseUrl
+                        removedWorktree
+                        "diff-file"
+
+                let retainedIdentity =
+                    issueIdentity client retainedSummaryUrl
+
+                let removedIdentity =
+                    issueIdentity client removedSummaryUrl
+
+                let reconcileAgent =
+                    RefreshScheduler.createAgent ()
+
+                let retainedInfo: GitWorktree.WorktreeInfo =
+                    { Path =
+                        PathUtils.normalizePath
+                            retainedWorktree
+                      Head = "abc123"
+                      Branch = Some "retained" }
+
+                let retainedRepo =
+                    { RefreshScheduler.PerRepoState.empty with
+                        WorktreeList = [ retainedInfo ]
+                        KnownPaths = Set.singleton retainedInfo.Path
+                        IsReady = true }
+
+                let pendingRepo =
+                    { RefreshScheduler.PerRepoState.empty with
+                        IsReady = false }
+
+                let pendingRepoId = RepoId "pending"
+
+                let reposBeforeAllReady =
+                    Map.ofList
+                        [ RepoId "retained", retainedRepo
+                          pendingRepoId, pendingRepo ]
+
+                let watchersBeforeAllReady =
+                    RefreshScheduler.CanvasWatchers.reconcile
+                        reconcileAgent
+                        reposBeforeAllReady
+                        Map.empty
+                    |> TestUtils.runAsync
+
+                use beforeReadyResponse =
+                    get
+                        client
+                        $"{removedFileUrl}?identity={removedIdentity}"
+
+                assertFileResponse
+                    repositorySecret
+                    removedIdentity
+                    beforeReadyResponse
+
+                let allReadyRepos =
+                    reposBeforeAllReady
+                    |> Map.add
+                        pendingRepoId
+                        { pendingRepo with IsReady = true }
+
+                let watchersAfterAllReady =
+                    RefreshScheduler.CanvasWatchers.reconcile
+                        reconcileAgent
+                        allReadyRepos
+                        watchersBeforeAllReady
+                    |> TestUtils.runAsync
+
+                try
+                    use prunedResponse =
+                        get
+                            client
+                            $"{removedFileUrl}?identity={removedIdentity}"
+
+                    assertGenericIdentityNotFound
+                        "all-ready-scheduler-reconciliation"
+                        removedWorktree
+                        repositorySecret
+                        prunedResponse
+
+                    use retainedResponse =
+                        get
+                            client
+                            $"{retainedFileUrl}?identity={retainedIdentity}"
+
+                    assertFileResponse
+                        repositorySecret
+                        retainedIdentity
+                        retainedResponse
+                finally
+                    RefreshScheduler.CanvasWatchers.disposeAll
+                        watchersAfterAllReady)
