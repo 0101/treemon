@@ -205,11 +205,15 @@ let update msg model =
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
-                // the selected group (its count fell to 0), clear it so the panel closes.
-                match m.SelectedOverviewGroup with
-                | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) ->
-                    { m with SelectedOverviewGroup = None }
-                | _ -> m)
+                // the selected group (its count fell to 0), clear it so the panel closes. Removing
+                // every agent group also resets the pinned state before its observer is disposed.
+                let selection =
+                    match m.SelectedOverviewGroup with
+                    | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) -> None
+                    | selection -> selection
+                { m with
+                    OverviewAgentsStuck = m.OverviewAgentsStuck && OverviewBand.hasAgentGroups m.Repos
+                    SelectedOverviewGroup = selection })
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
@@ -517,14 +521,9 @@ let update msg model =
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
         let scrollCmd =
-            match next with
-            | Some (OverviewData.OverviewSelection.Agents _) ->
-                Cmd.ofEffect (fun _ ->
-                    Dom.window?requestAnimationFrame(fun (_: float) ->
-                        Dom.document.querySelector ".dashboard"
-                        |> Option.ofObj
-                        |> Option.iter (fun dashboard ->
-                            dashboard?scrollTo(createObj [ "top" ==> 0; "behavior" ==> "smooth" ]))))
+            match model.OverviewAgentsStuck, next with
+            | true, Some (OverviewData.OverviewSelection.Agents _) ->
+                Cmd.ofEffect (fun _ -> scrollDashboardToTop ())
             | _ -> Cmd.none
         { model with SelectedOverviewGroup = next }, scrollCmd
 
@@ -693,7 +692,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
           [ "focus-reclaim" ], focusReclaim ]
 
     let subs =
-        if model.OverviewPanelOpen then
+        if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
             ([ "overview-sticky" ], overviewSticky) :: baseSubs
         else
             baseSubs
@@ -909,7 +908,6 @@ let view model dispatch =
             prop.children [
                 if model.OverviewPanelOpen then
                     OverviewBand.view
-                        model.OverviewAgentsStuck
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)

@@ -32,9 +32,9 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   `#313244` boundary. The Tasks section and drill-down panel stay in normal document flow.
 - **Aggregate-only**: no per-worktree cards or rows inside the band (the grid below already does
   that). All figures are cross-worktree roll-ups.
-- Two stacked sections are separated by a **1px dashed** rule and headed by small uppercase muted
-  labels: `AGENTS` and `TASKS`. The per-group/per-bucket counts live in the columns below, so the
-  headers stay bare (no count suffix, no "across all worktrees" caption).
+- Two stacked sections are separated by a **1px solid** `#313244` rule and headed by small uppercase
+  muted labels: `AGENTS` and `TASKS`. The per-group/per-bucket counts live in the columns below, so
+  the headers stay bare (no count suffix, no "across all worktrees" caption).
 - Each category is a column with its **count-first label above the visual**: the count uses the
   category accent, the label stays neutral, and both share the same font size/weight.
   1. **Agents** — **circles** (~15px), one **per live session**, each placed in its own group by
@@ -258,7 +258,7 @@ the solution compiling (no compat shims, per house rules).
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the
   count — so count and label differ only by colour, per spec.
 - **Section chrome.** The band renders bare `AGENTS` and `TASKS` headings (no count suffix, no
-  "across all worktrees" caption — the columns carry the counts), separated by a 1px dashed rule,
+  "across all worktrees" caption — the columns carry the counts), separated by a 1px solid rule,
   and has no top/bottom border hairlines or task footer caption.
 - **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
   `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
@@ -266,18 +266,17 @@ the solution compiling (no compat shims, per house rules).
   by the `section` helper) and returns `Html.none` when both lenses are empty, so an opened-but-empty
   band adds no chrome (not even margin).
 - **Placement:** rendered in `App.fs` above `.repo-list`, gated on `model.OverviewPanelOpen`.
-  `OverviewBand.view` emits three sibling fragment children: a zero-height sticky anchor containing
-  the compact circles-only bar, the full normal-flow Agents section, and the normal-flow
-  breakdown/Tasks remainder. The anchor spans the full dashboard scroll boundary without adding
-  layout height; pin/unpin therefore changes only visibility and cannot oscillate from scroll
-  anchoring. An `IntersectionObserver` rooted at `.dashboard` switches the compact bar only after the
-  full Agents section's actual bottom crosses the dashboard top, so variable row height and wrapping
-  cannot produce an abrupt duplicate full+compact row. A named CSS View Timeline on the full Agents
-  section scrubs the visual transition across its real `exit` range: the full row fades out while the
-  compact circles fade in and translate upward by the dashboard padding until flush with the
-  scrollport. The observer controls only behavior (closing the drill-down and enabling compact
-  pointer events), not visual timing. The two sections stay **stacked** at every width; category
-  columns wrap via `.overview-items { flex-wrap: wrap }`.
+  `OverviewBand.view` emits a 1px zero-net-flow sentinel, one sticky Agents section, and the
+  normal-flow breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs that single Agents
+  DOM across the first 112px of scrolling: heading and metadata fade, the existing circle groups
+  translate into one compact row, and `clip-path` reduces the same background to Canvas-header
+  height. No duplicate circle tree exists. An `IntersectionObserver` watches only the sentinel and
+  reports pinned only after the sentinel passes strictly above the dashboard boundary. Its Elmish
+  subscription exists only while agent groups are rendered, so removing the Agents DOM disposes the
+  observer and resets pinned state; a later group reappearance starts a fresh observer. Entering the
+  pinned state closes an agent drill-down; the observer does not control visual interpolation.
+  The two sections stay **stacked** at every width; category columns wrap via
+  `.overview-items { flex-wrap: wrap }`.
 
 ## Decisions
 
@@ -323,7 +322,7 @@ call site; running skill and persisted per-session context usage from the existi
   of the archived policy — drop the archived ones.
 
 **Additional locked decisions:**
-- The visual contract is the count-first, label-above-mark layout with section headers, dashed
+- The visual contract is the count-first, label-above-mark layout with section headers, a 1px solid
   separator, exact Catppuccin palette, no hairline borders, and no footer caption.
 - Working agents are red-dot worktrees (`CodingTool = Working`); `WaitingForUser` is a separate
   Waiting group; idle sessions form a distinct blue Idle group and do not inflate activity counts.

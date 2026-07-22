@@ -424,7 +424,7 @@ type OverviewBandE2ETests() =
         }
 
     [<Test>]
-    member this.``Pinned agents collapse to canvas-height circles and close the drill-down``() =
+    member this.``One agent band morphs to pinned circles and closes the drill-down``() =
         task {
             let canvasBtn =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
@@ -441,36 +441,39 @@ type OverviewBandE2ETests() =
                     """() => {
                       const dashboard = document.querySelector('.dashboard');
                       const agents = document.querySelector('.overview-agents-band');
-                      const dashboardTop = dashboard.getBoundingClientRect().top;
-                      const agentRect = agents.getBoundingClientRect();
-                      dashboard.scrollTop += agentRect.top - dashboardTop + agentRect.height / 2;
+                      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
+                      dashboard.scrollTop = morphRange / 2;
                       return new Promise(resolve =>
                         requestAnimationFrame(() => requestAnimationFrame(() =>
                           resolve(JSON.stringify({
-                            fullOpacity: parseFloat(getComputedStyle(agents).opacity),
-                            compactOpacity: parseFloat(getComputedStyle(document.querySelector('.overview-agents-compact')).opacity)
+                            bandCount: document.querySelectorAll('.overview-agents-band').length,
+                            compactCount: document.querySelectorAll('.overview-agents-compact').length,
+                            headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
+                            metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity)
                           })))));
                     }""")
 
             let morph = JObject.Parse(morphJson)
-            Assert.That(morph.Value<float>("fullOpacity"), Is.InRange(0.1, 0.9))
-            Assert.That(morph.Value<float>("compactOpacity"), Is.InRange(0.1, 0.9))
+            Assert.That(morph.Value<int>("bandCount"), Is.EqualTo(1))
+            Assert.That(morph.Value<int>("compactCount"), Is.EqualTo(0))
+            Assert.That(morph.Value<float>("headerOpacity"), Is.InRange(0.1, 0.9))
+            Assert.That(morph.Value<float>("metaOpacity"), Is.InRange(0.1, 0.9))
 
             let! _ =
                 this.Page.EvaluateAsync(
                     """() => {
                       const dashboard = document.querySelector('.dashboard');
-                      const agents = document.querySelector('.overview-agents-band');
-                      dashboard.scrollTop += agents.getBoundingClientRect().bottom
-                        - dashboard.getBoundingClientRect().top + 1;
+                      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
+                      dashboard.scrollTop = morphRange + 1;
                       window.__overviewStickyScrollTop = dashboard.scrollTop;
                     }""")
 
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     """() => {
-                      const agents = document.querySelector('.overview-agents-compact');
-                      return agents.classList.contains('overview-agents-compact-visible')
+                      const agents = document.querySelector('.overview-agents-band');
+                      const meta = agents.querySelector('.overview-meta');
+                      return parseFloat(getComputedStyle(meta).opacity) < 0.01
                         && !document.querySelector('.overview-breakdown')
                         && !document.querySelector('.overview-item-selected');
                     }""",
@@ -482,22 +485,29 @@ type OverviewBandE2ETests() =
                     """() => new Promise(resolve => {
                       requestAnimationFrame(() => requestAnimationFrame(() => {
                         const dashboard = document.querySelector('.dashboard');
-                        const agents = document.querySelector('.overview-agents-compact');
+                        const agents = document.querySelector('.overview-agents-band');
                         const canvasHeader = document.querySelector('.canvas-tab-bar');
-                        const agentRect = agents.getBoundingClientRect();
                         const dashboardRect = dashboard.getBoundingClientRect();
+                        const circleCenters = Array.from(agents.querySelectorAll('.overview-circle'))
+                          .map(circle => {
+                            const rect = circle.getBoundingClientRect();
+                            return rect.top + rect.height / 2 - dashboardRect.top;
+                          });
+                        const transform = new DOMMatrix(getComputedStyle(agents).transform);
+                        const line = getComputedStyle(agents, '::after');
                         resolve(JSON.stringify({
                           scrollTop: dashboard.scrollTop,
                           expectedScrollTop: window.__overviewStickyScrollTop,
                           position: getComputedStyle(agents).position,
-                          topDelta: agentRect.top - dashboardRect.top,
-                          widthDelta: agentRect.width - dashboard.clientWidth,
-                          height: agentRect.height,
                           canvasHeight: canvasHeader.getBoundingClientRect().height,
-                          headerCount: agents.querySelectorAll('.overview-header').length,
-                          metaCount: agents.querySelectorAll('.overview-meta').length,
-                          borderStyle: getComputedStyle(agents).borderBottomStyle,
-                          borderColor: getComputedStyle(agents).borderBottomColor,
+                          visualHeight: transform.m42 + parseFloat(line.top) + 1,
+                          minCircleCenter: Math.min(...circleCenters),
+                          maxCircleCenter: Math.max(...circleCenters),
+                          headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
+                          metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity),
+                          lineOpacity: parseFloat(line.opacity),
+                          lineColor: line.borderBottomColor,
+                          groupGap: getComputedStyle(agents.querySelector('.overview-items')).columnGap,
                           canvasBorderColor: getComputedStyle(canvasHeader).borderBottomColor
                         }));
                       }));
@@ -505,18 +515,17 @@ type OverviewBandE2ETests() =
 
             let sticky = JObject.Parse(stickyJson)
             Assert.That(sticky.Value<float>("scrollTop"), Is.EqualTo(sticky.Value<float>("expectedScrollTop")).Within(1.0), "pinning must not move the scroll position")
-            Assert.That(sticky.Value<string>("position"), Is.EqualTo("absolute"))
-            Assert.That(Math.Abs(sticky.Value<float>("topDelta")), Is.LessThanOrEqualTo(1.0), "agent strip stays at the dashboard top")
-            Assert.That(Math.Abs(sticky.Value<float>("widthDelta")), Is.LessThanOrEqualTo(1.0), "agent strip covers the dashboard width")
-            Assert.That(sticky.Value<float>("height"), Is.EqualTo(sticky.Value<float>("canvasHeight")).Within(1.0), "agent and canvas chrome heights match")
-            Assert.That(sticky.Value<int>("headerCount"), Is.EqualTo(0))
-            Assert.That(sticky.Value<int>("metaCount"), Is.EqualTo(0))
-            Assert.That(sticky.Value<string>("borderStyle"), Is.EqualTo("solid"))
-            Assert.That(sticky.Value<string>("borderColor"), Is.EqualTo(sticky.Value<string>("canvasBorderColor")))
+            Assert.That(sticky.Value<string>("position"), Is.EqualTo("sticky"))
+            Assert.That(sticky.Value<float>("visualHeight"), Is.EqualTo(sticky.Value<float>("canvasHeight")).Within(1.0), "agent and canvas chrome heights match")
+            Assert.That(sticky.Value<float>("minCircleCenter"), Is.EqualTo(sticky.Value<float>("maxCircleCenter")).Within(1.0), "all circle groups share one compact row")
+            Assert.That(sticky.Value<float>("minCircleCenter"), Is.EqualTo(sticky.Value<float>("canvasHeight") / 2.0).Within(1.5), "circles are vertically centered")
+            Assert.That(sticky.Value<float>("headerOpacity"), Is.LessThan(0.01))
+            Assert.That(sticky.Value<float>("metaOpacity"), Is.LessThan(0.01))
+            Assert.That(sticky.Value<float>("lineOpacity"), Is.EqualTo(1.0).Within(0.01))
+            Assert.That(sticky.Value<string>("lineColor"), Is.EqualTo(sticky.Value<string>("canvasBorderColor")))
+            Assert.That(sticky.Value<string>("groupGap"), Is.EqualTo("22px"))
 
-            let compactInvestigating =
-                this.Page.Locator(".overview-compact-group[title$='Investigating']")
-            do! compactInvestigating.ClickAsync()
+            do! investigating.Locator(".overview-circle").First.ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     """() => {

@@ -130,8 +130,9 @@ type OverviewSelection =
 - `Model` gains `SelectedOverviewGroup: OverviewSelection option` (initialized `None`).
 - New messages:
   - `SelectOverviewGroup of OverviewSelection` — **toggles**: selecting the already-selected group
-    sets it back to `None`. Opening an Agents selection also schedules a dashboard scroll to `top = 0`
-    on the next animation frame so the rendered breakdown is visible.
+    sets it back to `None`. Opening an Agents selection while the Agents strip is pinned schedules a
+    dashboard scroll to `top = 0` through `Navigation` on the next animation frame so the rendered
+    breakdown is visible; normal-row selections do not move the dashboard.
   - `SelectOverviewWorktree of scopedKey: string` — the arrow-nav-parity handler:
     `expandRepoOwning` → `applyFocus true (Some (Card scopedKey))` → `scrollFocusedIntoView Normal`,
     persisting collapsed repos when a repo was expanded. Must **not** open the Canvas pane.
@@ -149,14 +150,13 @@ type OverviewSelection =
   `OverviewBand.view model.Repos`).
 - Each `agentColumn` / `taskColumn` becomes clickable (raises `onSelectGroup`) and gets an
   `overview-item-selected`/tab class when it is the selected group.
-- Render a zero-height sticky anchor, the full Agents section, and the normal-flow breakdown/Tasks
-  content as sibling fragment children of `.dashboard`. The compact bar is absolutely positioned
-  inside the sticky anchor, so pin/unpin changes visibility without changing document height; this
-  avoids a scroll-anchor feedback loop at the threshold. An `IntersectionObserver` watches the full
-  Agents section and activates compact mode only when that section has completely crossed above the
-  dashboard viewport, rather than guessing from a fixed scroll offset. The visual morph is separate:
-  a named CSS View Timeline scrubs a crossfade/translation across the full section's actual `exit`
-  range, so every intermediate scroll position has a stable intermediate appearance.
+- Render one sticky Agents section plus a 1px zero-net-flow sentinel and the normal-flow
+  breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs the same Agents DOM: heading and
+  metadata fade, the existing circle groups translate upward, and the band clips to compact
+  Canvas-header height. There is no second compact circle tree to overlap during transition. An
+  `IntersectionObserver` is active only while agent groups exist, watches only the sentinel, and
+  closes an agent selection after the sentinel passes strictly above the dashboard boundary;
+  visual progress remains entirely scroll-driven.
 - Render the breakdown panel below the relevant row when a matching group is selected: the ✕ close
   button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members,
   agent chips vs. task bars.
@@ -172,9 +172,10 @@ type OverviewSelection =
 - **Unit** (`src/Tests/OverviewDataTests.fs`): membership correctness per bucket/group — the right
   worktrees, correct `Contribution`, `Count` == list length / Σ contributions, respects
   `isActive`/`IsArchived`, and repo names populated.
-- **E2E** (`OverviewBandE2ETests`): verifies entering the pinned state closes an agent drill-down,
-  hides the heading/metadata, matches the Canvas header height and solid boundary, spans the dashboard
-  width, and still lets a circle group scroll back to its drill-down.
+- **E2E** (`OverviewBandE2ETests`): verifies exactly one Agents band/circle tree exists, heading and
+  metadata have intermediate opacity midway through the morph, entering the pinned state closes an
+  agent drill-down, final circles share one centered row at Canvas-header height, and clicking a
+  circle scrolls back to its drill-down.
 
 ## Decisions
 

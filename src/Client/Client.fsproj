@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="BrowserObserverInterop.fs" />
     <Compile Include="Navigation.fs" />
     <Compile Include="OverviewData.fs" />
     <Compile Include="CanvasTypes.fs" />

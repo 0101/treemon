@@ -4,9 +4,9 @@ module OverviewBand
 //
 // A native Feliz view rendered inside the dashboard, above the repo list, gated by the caller on
 // Model.OverviewPanelOpen. It consumes the pure cross-worktree roll-up from OverviewData.aggregate.
-// The full Agents section stays in normal flow. A separate zero-height sticky anchor renders the
-// circles-only pinned chrome without changing document height at the pin/unpin threshold.
-// two STACKED sections split by a 1px dashed rule, each opening with an uppercase muted header, each
+// The Agents section is one sticky DOM tree. CSS scroll-driven animations fade its metadata,
+// translate its existing circle groups, and clip the same band down to compact chrome.
+// two STACKED sections split by a 1px solid rule, each opening with an uppercase muted header, each
 // category a column whose count+label meta line sits ABOVE its visual (count FIRST in the accent
 // colour, label neutral, same size/weight):
 //   - Agents        -> a row of session markers, one per agent, grouped by activity (red-dot working
@@ -23,45 +23,38 @@ module OverviewBand
 //                      workaround is gone.
 //
 // Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
-// fully-empty roll-up collapses to Html.none. v1 is static — no hover/click/greenlight.
+// fully-empty roll-up collapses to Html.none. Group columns toggle the drill-down described by
+// docs/spec/overview-drilldown.md.
 
 open Shared
 open Navigation
 open Feliz
 open OverviewData
 open Browser
-open Fable.Core
 open Fable.Core.JsInterop
+open BrowserObserverInterop
 
-[<Emit("new IntersectionObserver($0, $1)")>]
-let private createIntersectionObserver (callback: obj -> unit) (options: obj) : obj = jsNative
-
-[<Emit("$0.observe($1)")>]
-let private observeElement (observer: obj) (element: Browser.Types.Element) : unit = jsNative
-
-[<Emit("$0.disconnect()")>]
-let private disconnectObserver (observer: obj) : unit = jsNative
-
-[<Emit("$0[0]")>]
-let private firstIntersectionEntry (entries: obj) : obj = jsNative
+let isPastStickyBoundary (sentinelBottom: float) (dashboardTop: float) =
+    sentinelBottom < dashboardTop
 
 let private createPinnedObserver (onChange: bool -> unit) =
     match
         Dom.document.querySelector ".dashboard" |> Option.ofObj,
-        Dom.document.querySelector ".overview-agents-band" |> Option.ofObj
+        Dom.document.querySelector ".overview-agents-stick-sentinel" |> Option.ofObj
     with
-    | Some dashboard, Some agentsBand ->
+    | Some dashboard, Some sentinel ->
         let observer =
             createIntersectionObserver
                 (fun entries ->
                     let entry = firstIntersectionEntry entries
-                    let rootBounds: obj = entry?rootBounds
-                    if not (isNull rootBounds) then
-                        let bandBottom: float = entry?boundingClientRect?bottom
+                    (entry?rootBounds: obj)
+                    |> Option.ofObj
+                    |> Option.iter (fun rootBounds ->
+                        let sentinelBottom: float = entry?boundingClientRect?bottom
                         let dashboardTop: float = rootBounds?top
-                        onChange (bandBottom <= dashboardTop))
+                        onChange (isPastStickyBoundary sentinelBottom dashboardTop)))
                 (createObj [ "root" ==> dashboard; "threshold" ==> 0 ])
-        observeElement observer agentsBand
+        observeElement observer sentinel
         Some observer
     | _ -> None
 
@@ -174,17 +167,6 @@ let private agentColumn (selection: OverviewSelection option) (onSelectGroup: Ov
           prop.children
               [ metaLine accent (agentLabel group.Kind) group.Count
                 agentCircles accent group ] ]
-
-let private compactAgentGroup (onSelectGroup: OverviewSelection -> unit) (group: AgentGroup) =
-    let accent = agentClass group.Kind
-    let label = agentLabel group.Kind
-
-    Html.div
-        [ prop.className "overview-compact-group"
-          prop.key accent
-          prop.title $"{group.Count} {label}"
-          prop.onClick (fun _ -> onSelectGroup (OverviewSelection.Agents group.Kind))
-          prop.children [ agentCircles accent group ] ]
 
 /// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
 /// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by
@@ -337,7 +319,7 @@ let private taskBreakdown
     breakdownPanel accent (fun () -> onSelectGroup (OverviewSelection.Tasks bucket.Kind)) repoBlocks
 
 /// A section shell: an uppercase header over the wrapping row of category columns, plus an optional
-/// drill-down panel. The separated modifier preserves the dashed rule between Agents and Tasks even
+/// drill-down panel. The separated modifier preserves the solid rule between Agents and Tasks even
 /// though the sticky Agents section and normal-flow Tasks section have different parent elements.
 let private section (isSeparated: bool) (header: string) (columns: ReactElement list) (breakdown: ReactElement) =
     Html.div
@@ -352,8 +334,14 @@ let private section (isSeparated: bool) (header: string) (columns: ReactElement 
 /// group's count hits 0 — App's DataLoaded reducer uses this to clear the selection and close the
 /// panel. Lives here because it runs the exact same `repos |> List.map toRepoWorktrees |>
 /// OverviewData.aggregate` pipeline the view does — a pure Overview data query, not App/Elmish state.
+let private aggregateRepos (repos: RepoModel list) =
+    repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+
+let hasAgentGroups (repos: RepoModel list) =
+    aggregateRepos repos |> _.Agents |> List.isEmpty |> not
+
 let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
-    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    let overview = aggregateRepos repos
     match selection with
     | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
     | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
@@ -364,13 +352,12 @@ let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel li
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
 /// arrow-nav parity.
 let view
-    (isAgentsStuck: bool)
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
     (repos: RepoModel list)
     : ReactElement =
-    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    let overview = aggregateRepos repos
 
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
@@ -413,15 +400,8 @@ let view
         React.fragment
             [ match agents with
               | [] -> Html.none
-              | groups ->
-                  Html.div
-                      [ prop.className "overview-agents-sticky-anchor"
-                        prop.children
-                            [ Html.div
-                                  [ prop.className
-                                        [ "overview-agents-compact"
-                                          if isAgentsStuck then "overview-agents-compact-visible" ]
-                                    prop.children (groups |> List.map (compactAgentGroup onSelectGroup)) ] ] ]
+              | _ ->
+                  Html.div [ prop.className "overview-agents-stick-sentinel" ]
                   Html.div
                       [ prop.className "overview-band overview-agents-band"
                         prop.children [ agentSection ] ]

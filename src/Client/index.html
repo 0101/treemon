@@ -169,7 +169,7 @@
         /* Overview band (spec: docs/spec/beads-overview-band.md, Corrections v1.1) — chrome-less
            cross-worktree roll-up rendered inside .dashboard above .repo-list, gated on
            Model.OverviewPanelOpen. Rebuilt to match the prototype's .band block exactly
-           (.agents/canvas/beads-panel-prototypes.html): two STACKED sections split by a 1px dashed
+           (.agents/canvas/beads-panel-prototypes.html): two STACKED sections split by a 1px solid
            rule; each opens with an uppercase muted header; each category is a column with a
            count-first meta line ABOVE its visual (count in the accent colour, label neutral, same
            size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
@@ -178,45 +178,66 @@
            box/title bar or hairlines (the toggle button is the header); the category columns wrap to
            the next line when the pane is too narrow (overview-drilldown). */
         .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
-        /* The full Agents row stays in normal flow. A zero-height sticky anchor carries a separate
-           circles-only bar, so showing/hiding the pinned chrome cannot change document height and
-           oscillate at the sticky threshold. */
-        .overview-agents-sticky-anchor { position: sticky; top: 0; z-index: 20; height: 0; }
-        .overview-agents-compact {
-            position: absolute; top: 0; left: -16px; right: -16px;
-            display: flex; align-items: center; gap: 10px;
-            height: var(--pane-header-height); padding: 4px 16px;
-            background: #181825; border-bottom: 1px solid #313244;
-            opacity: 0; transform: translateY(16px); pointer-events: none;
-            animation: overview-agents-compact-enter linear both;
-            animation-timeline: --overview-agents-exit;
-            animation-range: exit;
-        }
-        .overview-agents-compact-visible { pointer-events: auto; }
-        .overview-compact-group {
-            display: flex; align-items: center; padding: 4px 6px; border-radius: 4px;
-            cursor: pointer;
-        }
-        .overview-compact-group:hover { background: #2a2a3c; }
+        /* A 1px zero-net-flow sentinel closes an open agent drill-down when the Agents band reaches
+           its sticky point. The visual transition itself is one DOM tree driven by dashboard scroll. */
+        .overview-agents-stick-sentinel { height: 1px; margin-bottom: -1px; }
         .overview-agents-band {
+            position: sticky; top: 0; z-index: 20;
             padding-bottom: 0; margin-bottom: 0;
-            view-timeline: --overview-agents-exit block;
-            animation: overview-agents-full-exit linear both;
-            animation-timeline: --overview-agents-exit;
-            animation-range: exit;
+            border-bottom: 1px solid transparent;
+            animation: overview-agents-shell-morph linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
         }
-        @keyframes overview-agents-compact-enter {
-            from { opacity: 0; transform: translateY(16px); }
-            to { opacity: 1; transform: translateY(-16px); }
+        .overview-agents-band::after {
+            content: ''; position: absolute; left: 0; right: 0;
+            top: calc(16px + var(--pane-header-height) - 1px);
+            border-bottom: 1px solid #313244; opacity: 0;
+            animation: overview-agents-line-enter linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
         }
-        @keyframes overview-agents-full-exit {
+        .overview-agents-band .overview-header,
+        .overview-agents-band .overview-meta {
+            animation: overview-agents-meta-exit linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
+        }
+        .overview-agents-band .overview-items {
+            animation: overview-agents-items-morph linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
+        }
+        @keyframes overview-agents-shell-morph {
+            from {
+                transform: translateY(0);
+                clip-path: inset(0 0 0 0);
+                background-color: #1e1e2e;
+            }
+            to {
+                transform: translateY(-16px);
+                clip-path: inset(16px 0 calc(100% - 16px - var(--pane-header-height)) 0);
+                background-color: #181825;
+            }
+        }
+        @keyframes overview-agents-meta-exit {
             from { opacity: 1; }
             to { opacity: 0; }
         }
-        @supports not (animation-timeline: view()) {
-            .overview-agents-band { animation: none; }
-            .overview-agents-compact { animation: none; opacity: 0; transform: translateY(-16px); }
-            .overview-agents-compact-visible { opacity: 1; }
+        @keyframes overview-agents-items-morph {
+            from { transform: translateY(0); }
+            to { transform: translateY(-55.5px); }
+        }
+        @keyframes overview-agents-line-enter {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @supports not (animation-timeline: scroll()) {
+            .overview-agents-band,
+            .overview-agents-band::after,
+            .overview-agents-band .overview-header,
+            .overview-agents-band .overview-meta,
+            .overview-agents-band .overview-items { animation: none; }
         }
         .overview-band-rest { padding-top: 0; }
         .overview-section-separated { margin-top: 17px; padding-top: 16px; border-top: 1px solid #313244; }
@@ -648,6 +669,7 @@
             flex-direction: column;
         }
         .app-layout > .dashboard {
+            --overview-agents-morph-range: 112px;
             flex: 1;
             min-width: 0;
             min-height: 0;
@@ -656,7 +678,7 @@
             transition: flex 0.2s ease;
             container-type: inline-size;
             container-name: dashboard;
-            timeline-scope: --overview-agents-exit;
+            scroll-timeline: --overview-dashboard-scroll block;
             --overview-bar-max: min(300px, 80cqi);
         }
         .canvas-pane {
