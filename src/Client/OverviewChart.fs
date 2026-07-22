@@ -467,12 +467,14 @@ let private buildChartGeometry input =
         let pathLength = pathXs.Length
 
         let stepSegments =
-            [ for index in 1 .. pathLength - 1 ->
-                  $"L {ix pathXs[index]} {ix (yOfHeight upper[index - 1])} L {ix pathXs[index]} {ix (yOfHeight upper[index])}" ]
+            [ 1 .. pathLength - 1 ]
+            |> List.map (fun index ->
+                $"L {ix pathXs[index]} {ix (yOfHeight upper[index - 1])} L {ix pathXs[index]} {ix (yOfHeight upper[index])}")
 
         let downSegments =
-            [ for index in pathLength - 1 .. -1 .. 1 ->
-                  $"L {ix pathXs[index]} {ix (yOfHeight lower[index])} L {ix pathXs[index]} {ix (yOfHeight lower[index - 1])}" ]
+            [ pathLength - 1 .. -1 .. 1 ]
+            |> List.map (fun index ->
+                $"L {ix pathXs[index]} {ix (yOfHeight lower[index])} L {ix pathXs[index]} {ix (yOfHeight lower[index - 1])}")
 
         let path =
             String.concat
