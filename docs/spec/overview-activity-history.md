@@ -193,6 +193,14 @@ API users stop. `SessionActivityService` receives the shared store instead of ow
 `OverviewHistoryCache` identifies entries by window plus publication identity rather than wall-clock
 anchor age.
 
+`OverviewHistoryPerformanceTests` is the reproducible release-mode request harness. It bulk-seeds
+deterministic on-disk databases with equivalent visible 72-hour histories at 40,000 and 400,000 raw
+events, rebuilds both through the production rollup worker, and measures API plus Fable-remoting JSON
+serialization. SQLite tracing and rollup-read callbacks run in separate audit requests so timed
+samples are not instrumented; the test emits one JSON report containing runtime/database
+configuration, every sample, statement/table access, cache and concurrency counts, and threshold
+comparisons. Run it in Release with a `Category=Performance` test filter and detailed console logger.
+
 ## Decisions
 
 | Decision | Choice |
@@ -216,6 +224,7 @@ anchor age.
 | Retention | Exposed 72-hour rollup horizon plus predecessor; raw retention remains authoritative. |
 | Cache | Key by window, published generation, and complete-through bucket. |
 | Rendering | Hand-written stepped SVG with memoized geometry and frame-coalesced hover. |
+| Performance evidence | A Release-only NUnit harness uses deterministic on-disk data and separate untimed SQLite tracing; Debug runs skip it rather than applying release thresholds to unoptimized code. |
 
 ## Key Files
 
@@ -233,6 +242,7 @@ anchor age.
 | `src/Server/SessionActivityService.fs` | Ingestion through the shared store. |
 | `src/Server/Program.fs` | Shared store and compactor lifecycle plus startup backfill. |
 | `src/Server/WorktreeApi.fs` | Published-rollup history query. |
+| `src/Tests/OverviewHistoryPerformanceTests.fs` | Release-mode on-disk SQLite, API, serialization, cache, concurrency, allocation, and statement-access harness. |
 | `src/Client/App.fs` | Window state, fetching, and refresh throttle. |
 | `src/Client/OverviewChart.fs` | Stepped chart geometry, SVG, and tooltip. |
 | `src/Client/OverviewBand.fs` | In-band chart placement and controls. |

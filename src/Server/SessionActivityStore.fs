@@ -523,14 +523,22 @@ let private addColumnIfMissing (conn: SqliteConnection) (table: string) (col: st
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
 /// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
-/// (restart rebuild, Overview history, prune timer) never share a connection. Dispose on shutdown.
-type SessionActivityStore(dbPath: string) =
+/// (restart rebuild, Overview history, prune timer) never share a connection. The optional observer
+/// runs after connection-local PRAGMAs and before store SQL so diagnostics can attach per connection
+/// without changing production callers. Dispose on shutdown.
+type SessionActivityStore
+    (
+        dbPath: string,
+        ?connectionOpened: SqliteConnection -> unit
+    ) =
 
     do
         let dir = Path.GetDirectoryName dbPath
 
         if not (String.IsNullOrEmpty dir) then
             Directory.CreateDirectory dir |> ignore
+
+    let connectionOpened = defaultArg connectionOpened ignore
 
     // Pooling is off so each connection fully releases its file handle on close — reliable teardown on
     // Windows (which locks open DB files) and no pooled-connection surprises. The keep-alive below
@@ -547,7 +555,13 @@ type SessionActivityStore(dbPath: string) =
         use cmd = c.CreateCommand()
         cmd.CommandText <- "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;"
         cmd.ExecuteNonQuery() |> ignore
-        c
+
+        try
+            connectionOpened c
+            c
+        with _ ->
+            c.Dispose()
+            reraise ()
 
     let overviewMaintenanceGate = obj ()
     let overviewWorkerLease = new SemaphoreSlim(1, 1)
