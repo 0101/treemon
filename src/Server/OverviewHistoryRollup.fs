@@ -190,4 +190,4 @@ let internal candidateRowsAreExact
     candidateRangeIsValid candidate
     && rows |> List.forall (fun staged -> staged.Generation = candidate.Generation)
     && rows |> List.forall (fun staged -> countsAreValid staged.Row.Tasks staged.Row.Agents)
-    && rows |> List.map (fun staged -> staged.Row.Boundary) = expectedBoundaries
+    && rows |> List.map _.Row.Boundary = expectedBoundaries
