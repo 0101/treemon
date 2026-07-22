@@ -10,7 +10,7 @@ dotnet test src/Tests/Tests.fsproj                          # all tests
 dotnet test src/Tests/Tests.fsproj --filter "Category=Fast" # fast suite (<60s)
 dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 .\treemon.ps1 dev "Q:\code\AITestAgent"                     # dev mode (path optional; omit to use global config roots)
-.\treemon.ps1 deploy                                        # build + restart production
+.\treemon.ps1 deploy                                        # build + replace production with this checkout
 .\treemon.ps1 add "Q:\code\OtherProject"                    # add a watched root (shim for 'tm add'; restarts prod if running)
 .\treemon.ps1 remove "Q:\code\OtherProject"                 # remove a watched root (shim for 'tm remove'; restarts prod if running)
 ```
