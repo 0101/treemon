@@ -1,8 +1,6 @@
 module Tests.OverviewHistoryRollupOracleTests
 
 open System
-open System.IO
-open Microsoft.Data.Sqlite
 open NUnit.Framework
 open OverviewData
 open Server
@@ -13,34 +11,15 @@ open Server.SessionActivityStore
 open Server.SqliteStorage
 open Shared
 open Tests.OverviewTestHelpers
+open Tests.SqliteTestDatabase
+
+let private withStore =
+    SqliteTestDatabase.withStore "treemon-rollup-oracle"
 
 type private Sources =
     { Tasks: (DateTimeOffset * TaskCount list) list
       Events: ActivityEventRow list
       Liveness: (SessionId * DateTimeOffset) list }
-
-let private withStore action =
-    let directory = Path.Combine(Path.GetTempPath(), $"treemon-rollup-oracle-{Guid.NewGuid()}")
-    Directory.CreateDirectory directory |> ignore
-    let path = Path.Combine(directory, "activity.db")
-
-    try
-        use store = new SessionActivityStore(path)
-        action path store
-    finally
-        try
-            Directory.Delete(directory, true)
-        with _ ->
-            ()
-
-let private openConnection path =
-    let connection =
-        new SqliteConnection(
-            SqliteConnectionStringBuilder(DataSource = path, Pooling = false).ConnectionString
-        )
-
-    connection.Open()
-    connection
 
 let private insertLiveness path rows =
     // Seed raw liveness directly so reconstruction covers unknown sessions and historical gaps that

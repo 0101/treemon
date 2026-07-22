@@ -16,6 +16,10 @@ open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared
 open Tests.OverviewTestHelpers
+open Tests.SqliteTestDatabase
+
+let private withDbPath =
+    SqliteTestDatabase.withDbPath "treemon-rollup-publication"
 
 type private Sources =
     { Tasks: (DateTimeOffset * TaskCount list) list
@@ -33,48 +37,6 @@ type private TestClock(initial: DateTimeOffset) =
 
     member _.AdvanceTo(timestamp: DateTimeOffset) =
         lock gate (fun () -> now <- timestamp)
-
-let private withDbPath action =
-    let directory =
-        Path.Combine(
-            Path.GetTempPath(),
-            $"treemon-rollup-publication-{Guid.NewGuid()}"
-        )
-
-    Directory.CreateDirectory directory |> ignore
-    let path = Path.Combine(directory, "activity.db")
-
-    try
-        action path
-    finally
-        try
-            Directory.Delete(directory, true)
-        with _ ->
-            ()
-
-let private openConnection path =
-    let connection =
-        new SqliteConnection(
-            SqliteConnectionStringBuilder(
-                DataSource = path,
-                Pooling = false
-            ).ConnectionString
-        )
-
-    connection.Open()
-    connection
-
-let private execute path sql =
-    use connection = openConnection path
-    use command = connection.CreateCommand()
-    command.CommandText <- sql
-    command.ExecuteNonQuery() |> ignore
-
-let private scalarInt path sql =
-    use connection = openConnection path
-    use command = connection.CreateCommand()
-    command.CommandText <- sql
-    Convert.ToInt32(command.ExecuteScalar())
 
 let private tc count : TaskCount list =
     [ { Kind = TaskBucketKind.Planned

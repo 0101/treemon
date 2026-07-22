@@ -12,30 +12,10 @@ open Shared
 open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
+open Tests.SqliteTestDatabase
 
-let private withDbPath action =
-    let directory = Path.Combine(Path.GetTempPath(), $"treemon-server-lifecycle-{Guid.NewGuid()}")
-    Directory.CreateDirectory directory |> ignore
-    let path = Path.Combine(directory, "activity.db")
-
-    try
-        action path
-    finally
-        try
-            Directory.Delete(directory, true)
-        with _ ->
-            ()
-
-let private execute path sql =
-    use connection =
-        new SqliteConnection(
-            SqliteConnectionStringBuilder(DataSource = path, Pooling = false).ConnectionString
-        )
-
-    connection.Open()
-    use command = connection.CreateCommand()
-    command.CommandText <- sql
-    command.ExecuteNonQuery() |> ignore
+let private withDbPath =
+    SqliteTestDatabase.withDbPath "treemon-server-lifecycle"
 
 [<TestFixture>]
 [<Category("Unit")>]

@@ -12,40 +12,10 @@ open Server.SessionActivityStore
 open Server.SqliteStorage
 open Shared
 open Tests.OverviewTestHelpers
+open Tests.SqliteTestDatabase
 
-let private withDbPath action =
-    let directory = Path.Combine(Path.GetTempPath(), $"treemon-rollup-schema-{Guid.NewGuid()}")
-    Directory.CreateDirectory directory |> ignore
-    let path = Path.Combine(directory, "activity.db")
-
-    try
-        action path
-    finally
-        try
-            Directory.Delete(directory, true)
-        with _ ->
-            ()
-
-let private openConnection path =
-    let connection =
-        new SqliteConnection(
-            SqliteConnectionStringBuilder(DataSource = path, Pooling = false).ConnectionString
-        )
-
-    connection.Open()
-    connection
-
-let private execute path sql =
-    use connection = openConnection path
-    use command = connection.CreateCommand()
-    command.CommandText <- sql
-    command.ExecuteNonQuery() |> ignore
-
-let private scalarInt path sql =
-    use connection = openConnection path
-    use command = connection.CreateCommand()
-    command.CommandText <- sql
-    Convert.ToInt32(command.ExecuteScalar())
+let private withDbPath =
+    SqliteTestDatabase.withDbPath "treemon-rollup-schema"
 
 let private observationBounds path sessionId =
     use connection = openConnection path

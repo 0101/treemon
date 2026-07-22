@@ -1,7 +1,6 @@
 module Tests.OverviewHistoryReconstructionTests
 
 open System
-open System.IO
 open Microsoft.Data.Sqlite
 open NUnit.Framework
 open OverviewData
@@ -13,29 +12,10 @@ open Server.SessionActivityStore
 open Server.SqliteStorage
 open Shared
 open Tests.OverviewTestHelpers
+open Tests.SqliteTestDatabase
 
-let private withStore action =
-    let directory = Path.Combine(Path.GetTempPath(), $"treemon-reconstruction-{Guid.NewGuid()}")
-    Directory.CreateDirectory directory |> ignore
-    let path = Path.Combine(directory, "activity.db")
-
-    try
-        use store = new SessionActivityStore(path)
-        action path store
-    finally
-        try
-            Directory.Delete(directory, true)
-        with _ ->
-            ()
-
-let private openConnection path =
-    let connection =
-        new SqliteConnection(
-            SqliteConnectionStringBuilder(DataSource = path, Pooling = false).ConnectionString
-        )
-
-    connection.Open()
-    connection
+let private withStore =
+    SqliteTestDatabase.withStore "treemon-reconstruction"
 
 let private setObservationBounds path observations =
     let bounds =
