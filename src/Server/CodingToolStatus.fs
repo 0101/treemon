@@ -3,6 +3,7 @@ module Server.CodingToolStatus
 open System
 open System.IO
 open System.Text.Json
+open System.Text.RegularExpressions
 open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
@@ -40,7 +41,7 @@ type CodingToolResult =
       CurrentSkill: string option
       /// The freshest source-tagged activity value from the same footer session as the other fields.
       AgentActivity: AgentActivity option
-      LastUserMessage: (string * DateTimeOffset) option
+      LastUserMessage: UserFooterMessage option
       LastAssistantMessage: (string * DateTimeOffset) option
       /// Mtime of the active session surface that won status resolution (its last write) — the best
       /// available "the agent last did something" time, and the value the scheduler freezes as the
@@ -100,6 +101,83 @@ let noSessionPushResult: CodingToolResult =
 
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
+
+let private canvasPrefix = "[canvas] "
+
+let private identifierWords (identifier: string) =
+    identifier.Replace('-', ' ').Replace('_', ' ')
+        .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+    |> Array.map (fun word ->
+        if String.Equals(word, "cli", StringComparison.OrdinalIgnoreCase) then "CLI"
+        else word.ToLowerInvariant())
+    |> String.concat " "
+
+let private humanizeIdentifier identifier =
+    let words = identifierWords identifier
+    if words = "" || Char.IsUpper words[0] then words
+    else string (Char.ToUpperInvariant words[0]) + words.Substring(1)
+
+let private tryStringProperty name (element: JsonElement) =
+    if element.ValueKind <> JsonValueKind.Object then
+        None
+    else
+        match element.TryGetProperty name with
+        | true, value when value.ValueKind = JsonValueKind.String ->
+            value.GetString()
+            |> Option.ofObj
+            |> Option.map _.Trim()
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        | _ -> None
+
+let private readableCanvasPayload (payload: string) =
+    payload
+        .Replace("{", "")
+        .Replace("}", "")
+        .Replace("[", "")
+        .Replace("]", "")
+        .Replace("\"", "")
+    |> fun text -> Regex.Replace(text, @"\s*:\s*", ": ")
+    |> fun text -> Regex.Replace(text, @"\s*,\s*", ", ")
+    |> fun text -> Regex.Replace(text, @"\s+", " ")
+    |> _.Trim()
+    |> function
+        | "" -> "Canvas interaction"
+        | text -> text
+
+let private formatCanvasPayload payload =
+    let fallback () = readableCanvasPayload payload
+
+    try
+        use document = JsonDocument.Parse payload
+        let root = document.RootElement
+
+        match tryStringProperty "text" root with
+        | Some text -> text
+        | None ->
+            match tryStringProperty "action" root with
+            | Some "decision" ->
+                match tryStringProperty "topic" root, tryStringProperty "choice" root with
+                | Some topic, Some choice -> $"{humanizeIdentifier topic}: {humanizeIdentifier choice}"
+                | _ -> fallback ()
+            | Some "expand-section" ->
+                match tryStringProperty "section" root with
+                | Some section -> $"Expand {identifierWords section}"
+                | None -> fallback ()
+            | _ -> fallback ()
+    with :? JsonException ->
+        fallback ()
+
+let internal formatUserMessage (text: string) : MessageGlyph option * string =
+    if text.StartsWith(canvasPrefix, StringComparison.Ordinal) then
+        Some MessageGlyph.Canvas, formatCanvasPayload text[canvasPrefix.Length..]
+    else
+        None, text
+
+let private toUserFooterMessage (message: Message) =
+    let glyph, text = formatUserMessage message.Text
+    { Glyph = glyph
+      Text = FileUtils.truncateMessage 120 text
+      Timestamp = message.At }
 
 /// Collapse a worktree's live push sessions into the card's coding-tool fields. Two DECOUPLED picks:
 ///
@@ -200,7 +278,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
-        |> Option.map (toFooterMessage 120)
+        |> Option.map toUserFooterMessage
       LastAssistantMessage =
         footer
         |> Option.bind _.LastAssistantMessage
@@ -235,7 +313,7 @@ let retainedFooterResult (stored: StoredStatus) : CodingToolResult =
       AgentActivity =
         SessionActivity.effectiveActivity s
         |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
-      LastUserMessage = s.LastUserMessage |> Option.map (toFooterMessage 120)
+      LastUserMessage = s.LastUserMessage |> Option.map toUserFooterMessage
       LastAssistantMessage = s.LastAssistantMessage |> Option.map (toFooterMessage 80)
       LastActivity = None }
 

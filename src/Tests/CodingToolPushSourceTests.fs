@@ -98,7 +98,7 @@ type FromPushSessionsTests() =
         let result = fromPushSessions now [ session ]
         Assert.That(result.Status, Is.EqualTo Idle)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
-        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "ship it"))
+        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "ship it"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "done, all green"))
 
     [<Test>]
@@ -113,7 +113,7 @@ type FromPushSessionsTests() =
         let result = fromPushSessions now [ session ]
         Assert.That(result.Status, Is.EqualTo NoSession)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "look at auth"))
+        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "look at auth"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
@@ -134,7 +134,7 @@ type FromPushSessionsTests() =
         Assert.That(result.Status, Is.EqualTo WaitingForUser)
         Assert.That(result.Provider, Is.EqualTo(Some CopilotCli))
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "the auth module"))
+        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "the auth module"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
@@ -183,9 +183,38 @@ type FromPushSessionsTests() =
             stored "a" "wt" SessionLevelStatus.Working None (Some(msg longText "2026-03-01T11:59:00Z")) None
                 "2026-03-01T11:59:00Z"
         let result = fromPushSessions now [ session ]
-        let truncated = result.LastUserMessage |> Option.map fst |> Option.get
+        let truncated = result.LastUserMessage |> Option.map _.Text |> Option.get
         Assert.That(truncated.Length, Is.EqualTo 123)
         Assert.That(truncated, Does.EndWith "...")
+
+    [<TestCase("fix the retry tests", null, "fix the retry tests")>]
+    [<TestCase("[canvas] {\"action\":\"comment\",\"text\":\"Why is retry not jittered?\"}", "Canvas", "Why is retry not jittered?")>]
+    [<TestCase("[canvas] {\"topic\":\"recommendation\",\"text\":\"Use the simpler parser\"}", "Canvas", "Use the simpler parser")>]
+    [<TestCase("[canvas] {\"action\":\"decision\",\"topic\":\"cli-parity\",\"choice\":\"dashboard-only\"}", "Canvas", "CLI parity: Dashboard only")>]
+    [<TestCase("[canvas] {\"action\":\"expand-section\",\"section\":\"data-flow\",\"doc\":\"investigation.html\"}", "Canvas", "Expand data flow")>]
+    [<TestCase("[canvas] {\"action\":\"custom-action\",\"text\":\"Use SQLite\"}", "Canvas", "Use SQLite")>]
+    [<TestCase("[canvas] {\"action\":\"custom-action\",\"payload\":{\"value\":42}}", "Canvas", "action: custom-action, payload: value: 42")>]
+    [<TestCase("[canvas] {\"topic\":\"recommendation\"}", "Canvas", "topic: recommendation")>]
+    [<TestCase("[canvas] {\"action\":\"comment\",\"text\":\"   \"}", "Canvas", "action: comment, text:")>]
+    [<TestCase("[canvas] [\"unexpected\",\"array\"]", "Canvas", "unexpected, array")>]
+    [<TestCase("[canvas] {not valid JSON", "Canvas", "not valid JSON")>]
+    member _.``User messages are formatted for the dashboard``(input: string, expectedGlyph: string, expectedText: string) =
+        let glyph, text = formatUserMessage input
+        Assert.Multiple(fun () ->
+            Assert.That(glyph |> Option.map string |> Option.toObj, Is.EqualTo(expectedGlyph))
+            Assert.That(text, Is.EqualTo(expectedText)))
+
+    [<Test>]
+    member _.``Canvas display text is truncated after parsing``() =
+        let longText = String('x', 200)
+        let payload = $"[canvas] {{\"action\":\"comment\",\"text\":\"{longText}\"}}"
+        let session =
+            stored "a" "wt" SessionLevelStatus.Working None (Some(msg payload "2026-03-01T11:59:00Z")) None
+                "2026-03-01T11:59:00Z"
+        let message = (fromPushSessions now [ session ]).LastUserMessage |> Option.get
+        Assert.Multiple(fun () ->
+            Assert.That(message.Glyph, Is.EqualTo(Some MessageGlyph.Canvas))
+            Assert.That(message.Text, Is.EqualTo(String('x', 120) + "...")))
 
     [<Test>]
     member _.``The last assistant message is truncated to the 80-char cap``() =
@@ -288,7 +317,7 @@ type WithRetainedFallbackTests() =
 
         Assert.That(merged["wt-old"].Status, Is.EqualTo NoSession, "the dot stays grey — no OPEN session")
         Assert.That(
-            merged["wt-old"].LastUserMessage |> Option.map fst,
+            merged["wt-old"].LastUserMessage |> Option.map _.Text,
             Is.EqualTo(Some "resume me"),
             "the retained footer/resume message is surfaced so the resume button is reachable"
         )
