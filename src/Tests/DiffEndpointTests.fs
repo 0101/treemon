@@ -1,9 +1,11 @@
 module Tests.DiffEndpointTests
 
 open System
+open System.Diagnostics
 open System.IO
 open System.Net
 open System.Net.Http
+open System.Runtime.InteropServices
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
@@ -400,6 +402,68 @@ type DiffEndpointHttpTests() =
             Path.GetTempPath(),
             $"treemon-diff-endpoint-{name}-{Guid.NewGuid():N}"
         )
+
+    [<Test>]
+    member _.``timeout summary completes within its response deadline without partial content``() =
+        let worktree = fakePath "timeout-deadline"
+        let responseDeadlineMs = 2_000
+
+        let fileName, arguments =
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                "powershell",
+                [ "-NoProfile"
+                  "-Command"
+                  "Start-Sleep -Seconds 30" ]
+            else
+                "sh", [ "-c"; "sleep 30" ]
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ ->
+                    async {
+                        let! result =
+                            ProcessRunner.runArgumentListWithResponseDeadline
+                                responseDeadlineMs
+                                1024
+                                1024
+                                "DiffEndpointDeadlineTest"
+                                fileName
+                                arguments
+                                None
+
+                        return
+                            match result with
+                            | Error ProcessRunner.TimedOut ->
+                                Error(
+                                    WorktreeDiff.GitTimedOut
+                                        WorktreeDiff.ResolveRemote
+                                )
+                            | other ->
+                                failwith $"Expected process timeout, got {other}"
+                    }
+              GetFile = fun _ _ _ -> failwith "File endpoint was not expected" }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> "unused")
+            (fun client baseUrl ->
+                let stopwatch = Stopwatch.StartNew()
+
+                use response =
+                    get client (worktreeUrl baseUrl worktree "diff-summary")
+
+                let body = getResponseBody response
+                stopwatch.Stop()
+
+                Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                body |> assertJson """{"status":"timeout"}"""
+
+                Assert.That(
+                    stopwatch.ElapsedMilliseconds,
+                    Is.LessThan(int64 responseDeadlineMs),
+                    $"Complete timeout response took {stopwatch.ElapsedMilliseconds} ms"
+                ))
 
     [<Test>]
     member _.``loopback Host headers can access diff document and asset routes``() =

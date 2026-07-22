@@ -6,7 +6,9 @@ open System.IO
 open System.Threading
 
 let private defaultTimeoutMs = 60_000
-let private argumentListTimeoutMs = 10_000
+let internal argumentListResponseDeadlineMs = 10_000
+let private maxArgumentListShutdownMs = 250
+let private maxArgumentListResponseReserveMs = 500
 
 type CaptureStream =
     | StandardOutput
@@ -176,8 +178,9 @@ let private observeCapture (captureTask: Tasks.Task<BoundedCapture>) =
 
 /// Runs a process without shell argument parsing. Output capture is bounded and
 /// timeout cancellation terminates the complete process tree.
-let runArgumentListWithTimeout
+let private runArgumentListCore
     (timeoutMs: int)
+    (shutdownTimeoutMs: int)
     (stdoutLimitBytes: int)
     (stderrLimitBytes: int)
     (context: string)
@@ -230,7 +233,7 @@ let runArgumentListWithTimeout
                 with :? OperationCanceledException ->
                     killProcessTree proc
 
-                    use killCts = new CancellationTokenSource(5_000)
+                    use killCts = new CancellationTokenSource(shutdownTimeoutMs)
 
                     try
                         do! proc.WaitForExitAsync(killCts.Token) |> Async.AwaitTask
@@ -252,7 +255,54 @@ let runArgumentListWithTimeout
             return Error(StartFailed ex.Message)
     }
 
-/// Argument-list process execution with the production 10-second timeout.
+let runArgumentListWithTimeout
+    (timeoutMs: int)
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    =
+    runArgumentListCore
+        timeoutMs
+        5_000
+        stdoutLimitBytes
+        stderrLimitBytes
+        context
+        fileName
+        arguments
+        workingDirectory
+
+let internal runArgumentListWithResponseDeadline
+    (responseDeadlineMs: int)
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    =
+    let responseReserveMs =
+        min maxArgumentListResponseReserveMs (max 1 (responseDeadlineMs / 4))
+
+    let shutdownTimeoutMs =
+        min maxArgumentListShutdownMs (max 1 (responseDeadlineMs / 8))
+
+    let processTimeoutMs =
+        max 1 (responseDeadlineMs - responseReserveMs - shutdownTimeoutMs)
+
+    runArgumentListCore
+        processTimeoutMs
+        shutdownTimeoutMs
+        stdoutLimitBytes
+        stderrLimitBytes
+        context
+        fileName
+        arguments
+        workingDirectory
+
+/// Argument-list process execution within the production 10-second response deadline.
 let runArgumentList
     (stdoutLimitBytes: int)
     (stderrLimitBytes: int)
@@ -261,8 +311,8 @@ let runArgumentList
     (arguments: string list)
     (workingDirectory: string option)
     =
-    runArgumentListWithTimeout
-        argumentListTimeoutMs
+    runArgumentListWithResponseDeadline
+        argumentListResponseDeadlineMs
         stdoutLimitBytes
         stderrLimitBytes
         context
