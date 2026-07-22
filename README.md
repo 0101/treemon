@@ -58,7 +58,7 @@ The roots you pass to `start` are saved to the global config (`~/.treemon/config
 .\treemon.ps1 log                                                   # tail server log
 .\treemon.ps1 add "C:\code\another-project"                         # add a monitored root
 .\treemon.ps1 remove "C:\code\another-project"                      # remove a monitored root
-.\treemon.ps1 deploy                                                # rebuild frontend + restart
+.\treemon.ps1 deploy                                                # rebuild + replace production with this checkout
 ```
 
 ### Development
