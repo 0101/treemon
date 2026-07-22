@@ -708,7 +708,7 @@ let private queryBoolean
 
 let private summaryLayers (ctx: HttpContext) =
     if ctx.Request.Query.Count = 0 then
-        Some WorktreeDiff.defaultWorktreeDiffLayers
+        Some WorktreeDiff.allWorktreeDiffLayers
     elif
         ctx.Request.Query.Count <> 3
         || not (ctx.Request.Query.ContainsKey("committed"))

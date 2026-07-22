@@ -71,11 +71,6 @@ let maxWorktreeDiffFiles = 1_000
 let maxWorktreeDiffBytes = 2 * 1024 * 1024
 let maxWorktreeDiffLines = 20_000
 
-let defaultWorktreeDiffLayers =
-    { AlreadyCommitted = true
-      LocalChanges = true
-      Untracked = false }
-
 let allWorktreeDiffLayers =
     { AlreadyCommitted = true
       LocalChanges = true

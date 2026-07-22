@@ -437,7 +437,7 @@ type DiffEndpointHttpTests() =
         )
 
     [<Test>]
-    member _.``summary accepts every fixed layer combination and applies server defaults``() =
+    member _.``summary accepts every fixed layer combination and preserves no-query compatibility``() =
         let worktree = fakePath "layers"
         let committed = entry "committed.txt" None WorktreeDiff.Modified
         let local = entry "local.txt" None WorktreeDiff.Modified
@@ -470,7 +470,12 @@ type DiffEndpointHttpTests() =
                     Assert.That(defaultResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     Assert.That(
                         summaryPaths defaultBody,
-                        Is.EqualTo(Set.ofList [ committed.Path; local.Path ])
+                        Is.EqualTo(
+                            Set.ofList
+                                [ committed.Path
+                                  local.Path
+                                  untracked.Path ]
+                        )
                     ))
 
                 [ false, false, false
@@ -512,6 +517,39 @@ type DiffEndpointHttpTests() =
                             |> Set.ofList
 
                         Assert.That(summaryPaths body, Is.EqualTo(expected))))
+
+    [<Test>]
+    member _.``no-query summary does not report an untracked-only worktree as clean``() =
+        let tempDir = fakePath "untracked-only"
+        let repoDir = Path.Combine(tempDir, "repo")
+
+        try
+            GitTestHelpers.initRepoOnMain repoDir
+            GitTestHelpers.gitAssert repoDir "checkout -b feature"
+            File.WriteAllText(Path.Combine(repoDir, "untracked.txt"), "untracked")
+
+            withDiffServer
+                [ repoDir ]
+                WorktreeDiffApi.liveService
+                (fun _ -> "untracked-id")
+                (fun client baseUrl ->
+                    use response =
+                        get
+                            client
+                            (worktreeUrl baseUrl repoDir "diff-summary")
+
+                    Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+
+                    response
+                    |> getResponseBody
+                    |> assertJson
+                        """{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}""")
+        finally
+            if Directory.Exists(tempDir) then
+                try
+                    Directory.Delete(tempDir, recursive = true)
+                with _ ->
+                    ()
 
     [<Test>]
     member _.``filter refresh makes prior identities stale and preserves selected patch layers``() =
