@@ -23,6 +23,7 @@
     --deleted: #f38ba8;
     --modified: #f9e2af;
     --renamed: #89b4fa;
+    --untracked: #94e2d5;
 }
 
 * { box-sizing: border-box; }
@@ -87,16 +88,17 @@ button { font: inherit; }
 
 .view-toggle button,
 .refresh-button {
+    display: inline-grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    padding: 0;
     border: 0;
     border-radius: 5px;
     color: var(--text-secondary);
     background: transparent;
     cursor: pointer;
-    font-size: .72rem;
-    font-weight: 600;
 }
-
-.view-toggle button { padding: .38rem .62rem; }
 
 .view-toggle button[aria-pressed="true"] {
     color: var(--bg-deep);
@@ -104,9 +106,14 @@ button { font: inherit; }
 }
 
 .refresh-button {
-    padding: .45rem .65rem;
     border: 1px solid var(--border);
     background: var(--bg-elevated);
+}
+
+.toolbar-icon {
+    display: block;
+    width: 1rem;
+    height: 1rem;
 }
 
 .view-toggle button:hover,
@@ -253,16 +260,19 @@ button { font: inherit; }
 }
 
 .change-badge {
-    padding: .08rem .35rem;
+    display: inline-grid;
+    min-width: 1.45rem;
+    height: 1.25rem;
+    place-items: center;
+    padding: 0 .25rem;
     border-radius: 999px;
-    font-size: .58rem;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: .76rem;
     font-weight: 800;
-    letter-spacing: .03em;
-    text-transform: uppercase;
 }
 
-.change-badge.added,
-.change-badge.untracked { color: var(--added); background: rgba(166, 227, 161, .12); }
+.change-badge.added { color: var(--added); background: rgba(166, 227, 161, .12); }
+.change-badge.untracked { color: var(--untracked); background: rgba(148, 226, 213, .12); }
 .change-badge.deleted { color: var(--deleted); background: rgba(243, 139, 168, .12); }
 .change-badge.modified { color: var(--modified); background: rgba(249, 226, 175, .12); }
 .change-badge.renamed { color: var(--renamed); background: rgba(137, 180, 250, .12); }
@@ -485,10 +495,22 @@ button { font: inherit; }
             <span id="base-label">Loading comparison…</span>
         </div>
         <div class="view-toggle" role="group" aria-label="Diff layout">
-            <button id="unified-view" type="button" aria-pressed="true">Unified</button>
-            <button id="split-view" type="button" aria-pressed="false">Split</button>
+            <button id="unified-view" type="button" aria-label="Unified view" title="Unified view" aria-pressed="true">
+                <svg class="toolbar-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false">
+                    <path d="M3 4h10M3 8h10M3 12h10"></path>
+                </svg>
+            </button>
+            <button id="split-view" type="button" aria-label="Split view" title="Split view" aria-pressed="false">
+                <svg class="toolbar-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false">
+                    <path d="M2.5 3.5h4v9h-4zM9.5 3.5h4v9h-4z"></path>
+                </svg>
+            </button>
         </div>
-        <button id="refresh" class="refresh-button" type="button">Refresh</button>
+        <button id="refresh" class="refresh-button" type="button" aria-label="Refresh diff" title="Refresh diff">
+            <svg class="toolbar-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M13 5V2.5l-1.6 1.6A5.5 5.5 0 1 0 13.2 10"></path>
+            </svg>
+        </button>
     </header>
     <div class="workspace">
         <main id="content" class="content" aria-label="Changed files">
@@ -670,8 +692,14 @@ function clearNavigator() {
     document.getElementById('file-count').textContent = '0';
 }
 
-function changeLabel(change) {
-    return change === 'untracked' ? 'new' : change;
+function changePresentation(change) {
+    return {
+        added: { symbol: '+', label: 'Added file' },
+        modified: { symbol: '~', label: 'Modified file' },
+        deleted: { symbol: '−', label: 'Deleted file' },
+        renamed: { symbol: '→', label: 'Renamed file' },
+        untracked: { symbol: '+', label: 'Untracked file' }
+    }[change] || { symbol: '?', label: 'Changed file' };
 }
 
 function renderFileList(files) {
@@ -701,9 +729,12 @@ function renderFileList(files) {
         path.textContent = file.displayPath;
         button.appendChild(path);
 
+        var presentation = changePresentation(file.change);
         var badge = document.createElement('span');
         badge.className = 'change-badge ' + file.change;
-        badge.textContent = changeLabel(file.change);
+        badge.textContent = presentation.symbol;
+        badge.setAttribute('aria-label', presentation.label);
+        badge.title = presentation.label;
         button.appendChild(badge);
 
         if (file.oldDisplayPath) {

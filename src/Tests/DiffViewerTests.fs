@@ -1091,6 +1091,92 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``toolbar glyphs and every change status have exact accessible semantics``() =
+        task {
+            let files =
+                [| firstFile
+                   fileJson "id-added" "src/added.txt" None "added"
+                   fileJson "id-deleted" "src/deleted.txt" None "deleted"
+                   secondFile
+                   fileJson "id-untracked" "src/untracked.txt" None "untracked" |]
+
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson files)
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator(".file-entry").Nth(4).WaitForAsync()
+
+            let! controls =
+                this.Page.EvaluateAsync<string array array>(
+                    """() => ['unified-view', 'split-view', 'refresh'].map(id => {
+                        const button = document.getElementById(id);
+                        return [
+                            button.id,
+                            button.getAttribute('aria-label'),
+                            button.getAttribute('title'),
+                            button.getAttribute('aria-pressed') || '',
+                            button.firstElementChild?.tagName.toLowerCase() || '',
+                            button.firstElementChild?.getAttribute('aria-hidden') || '',
+                            String(button.querySelectorAll(':scope > svg').length),
+                            button.textContent.trim()
+                        ];
+                    })"""
+                )
+
+            let! statuses =
+                this.Page.EvaluateAsync<string array array>(
+                    """() => [...document.querySelectorAll('.change-badge')].map(badge => [
+                        badge.className,
+                        badge.textContent,
+                        badge.getAttribute('aria-label'),
+                        badge.getAttribute('title')
+                    ])"""
+                )
+
+            let! renamePaths =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const entry = document.querySelector(
+                            ".file-entry[data-identity='id-2']"
+                        );
+                        return [
+                            entry.querySelector('.file-path').textContent,
+                            entry.querySelector('.old-path').textContent,
+                            entry.getAttribute('title')
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    controls,
+                    Is.EqualTo(
+                        [| [| "unified-view"; "Unified view"; "Unified view"; "true"; "svg"; "true"; "1"; "" |]
+                           [| "split-view"; "Split view"; "Split view"; "false"; "svg"; "true"; "1"; "" |]
+                           [| "refresh"; "Refresh diff"; "Refresh diff"; ""; "svg"; "true"; "1"; "" |] |]
+                    )
+                )
+                Assert.That(
+                    statuses,
+                    Is.EqualTo(
+                        [| [| "change-badge modified"; "~"; "Modified file"; "Modified file" |]
+                           [| "change-badge added"; "+"; "Added file"; "Added file" |]
+                           [| "change-badge deleted"; "−"; "Deleted file"; "Deleted file" |]
+                           [| "change-badge renamed"; "→"; "Renamed file"; "Renamed file" |]
+                           [| "change-badge untracked"; "+"; "Untracked file"; "Untracked file" |] |]
+                    )
+                )
+                Assert.That(
+                    renamePaths,
+                    Is.EqualTo(
+                        [| "src/new-name.txt"
+                           "from src/old-name.txt"
+                           "src/old-name.txt → src/new-name.txt" |]
+                    )
+                ))
+        }
+
+    [<Test>]
     member this.``wrapped rows keep gutters separate and source ranges exact in both views``() =
         task {
             do! this.Page.SetViewportSizeAsync(860, 900)

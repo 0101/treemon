@@ -221,6 +221,7 @@ let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: strin
     Html.button [
         prop.className (if ready then "diff-btn" else "diff-btn disabled")
         prop.disabled (not ready)
+        prop.custom ("aria-label", "Open worktree diff")
         prop.onKeyDown (fun e ->
             if e.key = "Enter" || e.key = " " then
                 e.stopPropagation())
@@ -228,7 +229,7 @@ let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: strin
             e.stopPropagation()
             callbacks.OpenDiff scopedKey)
         prop.title (if ready then "Open worktree diff" else "Diff view not ready")
-        prop.text "Diff"
+        prop.children [ diffIcon ]
     ]
 
 let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =

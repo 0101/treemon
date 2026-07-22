@@ -377,6 +377,45 @@ type WorktreeDiffActionTests() =
         }
 
     [<Test>]
+    member this.``Diff action uses only an accessible inline SVG glyph on normal and compact cards``() =
+        task {
+            do! this.NavigateWithDiffDocs()
+
+            let semantics (button: ILocator) =
+                button.EvaluateAsync<string array>(
+                    """button => [
+                        button.getAttribute('aria-label'),
+                        button.getAttribute('title'),
+                        button.firstElementChild?.tagName.toLowerCase() || '',
+                        button.firstElementChild?.getAttribute('aria-hidden') || '',
+                        String(button.querySelectorAll(':scope > svg').length),
+                        button.textContent.trim()
+                    ]"""
+                )
+
+            let! normal =
+                semantics (this.Page.Locator(".wt-card:not(.compact) .diff-btn").First)
+
+            let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
+            do! compactButton.ClickAsync()
+            let compactDiff = this.Page.Locator(".wt-card.compact .diff-btn").First
+            do! compactDiff.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! compact = semantics compactDiff
+
+            let expected =
+                [| "Open worktree diff"
+                   "Open worktree diff"
+                   "svg"
+                   "true"
+                   "1"
+                   "" |]
+
+            Assert.Multiple(fun () ->
+                Assert.That(normal, Is.EqualTo(expected))
+                Assert.That(compact, Is.EqualTo(expected)))
+        }
+
+    [<Test>]
     member this.``Diff action is disabled on normal and compact cards until the SystemView is scanned``() =
         task {
             do! routeDashboardWithoutDiffDocs this.Page
@@ -386,10 +425,29 @@ type WorktreeDiffActionTests() =
             let normalCards = this.Page.Locator(".wt-card:not(.compact)")
             let! normalCount = normalCards.CountAsync()
             let! disabledNormalCount = normalCards.Locator(".diff-btn:disabled").CountAsync()
-            let! normalTitle = normalCards.First.Locator(".diff-btn").GetAttributeAsync("title")
+            let normalButton = normalCards.First.Locator(".diff-btn")
+            let! normalSemantics =
+                normalButton.EvaluateAsync<string array>(
+                    """button => [
+                        button.getAttribute('aria-label'),
+                        button.getAttribute('title'),
+                        String(button.disabled),
+                        String(button.querySelectorAll(':scope > svg').length),
+                        button.textContent.trim()
+                    ]"""
+                )
             Assert.Multiple(fun () ->
                 Assert.That(disabledNormalCount, Is.EqualTo(normalCount))
-                Assert.That(normalTitle, Is.EqualTo("Diff view not ready")))
+                Assert.That(
+                    normalSemantics,
+                    Is.EqualTo(
+                        [| "Open worktree diff"
+                           "Diff view not ready"
+                           "true"
+                           "1"
+                           "" |]
+                    )
+                ))
 
             let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
             do! compactButton.ClickAsync()
@@ -397,10 +455,19 @@ type WorktreeDiffActionTests() =
             do! compactCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! compactCount = compactCards.CountAsync()
             let! disabledCompactCount = compactCards.Locator(".diff-btn:disabled").CountAsync()
-            let! compactTitle = compactCards.First.Locator(".diff-btn").GetAttributeAsync("title")
+            let! compactSemantics =
+                compactCards.First.Locator(".diff-btn").EvaluateAsync<string array>(
+                    """button => [
+                        button.getAttribute('aria-label'),
+                        button.getAttribute('title'),
+                        String(button.disabled),
+                        String(button.querySelectorAll(':scope > svg').length),
+                        button.textContent.trim()
+                    ]"""
+                )
             Assert.Multiple(fun () ->
                 Assert.That(disabledCompactCount, Is.EqualTo(compactCount))
-                Assert.That(compactTitle, Is.EqualTo("Diff view not ready")))
+                Assert.That(compactSemantics, Is.EqualTo(normalSemantics)))
         }
 
     [<Test>]
