@@ -38,7 +38,8 @@ rollups.
 - The first affected boundary is the smallest canonical boundary greater than or equal to the source
   timestamp. It is clamped to the oldest retained boundary needed by the currently exposed 72-hour
   horizon, so arbitrarily old late writes repair the visible baseline without creating unbounded
-  work.
+  work. Once publication exists, that horizon is anchored to its complete-through boundary rather
+  than wall clock; wall clock is used only before the first publication.
 - Activity and liveness writes update each session's earliest and latest observation bounds in the
   same transaction. Reconstruction uses those bounds only to exclude sessions that cannot affect a
   candidate range; they are derived state and are rebuilt with the rollups.
@@ -214,7 +215,7 @@ comparisons. Run it in Release with a `Category=Performance` test filter and det
 | Stored shape | Count-only task and agent values. |
 | Late event semantics | Preserve current stored post-event behavior in this performance change. |
 | Liveness no-op | Equal or stale observations do not append liveness, advance generation, or change observation bounds. |
-| Dirty boundary | Ceiling source timestamps to the 30-second grid and clamp to the oldest exposed baseline, bounding repair regardless of source age. |
+| Dirty boundary | Ceiling source timestamps to the 30-second grid and clamp to the oldest exposed baseline anchored to published completeness when available, using wall clock only before first publication. |
 | Initial availability | Complete the 72-hour backfill before serving history; keep the existing wire type. |
 | Initial failure | Fail real-mode startup before binding rather than serve empty, partial, or raw-reconstructed history. |
 | Publication | Generation check plus transactional candidate publication and dirty-marker update. |
