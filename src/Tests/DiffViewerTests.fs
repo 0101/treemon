@@ -543,6 +543,78 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``accordion content scrolls to every file header and expanded patch``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(900, 520)
+
+            let files =
+                Array.init 24 (fun index ->
+                    let number = index + 1
+                    fileJson
+                        $"id-scroll-{number}"
+                        $"src/file-{number:D2}.txt"
+                        (None: string option)
+                        "modified")
+
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson files)
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let lastHeader = this.Page.Locator(".file-entry[data-identity='id-scroll-24']")
+
+            let! headerState =
+                this.Page.EvaluateAsync<bool array>(
+                    """() => {
+                        const content = document.getElementById('content');
+                        const workspace = document.querySelector('.workspace');
+                        const header = document.querySelector(
+                            ".file-entry[data-identity='id-scroll-24']"
+                        );
+                        content.scrollTop = content.scrollHeight;
+                        const contentRect = content.getBoundingClientRect();
+                        const headerRect = header.getBoundingClientRect();
+                        return [
+                            getComputedStyle(content).overflowY === 'auto',
+                            content.clientHeight <= workspace.clientHeight,
+                            content.scrollHeight > content.clientHeight,
+                            content.scrollTop > 0,
+                            headerRect.top >= contentRect.top - 1 &&
+                                headerRect.bottom <= contentRect.bottom + 1,
+                            document.scrollingElement.scrollTop === 0
+                        ];
+                    }"""
+                )
+
+            do! lastHeader.ClickAsync()
+            do!
+                lastHeader.Locator("xpath=../..").Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let! patchState =
+                this.Page.EvaluateAsync<bool array>(
+                    """() => {
+                        const content = document.getElementById('content');
+                        const patch = document.querySelector(
+                            ".file-entry[data-identity='id-scroll-24']"
+                        ).closest('.file-item').querySelector('#patch');
+                        content.scrollTop = content.scrollHeight;
+                        const contentRect = content.getBoundingClientRect();
+                        const patchRect = patch.getBoundingClientRect();
+                        return [
+                            content.scrollTop > 0,
+                            patchRect.bottom <= contentRect.bottom + 1,
+                            patchRect.bottom > contentRect.top
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(headerState, Is.All.True)
+                Assert.That(patchState, Is.All.True))
+        }
+
+    [<Test>]
     member this.``layer filters cover every combination and persist per worktree``() =
         task {
             do!
