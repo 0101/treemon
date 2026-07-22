@@ -63,8 +63,8 @@ type CodingToolProvider =
     static member Default = CopilotCli
 
 /// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
-/// model's limit. Sourced from the SDK `session.usage_info` event, which is ephemeral upstream —
-/// so this is live-only (absent until the first event arrives, and not restored after a restart).
+/// model's limit. The SDK `session.usage_info` event is ephemeral upstream, so Treemon persists the
+/// last accepted snapshot for restart recovery.
 type ContextUsage = { CurrentTokens: int; TokenLimit: int }
 
 module ContextUsage =
@@ -84,7 +84,7 @@ module ContextUsage =
 /// is running no recognized skill); the Overview band classifies each session's activity from it
 /// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
 /// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
-/// session reports usage (or after a restart, as it is not persisted), in which case the session
+/// session first reports usage (including migrated rows with no snapshot), in which case the session
 /// renders as a plain status dot rather than a donut.
 type SessionDot =
     { Status: CodingToolStatus

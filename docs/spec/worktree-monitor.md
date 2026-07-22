@@ -47,7 +47,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
-- Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; a worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
+- Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
