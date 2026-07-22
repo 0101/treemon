@@ -34,6 +34,28 @@ let private samplePatch =
           "+four"
           "" ]
 
+let private wrappedPatch =
+    let longLine prefix word =
+        prefix + String.replicate 24 $"{word} "
+
+    String.concat
+        Environment.NewLine
+        [ "diff --git a/src/a.txt b/src/a.txt"
+          "index 1111111..2222222 100644"
+          "--- a/src/a.txt"
+          "+++ b/src/a.txt"
+          "@@ -1,4 +1,4 @@"
+          longLine " first context " "context"
+          longLine "-removed line " "removed"
+          longLine "+added line " "added"
+          " short context"
+          " trailing context"
+          "@@ -10,2 +10,2 @@"
+          longLine " second hunk context " "boundary"
+          longLine "-second removed line " "old"
+          longLine "+second added line " "new"
+          "" ]
+
 let private fileJson identity displayPath oldDisplayPath change =
     {| identity = identity
        displayPath = displayPath
@@ -54,7 +76,7 @@ let private readySummaryJson files =
            files = files |}
     )
 
-let private fileResultJson status identity displayPath oldDisplayPath change =
+let private fileResultJsonWithPatch patch status identity displayPath oldDisplayPath change =
     let file = fileJson identity displayPath oldDisplayPath change
 
     match status with
@@ -63,7 +85,7 @@ let private fileResultJson status identity displayPath oldDisplayPath change =
         JsonSerializer.Serialize(
             {| status = status
                file = file
-               patch = samplePatch |}
+               patch = patch |}
         )
     | "symlink" ->
         JsonSerializer.Serialize(
@@ -76,6 +98,9 @@ let private fileResultJson status identity displayPath oldDisplayPath change =
             {| status = status
                file = file |}
         )
+
+let private fileResultJson =
+    fileResultJsonWithPatch samplePatch
 
 let private summaryStateJson status =
     match status with
@@ -217,6 +242,19 @@ type DiffViewerE2ETests() =
             "application/json",
             fileResultJson
                 status
+                firstFile.identity
+                firstFile.displayPath
+                firstFile.oldDisplayPath
+                firstFile.change
+        )
+
+    member private this.RoutePatch(patch) =
+        this.RouteBody(
+            "**/diff-file?*",
+            "application/json",
+            fileResultJsonWithPatch
+                patch
+                "text"
                 firstFile.identity
                 firstFile.displayPath
                 firstFile.oldDisplayPath
@@ -536,6 +574,187 @@ type DiffViewerE2ETests() =
             Assert.Multiple(fun () ->
                 Assert.That(splitPressed, Is.EqualTo("true"))
                 Assert.That(stored, Is.EqualTo("split")))
+        }
+
+    [<Test>]
+    member this.``wrapped rows keep gutters separate and source ranges exact in both views``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(860, 900)
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RoutePatch(wrappedPatch)
+            do! this.Goto()
+            do!
+                this.Page.Locator("#patch[data-highlight-status='ready'] .d2h-file-diff").WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 15000.0f)
+                )
+
+            let geometryFailures mode =
+                this.Page.Locator("#patch").EvaluateAsync<string array>(
+                    $"""(patch) => {{
+                        const failures = [];
+                        const close = (left, right) => Math.abs(left - right) <= 1;
+                        const inside = (inner, outer) =>
+                            inner.left >= outer.left - 1 &&
+                            inner.right <= outer.right + 1 &&
+                            inner.top >= outer.top - 1 &&
+                            inner.bottom <= outer.bottom + 1;
+                        const noOverflow = (element, name) => {{
+                            if (element.scrollWidth > element.clientWidth + 1)
+                                failures.push(name + ' overflows horizontally');
+                        }};
+                        const checkRow = (row, name, mustWrap) => {{
+                            if (!row) {{
+                                failures.push(name + ' is missing');
+                                return;
+                            }}
+                            const gutter = row.cells[0];
+                            const code = row.cells[1];
+                            const rowRect = row.getBoundingClientRect();
+                            const gutterRect = gutter.getBoundingClientRect();
+                            const codeRect = code.getBoundingClientRect();
+                            const line = code.querySelector('.d2h-code-line, .d2h-code-side-line');
+                            const lineHeight = line ? parseFloat(getComputedStyle(line).lineHeight) : 0;
+                            if (!close(gutterRect.top, rowRect.top))
+                                failures.push(name + ' gutter is not aligned to the first visual line');
+                            if (gutterRect.right > codeRect.left + 1)
+                                failures.push(name + ' gutter overlaps code');
+                            [...gutter.children].filter(child => child.textContent.trim()).forEach(number => {{
+                                if (!inside(number.getBoundingClientRect(), gutterRect))
+                                    failures.push(name + ' number escapes its gutter');
+                            }});
+                            if (line && !inside(line.getBoundingClientRect(), rowRect))
+                                failures.push(name + ' wrapped content escapes its logical row');
+                            if (mustWrap && rowRect.height < lineHeight * 2)
+                                failures.push(name + ' did not wrap');
+                        }};
+                        const checkNumbers = (root, name, side) => {{
+                            root.querySelectorAll('tr[data-old-line], tr[data-new-line]').forEach(row => {{
+                                const oldNumber = row.querySelector('.line-num1');
+                                const newNumber = row.querySelector('.line-num2');
+                                const sideNumber = row.querySelector('.d2h-code-side-linenumber');
+                                if (row.querySelectorAll('.line-num1').length > 1)
+                                    failures.push(name + ' row has multiple old numbers');
+                                if (row.querySelectorAll('.line-num2').length > 1)
+                                    failures.push(name + ' row has multiple new numbers');
+                                if (oldNumber && oldNumber.textContent.trim() !== (row.dataset.oldLine || ''))
+                                    failures.push(name + ' old number does not match row metadata');
+                                if (newNumber && newNumber.textContent.trim() !== (row.dataset.newLine || ''))
+                                    failures.push(name + ' new number does not match row metadata');
+                                if (sideNumber) {{
+                                    const visible = sideNumber.textContent.trim();
+                                    const expected =
+                                        side === 'old'
+                                            ? row.dataset.oldLine || ''
+                                            : row.dataset.newLine || '';
+                                    if (visible !== expected)
+                                        failures.push(name + ' side number does not match row metadata');
+                                }}
+                            }});
+                        }};
+                        noOverflow(document.querySelector('.content'), '{mode} content');
+                        noOverflow(patch, '{mode} patch');
+                        noOverflow(patch.querySelector('.d2h-wrapper'), '{mode} wrapper');
+                        if ('{mode}' === 'unified') {{
+                            const diff = patch.querySelector('.d2h-file-diff');
+                            noOverflow(diff, 'unified diff');
+                            checkNumbers(diff, 'unified', null);
+                            checkRow(diff.querySelector("tr[data-old-line='1'][data-new-line='1']"), 'unified context', true);
+                            checkRow(diff.querySelector("tr[data-old-line='2']:not([data-new-line])"), 'unified deletion', true);
+                            checkRow(diff.querySelector("tr[data-new-line='2']:not([data-old-line])"), 'unified addition', true);
+                            checkRow(diff.querySelector("tr[data-old-line='10'][data-new-line='10']"), 'unified hunk context', true);
+                            diff.querySelectorAll('tr').forEach((row, index) =>
+                                checkRow(row, 'unified row ' + index, false));
+                        }} else {{
+                            const sides = [...patch.querySelectorAll('.d2h-file-side-diff')];
+                            if (sides.length !== 2) failures.push('split does not retain two columns');
+                            if (sides.length === 2) {{
+                                const leftRect = sides[0].getBoundingClientRect();
+                                const rightRect = sides[1].getBoundingClientRect();
+                                if (leftRect.right > rightRect.left + 1)
+                                    failures.push('split columns overlap');
+                            }}
+                            sides.forEach((side, sideIndex) => {{
+                                noOverflow(side, 'split side ' + sideIndex);
+                                checkNumbers(
+                                    side,
+                                    'split side ' + sideIndex,
+                                    sideIndex === 0 ? 'old' : 'new'
+                                );
+                                side.querySelectorAll('tr').forEach((row, rowIndex) =>
+                                    checkRow(row, 'split row ' + sideIndex + ':' + rowIndex, false));
+                            }});
+                            checkRow(sides[0].querySelector("tr[data-old-line='2']:not([data-new-line])"), 'split deletion', true);
+                            checkRow(sides[1].querySelector("tr[data-new-line='2']:not([data-old-line])"), 'split addition', true);
+                            checkRow(sides[0].querySelector("tr[data-old-line='10'][data-new-line='10']"), 'split hunk context left', true);
+                            checkRow(sides[1].querySelector("tr[data-old-line='10'][data-new-line='10']"), 'split hunk context right', true);
+                        }}
+                        return failures;
+                    }}"""
+                )
+
+            let sourceContext selector =
+                this.Page.Locator(selector).EvaluateAsync<string>(
+                    """element => {
+                        const range = document.createRange();
+                        range.selectNodeContents(element);
+                        return JSON.stringify(window.canvasSelectionMetadata({ range }));
+                    }"""
+                )
+
+            let expected hunk oldRange newRange =
+                $"""{{"kind":"diff","fileIdentity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"hunkHeader":"{hunk}","oldLineRange":{oldRange},"newLineRange":{newRange}}}"""
+
+            let! unifiedFailures = geometryFailures "unified"
+            let! unifiedDeletion =
+                sourceContext
+                    "tr[data-old-line='2']:not([data-new-line]) .d2h-code-line-ctn"
+            let! unifiedContext =
+                sourceContext
+                    "tr[data-old-line='10'][data-new-line='10'] .d2h-code-line-ctn"
+
+            Assert.Multiple(fun () ->
+                Assert.That(unifiedFailures, Is.Empty)
+                Assert.That(
+                    unifiedDeletion,
+                    Is.EqualTo(expected "@@ -1,4 +1,4 @@" """{"start":2,"end":2}""" "null")
+                )
+                Assert.That(
+                    unifiedContext,
+                    Is.EqualTo(
+                        expected
+                            "@@ -10,2 +10,2 @@"
+                            """{"start":10,"end":10}"""
+                            """{"start":10,"end":10}"""
+                    )
+                ))
+
+            do! this.Page.Locator("#split-view").ClickAsync()
+            do! this.Page.Locator("#patch .d2h-files-diff").WaitForAsync()
+
+            let! splitFailures = geometryFailures "split"
+            let! splitAddition =
+                sourceContext
+                    ".d2h-file-side-diff:last-child tr[data-new-line='2']:not([data-old-line]) .d2h-code-line-ctn"
+            let! splitContext =
+                sourceContext
+                    ".d2h-file-side-diff:last-child tr[data-old-line='10'][data-new-line='10'] .d2h-code-line-ctn"
+
+            Assert.Multiple(fun () ->
+                Assert.That(splitFailures, Is.Empty)
+                Assert.That(
+                    splitAddition,
+                    Is.EqualTo(expected "@@ -1,4 +1,4 @@" "null" """{"start":2,"end":2}""")
+                )
+                Assert.That(
+                    splitContext,
+                    Is.EqualTo(
+                        expected
+                            "@@ -10,2 +10,2 @@"
+                            """{"start":10,"end":10}"""
+                            """{"start":10,"end":10}"""
+                    )
+                ))
         }
 
     [<Test>]

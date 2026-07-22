@@ -264,11 +264,17 @@ button { font: inherit; }
 }
 
 #patch {
-    min-width: min-content;
+    min-width: 0;
+    width: 100%;
     padding: .75rem;
+    overflow-x: hidden;
 }
 
-#patch .d2h-wrapper { color: var(--text-primary); }
+#patch .d2h-wrapper {
+    min-width: 0;
+    max-width: 100%;
+    color: var(--text-primary);
+}
 #patch .d2h-file-wrapper {
     margin: 0;
     border-color: var(--border);
@@ -286,14 +292,69 @@ button { font: inherit; }
 #patch .d2h-file-stats,
 #patch .d2h-tag { color: var(--text-secondary); }
 #patch .d2h-file-collapse { display: none; }
-#patch .d2h-diff-table { font-family: Consolas, "Courier New", monospace; }
+#patch .d2h-file-diff,
+#patch .d2h-code-wrapper {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+#patch .d2h-files-diff {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+#patch .d2h-file-side-diff {
+    display: block;
+    min-width: 0;
+    width: auto;
+    overflow-x: hidden;
+}
+#patch .d2h-diff-table {
+    width: 100%;
+    table-layout: fixed;
+    font-family: Consolas, "Courier New", monospace;
+}
+#patch .d2h-diff-table td { vertical-align: top; }
 #patch .d2h-code-line,
-#patch .d2h-code-side-line { font-size: .72rem; line-height: 1.45; }
+#patch .d2h-code-side-line {
+    display: flex;
+    min-width: 0;
+    width: auto;
+    padding: 0 .6em;
+    align-items: flex-start;
+    font-size: .72rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+}
+#patch .d2h-code-line-prefix {
+    flex: 0 0 1ch;
+    word-wrap: normal;
+    white-space: pre;
+}
+#patch .d2h-code-line-ctn {
+    display: block;
+    min-width: 0;
+    width: auto;
+    flex: 1 1 auto;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
 #patch .d2h-code-linenumber,
 #patch .d2h-code-side-linenumber {
+    position: static;
+    display: table-cell;
+    vertical-align: top;
     border-color: var(--border);
     color: var(--text-muted);
     background: var(--bg-surface);
+}
+#patch .d2h-code-linenumber {
+    width: 7.5em;
+    min-width: 7.5em;
+}
+#patch .d2h-code-side-linenumber {
+    width: 4em;
+    min-width: 4em;
 }
 #patch .d2h-info {
     border-color: var(--border);
@@ -305,9 +366,15 @@ button { font: inherit; }
 #patch .d2h-ins { color: #b5e8b0; background: rgba(166, 227, 161, .12); }
 #patch .d2h-change { background: rgba(249, 226, 175, .12); }
 #patch .d2h-code-line del,
-#patch .d2h-code-side-line del { background: rgba(243, 139, 168, .24); }
+#patch .d2h-code-side-line del {
+    display: inline;
+    background: rgba(243, 139, 168, .24);
+}
 #patch .d2h-code-line ins,
-#patch .d2h-code-side-line ins { background: rgba(166, 227, 161, .22); }
+#patch .d2h-code-side-line ins {
+    display: inline;
+    background: rgba(166, 227, 161, .22);
+}
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
