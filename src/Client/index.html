@@ -219,7 +219,7 @@
            RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
            single bar never overflows a narrow pane, while every bar scales together (shared scale
            preserved). min-width keeps a count-1 bar a visible sliver. */
-        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
+        .overview-bar { height: 6px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
         /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
            count text and, via currentColor, the circle/bar fill. */
         .task-planned { color: #fab387; }
@@ -275,7 +275,7 @@
         .overview-task-row:hover { background: #1e1e2e; }
         .overview-task-name { font-size: 12.5px; color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .overview-task-track { display: block; }
-        .overview-task-bar { display: block; height: 13px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
+        .overview-task-bar { display: block; height: 6px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
