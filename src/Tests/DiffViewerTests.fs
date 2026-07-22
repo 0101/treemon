@@ -1,6 +1,7 @@
 module Tests.DiffViewerTests
 
 open System
+open System.Diagnostics
 open System.IO
 open System.Net.Http
 open System.Text.Json
@@ -150,6 +151,83 @@ let private summaryStateJson status =
 
 let private layerFilterQuery committed local untracked =
     $"?committed={committed.ToString().ToLowerInvariant()}&local={local.ToString().ToLowerInvariant()}&untracked={untracked.ToString().ToLowerInvariant()}"
+
+let private createSummaryPerformanceRepo repoDir =
+    let trackedPaths =
+        [ 1..225 ]
+        |> List.map (fun index -> Path.Combine("tracked", $"{index:D3}.txt"))
+
+    let untrackedPaths =
+        [ 1..25 ]
+        |> List.map (fun index -> Path.Combine("untracked", $"{index:D3}.txt"))
+
+    GitTestHelpers.initRepoOnMain repoDir
+
+    trackedPaths
+    |> List.iter (fun relativePath ->
+        let path = Path.Combine(repoDir, relativePath)
+        Path.GetDirectoryName(path) |> Directory.CreateDirectory |> ignore
+        File.WriteAllText(path, "base"))
+
+    GitTestHelpers.gitOk repoDir [ "add"; "--"; "." ]
+    GitTestHelpers.gitOk repoDir [ "commit"; "-m"; "performance base" ]
+    GitTestHelpers.gitOk repoDir [ "checkout"; "-b"; "performance" ]
+
+    trackedPaths
+    |> List.iter (fun relativePath ->
+        File.WriteAllText(Path.Combine(repoDir, relativePath), "changed"))
+
+    untrackedPaths
+    |> List.iter (fun relativePath ->
+        let path = Path.Combine(repoDir, relativePath)
+        Path.GetDirectoryName(path) |> Directory.CreateDirectory |> ignore
+        File.WriteAllText(path, "untracked"))
+
+    DiffProvisioner.provisionViewer repoDir |> ignore
+
+let private performanceAgentKnowing worktreePath =
+    let agent = RefreshScheduler.createAgent ()
+
+    let info: GitWorktree.WorktreeInfo =
+        { Path = PathUtils.normalizePath worktreePath
+          Head = ""
+          Branch = Some "performance" }
+
+    agent.Post(
+        RefreshScheduler.UpdateWorktreeList(
+            RepoId "diff-summary-performance",
+            [ info ]
+        )
+    )
+
+    agent.PostAndAsyncReply(RefreshScheduler.GetState)
+    |> TestUtils.runAsync
+    |> ignore
+
+    agent
+
+let private performanceSummaryUrl baseUrl worktreePath =
+    let encoded =
+        worktreePath
+        |> PathUtils.normalizePath
+        |> Uri.EscapeDataString
+
+    $"{baseUrl}/{encoded}/diff-summary?committed=true&local=true&untracked=true"
+
+let private summaryPathCounts (json: string) =
+    use doc = JsonDocument.Parse(json)
+
+    let files =
+        doc.RootElement.GetProperty("files").EnumerateArray()
+        |> Seq.toList
+
+    let untracked =
+        files
+        |> List.filter (fun file ->
+            file.GetProperty("change").GetString() = "untracked")
+        |> List.length
+
+    files.Length, untracked
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1576,4 +1654,212 @@ type DiffViewerE2ETests() =
                 Assert.That(splitContext, Is.EqualTo(expectedContext))
                 Assert.That(splitDeletion, Is.EqualTo(expectedDeletion))
                 Assert.That(splitAddition, Is.EqualTo(expectedAddition)))
+        }
+
+[<TestFixture>]
+[<Category("E2E")>]
+[<Category("Canvas")>]
+[<NonParallelizable>]
+type DiffSummaryPerformanceE2ETests() =
+    inherit PageTest()
+
+    [<Test>]
+    member this.``warm 250-path summary appears within one second``() =
+        task {
+            let tempDir =
+                Path.Combine(
+                    Path.GetTempPath(),
+                    $"treemon-diff-summary-performance-{Guid.NewGuid():N}"
+                )
+
+            let repoDir = Path.Combine(tempDir, "repo")
+            Directory.CreateDirectory(tempDir) |> ignore
+
+            try
+                createSummaryPerformanceRepo repoDir
+
+                let port = TestUtils.getFreeTcpPort ()
+                let agent = performanceAgentKnowing repoDir
+
+                use host =
+                    CanvasDocServer.createHost
+                        agent
+                        WorktreeDiffApi.liveService
+                        WorktreeDiffApi.newOpaqueIdentity
+                        port
+
+                host.StartAsync(System.Threading.CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult()
+
+                try
+                    let baseUrl = $"http://127.0.0.1:{port}"
+                    let summaryUrl = performanceSummaryUrl baseUrl repoDir
+
+                    use warmClient = new HttpClient()
+                    warmClient.DefaultRequestHeaders.Add(
+                        WorktreeDiffApi.viewerHeaderName,
+                        Guid.NewGuid().ToString("D")
+                    )
+
+                    let warmStopwatch = Stopwatch.StartNew()
+                    let! warmResponse = warmClient.GetAsync(summaryUrl)
+                    let! warmBody = warmResponse.Content.ReadAsStringAsync()
+                    warmStopwatch.Stop()
+
+                    let warmPathCount, warmUntrackedCount =
+                        summaryPathCounts warmBody
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(int warmResponse.StatusCode, Is.EqualTo(200))
+                        Assert.That(warmPathCount, Is.EqualTo(250))
+                        Assert.That(warmUntrackedCount, Is.EqualTo(25)))
+
+                    do!
+                        this.Page.AddInitScriptAsync(
+                            """(() => {
+                                const filterKey =
+                                    'treemon.diff.layers:' +
+                                    location.pathname.replace(/\/diff\.html$/, '');
+                                localStorage.setItem(
+                                    filterKey,
+                                    JSON.stringify({
+                                        committed: true,
+                                        local: true,
+                                        untracked: true
+                                    })
+                                );
+
+                                window.__summaryPerformance = {};
+                                const originalFetch = window.fetch.bind(window);
+                                window.fetch = async function(input, options) {
+                                    const url =
+                                        typeof input === 'string' ? input : input.url;
+                                    if (!url.includes('diff-summary')) {
+                                        return originalFetch(input, options);
+                                    }
+
+                                    const started = performance.now();
+                                    window.__summaryPerformance = { started };
+                                    const response = await originalFetch(input, options);
+                                    const readJson = response.json.bind(response);
+                                    response.json = async function() {
+                                        const body = await readJson();
+                                        window.__summaryPerformance.responseMs =
+                                            performance.now() - started;
+                                        return body;
+                                    };
+                                    return response;
+                                };
+
+                                const observeSummary = () => {
+                                    const list = document.getElementById('file-list');
+                                    const capture = () => {
+                                        const pathCount =
+                                            list.querySelectorAll('.file-entry').length;
+                                        const untrackedCount =
+                                            list.querySelectorAll(
+                                                '.change-badge.untracked'
+                                            ).length;
+                                        const timing = window.__summaryPerformance;
+                                        if (
+                                            pathCount === 250 &&
+                                            untrackedCount === 25 &&
+                                            timing.started !== undefined &&
+                                            !timing.displayScheduled
+                                        ) {
+                                            timing.displayScheduled = true;
+                                            requestAnimationFrame(() =>
+                                                requestAnimationFrame(() => {
+                                                    timing.pathCount = pathCount;
+                                                    timing.untrackedCount =
+                                                        untrackedCount;
+                                                    timing.displayMs =
+                                                        performance.now() -
+                                                        timing.started;
+                                                })
+                                            );
+                                        }
+                                    };
+
+                                    new MutationObserver(capture).observe(list, {
+                                        childList: true,
+                                        subtree: true
+                                    });
+                                    capture();
+                                };
+
+                                if (document.readyState === 'loading') {
+                                    document.addEventListener(
+                                        'DOMContentLoaded',
+                                        observeSummary,
+                                        { once: true }
+                                    );
+                                } else {
+                                    observeSummary();
+                                }
+                            })()"""
+                        )
+
+                    let documentUrl =
+                        summaryUrl.Replace(
+                            "diff-summary?committed=true&local=true&untracked=true",
+                            "diff.html"
+                        )
+
+                    let! _ =
+                        this.Page.GotoAsync(
+                            documentUrl,
+                            PageGotoOptions(WaitUntil = WaitUntilState.Load)
+                        )
+
+                    let! _ =
+                        this.Page.WaitForFunctionAsync(
+                            "() => window.__summaryPerformance.displayMs !== undefined",
+                            null,
+                            PageWaitForFunctionOptions(Timeout = 5000.0f)
+                        )
+
+                    let! rawTiming =
+                        this.Page.EvaluateAsync<string>(
+                            "() => JSON.stringify(window.__summaryPerformance)"
+                        )
+
+                    use timing = JsonDocument.Parse(rawTiming)
+                    let root = timing.RootElement
+                    let pathCount = root.GetProperty("pathCount").GetInt32()
+                    let untrackedCount =
+                        root.GetProperty("untrackedCount").GetInt32()
+                    let responseMs =
+                        root.GetProperty("responseMs").GetDouble()
+                    let displayMs =
+                        root.GetProperty("displayMs").GetDouble()
+
+                    TestContext.Out.WriteLine(
+                        $"DIFF_SUMMARY_PERFORMANCE pathCount={pathCount} trackedCount={pathCount - untrackedCount} untrackedCount={untrackedCount} warmResponseMs={warmStopwatch.Elapsed.TotalMilliseconds:F3} responseMs={responseMs:F3} displayMs={displayMs:F3}"
+                    )
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(pathCount, Is.EqualTo(250))
+                        Assert.That(untrackedCount, Is.EqualTo(25))
+                        Assert.That(
+                            responseMs,
+                            Is.LessThan(1000.0),
+                            $"Warm summary response took {responseMs:F3} ms"
+                        )
+                        Assert.That(
+                            displayMs,
+                            Is.LessThan(1000.0),
+                            $"Warm summary display took {displayMs:F3} ms"
+                        ))
+                finally
+                    host.StopAsync(System.Threading.CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult()
+            finally
+                if Directory.Exists(tempDir) then
+                    try
+                        Directory.Delete(tempDir, recursive = true)
+                    with _ ->
+                        ()
         }
