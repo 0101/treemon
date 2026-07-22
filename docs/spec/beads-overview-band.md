@@ -26,6 +26,10 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   directly under the app-header on the dashboard background.
 - **Placement is dashboard-scoped**: rendered inside `.dashboard`, above `.repo-list`. It leaves the
   Canvas pane untouched and reflows via the existing dashboard container-query on narrow panes.
+- The **Agents strip is sticky** at the top of the dashboard scroll container. In its normal
+  top-of-page position it shows the `AGENTS` heading and count/label metadata; once pinned it
+  collapses to a circles-only chrome bar matching the Canvas tab bar's height, background, and solid
+  `#313244` boundary. The Tasks section and drill-down panel stay in normal document flow.
 - **Aggregate-only**: no per-worktree cards or rows inside the band (the grid below already does
   that). All figures are cross-worktree roll-ups.
 - Two stacked sections are separated by a **1px dashed** rule and headed by small uppercase muted
@@ -261,10 +265,19 @@ the solution compiling (no compat shims, per house rules).
 - **Empty-state collapse.** `view` drops an all-empty lens by pattern-matching (each section is built
   by the `section` helper) and returns `Html.none` when both lenses are empty, so an opened-but-empty
   band adds no chrome (not even margin).
-- **Placement:** rendered in `App.fs` as the first child inside `.dashboard` (above `.repo-list`),
-  gated on `model.OverviewPanelOpen`. The two sections stay **stacked** at every width; the reflow is
-  the category columns wrapping onto new rows via `.overview-items { flex-wrap: wrap }` as the pane
-  narrows — there is no container-query flip to a side-by-side layout.
+- **Placement:** rendered in `App.fs` above `.repo-list`, gated on `model.OverviewPanelOpen`.
+  `OverviewBand.view` emits three sibling fragment children: a zero-height sticky anchor containing
+  the compact circles-only bar, the full normal-flow Agents section, and the normal-flow
+  breakdown/Tasks remainder. The anchor spans the full dashboard scroll boundary without adding
+  layout height; pin/unpin therefore changes only visibility and cannot oscillate from scroll
+  anchoring. An `IntersectionObserver` rooted at `.dashboard` switches the compact bar only after the
+  full Agents section's actual bottom crosses the dashboard top, so variable row height and wrapping
+  cannot produce an abrupt duplicate full+compact row. A named CSS View Timeline on the full Agents
+  section scrubs the visual transition across its real `exit` range: the full row fades out while the
+  compact circles fade in and translate upward by the dashboard padding until flush with the
+  scrollport. The observer controls only behavior (closing the drill-down and enabling compact
+  pointer events), not visual timing. The two sections stay **stacked** at every width; category
+  columns wrap via `.overview-items { flex-wrap: wrap }`.
 
 ## Decisions
 

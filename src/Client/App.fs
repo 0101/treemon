@@ -53,6 +53,7 @@ let init () =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
+      OverviewAgentsStuck = false
       SelectedOverviewGroup = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
@@ -496,13 +497,36 @@ let update msg model =
         let newState = not model.OverviewPanelOpen
         // Closing the band drops any drill-down selection so it can't linger while hidden.
         let selection = if newState then model.SelectedOverviewGroup else None
-        { model with OverviewPanelOpen = newState; SelectedOverviewGroup = selection },
+        { model with
+            OverviewPanelOpen = newState
+            OverviewAgentsStuck = if newState then model.OverviewAgentsStuck else false
+            SelectedOverviewGroup = selection },
         Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
+
+    | SetOverviewAgentsStuck isStuck ->
+        if isStuck = model.OverviewAgentsStuck then
+            model, Cmd.none
+        else
+            let selection =
+                match isStuck, model.SelectedOverviewGroup with
+                | true, Some (OverviewData.OverviewSelection.Agents _) -> None
+                | _ -> model.SelectedOverviewGroup
+            { model with OverviewAgentsStuck = isStuck; SelectedOverviewGroup = selection }, Cmd.none
 
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
-        { model with SelectedOverviewGroup = next }, Cmd.none
+        let scrollCmd =
+            match next with
+            | Some (OverviewData.OverviewSelection.Agents _) ->
+                Cmd.ofEffect (fun _ ->
+                    Dom.window?requestAnimationFrame(fun (_: float) ->
+                        Dom.document.querySelector ".dashboard"
+                        |> Option.ofObj
+                        |> Option.iter (fun dashboard ->
+                            dashboard?scrollTo(createObj [ "top" ==> 0; "behavior" ==> "smooth" ]))))
+            | _ -> Cmd.none
+        { model with SelectedOverviewGroup = next }, scrollCmd
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -659,11 +683,20 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
 
-    let subs =
+    let overviewSticky (dispatch: Dispatch<Msg>) =
+        OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
+
+    let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
           [ "focus-reclaim" ], focusReclaim ]
+
+    let subs =
+        if model.OverviewPanelOpen then
+            ([ "overview-sticky" ], overviewSticky) :: baseSubs
+        else
+            baseSubs
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
@@ -876,6 +909,7 @@ let view model dispatch =
             prop.children [
                 if model.OverviewPanelOpen then
                     OverviewBand.view
+                        model.OverviewAgentsStuck
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)

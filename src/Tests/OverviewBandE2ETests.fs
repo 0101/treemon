@@ -249,7 +249,7 @@ type OverviewBandE2ETests() =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Overview"))
             do! overviewBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! overviewBtn.ClickAsync()
-            do! this.Page.Locator(".overview-band").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.Locator(".overview-agents-band").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! this.Page.Locator(".overview-band .overview-bar").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! json = this.Page.EvaluateAsync<string>(bandProbeJs)
@@ -421,4 +421,111 @@ type OverviewBandE2ETests() =
             let bd = JObject.Parse(json)
             Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
             Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
+        }
+
+    [<Test>]
+    member this.``Pinned agents collapse to canvas-height circles and close the drill-down``() =
+        task {
+            let canvasBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
+            do! canvasBtn.ClickAsync()
+            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let investigating =
+                this.Page.Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+            do! investigating.ClickAsync()
+            do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! morphJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      const agents = document.querySelector('.overview-agents-band');
+                      const dashboardTop = dashboard.getBoundingClientRect().top;
+                      const agentRect = agents.getBoundingClientRect();
+                      dashboard.scrollTop += agentRect.top - dashboardTop + agentRect.height / 2;
+                      return new Promise(resolve =>
+                        requestAnimationFrame(() => requestAnimationFrame(() =>
+                          resolve(JSON.stringify({
+                            fullOpacity: parseFloat(getComputedStyle(agents).opacity),
+                            compactOpacity: parseFloat(getComputedStyle(document.querySelector('.overview-agents-compact')).opacity)
+                          })))));
+                    }""")
+
+            let morph = JObject.Parse(morphJson)
+            Assert.That(morph.Value<float>("fullOpacity"), Is.InRange(0.1, 0.9))
+            Assert.That(morph.Value<float>("compactOpacity"), Is.InRange(0.1, 0.9))
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      const agents = document.querySelector('.overview-agents-band');
+                      dashboard.scrollTop += agents.getBoundingClientRect().bottom
+                        - dashboard.getBoundingClientRect().top + 1;
+                      window.__overviewStickyScrollTop = dashboard.scrollTop;
+                    }""")
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => {
+                      const agents = document.querySelector('.overview-agents-compact');
+                      return agents.classList.contains('overview-agents-compact-visible')
+                        && !document.querySelector('.overview-breakdown')
+                        && !document.querySelector('.overview-item-selected');
+                    }""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! stickyJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => new Promise(resolve => {
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        const dashboard = document.querySelector('.dashboard');
+                        const agents = document.querySelector('.overview-agents-compact');
+                        const canvasHeader = document.querySelector('.canvas-tab-bar');
+                        const agentRect = agents.getBoundingClientRect();
+                        const dashboardRect = dashboard.getBoundingClientRect();
+                        resolve(JSON.stringify({
+                          scrollTop: dashboard.scrollTop,
+                          expectedScrollTop: window.__overviewStickyScrollTop,
+                          position: getComputedStyle(agents).position,
+                          topDelta: agentRect.top - dashboardRect.top,
+                          widthDelta: agentRect.width - dashboard.clientWidth,
+                          height: agentRect.height,
+                          canvasHeight: canvasHeader.getBoundingClientRect().height,
+                          headerCount: agents.querySelectorAll('.overview-header').length,
+                          metaCount: agents.querySelectorAll('.overview-meta').length,
+                          borderStyle: getComputedStyle(agents).borderBottomStyle,
+                          borderColor: getComputedStyle(agents).borderBottomColor,
+                          canvasBorderColor: getComputedStyle(canvasHeader).borderBottomColor
+                        }));
+                      }));
+                    })""")
+
+            let sticky = JObject.Parse(stickyJson)
+            Assert.That(sticky.Value<float>("scrollTop"), Is.EqualTo(sticky.Value<float>("expectedScrollTop")).Within(1.0), "pinning must not move the scroll position")
+            Assert.That(sticky.Value<string>("position"), Is.EqualTo("absolute"))
+            Assert.That(Math.Abs(sticky.Value<float>("topDelta")), Is.LessThanOrEqualTo(1.0), "agent strip stays at the dashboard top")
+            Assert.That(Math.Abs(sticky.Value<float>("widthDelta")), Is.LessThanOrEqualTo(1.0), "agent strip covers the dashboard width")
+            Assert.That(sticky.Value<float>("height"), Is.EqualTo(sticky.Value<float>("canvasHeight")).Within(1.0), "agent and canvas chrome heights match")
+            Assert.That(sticky.Value<int>("headerCount"), Is.EqualTo(0))
+            Assert.That(sticky.Value<int>("metaCount"), Is.EqualTo(0))
+            Assert.That(sticky.Value<string>("borderStyle"), Is.EqualTo("solid"))
+            Assert.That(sticky.Value<string>("borderColor"), Is.EqualTo(sticky.Value<string>("canvasBorderColor")))
+
+            let compactInvestigating =
+                this.Page.Locator(".overview-compact-group[title$='Investigating']")
+            do! compactInvestigating.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      return dashboard.scrollTop <= 0.5
+                        && !!document.querySelector('.overview-agents-band .overview-item-selected')
+                        && !!document.querySelector('.overview-breakdown');
+                    }""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
         }

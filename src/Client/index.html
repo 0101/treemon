@@ -178,7 +178,48 @@
            box/title bar or hairlines (the toggle button is the header); the category columns wrap to
            the next line when the pane is too narrow (overview-drilldown). */
         .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
-        .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
+        /* The full Agents row stays in normal flow. A zero-height sticky anchor carries a separate
+           circles-only bar, so showing/hiding the pinned chrome cannot change document height and
+           oscillate at the sticky threshold. */
+        .overview-agents-sticky-anchor { position: sticky; top: 0; z-index: 20; height: 0; }
+        .overview-agents-compact {
+            position: absolute; top: 0; left: -16px; right: -16px;
+            display: flex; align-items: center; gap: 10px;
+            height: var(--pane-header-height); padding: 4px 16px;
+            background: #181825; border-bottom: 1px solid #313244;
+            opacity: 0; transform: translateY(16px); pointer-events: none;
+            animation: overview-agents-compact-enter linear both;
+            animation-timeline: --overview-agents-exit;
+            animation-range: exit;
+        }
+        .overview-agents-compact-visible { pointer-events: auto; }
+        .overview-compact-group {
+            display: flex; align-items: center; padding: 4px 6px; border-radius: 4px;
+            cursor: pointer;
+        }
+        .overview-compact-group:hover { background: #2a2a3c; }
+        .overview-agents-band {
+            padding-bottom: 0; margin-bottom: 0;
+            view-timeline: --overview-agents-exit block;
+            animation: overview-agents-full-exit linear both;
+            animation-timeline: --overview-agents-exit;
+            animation-range: exit;
+        }
+        @keyframes overview-agents-compact-enter {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(-16px); }
+        }
+        @keyframes overview-agents-full-exit {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+        @supports not (animation-timeline: view()) {
+            .overview-agents-band { animation: none; }
+            .overview-agents-compact { animation: none; opacity: 0; transform: translateY(-16px); }
+            .overview-agents-compact-visible { opacity: 1; }
+        }
+        .overview-band-rest { padding-top: 0; }
+        .overview-section-separated { margin-top: 17px; padding-top: 16px; border-top: 1px solid #313244; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
         /* Shared column layout — identical for both sections; only the visual row differs. The
            group columns wrap to the next line when the pane is too narrow (overview-drilldown
@@ -597,6 +638,7 @@
 
         /* Canvas pane layout */
         .app-layout {
+            --pane-header-height: 34px;
             display: flex;
             flex-direction: row;
             height: calc(100vh - 36px);
@@ -614,6 +656,7 @@
             transition: flex 0.2s ease;
             container-type: inline-size;
             container-name: dashboard;
+            timeline-scope: --overview-agents-exit;
             --overview-bar-max: min(300px, 80cqi);
         }
         .canvas-pane {
@@ -650,6 +693,7 @@
             background: #181825;
             border-bottom: 1px solid #313244;
             flex-shrink: 0;
+            min-height: var(--pane-header-height);
         }
         .canvas-tab-group {
             display: flex;

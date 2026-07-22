@@ -25,6 +25,9 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 
 - Each agent-group column (Agents section) and task-bucket column (Tasks section) is
   clickable. Clicking a column selects that group; clicking the selected group again deselects it.
+- Selecting an agent group from the sticky Agents strip scrolls the dashboard all the way to the top
+  after the selection renders, placing the newly-opened agent breakdown in view. Closing the selected
+  group does not force a scroll.
 - **Single-select**: at most one group is selected at a time (across both sections).
 - The selected column renders as a **black "tab"** with rounded top corners, sitting flush against a
   black **breakdown panel** rendered directly beneath the group's row.
@@ -34,7 +37,8 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 - Within each section, the group columns **wrap** to the next line when the pane is too narrow (a
   row-gap keeps wrapped lines legible), instead of a horizontal scrollbar.
 - The panel closes when: the group is re-clicked, the panel's **✕** button is clicked, or **Esc** is
-  pressed while a group is selected.
+  pressed while a group is selected. An agent-group panel also closes when scrolling transitions
+  the Agents strip into its compact pinned state.
 - Selection is **ephemeral** session state — it does not persist across reloads (unlike the band's
   open/closed state).
 
@@ -126,11 +130,15 @@ type OverviewSelection =
 - `Model` gains `SelectedOverviewGroup: OverviewSelection option` (initialized `None`).
 - New messages:
   - `SelectOverviewGroup of OverviewSelection` — **toggles**: selecting the already-selected group
-    sets it back to `None`.
+    sets it back to `None`. Opening an Agents selection also schedules a dashboard scroll to `top = 0`
+    on the next animation frame so the rendered breakdown is visible.
   - `SelectOverviewWorktree of scopedKey: string` — the arrow-nav-parity handler:
     `expandRepoOwning` → `applyFocus true (Some (Card scopedKey))` → `scrollFocusedIntoView Normal`,
     persisting collapsed repos when a repo was expanded. Must **not** open the Canvas pane.
 - `ToggleOverviewPanel` clears `SelectedOverviewGroup` when it closes the band.
+- `SetOverviewAgentsStuck` records the dashboard's normal-vs-pinned transition. Entering the pinned
+  state clears an Agents selection so a detached selected tab cannot remain after its panel scrolls
+  away.
 - On `DataLoaded`, drop `SelectedOverviewGroup` if the fresh roll-up no longer contains that group.
 - `Esc` closes the panel when a group is selected (extend the dashboard key handling / `KeyPressed`).
 
@@ -141,8 +149,17 @@ type OverviewSelection =
   `OverviewBand.view model.Repos`).
 - Each `agentColumn` / `taskColumn` becomes clickable (raises `onSelectGroup`) and gets an
   `overview-item-selected`/tab class when it is the selected group.
-- Render the breakdown panel inside the relevant section when a matching group is selected: the ✕
-  close button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members, agent chips vs. task bars (task bar width = `member.Contribution * barMaxPx / overview.Scale`, floored at the existing visible minimum).
+- Render a zero-height sticky anchor, the full Agents section, and the normal-flow breakdown/Tasks
+  content as sibling fragment children of `.dashboard`. The compact bar is absolutely positioned
+  inside the sticky anchor, so pin/unpin changes visibility without changing document height; this
+  avoids a scroll-anchor feedback loop at the threshold. An `IntersectionObserver` watches the full
+  Agents section and activates compact mode only when that section has completely crossed above the
+  dashboard viewport, rather than guessing from a fixed scroll offset. The visual morph is separate:
+  a named CSS View Timeline scrubs a crossfade/translation across the full section's actual `exit`
+  range, so every intermediate scroll position has a stable intermediate appearance.
+- Render the breakdown panel below the relevant row when a matching group is selected: the ✕ close
+  button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members,
+  agent chips vs. task bars.
 - CSS additions near the existing `.overview-*` rules (`index.html`): the selected black tab
   (rounded top corners), the `.overview-breakdown` panel, `.overview-chips`/chip, the task
   `name + bar` rows, the close button, and `.overview-items` wrapping (`flex-wrap: wrap`, no
@@ -155,9 +172,9 @@ type OverviewSelection =
 - **Unit** (`src/Tests/OverviewDataTests.fs`): membership correctness per bucket/group — the right
   worktrees, correct `Contribution`, `Count` == list length / Σ contributions, respects
   `isActive`/`IsArchived`, and repo names populated.
-- **E2E**: **no new E2E tests are added** for this feature (project decision). Verification instead
-  proves the existing E2E suite (`Category=E2E`, incl. the read-only `OverviewBandE2ETests`) still
-  passes with zero regressions, alongside the `OverviewData` membership unit tests above.
+- **E2E** (`OverviewBandE2ETests`): verifies entering the pinned state closes an agent drill-down,
+  hides the heading/metadata, matches the Canvas header height and solid boundary, spans the dashboard
+  width, and still lets a circle group scroll back to its drill-down.
 
 ## Decisions
 
@@ -170,8 +187,9 @@ Locked during prototyping (see the canvas prototype doc):
 - **Groups wrap** to the next line per section on narrow panes (no horizontal scrollbar).
 - **Agent breakdown** = borderless activity-colored `[● name]` chips; **task breakdown** = `name + bar`
   rows on the band's shared task scale.
-- **No new E2E tests.** Verification = existing E2E suite stays green + `OverviewData` membership unit
-  tests; new UI behavior is covered by unit tests at the data layer, not new Playwright tests.
+- **Sticky strip stays separate from the breakdown.** Only the agent summary remains pinned; the
+  detail panel and Tasks content stay in normal flow so they cannot cover the dashboard while
+  scrolling.
 
 ## Related Specs
 
