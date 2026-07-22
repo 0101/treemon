@@ -1112,6 +1112,10 @@ function renderSummaryState(summary) {
                 false
             );
             break;
+        case 'stale':
+            document.getElementById('base-label').textContent = 'Comparison superseded';
+            renderState('stale', 'Newer comparison available', 'A newer refresh replaced this summary.', false);
+            break;
         case 'base-error':
             document.getElementById('base-label').textContent = 'Comparison unavailable';
             renderState('base-error', 'Comparison base unavailable', 'Treemon could not resolve the configured base branch.', false);

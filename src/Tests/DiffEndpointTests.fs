@@ -375,6 +375,8 @@ type DiffSerializationTests() =
               """{"status":"clean","baseRef":"main","fileCount":0,"files":[]}"""
               DiffSummaryResult.FilteredEmpty,
               """{"status":"filtered-empty","fileCount":0,"files":[]}"""
+              DiffSummaryResult.Stale,
+              """{"status":"stale"}"""
               DiffSummaryResult.BaseError,
               """{"status":"base-error"}"""
               DiffSummaryResult.TimedOut,
@@ -618,7 +620,7 @@ type DiffEndpointHttpTests() =
                 ))
 
     [<Test>]
-    member _.``out-of-order filter summaries retain only the latest-started snapshot``() =
+    member _.``out-of-order ready summary returns stale while latest identities resolve``() =
         let worktree = fakePath "filter-race"
         let changed = entry "changed.txt" None WorktreeDiff.Modified
         let firstStarted =
@@ -671,22 +673,93 @@ type DiffEndpointHttpTests() =
                 releaseFirst.TrySetResult(true) |> ignore
                 use firstResponse = firstTask.GetAwaiter().GetResult()
 
-                let firstIdentity =
-                    firstResponse
-                    |> getResponseBody
-                    |> summaryIdentity changed.Path
-
-                use staleResponse =
-                    get client $"{fileUrl}?identity={firstIdentity}"
-
                 use currentResponse =
                     get client $"{fileUrl}?identity={secondIdentity}"
 
                 Assert.Multiple(fun () ->
                     Assert.That(firstResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    firstResponse
+                    |> getResponseBody
+                    |> assertJson """{"status":"stale"}"""
                     Assert.That(secondResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
-                    Assert.That(staleResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
-                    Assert.That(getResponseBody staleResponse, Is.EqualTo("Unknown diff identity"))
+                    Assert.That(currentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
+
+                currentResponse
+                |> getResponseBody
+                |> assertJson (
+                    DiffFileResult.Text(
+                        fileSummary
+                            secondIdentity
+                            changed.Path
+                            None
+                            DiffChangeKind.Modified,
+                        "False,True,False"
+                    )
+                    |> WorktreeDiffApi.serializeFileResult
+                ))
+
+    [<Test>]
+    member _.``out-of-order clean summary returns stale while latest identities resolve``() =
+        let worktree = fakePath "clean-filter-race"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+        let firstStarted =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let releaseFirst =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ layers ->
+                    async {
+                        if layers.AlreadyCommitted && not layers.LocalChanges then
+                            firstStarted.TrySetResult(true) |> ignore
+                            let! _ = releaseFirst.Task |> Async.AwaitTask
+                            return Ok(summary [])
+                        else
+                            return Ok(summary [ changed ])
+                    }
+              GetFile =
+                fun _ _ _ layers _ ->
+                    let patch =
+                        $"{layers.AlreadyCommitted},{layers.LocalChanges},{layers.Untracked}"
+
+                    async.Return(Ok(WorktreeDiff.Text patch)) }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun client baseUrl ->
+                let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+                let fileUrl = worktreeUrl baseUrl worktree "diff-file"
+
+                let firstTask =
+                    client.GetAsync(summaryUrl + layerQuery true false false)
+
+                firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+                |> Async.AwaitTask
+                |> TestUtils.runAsync
+                |> ignore
+
+                use secondResponse =
+                    get client (summaryUrl + layerQuery false true false)
+
+                let secondIdentity =
+                    secondResponse
+                    |> getResponseBody
+                    |> summaryIdentity changed.Path
+
+                releaseFirst.TrySetResult(true) |> ignore
+                use firstResponse = firstTask.GetAwaiter().GetResult()
+                use currentResponse =
+                    get client $"{fileUrl}?identity={secondIdentity}"
+
+                Assert.Multiple(fun () ->
+                    Assert.That(firstResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    firstResponse
+                    |> getResponseBody
+                    |> assertJson """{"status":"stale"}"""
+                    Assert.That(secondResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     Assert.That(currentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
 
                 currentResponse

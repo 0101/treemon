@@ -486,6 +486,8 @@ let internal serializeSummaryResult =
                fileCount = 0
                files = List.empty |}
         )
+    | DiffSummaryResult.Stale ->
+        JsonSerializer.Serialize {| status = "stale" |}
     | DiffSummaryResult.BaseError ->
         JsonSerializer.Serialize {| status = "base-error" |}
     | DiffSummaryResult.TimedOut ->
@@ -572,6 +574,9 @@ let private summaryErrorResult =
     | WorktreeDiff.TooManyFiles minimumCount ->
         DiffSummaryResult.TooManyFiles minimumCount
     | _ -> DiffSummaryResult.GitError
+
+let private summaryResultIfCurrent isCurrent result =
+    if isCurrent then result else DiffSummaryResult.Stale
 
 let private fileResult file =
     function
@@ -768,7 +773,7 @@ let private handleSummary
                     store.BeginSummary(worktreePath, viewer)
                     |> Async.StartAsTask
 
-                let! _ =
+                let! isCurrent =
                     store.ClearCurrent(
                         worktreePath,
                         viewer,
@@ -778,6 +783,7 @@ let private handleSummary
 
                 do!
                     DiffSummaryResult.FilteredEmpty
+                    |> summaryResultIfCurrent isCurrent
                     |> serializeSummaryResult
                     |> writeJson deadline ctx
             | Some viewer, Some layers ->
@@ -795,7 +801,7 @@ let private handleSummary
                         | Ok summary
                             when summary.Files.Length
                                  > WorktreeDiff.maxWorktreeDiffFiles ->
-                            let! _ =
+                            let! isCurrent =
                                 store.ClearCurrent(
                                     worktreePath,
                                     viewer,
@@ -805,22 +811,25 @@ let private handleSummary
                             return
                                 DiffSummaryResult.TooManyFiles
                                     summary.Files.Length
+                                |> summaryResultIfCurrent isCurrent
                         | Ok summary when summary.Files.IsEmpty ->
-                            let! _ =
+                            let! isCurrent =
                                 store.ClearCurrent(
                                     worktreePath,
                                     viewer,
                                     generation
                                 )
 
-                            return DiffSummaryResult.Clean summary.BaseRef
+                            return
+                                DiffSummaryResult.Clean summary.BaseRef
+                                |> summaryResultIfCurrent isCurrent
                         | Ok summary ->
                             let issued =
                                 summary.Files
                                 |> List.map (fun entry ->
                                     issueFile newIdentity entry, entry)
 
-                            let! _ =
+                            let! isCurrent =
                                 store.ReplaceCurrent(
                                     worktreePath,
                                     viewer,
@@ -837,15 +846,18 @@ let private handleSummary
                                     { BaseRef = summary.BaseRef
                                       FileCount = files.Length
                                       Files = files }
+                                |> summaryResultIfCurrent isCurrent
                         | Error error ->
-                            let! _ =
+                            let! isCurrent =
                                 store.ClearCurrent(
                                     worktreePath,
                                     viewer,
                                     generation
                                 )
 
-                            return summaryErrorResult error
+                            return
+                                summaryErrorResult error
+                                |> summaryResultIfCurrent isCurrent
                     }
                     |> Async.StartAsTask
 

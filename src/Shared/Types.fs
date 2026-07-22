@@ -228,6 +228,7 @@ type DiffSummaryResult =
     | Ready of DiffSummaryDetails
     | Clean of baseRef: string
     | FilteredEmpty
+    | Stale
     | BaseError
     | TimedOut
     | GitError
