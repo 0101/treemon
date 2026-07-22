@@ -137,7 +137,9 @@ type OverviewHistoryReconstructionTests() =
 
             tasks |> List.iter store.AppendTaskSnapshot
             events |> List.iter (store.AppendEvent >> ignore)
-            liveness |> List.iter store.RecordLiveness
+            liveness
+            |> List.iter (fun (sessionId, observedAt) ->
+                appendLivenessAndBound path sessionId observedAt)
             setObservationBounds path observations
 
             let actual = reconstructRange store start ending

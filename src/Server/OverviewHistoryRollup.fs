@@ -77,6 +77,9 @@ let oldestExposedBoundary (anchor: DateTimeOffset) =
 let oldestRetainedBoundary (anchor: DateTimeOffset) =
     oldestExposedBoundary anchor - predecessorRetention
 
+let dirtyBoundary (anchor: DateTimeOffset) (sourceTimestamp: DateTimeOffset) =
+    max (oldestExposedBoundary anchor) (firstBoundaryAtOrAfter sourceTimestamp)
+
 let toBucket (boundary: DateTimeOffset) =
     if not (isBoundary boundary) then
         invalidArg (nameof boundary) "Overview rollup buckets must be canonical UTC boundaries."

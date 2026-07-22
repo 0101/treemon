@@ -34,7 +34,7 @@ rollups.
   Overview. Multiple sessions in one worktree count independently.
 - Task snapshot change detection, event insertion, and liveness insertion update source generation
   and the earliest dirty boundary in the same SQLite transaction. Duplicate or unchanged writes do
-  neither.
+  neither; liveness is inserted only when it advances the durable session observation time.
 - The first affected boundary is the smallest canonical boundary greater than or equal to the source
   timestamp. It is clamped to the oldest retained boundary needed by the currently exposed 72-hour
   horizon, so arbitrarily old late writes repair the visible baseline without creating unbounded
@@ -198,6 +198,7 @@ anchor age.
 | Request path | Published rollups only; no raw fallback, raw-row cap, or boundary-indexed raw query. |
 | Stored shape | Count-only task and agent values. |
 | Late event semantics | Preserve current stored post-event behavior in this performance change. |
+| Liveness no-op | Equal or stale observations do not append liveness, advance generation, or change observation bounds. |
 | Dirty boundary | Ceiling source timestamps to the 30-second grid and clamp to the oldest exposed baseline, bounding repair regardless of source age. |
 | Initial availability | Complete the 72-hour backfill before serving history; keep the existing wire type. |
 | Initial failure | Fail real-mode startup before binding rather than serve empty, partial, or raw-reconstructed history. |

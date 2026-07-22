@@ -326,6 +326,27 @@ let private appendLivenessSql =
 INSERT OR IGNORE INTO session_liveness (session_id, ts) VALUES ($sid, $seen);
 """
 
+let private updateObservationBoundsSql =
+    """
+INSERT INTO overview_history_session_bounds
+    (session_id, first_observed_at, last_observed_at)
+VALUES ($sid, $observed, $observed)
+ON CONFLICT(session_id) DO UPDATE SET
+    first_observed_at = min(first_observed_at, excluded.first_observed_at),
+    last_observed_at  = max(last_observed_at, excluded.last_observed_at);
+"""
+
+let private invalidateOverviewRollupSql =
+    """
+UPDATE overview_history_state
+SET source_generation = source_generation + 1,
+    earliest_dirty = CASE
+        WHEN earliest_dirty IS NULL OR $dirty < earliest_dirty THEN $dirty
+        ELSE earliest_dirty
+    END
+WHERE id = 1;
+"""
+
 let private loadSql =
     """
 SELECT session_id, worktree_path, provider, status, current_skill,
@@ -525,6 +546,78 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$tts", ttTs) |> ignore
     cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
     cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
+
+let private appendEvent (conn: SqliteConnection) (tx: SqliteTransaction) row =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- appendSql
+    bindAppend cmd row
+    cmd.ExecuteNonQuery() = 1
+
+let private upsertObservationBounds
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    sessionId
+    observedAt
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- updateObservationBoundsSql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    cmd.Parameters.AddWithValue("$observed", isoUtc observedAt) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
+let private invalidateOverviewRollup
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    sourceTimestamp
+    =
+    let dirty = dirtyBoundary DateTimeOffset.UtcNow sourceTimestamp
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- invalidateOverviewRollupSql
+    cmd.Parameters.AddWithValue("$dirty", toBucket dirty) |> ignore
+
+    if cmd.ExecuteNonQuery() <> 1 then
+        raise (InvalidDataException("Overview history publication state is missing."))
+
+let private appendTaskSnapshot
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    ts
+    tasks
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- appendTaskSnapshotSql
+    cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
+    cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
+let private queryLatestTaskSnapshot
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- queryLatestTaskSnapshotSql
+    use reader = cmd.ExecuteReader()
+
+    if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
+    else None
+
+let private appendTaskSnapshotIfChanged
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    ts
+    tasks
+    =
+    match queryLatestTaskSnapshot conn tx with
+    | Some (_, previous) when previous = tasks -> false
+    | _ ->
+        appendTaskSnapshot conn tx ts tasks
+        invalidateOverviewRollup conn tx ts
+        true
 
 // --- Store ------------------------------------------------------------------------------------
 
@@ -790,10 +883,15 @@ type SessionActivityStore(dbPath: string) =
     /// (INSERT OR IGNORE dedupe).
     member _.AppendEvent(row: ActivityEventRow) : bool =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- appendSql
-        bindAppend cmd row
-        cmd.ExecuteNonQuery() = 1
+        use tx = conn.BeginTransaction()
+        let inserted = appendEvent conn tx row
+
+        if inserted then
+            upsertObservationBounds conn tx row.SessionId row.Ts
+            invalidateOverviewRollup conn tx row.Ts
+
+        tx.Commit()
+        inserted
 
     /// Atomically append the raw event AND upsert the session's live row in ONE transaction on ONE
     /// connection, so the durable status can never diverge from the appended history. With the two on
@@ -804,11 +902,7 @@ type SessionActivityStore(dbPath: string) =
     member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : bool =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
-        use appendCmd = conn.CreateCommand()
-        appendCmd.Transaction <- tx
-        appendCmd.CommandText <- appendSql
-        bindAppend appendCmd row
-        let inserted = appendCmd.ExecuteNonQuery() = 1
+        let inserted = appendEvent conn tx row
 
         if inserted then
             use upsertCmd = conn.CreateCommand()
@@ -816,12 +910,15 @@ type SessionActivityStore(dbPath: string) =
             upsertCmd.CommandText <- upsertSql
             bindUpsert upsertCmd stored
             upsertCmd.ExecuteNonQuery() |> ignore
+            upsertObservationBounds conn tx row.SessionId row.Ts
+            invalidateOverviewRollup conn tx row.Ts
 
         tx.Commit()
         inserted
 
     /// Advance `last_seen` and append the compact liveness point used by historical openness
-    /// reconstruction. Both writes share one transaction so live state and history cannot diverge.
+    /// reconstruction. Both writes share one transaction so live state and history cannot diverge;
+    /// stale or equal observations are a full no-op.
     member _.RecordLiveness(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
@@ -833,12 +930,18 @@ type SessionActivityStore(dbPath: string) =
         use touchCmd = conn.CreateCommand()
         touchCmd.CommandText <- touchSql
         bind touchCmd
-        touchCmd.ExecuteNonQuery() |> ignore
+        let advanced = touchCmd.ExecuteNonQuery() = 1
 
-        use livenessCmd = conn.CreateCommand()
-        livenessCmd.CommandText <- appendLivenessSql
-        bind livenessCmd
-        livenessCmd.ExecuteNonQuery() |> ignore
+        if advanced then
+            use livenessCmd = conn.CreateCommand()
+            livenessCmd.CommandText <- appendLivenessSql
+            bind livenessCmd
+            let inserted = livenessCmd.ExecuteNonQuery() = 1
+
+            if inserted then
+                upsertObservationBounds conn tx sessionId lastSeen
+                invalidateOverviewRollup conn tx lastSeen
+
         tx.Commit()
 
     /// Read one durable session row regardless of the live idle-window cutoff.
@@ -1012,18 +1115,17 @@ type SessionActivityStore(dbPath: string) =
     /// `activity_events` (the push event stream), so only Tasks are snapshot-based.
     member _.AppendTaskSnapshot(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : unit =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- appendTaskSnapshotSql
-        cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
-        cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
-        cmd.ExecuteNonQuery() |> ignore
+        use tx = conn.BeginTransaction()
+        appendTaskSnapshot conn tx ts tasks
+        invalidateOverviewRollup conn tx ts
+        tx.Commit()
 
-    member this.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =
-        match this.QueryLatestTaskSnapshot() with
-        | Some (_, previous) when previous = tasks -> false
-        | _ ->
-            this.AppendTaskSnapshot(ts, tasks)
-            true
+    member _.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction()
+        let appended = appendTaskSnapshotIfChanged conn tx ts tasks
+        tx.Commit()
+        appended
 
     /// The Tasks history substrate: task snapshots with `ts` in [startTime, endTime], oldest first.
     /// Merged with the event-derived Agents history into the OverviewSnapshot stream on read.

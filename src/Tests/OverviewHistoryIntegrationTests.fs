@@ -134,9 +134,15 @@ type OverviewHistoryIntegrationTests() =
             let window = HistoryWindow.duration HistoryWindow.Hours12
             let start = anchor - window
             let tasks = [ tc TaskBucketKind.Blocked 3 ]
+            let eventAt = start.AddMinutes(-10.0)
+            let event = evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Working (Some "pr") eventAt
 
             store.AppendTaskSnapshot(start.AddDays(-1.0), tasks)
-            store.AppendEvent(evt "e1" "s1" "C:/wt/a" SessionLevelStatus.Working (Some "pr") (start.AddMinutes(-10.0))) |> ignore
+            store.AppendAndUpsert(
+                event,
+                stored "s1" "C:/wt/a" SessionLevelStatus.Working eventAt eventAt
+            )
+            |> ignore
             store.AppendEvent(evt "irrelevant" "closed" "C:/wt/closed" SessionLevelStatus.Working None (start.AddDays(-1.0))) |> ignore
             store.RecordLiveness(SessionId "s1", start.AddMinutes(-1.0))
 
@@ -180,6 +186,14 @@ type OverviewHistoryIntegrationTests() =
                     baselineAt
             )
             |> ignore
+            writer.UpsertStatus(
+                stored
+                    (SessionId.value sessionId)
+                    "C:/wt/interleaved"
+                    SessionLevelStatus.Working
+                    baselineAt
+                    baselineAt
+            )
 
             let inputs =
                 reader.QueryOverviewHistoryInputs(
@@ -257,8 +271,8 @@ type OverviewHistoryIntegrationTests() =
               evt "expired" "s3" "C:/wt/c" SessionLevelStatus.Working None old2 ]
             |> List.iter (store.AppendEvent >> ignore)
 
-            store.UpsertStatus(stored "s1" "C:/wt/a" SessionLevelStatus.Working old2 recent)
-            store.UpsertStatus(stored "s2" "C:/wt/b" SessionLevelStatus.WaitingForUser old2 recent)
+            store.UpsertStatus(stored "s1" "C:/wt/a" SessionLevelStatus.Working old2 old2)
+            store.UpsertStatus(stored "s2" "C:/wt/b" SessionLevelStatus.WaitingForUser old2 old2)
             store.UpsertStatus(stored "s3" "C:/wt/c" SessionLevelStatus.Working old2 old2)
             store.RecordLiveness(SessionId "s1", recent)
             store.RecordLiveness(SessionId "s2", recent)
