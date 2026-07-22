@@ -147,7 +147,7 @@ remain in `OverviewPresentation`.
 
 ### Derived schema
 
-`SessionActivityStore` owns idempotent creation and migration of:
+`OverviewHistoryRollupStore` owns idempotent creation, migration, validation, and reset of:
 
 - published count-only rollup rows keyed by canonical bucket;
 - singleton publication state containing schema version, resolution, source generation, published
@@ -159,11 +159,14 @@ Every source mutation uses the same transaction as generation and dirty-range ma
 `AppendTaskSnapshotIfChanged` performs comparison and insertion on one connection and transaction.
 Dirty boundaries use a shared ceiling-to-grid function and clamp to the retained exposed baseline.
 Event and liveness mutations maintain session observation bounds; task mutations do not.
+`SessionActivityStore` remains the facade that coordinates these derived updates with authoritative
+raw-source writes.
 
 ### Reconstruction and compaction
 
-`OverviewHistory` remains the pure correctness oracle. `OverviewHistoryRollup` owns grid arithmetic,
-bounded backfill/repair, staging, publication, retention, and recovery.
+`OverviewHistory` remains the pure correctness oracle. `OverviewHistoryRollup` owns the count model,
+grid arithmetic, and candidate validation. `OverviewHistoryRollupStore` owns durable staging,
+publication, retention, recovery, and published reads.
 `OverviewHistoryReconstruction` owns the background-only indexed source reads and dense boundary
 projection, keeping raw reconstruction separate from both request handling and store persistence.
 
@@ -221,11 +224,12 @@ anchor age.
 | `src/Shared/OverviewData.fs` | Count-only history types and shared agent grouping. |
 | `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract. |
 | `src/Server/OverviewHistory.fs` | Pure sampler oracle and response collapsing. |
-| `src/Server/OverviewHistoryRollup.fs` | Grid arithmetic, reconstruction orchestration, staging, publication, repair, and retention. |
+| `src/Server/OverviewHistoryRollup.fs` | Count model, grid arithmetic, serialization, and candidate validation. |
+| `src/Server/OverviewHistoryRollupStore.fs` | Derived schema, invariant validation/reset, source invalidation metadata, staging, publication, retention, and published reads. |
 | `src/Server/OverviewHistoryReconstruction.fs` | Stable-snapshot indexed source reads and dense count reconstruction. |
 | `src/Server/OverviewHistoryRollupWorker.fs` | Serialized startup backfill, boundary wake loop, conflict recovery, and retention coordination. |
 | `src/Server/OverviewHistoryCache.fs` | Publication-keyed cache and in-flight request deduplication. |
-| `src/Server/SessionActivityStore.fs` | Raw persistence, derived schema, transactional invalidation, and rollup reads/writes. |
+| `src/Server/SessionActivityStore.fs` | Raw persistence and the public facade coordinating source transactions with rollup storage. |
 | `src/Server/SessionActivityService.fs` | Ingestion through the shared store. |
 | `src/Server/Program.fs` | Shared store and compactor lifecycle plus startup backfill. |
 | `src/Server/WorktreeApi.fs` | Published-rollup history query. |

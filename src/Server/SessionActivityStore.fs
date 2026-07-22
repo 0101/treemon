@@ -195,64 +195,6 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
 CREATE INDEX IF NOT EXISTS ix_task_snapshots_ts ON task_snapshots(ts);
 """
 
-let private derivedSchemaSql =
-    $"""
-CREATE TABLE IF NOT EXISTS overview_history_rows (
-    bucket INTEGER PRIMARY KEY CHECK (bucket %% {resolutionSeconds} = 0),
-    tasks  TEXT NOT NULL,
-    agents TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS overview_history_state (
-    id                   INTEGER PRIMARY KEY CHECK (id = 1),
-    schema_version       INTEGER NOT NULL CHECK (schema_version = {schemaVersion}),
-    resolution_seconds   INTEGER NOT NULL CHECK (resolution_seconds = {resolutionSeconds}),
-    source_generation    INTEGER NOT NULL CHECK (source_generation >= 0),
-    published_generation INTEGER NOT NULL CHECK (
-        published_generation >= 0 AND published_generation <= source_generation
-    ),
-    complete_through     INTEGER CHECK (
-        complete_through IS NULL OR complete_through %% resolution_seconds = 0
-    ),
-    earliest_dirty       INTEGER CHECK (
-        earliest_dirty IS NULL OR earliest_dirty %% resolution_seconds = 0
-    )
-);
-
-INSERT OR IGNORE INTO overview_history_state
-    (id, schema_version, resolution_seconds, source_generation, published_generation)
-VALUES (1, {schemaVersion}, {resolutionSeconds}, 0, 0);
-
-CREATE TABLE IF NOT EXISTS overview_history_staging (
-    generation INTEGER NOT NULL CHECK (generation >= 0),
-    bucket     INTEGER NOT NULL CHECK (bucket %% {resolutionSeconds} = 0),
-    tasks      TEXT NOT NULL,
-    agents     TEXT NOT NULL,
-    PRIMARY KEY (generation, bucket)
-);
-CREATE INDEX IF NOT EXISTS ix_overview_staging_bucket
-    ON overview_history_staging(bucket, generation);
-
-CREATE TABLE IF NOT EXISTS overview_history_session_bounds (
-    session_id        TEXT PRIMARY KEY,
-    first_observed_at TEXT NOT NULL,
-    last_observed_at  TEXT NOT NULL,
-    CHECK (first_observed_at <= last_observed_at)
-);
-CREATE INDEX IF NOT EXISTS ix_overview_bounds_last_first
-    ON overview_history_session_bounds(last_observed_at, first_observed_at);
-CREATE INDEX IF NOT EXISTS ix_overview_bounds_first_last
-    ON overview_history_session_bounds(first_observed_at, last_observed_at);
-"""
-
-let private dropDerivedSchemaSql =
-    """
-DROP TABLE IF EXISTS overview_history_staging;
-DROP TABLE IF EXISTS overview_history_rows;
-DROP TABLE IF EXISTS overview_history_session_bounds;
-DROP TABLE IF EXISTS overview_history_state;
-"""
-
 // One-time normalisation of legacy rows: pre-idle-only builds persisted the retired "done" status, so
 // existing DBs still carry status='done' rows. Rewrite them to 'idle' (the value 'done' now folds to)
 // so stored data matches the current vocabulary. Idempotent — a no-op once no 'done' rows remain — so
@@ -311,27 +253,6 @@ UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_see
 let private appendLivenessSql =
     """
 INSERT OR IGNORE INTO session_liveness (session_id, ts) VALUES ($sid, $seen);
-"""
-
-let private updateObservationBoundsSql =
-    """
-INSERT INTO overview_history_session_bounds
-    (session_id, first_observed_at, last_observed_at)
-VALUES ($sid, $observed, $observed)
-ON CONFLICT(session_id) DO UPDATE SET
-    first_observed_at = min(first_observed_at, excluded.first_observed_at),
-    last_observed_at  = max(last_observed_at, excluded.last_observed_at);
-"""
-
-let private invalidateOverviewRollupSql =
-    """
-UPDATE overview_history_state
-SET source_generation = source_generation + 1,
-    earliest_dirty = CASE
-        WHEN earliest_dirty IS NULL OR $dirty < earliest_dirty THEN $dirty
-        ELSE earliest_dirty
-    END
-WHERE id = 1;
 """
 
 let private loadSql =
@@ -541,33 +462,6 @@ let private appendEvent (conn: SqliteConnection) (tx: SqliteTransaction) row =
     bindAppend cmd row
     cmd.ExecuteNonQuery() = 1
 
-let private upsertObservationBounds
-    (conn: SqliteConnection)
-    (tx: SqliteTransaction)
-    sessionId
-    observedAt
-    =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- updateObservationBoundsSql
-    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-    cmd.Parameters.AddWithValue("$observed", isoUtc observedAt) |> ignore
-    cmd.ExecuteNonQuery() |> ignore
-
-let private invalidateOverviewRollup
-    (conn: SqliteConnection)
-    (tx: SqliteTransaction)
-    sourceTimestamp
-    =
-    let dirty = dirtyBoundary DateTimeOffset.UtcNow sourceTimestamp
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- invalidateOverviewRollupSql
-    cmd.Parameters.AddWithValue("$dirty", toBucket dirty) |> ignore
-
-    if cmd.ExecuteNonQuery() <> 1 then
-        raise (InvalidDataException("Overview history publication state is missing."))
-
 let private appendTaskSnapshot
     (conn: SqliteConnection)
     (tx: SqliteTransaction)
@@ -603,7 +497,7 @@ let private appendTaskSnapshotIfChanged
     | Some (_, previous) when previous = tasks -> false
     | _ ->
         appendTaskSnapshot conn tx ts tasks
-        invalidateOverviewRollup conn tx ts
+        OverviewHistoryRollupStore.invalidateOverviewRollup conn tx ts
         true
 
 // --- Store ------------------------------------------------------------------------------------
@@ -625,77 +519,6 @@ let private addColumnIfMissing (conn: SqliteConnection) (table: string) (col: st
         use cmd = conn.CreateCommand()
         cmd.CommandText <- $"ALTER TABLE %s{table} ADD COLUMN %s{col} %s{decl};"
         cmd.ExecuteNonQuery() |> ignore
-
-let private derivedTableShapes =
-    [ "overview_history_rows", [ "bucket"; "tasks"; "agents" ]
-      "overview_history_state",
-      [ "id"
-        "schema_version"
-        "resolution_seconds"
-        "source_generation"
-        "published_generation"
-        "complete_through"
-        "earliest_dirty" ]
-      "overview_history_staging", [ "generation"; "bucket"; "tasks"; "agents" ]
-      "overview_history_session_bounds", [ "session_id"; "first_observed_at"; "last_observed_at" ] ]
-
-let private tableColumns (conn: SqliteConnection) table =
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- $"PRAGMA table_info(%s{table});"
-    use reader = cmd.ExecuteReader()
-    readRows reader (fun row -> row.GetString 1) []
-
-let private derivedShapesAreCurrent conn =
-    derivedTableShapes
-    |> List.forall (fun (table, expected) -> tableColumns conn table = expected)
-
-let private executeSql (conn: SqliteConnection) sql =
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- sql
-    cmd.ExecuteNonQuery() |> ignore
-
-let private observationBoundsAreValid (conn: SqliteConnection) =
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <-
-        "SELECT first_observed_at, last_observed_at FROM overview_history_session_bounds;"
-    use reader = cmd.ExecuteReader()
-
-    readRows reader (fun row -> row.GetString 0, row.GetString 1) []
-    |> List.forall (fun (firstText, lastText) ->
-        try
-            let first = parseIso firstText
-            let last = parseIso lastText
-            isoUtc first = firstText && isoUtc last = lastText && first <= last
-        with _ ->
-            false)
-
-let private derivedDataIsValid conn =
-    try
-        match readPublicationState conn None with
-        | Some state when isSupportedState state ->
-            publishedRowsAreValid conn state
-            && stagingRowsAreValid conn state.SourceGeneration
-            && observationBoundsAreValid conn
-        | _ -> false
-    with _ ->
-        false
-
-let private resetDerivedSchema (conn: SqliteConnection) =
-    use tx = conn.BeginTransaction()
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- dropDerivedSchemaSql + derivedSchemaSql
-    cmd.ExecuteNonQuery() |> ignore
-    tx.Commit()
-
-let private ensureDerivedSchema conn =
-    if derivedShapesAreCurrent conn then
-        executeSql conn derivedSchemaSql
-
-        if not (derivedDataIsValid conn) then
-            resetDerivedSchema conn
-    else
-        resetDerivedSchema conn
 
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
@@ -742,7 +565,7 @@ type SessionActivityStore(dbPath: string) =
         addColumnIfMissing c "session_status" "intent_ts" "TEXT"
         addColumnIfMissing c "session_status" "title_text" "TEXT"
         addColumnIfMissing c "session_status" "title_ts" "TEXT"
-        ensureDerivedSchema c
+        OverviewHistoryRollupStore.ensureSchema c
         c
 
     /// Run a related group of internal reads against one stable deferred WAL snapshot.
@@ -773,37 +596,10 @@ type SessionActivityStore(dbPath: string) =
                         overviewWorkerLease.Release() |> ignore) }
 
     member internal _.RebuildOverviewRollupObservationBounds() : unit =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction(deferred = false)
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <-
-            """
-DELETE FROM overview_history_session_bounds;
-INSERT INTO overview_history_session_bounds
-    (session_id, first_observed_at, last_observed_at)
-SELECT session_id, min(ts), max(ts)
-FROM (
-    SELECT session_id, ts FROM activity_events
-    UNION ALL
-    SELECT session_id, ts FROM session_liveness
-)
-GROUP BY session_id;
-"""
-        cmd.ExecuteNonQuery() |> ignore
-        tx.Commit()
+        OverviewHistoryRollupStore.rebuildObservationBounds openConn
 
     member internal _.OverviewRollupState() : PublicationState =
-        use conn = openConn ()
-
-        match readPublicationState conn None with
-        | Some state when isSupportedState state -> state
-        | _ ->
-            raise (
-                InvalidDataException(
-                    "Overview history publication state has an unsupported schema or resolution."
-                )
-            )
+        OverviewHistoryRollupStore.publicationState openConn
 
     /// Append one exact dense batch to the single-generation durable candidate range.
     member internal _.StageOverviewRollup
@@ -811,21 +607,21 @@ GROUP BY session_id;
             candidate: RollupCandidate,
             rows: StagedRollupRow list
         ) : StagingResult =
-        stageCandidate openConn candidate rows
+        OverviewHistoryRollupStore.stageCandidate openConn candidate rows
 
     /// Atomically replace the candidate range only while its source generation is still current.
     member internal _.PublishOverviewRollup(candidate: RollupCandidate) : PublicationResult =
-        publishCandidate openConn candidate
+        OverviewHistoryRollupStore.publishCandidate openConn candidate
 
     /// Atomically replace every published row with one complete retained-horizon rebuild.
     member internal _.ReplaceOverviewRollup(candidate: RollupCandidate) : PublicationResult =
-        replacePublishedCandidate openConn candidate
+        OverviewHistoryRollupStore.replacePublishedCandidate openConn candidate
 
     member internal _.DiscardOverviewRollupStaging() : unit =
-        discardStaging openConn
+        OverviewHistoryRollupStore.discardStaging openConn
 
     member internal _.PruneOverviewRollup(oldestRetained: DateTimeOffset) : int =
-        prunePublishedRows openConn oldestRetained
+        OverviewHistoryRollupStore.prunePublishedRows openConn oldestRetained
 
     /// Read publication metadata and rows from one WAL snapshot. The callback is a deterministic
     /// test seam for committing a publisher after metadata is read but before rows are read.
@@ -835,7 +631,7 @@ GROUP BY session_id;
             endBoundary: DateTimeOffset,
             ?afterStateRead: unit -> unit
         ) : PublicationState * RollupRow list =
-        readPublishedSnapshot
+        OverviewHistoryRollupStore.readPublishedSnapshot
             openConn
             startBoundary
             endBoundary
@@ -858,8 +654,8 @@ GROUP BY session_id;
         let inserted = appendEvent conn tx row
 
         if inserted then
-            upsertObservationBounds conn tx row.SessionId row.Ts
-            invalidateOverviewRollup conn tx row.Ts
+            OverviewHistoryRollupStore.upsertObservationBounds conn tx row.SessionId row.Ts
+            OverviewHistoryRollupStore.invalidateOverviewRollup conn tx row.Ts
 
         tx.Commit()
         inserted
@@ -881,8 +677,8 @@ GROUP BY session_id;
             upsertCmd.CommandText <- upsertSql
             bindUpsert upsertCmd stored
             upsertCmd.ExecuteNonQuery() |> ignore
-            upsertObservationBounds conn tx row.SessionId row.Ts
-            invalidateOverviewRollup conn tx row.Ts
+            OverviewHistoryRollupStore.upsertObservationBounds conn tx row.SessionId row.Ts
+            OverviewHistoryRollupStore.invalidateOverviewRollup conn tx row.Ts
 
         tx.Commit()
         inserted
@@ -910,8 +706,8 @@ GROUP BY session_id;
             let inserted = livenessCmd.ExecuteNonQuery() = 1
 
             if inserted then
-                upsertObservationBounds conn tx sessionId lastSeen
-                invalidateOverviewRollup conn tx lastSeen
+                OverviewHistoryRollupStore.upsertObservationBounds conn tx sessionId lastSeen
+                OverviewHistoryRollupStore.invalidateOverviewRollup conn tx lastSeen
 
         tx.Commit()
 
@@ -1089,7 +885,7 @@ GROUP BY session_id;
         use conn = openConn ()
         use tx = conn.BeginTransaction()
         appendTaskSnapshot conn tx ts tasks
-        invalidateOverviewRollup conn tx ts
+        OverviewHistoryRollupStore.invalidateOverviewRollup conn tx ts
         tx.Commit()
 
     member _.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =

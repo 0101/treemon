@@ -119,6 +119,8 @@ upsert and liveness/status updates are transactional. Hourly retention removes r
 than 60 days while preserving the latest old status event for each retained session and the latest old
 task snapshot as history baselines. Raw retention is serialized with active Overview rollup
 reconstruction so a multi-batch rebuild cannot lose inputs between snapshots.
+The disposable `overview_history_*` schema and publication operations live in
+`OverviewHistoryRollupStore`; `SessionActivityStore` coordinates them with raw-source transactions.
 
 ### Worktree projection
 
@@ -153,7 +155,8 @@ footer fallback. `OverviewHistory` uses the same openness collapse and per-sessi
 | `src/Extension/reporting/reporting-core.mjs` | Pure nonblank message-report construction. |
 | `src/Server/SessionActivity.fs` | Event domain, pure fold, effective activity, freshness, and active selection. |
 | `src/Server/SessionActivityService.fs` | Request validation, ordering paths, mailbox ingestion, and lifecycle. |
-| `src/Server/SessionActivityStore.fs` | SQLite persistence, migrations, queries, and retention. |
+| `src/Server/SessionActivityStore.fs` | Raw SQLite persistence, queries, retention, and rollup facade. |
+| `src/Server/OverviewHistoryRollupStore.fs` | Disposable Overview rollup schema, validation, invalidation metadata, staging, publication, and reads. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, activity/footer projection, and resume lookup. |
 | `src/Server/RefreshScheduler.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, history API, and resume command wiring. |
