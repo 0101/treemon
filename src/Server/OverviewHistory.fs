@@ -10,7 +10,7 @@ open OverviewData
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-let sampleBucketCount = 288
+let sampleBucketCount = OverviewHistoryRollup.sampleIntervalCount
 
 let tasksChanged (last: TaskCount list option) (current: TaskCount list) : bool =
     match last with
@@ -202,3 +202,16 @@ let sample
             ))
     |> fun boundaries -> reconstructAt boundaries taskSnapshots events liveness
     |> collapseEqualSnapshots
+
+let fromPublishedRows
+    anchor
+    (rows: OverviewHistoryRollup.RollupRow list)
+    : OverviewHistoryResponse =
+    { Anchor = anchor
+      Snapshots =
+        rows
+        |> List.map (fun row ->
+            { Timestamp = row.Boundary
+              Tasks = row.Tasks
+              Agents = row.Agents })
+        |> collapseEqualSnapshots }

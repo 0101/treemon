@@ -2,10 +2,14 @@ module Tests.OverviewHistoryIntegrationTests
 
 open System
 open System.IO
+open System.Threading
+open System.Threading.Tasks
+open Microsoft.Data.Sqlite
 open NUnit.Framework
 open Shared
 open OverviewData
 open Server
+open Server.OverviewHistoryRollup
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Tests.OverviewTestHelpers
@@ -19,13 +23,14 @@ type OverviewHistoryIntegrationTests() =
     let tc kind count : TaskCount = { Kind = kind; Count = count }
     let ac kind count : AgentCount = { Kind = kind; Count = count }
 
-    let withStore (action: SessionActivityStore -> unit) =
+    let withStorePath (action: string -> SessionActivityStore -> unit) =
         let directory = Path.Combine(Path.GetTempPath(), $"treemon-overview-history-{Guid.NewGuid()}")
         Directory.CreateDirectory directory |> ignore
-        let store = new SessionActivityStore(Path.Combine(directory, "activity.db"))
+        let path = Path.Combine(directory, "activity.db")
+        let store = new SessionActivityStore(path)
 
         try
-            action store
+            action path store
         finally
             (store :> IDisposable).Dispose()
 
@@ -33,6 +38,19 @@ type OverviewHistoryIntegrationTests() =
                 Directory.Delete(directory, true)
             with _ ->
                 ()
+
+    let withStore (action: SessionActivityStore -> unit) =
+        withStorePath (fun _ store -> action store)
+
+    let execute path sql =
+        use connection =
+            new SqliteConnection(
+                SqliteConnectionStringBuilder(DataSource = path, Pooling = false).ConnectionString
+            )
+        connection.Open()
+        use command = connection.CreateCommand()
+        command.CommandText <- sql
+        command.ExecuteNonQuery() |> ignore
 
     let stored sid worktree status updatedAt lastSeen : StoredStatus =
         { SessionId = SessionId sid
@@ -53,7 +71,55 @@ type OverviewHistoryIntegrationTests() =
     let readHistory (store: SessionActivityStore) (window: HistoryWindow) =
         let duration = HistoryWindow.duration window
         let inputs = store.QueryOverviewHistoryInputs(anchor - duration, anchor)
-        WorktreeApi.buildOverviewHistoryResponse anchor window inputs
+
+        { OverviewHistoryResponse.Anchor = anchor
+          Snapshots =
+            OverviewHistory.sample
+                anchor
+                duration
+                inputs.TaskSnapshots
+                inputs.Events
+                inputs.Liveness }
+
+    let rollupRow boundary count : RollupRow =
+        { Boundary = boundary
+          Tasks = [ tc TaskBucketKind.Planned count ]
+          Agents = [] }
+
+    let publishRows (store: SessionActivityStore) generation (rows: RollupRow list) =
+        let candidate =
+            { Generation = generation
+              StartBoundary = rows.Head.Boundary
+              EndBoundary = (List.last rows).Boundary }
+
+        let stagedRows =
+            rows
+            |> List.map (fun row ->
+                { Generation = generation
+                  Row = row })
+
+        match store.StageOverviewRollup(candidate, stagedRows) with
+        | StagingResult.Staged -> ()
+        | StagingResult.SourceGenerationChanged current ->
+            failwith $"Expected generation {generation} to stage, but source generation is {current}."
+
+        match store.PublishOverviewRollup candidate with
+        | PublicationResult.Published state -> state
+        | PublicationResult.SourceGenerationChanged current ->
+            failwith $"Expected generation {generation} to publish, but source generation is {current}."
+
+    let publishDense
+        (store: SessionActivityStore)
+        startBoundary
+        endBoundary
+        countAt
+        =
+        let generation = store.OverviewRollupState().SourceGeneration
+
+        boundaries startBoundary endBoundary
+        |> Seq.mapi (fun index boundary -> rollupRow boundary (countAt index))
+        |> Seq.toList
+        |> publishRows store generation
 
     [<Test>]
     member _.``task snapshots round trip as count only JSON``() =
@@ -67,7 +133,7 @@ type OverviewHistoryIntegrationTests() =
             ))
 
     [<Test>]
-    member _.``API read samples store changes at boundaries and returns its supplied anchor``() =
+    member _.``raw oracle samples store changes at boundaries and returns its supplied anchor``() =
         withStore (fun store ->
             let window = HistoryWindow.duration HistoryWindow.Hours12
             let start = anchor - window
@@ -93,43 +159,271 @@ type OverviewHistoryIntegrationTests() =
                 )))
 
     [<Test>]
-    member _.``API history cache preserves an anchored snapshot until expiration``() =
+    member _.``published API anchors at complete-through and collapses selected values``() =
         withStore (fun store ->
             let cache = OverviewHistoryCache.create ()
-            let initialTasks = [ tc TaskBucketKind.Planned 1 ]
-            let changedTasks = [ tc TaskBucketKind.Planned 2 ]
+            let start = anchor - HistoryWindow.duration HistoryWindow.Hours12
 
-            store.AppendTaskSnapshot(anchor.AddHours(-1.0), initialTasks)
+            publishDense store start anchor (fun index ->
+                if index < 5 then 1
+                elif index = 5 then 2
+                else 3)
+            |> ignore
 
-            let first =
-                WorktreeApi.overviewHistoryCachedAt cache (Some store) anchor HistoryWindow.Hours12
+            let response =
+                WorktreeApi.overviewHistoryCached cache store HistoryWindow.Hours12
                 |> Async.RunSynchronously
 
-            store.AppendTaskSnapshot(anchor.AddMinutes(-1.0), changedTasks)
+            Assert.Multiple(fun () ->
+                Assert.That(response.Anchor, Is.EqualTo anchor)
+                Assert.That(
+                    response.Snapshots,
+                    Is.EqualTo
+                        [ { Timestamp = start
+                            Tasks = [ tc TaskBucketKind.Planned 1 ]
+                            Agents = [] }
+                          { Timestamp = start.AddMinutes 2.5
+                            Tasks = [ tc TaskBucketKind.Planned 2 ]
+                            Agents = [] }
+                          { Timestamp = start.AddMinutes 5.0
+                            Tasks = [ tc TaskBucketKind.Planned 3 ]
+                            Agents = [] } ]
+                )
+                Assert.That(response.Snapshots.Length, Is.LessThanOrEqualTo(sampleIntervalCount + 1))))
 
-            let hit =
-                WorktreeApi.overviewHistoryCachedAt
+    [<Test>]
+    member _.``published store selects exactly 289 rows at each window stride``() =
+        withStore (fun store ->
+            let start = anchor - HistoryWindow.duration HistoryWindow.Hours72
+            publishDense store start anchor (fun _ -> 1) |> ignore
+
+            [ HistoryWindow.Hours12; HistoryWindow.Hours24; HistoryWindow.Hours72 ]
+            |> List.iter (fun window ->
+                let rows =
+                    store.UsePublishedOverviewRollupSnapshot(
+                        window,
+                        fun _ _ readRows -> async { return readRows () }
+                    )
+                    |> Async.RunSynchronously
+
+                let expectedStep =
+                    TimeSpan.FromSeconds(int64 (resolutionSeconds * stride window))
+
+                Assert.Multiple(fun () ->
+                    Assert.That(rows.Length, Is.EqualTo(sampleIntervalCount + 1))
+                    Assert.That(rows.Head.Boundary, Is.EqualTo(anchor - HistoryWindow.duration window))
+                    Assert.That((List.last rows).Boundary, Is.EqualTo anchor)
+                    Assert.That(
+                        rows
+                        |> List.pairwise
+                        |> List.forall (fun (left, right) -> right.Boundary - left.Boundary = expectedStep),
+                        Is.True
+                    ))))
+
+    [<Test>]
+    member _.``published identity and selected rows share one read snapshot``() =
+        withStore (fun store ->
+            let currentAnchor = latestCompleteBoundary DateTimeOffset.UtcNow
+            let start = currentAnchor - HistoryWindow.duration HistoryWindow.Hours12
+            publishDense store start currentAnchor (fun _ -> 1) |> ignore
+
+            store.AppendTaskSnapshot(currentAnchor, [ tc TaskBucketKind.Planned 9 ])
+            let repairGeneration = store.OverviewRollupState().SourceGeneration
+            let repairCandidate =
+                { Generation = repairGeneration
+                  StartBoundary = currentAnchor
+                  EndBoundary = currentAnchor }
+            let repairRows =
+                [ { Generation = repairGeneration
+                    Row = rollupRow currentAnchor 9 } ]
+
+            match store.StageOverviewRollup(repairCandidate, repairRows) with
+            | StagingResult.Staged -> ()
+            | StagingResult.SourceGenerationChanged current ->
+                failwith $"Expected repair generation {repairGeneration}, but source generation is {current}."
+
+            let oldState, oldAnchor, oldRows =
+                store.UsePublishedOverviewRollupSnapshot(
+                    HistoryWindow.Hours12,
+                    (fun state observedAnchor readRows ->
+                        async {
+                            return state, observedAnchor, readRows ()
+                        }),
+                    afterStateRead =
+                        (fun () ->
+                            match store.PublishOverviewRollup repairCandidate with
+                            | PublicationResult.Published _ -> ()
+                            | PublicationResult.SourceGenerationChanged current ->
+                                failwith $"Expected repair publication, but source generation is {current}.")
+                )
+                |> Async.RunSynchronously
+
+            let newState, newAnchor, newRows =
+                store.UsePublishedOverviewRollupSnapshot(
+                    HistoryWindow.Hours12,
+                    fun state observedAnchor readRows ->
+                        async {
+                            return state, observedAnchor, readRows ()
+                        }
+                )
+                |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(oldState.PublishedGeneration, Is.Zero)
+                Assert.That(oldAnchor, Is.EqualTo currentAnchor)
+                Assert.That((List.last oldRows).Tasks, Is.EqualTo [ tc TaskBucketKind.Planned 1 ])
+                Assert.That(newState.PublishedGeneration, Is.EqualTo repairGeneration)
+                Assert.That(newAnchor, Is.EqualTo currentAnchor)
+                Assert.That((List.last newRows).Tasks, Is.EqualTo [ tc TaskBucketKind.Planned 9 ])))
+
+    [<Test>]
+    member _.``published cache hits avoid row reads and publication changes invalidate``() =
+        withStore (fun store ->
+            let cache = OverviewHistoryCache.create ()
+            let start = anchor - HistoryWindow.duration HistoryWindow.Hours12
+            publishDense store start anchor (fun _ -> 1) |> ignore
+            // The store invokes this seam only when the publication-keyed cache actually reads rows.
+            let mutable rowReads = 0
+            let beforeRowsRead () = Interlocked.Increment(&rowReads) |> ignore
+
+            let first =
+                WorktreeApi.overviewHistoryCachedWith
+                    beforeRowsRead
                     cache
-                    (Some store)
-                    (anchor.AddSeconds 29.0)
+                    store
                     HistoryWindow.Hours12
                 |> Async.RunSynchronously
 
-            let refreshed =
-                WorktreeApi.overviewHistoryCachedAt
+            let hit =
+                WorktreeApi.overviewHistoryCachedWith
+                    beforeRowsRead
                     cache
-                    (Some store)
-                    (anchor.AddSeconds 30.0)
+                    store
+                    HistoryWindow.Hours12
+                |> Async.RunSynchronously
+
+            let nextAnchor = anchor + resolution
+            let publishedGeneration = store.OverviewRollupState().PublishedGeneration
+            publishRows store publishedGeneration [ rollupRow nextAnchor 9 ] |> ignore
+
+            let repaired =
+                WorktreeApi.overviewHistoryCachedWith
+                    beforeRowsRead
+                    cache
+                    store
                     HistoryWindow.Hours12
                 |> Async.RunSynchronously
 
             Assert.Multiple(fun () ->
                 Assert.That(hit, Is.EqualTo first)
-                Assert.That(refreshed.Anchor, Is.EqualTo(anchor.AddSeconds 30.0))
-                Assert.That((List.last refreshed.Snapshots).Tasks, Is.EqualTo changedTasks)))
+                Assert.That(rowReads, Is.EqualTo 2)
+                Assert.That(repaired.Anchor, Is.EqualTo nextAnchor)
+                Assert.That((List.last repaired.Snapshots).Timestamp, Is.EqualTo nextAnchor)
+                Assert.That(
+                    (List.last repaired.Snapshots).Tasks,
+                    Is.EqualTo [ tc TaskBucketKind.Planned 9 ]
+                )))
 
     [<Test>]
-    member _.``API read carries task status and liveness lookbacks to the left edge``() =
+    member _.``simultaneous published API misses perform one row read``() =
+        withStore (fun store ->
+            let cache = OverviewHistoryCache.create ()
+            let start = anchor - HistoryWindow.duration HistoryWindow.Hours12
+            publishDense store start anchor (fun _ -> 1) |> ignore
+            // Concurrent cache callbacks require one shared atomic read counter.
+            let mutable rowReads = 0
+
+            let requests =
+                [ 1..8 ]
+                |> List.map (fun _ ->
+                    WorktreeApi.overviewHistoryCachedWith
+                        (fun () -> Interlocked.Increment(&rowReads) |> ignore)
+                        cache
+                        store
+                        HistoryWindow.Hours12
+                    |> Async.StartAsTask)
+
+            let responses = Task.WhenAll requests |> Async.AwaitTask |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(rowReads, Is.EqualTo 1)
+                Assert.That(responses |> Array.distinct, Has.Length.EqualTo 1)))
+
+    [<Test>]
+    member _.``real published API fails when publication is missing``() =
+        withStore (fun store ->
+            let error =
+                Assert.Throws<InvalidDataException>(fun () ->
+                    WorktreeApi.overviewHistoryCached
+                        (OverviewHistoryCache.create ())
+                        store
+                        HistoryWindow.Hours12
+                    |> Async.RunSynchronously
+                    |> ignore)
+
+            Assert.That(error.Message, Is.EqualTo "Overview history has no published rollup."))
+
+    [<Test>]
+    member _.``incomplete publication fails instead of returning partial history``() =
+        withStore (fun store ->
+            let start = anchor - HistoryWindow.duration HistoryWindow.Hours12
+            publishDense store (start + resolution) anchor (fun _ -> 1) |> ignore
+
+            let error =
+                Assert.Throws<InvalidDataException>(fun () ->
+                    WorktreeApi.overviewHistoryCached
+                        (OverviewHistoryCache.create ())
+                        store
+                        HistoryWindow.Hours12
+                    |> Async.RunSynchronously
+                    |> ignore)
+
+            Assert.That(
+                error.Message,
+                Is.EqualTo "Overview history publication does not completely cover the requested window."
+            ))
+
+    [<Test>]
+    member _.``demo history keeps its empty response``() =
+        let api =
+            WorktreeApi.readOnlyApi
+                "demo mode"
+                (fun () -> async { return Unchecked.defaultof<DashboardResponse> })
+                (fun () -> async { return Map.empty })
+
+        let response =
+            api.getOverviewHistory HistoryWindow.Hours72
+            |> Async.RunSynchronously
+
+        Assert.That(response.Snapshots, Is.Empty)
+
+    [<Test>]
+    member _.``published API reads no raw history tables``() =
+        withStorePath (fun path store ->
+            let start = anchor - HistoryWindow.duration HistoryWindow.Hours12
+            publishDense store start anchor (fun _ -> 1) |> ignore
+
+            execute
+                path
+                """
+DROP TABLE activity_events;
+DROP TABLE session_liveness;
+DROP TABLE task_snapshots;
+"""
+
+            let response =
+                WorktreeApi.overviewHistoryCached
+                    (OverviewHistoryCache.create ())
+                    store
+                    HistoryWindow.Hours12
+                |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(response.Anchor, Is.EqualTo anchor)
+                Assert.That(response.Snapshots.Length, Is.EqualTo 1)))
+
+    [<Test>]
+    member _.``raw oracle carries task status and liveness lookbacks to the left edge``() =
         withStore (fun store ->
             let window = HistoryWindow.duration HistoryWindow.Hours12
             let start = anchor - window
@@ -230,7 +524,7 @@ type OverviewHistoryIntegrationTests() =
                 ()
 
     [<Test>]
-    member _.``API read honors all supported windows and the hard output bound``() =
+    member _.``raw oracle honors all supported windows and the hard output bound``() =
         withStore (fun store ->
             store.AppendTaskSnapshot(anchor.AddDays(-4.0), [ tc TaskBucketKind.Planned 1 ])
 

@@ -22,14 +22,18 @@ type OverviewHistoryCacheTests() =
                 Tasks = [ { Kind = TaskBucketKind.Planned; Count = count } ]
                 Agents = [] } ] }
 
-    let get cache now window compute =
-        OverviewHistoryCache.get cache now window compute
+    let cacheKey window generation at =
+        OverviewHistoryCache.key window generation at
+
+    let get cache key compute =
+        OverviewHistoryCache.get cache key compute
         |> Async.StartAsTask
 
     [<Test>]
-    member _.``simultaneous callers share one in-flight computation and response``() =
+    member _.``simultaneous callers for one publication share one computation``() =
         task {
             let cache = OverviewHistoryCache.create ()
+            let key = cacheKey HistoryWindow.Hours12 4L anchor
             // Concurrent callbacks require one shared atomic invocation counter.
             let mutable calls = 0
             let started = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -45,7 +49,7 @@ type OverviewHistoryCacheTests() =
 
             let requests =
                 [ 1..8 ]
-                |> List.map (fun _ -> get cache anchor HistoryWindow.Hours12 compute)
+                |> List.map (fun _ -> get cache key compute)
 
             do! started.Task.WaitAsync timeout
             Assert.That(calls, Is.EqualTo 1)
@@ -60,31 +64,57 @@ type OverviewHistoryCacheTests() =
         }
 
     [<Test>]
-    member _.``entry expires from its response anchor rather than its last hit``() =
+    member _.``same publication key is an immediate cache hit``() =
         task {
             let cache = OverviewHistoryCache.create ()
+            let key = cacheKey HistoryWindow.Hours24 7L anchor
             // Cache recomputations require a counter retained across async callbacks.
             let mutable calls = 0
 
             let compute () =
                 async {
-                    let generation = Interlocked.Increment(&calls)
-                    let responseAnchor =
-                        if generation = 1 then anchor
-                        else anchor.AddSeconds 30.0
-
-                    return response responseAnchor generation
+                    return response anchor (Interlocked.Increment(&calls))
                 }
 
-            let! first = get cache anchor HistoryWindow.Hours24 compute
-            let! hit = get cache (anchor.AddSeconds 29.0) HistoryWindow.Hours24 compute
-            let! refreshed = get cache (anchor.AddSeconds 30.0) HistoryWindow.Hours24 compute
+            let! first = get cache key compute
+
+            let! hit =
+                get cache key (fun () ->
+                    async {
+                        return failwith "matching publication should be cached"
+                    })
 
             Assert.Multiple(fun () ->
                 Assert.That(hit, Is.EqualTo first)
-                Assert.That(refreshed.Anchor, Is.EqualTo(anchor.AddSeconds 30.0))
-                Assert.That(refreshed, Is.Not.EqualTo first)
-                Assert.That(calls, Is.EqualTo 2))
+                Assert.That(calls, Is.EqualTo 1))
+        }
+
+    [<Test>]
+    member _.``generation and complete-through bucket each invalidate a window entry``() =
+        task {
+            let cache = OverviewHistoryCache.create ()
+            // Publication changes require a counter retained across async callbacks.
+            let mutable calls = 0
+
+            let compute at () =
+                async {
+                    return response at (Interlocked.Increment(&calls))
+                }
+
+            let generation1 = cacheKey HistoryWindow.Hours72 1L anchor
+            let generation2 = cacheKey HistoryWindow.Hours72 2L anchor
+            let nextBucket = cacheKey HistoryWindow.Hours72 2L (anchor.AddSeconds 30.0)
+
+            let! first = get cache generation1 (compute anchor)
+            let! repaired = get cache generation2 (compute anchor)
+            let! advanced = get cache nextBucket (compute (anchor.AddSeconds 30.0))
+
+            Assert.Multiple(fun () ->
+                Assert.That(first.Snapshots.Head.Tasks.Head.Count, Is.EqualTo 1)
+                Assert.That(repaired.Snapshots.Head.Tasks.Head.Count, Is.EqualTo 2)
+                Assert.That(advanced.Snapshots.Head.Tasks.Head.Count, Is.EqualTo 3)
+                Assert.That(calls, Is.EqualTo 3)
+                Assert.That(OverviewHistoryCache.entryCount cache, Is.EqualTo 1))
         }
 
     [<Test>]
@@ -94,18 +124,6 @@ type OverviewHistoryCacheTests() =
             // Independent async window callbacks require one shared atomic counter.
             let mutable calls = 0
 
-            let compute window () =
-                async {
-                    let count = Interlocked.Increment(&calls)
-                    let offset =
-                        match window with
-                        | HistoryWindow.Hours12 -> 12.0
-                        | HistoryWindow.Hours24 -> 24.0
-                        | HistoryWindow.Hours72 -> 72.0
-
-                    return response (anchor.AddHours offset) count
-                }
-
             let windows =
                 [ HistoryWindow.Hours12
                   HistoryWindow.Hours24
@@ -113,18 +131,27 @@ type OverviewHistoryCacheTests() =
 
             let! first =
                 windows
-                |> List.map (fun window -> get cache anchor window (compute window))
+                |> List.map (fun window ->
+                    get
+                        cache
+                        (cacheKey window 3L anchor)
+                        (fun () ->
+                            async {
+                                return response anchor (Interlocked.Increment(&calls))
+                            }))
                 |> Task.WhenAll
 
             let! hits =
                 windows
                 |> List.map (fun window ->
-                    get cache (anchor.AddSeconds 1.0) window (fun () -> async { return failwith "cache miss" }))
+                    get
+                        cache
+                        (cacheKey window 3L anchor)
+                        (fun () -> async { return failwith "cache miss" }))
                 |> Task.WhenAll
 
             Assert.Multiple(fun () ->
                 Assert.That(hits, Is.EqualTo first)
-                Assert.That(first |> Array.map _.Anchor |> Array.distinct, Has.Length.EqualTo 3)
                 Assert.That(calls, Is.EqualTo 3)
                 Assert.That(OverviewHistoryCache.entryCount cache, Is.EqualTo 3))
         }
@@ -133,6 +160,7 @@ type OverviewHistoryCacheTests() =
     member _.``failed computation is evicted so the next request retries``() =
         task {
             let cache = OverviewHistoryCache.create ()
+            let key = cacheKey HistoryWindow.Hours72 9L anchor
             // Retry callbacks require an attempt counter retained after failure.
             let mutable calls = 0
 
@@ -149,13 +177,13 @@ type OverviewHistoryCacheTests() =
             let! firstError =
                 task {
                     try
-                        let! _ = get cache anchor HistoryWindow.Hours72 compute
+                        let! _ = get cache key compute
                         return None
                     with ex ->
                         return Some ex.Message
                 }
 
-            let! retried = get cache anchor HistoryWindow.Hours72 compute
+            let! retried = get cache key compute
 
             Assert.Multiple(fun () ->
                 Assert.That(firstError, Is.EqualTo(Some "first attempt failed"))

@@ -637,6 +637,26 @@ type SessionActivityStore(dbPath: string) =
             endBoundary
             (defaultArg afterStateRead ignore)
 
+    /// Read publication identity and, on a cache miss, only the selected rows for one history
+    /// window from the same deferred WAL snapshot.
+    member internal _.UsePublishedOverviewRollupSnapshot
+        (
+            window: OverviewData.HistoryWindow,
+            useSnapshot:
+                PublicationState ->
+                DateTimeOffset ->
+                (unit -> RollupRow list) ->
+                Async<'T>,
+            ?afterStateRead: unit -> unit,
+            ?beforeRowsRead: unit -> unit
+        ) : Async<'T> =
+        OverviewHistoryRollupStore.usePublishedSnapshot
+            openConn
+            window
+            (defaultArg afterStateRead ignore)
+            (defaultArg beforeRowsRead ignore)
+            useSnapshot
+
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).
     member _.UpsertStatus(stored: StoredStatus) : unit =

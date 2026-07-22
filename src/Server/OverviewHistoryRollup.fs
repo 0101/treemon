@@ -9,6 +9,9 @@ let schemaVersion = 1
 [<Literal>]
 let resolutionSeconds = 30
 
+[<Literal>]
+let sampleIntervalCount = 288
+
 let resolution = TimeSpan.FromSeconds(int64 resolutionSeconds)
 let exposedHorizon = HistoryWindow.duration HistoryWindow.Hours72
 let predecessorRetention = resolution
@@ -114,6 +117,16 @@ let stride =
     | HistoryWindow.Hours12 -> 5
     | HistoryWindow.Hours24 -> 10
     | HistoryWindow.Hours72 -> 30
+
+let selectedBoundaries window anchor =
+    if not (isBoundary anchor) then
+        invalidArg (nameof anchor) "Overview history sampling requires a canonical anchor."
+
+    let step = TimeSpan.FromSeconds(int64 (resolutionSeconds * stride window))
+    let start = anchor - HistoryWindow.duration window
+
+    [ 0..sampleIntervalCount ]
+    |> List.map (fun index -> start + TimeSpan.FromTicks(step.Ticks * int64 index))
 
 let oldestExposedBoundary (anchor: DateTimeOffset) =
     latestCompleteBoundary anchor - exposedHorizon

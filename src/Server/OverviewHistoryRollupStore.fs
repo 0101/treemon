@@ -629,6 +629,57 @@ ORDER BY bucket;
               Agents = parseAgents (row.GetString 2) })
         []
 
+let private readSelectedPublishedRows
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    window
+    anchor
+    =
+    let expected = selectedBoundaries window anchor
+    let startBoundary = List.head expected
+    let stepSeconds = int64 (resolutionSeconds * stride window)
+
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <-
+        """
+SELECT bucket, tasks, agents
+FROM overview_history_rows
+WHERE bucket >= $start
+  AND bucket <= $end
+  AND ((bucket - $start) % $step) = 0
+ORDER BY bucket
+LIMIT $limit;
+"""
+    cmd.Parameters.AddWithValue("$start", toBucket startBoundary) |> ignore
+    cmd.Parameters.AddWithValue("$end", toBucket anchor) |> ignore
+    cmd.Parameters.AddWithValue("$step", stepSeconds) |> ignore
+    cmd.Parameters.AddWithValue("$limit", sampleIntervalCount + 1) |> ignore
+    use reader = cmd.ExecuteReader()
+
+    let rows =
+        readRows
+            reader
+            (fun row ->
+                let boundary =
+                    tryFromBucket (row.GetInt64 0)
+                    |> Option.defaultWith (fun () ->
+                        raise (InvalidDataException("Overview history contains an invalid published bucket.")))
+
+                { Boundary = boundary
+                  Tasks = parseTasks (row.GetString 1)
+                  Agents = parseAgents (row.GetString 2) })
+            []
+
+    if rows |> List.map _.Boundary <> expected then
+        raise (
+            InvalidDataException(
+                "Overview history publication does not completely cover the requested window."
+            )
+        )
+
+    rows
+
 let internal readPublishedSnapshot
     (openConnection: unit -> SqliteConnection)
     startBoundary
@@ -647,6 +698,37 @@ let internal readPublishedSnapshot
     let rows = readPublishedRows conn tx startBoundary endBoundary
     tx.Commit()
     state, rows
+
+let internal usePublishedSnapshot
+    (openConnection: unit -> SqliteConnection)
+    window
+    afterStateRead
+    beforeRowsRead
+    useSnapshot
+    =
+    async {
+        use conn = openConnection ()
+        use tx = conn.BeginTransaction(deferred = true)
+        let state = requirePublicationState conn tx
+        afterStateRead ()
+
+        let anchor =
+            state.CompleteThrough
+            |> Option.defaultWith (fun () ->
+                raise (
+                    InvalidDataException(
+                        "Overview history has no published rollup."
+                    )
+                ))
+
+        let readRows () =
+            beforeRowsRead ()
+            readSelectedPublishedRows conn tx window anchor
+
+        let! result = useSnapshot state anchor readRows
+        tx.Commit()
+        return result
+    }
 
 let internal upsertObservationBounds
     (conn: SqliteConnection)
