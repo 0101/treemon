@@ -25,6 +25,7 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
+    <Compile Include="SqliteStorage.fs" />
     <Compile Include="OverviewHistoryRollup.fs" />
     <Compile Include="OverviewHistoryRollupStore.fs" />
     <Compile Include="SessionActivityStore.fs" />

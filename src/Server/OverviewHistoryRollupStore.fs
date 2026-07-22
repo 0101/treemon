@@ -1,26 +1,12 @@
 module Server.OverviewHistoryRollupStore
 
 open System
-open System.Globalization
 open System.IO
 open Microsoft.Data.Sqlite
 open Server.SessionActivity
 open Server.OverviewHistoryRollup
+open Server.SqliteStorage
 open Shared
-
-let private isoUtc (timestamp: DateTimeOffset) =
-    timestamp.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
-
-let private parseIso (value: string) =
-    DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
-
-let rec private readRows
-    (reader: SqliteDataReader)
-    (map: SqliteDataReader -> 'T)
-    (acc: 'T list)
-    =
-    if reader.Read() then readRows reader map (map reader :: acc)
-    else List.rev acc
 
 let private derivedSchemaSql =
     $"""

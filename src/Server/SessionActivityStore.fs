@@ -2,12 +2,12 @@ module Server.SessionActivityStore
 
 open System
 open System.IO
-open System.Globalization
 open System.Threading
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
 open Server.OverviewHistoryRollup
+open Server.SqliteStorage
 
 // The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
 // upserts the per-session fold result and appends the raw event to the authoritative source tables:
@@ -64,15 +64,6 @@ type internal OverviewHistoryInputs =
       Liveness: (SessionId * DateTimeOffset) list }
 
 // --- Serialisation helpers --------------------------------------------------------------------
-
-// Timestamps are stored as UTC round-trip ("O") strings. Normalising to UTC gives every value the
-// same fixed-width "+00:00" suffix, so lexical string comparison equals chronological order — which
-// is what the `ts >= $start` window query and the `last_seen >= $cutoff` live filter rely on.
-let internal isoUtc (dto: DateTimeOffset) =
-    dto.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
-
-let internal parseIso (s: string) =
-    DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
 
 let private statusText =
     function
@@ -413,11 +404,6 @@ ORDER BY last_seen;
 """
 
 // --- Reader / binder helpers ------------------------------------------------------------------
-
-// Drain the reader through an immutable recursive accumulator instead of a mutable list-building
-// loop, then restore source order.
-let rec internal readRows (reader: SqliteDataReader) (map: SqliteDataReader -> 'T) (acc: 'T list) : 'T list =
-    if reader.Read() then readRows reader map (map reader :: acc) else List.rev acc
 
 // Bind an activity_events row's parameters onto a prepared command — shared by AppendEvent and the
 // transactional AppendAndUpsert so the two paths can never drift.

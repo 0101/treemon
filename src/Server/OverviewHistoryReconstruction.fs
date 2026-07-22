@@ -5,6 +5,7 @@ open Microsoft.Data.Sqlite
 open Server.OverviewHistoryRollup
 open Server.SessionActivity
 open Server.SessionActivityStore
+open Server.SqliteStorage
 open Shared
 
 [<Literal>]

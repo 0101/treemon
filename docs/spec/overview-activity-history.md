@@ -162,7 +162,8 @@ Every source mutation uses the same transaction as generation and dirty-range ma
 Dirty boundaries use a shared ceiling-to-grid function and clamp to the retained exposed baseline.
 Event and liveness mutations maintain session observation bounds; task mutations do not.
 `SessionActivityStore` remains the facade that coordinates these derived updates with authoritative
-raw-source writes.
+raw-source writes. `SqliteStorage` owns the shared UTC timestamp encoding/parsing and immutable
+reader draining used by both stores and reconstruction.
 
 ### Reconstruction and compaction
 
@@ -236,6 +237,7 @@ comparisons. Run it in Release with a `Category=Performance` test filter and det
 | `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract. |
 | `src/Server/OverviewHistory.fs` | Pure sampler oracle and response collapsing. |
 | `src/Server/OverviewHistoryRollup.fs` | Count model, grid arithmetic, serialization, and candidate validation. |
+| `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/OverviewHistoryRollupStore.fs` | Derived schema, invariant validation/reset, source invalidation metadata, staging, publication, retention, and published reads. |
 | `src/Server/OverviewHistoryReconstruction.fs` | Stable-snapshot indexed source reads and dense count reconstruction. |
 | `src/Server/OverviewHistoryRollupWorker.fs` | Serialized startup backfill, boundary wake loop, conflict recovery, and retention coordination. |

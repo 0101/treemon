@@ -9,6 +9,7 @@ open Server
 open Server.OverviewHistoryRollup
 open Server.SessionActivity
 open Server.SessionActivityStore
+open Server.SqliteStorage
 open Shared
 open Tests.OverviewTestHelpers
 

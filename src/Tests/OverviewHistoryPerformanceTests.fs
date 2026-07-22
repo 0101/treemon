@@ -17,6 +17,7 @@ open Server
 open Server.OverviewHistoryRollup
 open Server.OverviewHistoryRollupWorker
 open Server.SessionActivityStore
+open Server.SqliteStorage
 
 [<Literal>]
 let private sessionCount = 130
