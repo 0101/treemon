@@ -748,7 +748,12 @@ let internal invalidateOverviewRollup
     (tx: SqliteTransaction)
     sourceTimestamp
     =
-    let dirty = dirtyBoundary DateTimeOffset.UtcNow sourceTimestamp
+    let clampAnchor =
+        (requirePublicationState conn tx).CompleteThrough
+        |> Option.defaultWith (fun () ->
+            latestCompleteBoundary DateTimeOffset.UtcNow)
+
+    let dirty = dirtyBoundary clampAnchor sourceTimestamp
     use cmd = conn.CreateCommand()
     cmd.Transaction <- tx
     cmd.CommandText <- invalidateOverviewRollupSql

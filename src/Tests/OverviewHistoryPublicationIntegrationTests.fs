@@ -368,6 +368,53 @@ type OverviewHistoryPublicationIntegrationTests() =
                 finalSources)
 
     [<Test>]
+    member _.``lagging published anchor repairs concurrent late write at the visible 72-hour left edge``() =
+        withDbPath (fun path ->
+            let publishedAnchor =
+                latestCompleteBoundary(
+                    DateTimeOffset.UtcNow.AddHours(-2.0)
+                )
+
+            let repairAnchor = publishedAnchor + resolution
+            let publishedLeftEdge = oldestExposedBoundary publishedAnchor
+
+            use store = new SessionActivityStore(path)
+            store.AppendTaskSnapshot(publishedAnchor.AddHours(-80.0), tc 1)
+            // The worker hook arms one source write between reconstruction and staging.
+            let mutable injectLateWrite = false
+
+            let hooks =
+                { noHooks with
+                    BeforeStage =
+                        fun _ ->
+                            if injectLateWrite then
+                                injectLateWrite <- false
+                                store.AppendTaskSnapshot(publishedLeftEdge, tc 2) }
+
+            let clock = TestClock(publishedAnchor)
+            use worker = createWorker store clock.Clock hooks
+            worker.Backfill TestContext.CurrentContext.CancellationToken
+            |> ignore
+
+            clock.AdvanceTo repairAnchor
+            injectLateWrite <- true
+            let repaired =
+                worker.Backfill TestContext.CurrentContext.CancellationToken
+
+            let response = readApi store HistoryWindow.Hours72
+            let snapshot = response.Snapshots |> List.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(injectLateWrite, Is.False)
+                Assert.That(repaired.EarliestDirty, Is.EqualTo None)
+                Assert.That(response.Anchor, Is.EqualTo repairAnchor)
+                Assert.That(
+                    snapshot.Timestamp,
+                    Is.EqualTo(oldestExposedBoundary repairAnchor)
+                )
+                Assert.That(snapshot.Tasks, Is.EqualTo(tc 2))))
+
+    [<Test>]
     member _.``generation change after partial staging retries without losing dirty work``() =
         withDbPath (fun path ->
             let anchor = latestCompleteBoundary DateTimeOffset.UtcNow
