@@ -119,26 +119,22 @@ button { font: inherit; }
 }
 
 .workspace {
-    display: grid;
-    grid-template-columns: minmax(220px, 290px) minmax(0, 1fr);
     min-height: 0;
-}
-
-.navigator {
-    display: flex;
-    min-width: 0;
-    min-height: 0;
-    flex-direction: column;
-    border-right: 1px solid var(--border);
-    background: var(--bg-surface);
+    overflow: hidden;
+    background: var(--bg-deep);
 }
 
 .navigator-heading {
+    position: sticky;
+    top: 0;
+    z-index: 4;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: .75rem .8rem .5rem;
+    padding: .75rem .8rem;
+    border-bottom: 1px solid var(--border);
     color: var(--text-muted);
+    background: var(--bg-surface);
     font-size: .68rem;
     font-weight: 700;
     letter-spacing: .06em;
@@ -147,37 +143,57 @@ button { font: inherit; }
 
 .file-list {
     min-height: 0;
-    padding: 0 .45rem .7rem;
-    overflow: auto;
+    padding: .55rem;
+}
+
+.file-item {
+    min-width: 0;
+    margin: .35rem 0;
+}
+
+.file-heading {
+    margin: 0;
+    font: inherit;
 }
 
 .file-entry {
     display: grid;
     width: 100%;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: .3rem .5rem;
     align-items: center;
-    margin: .15rem 0;
     padding: .55rem .58rem;
-    border: 1px solid transparent;
+    border: 1px solid var(--border);
     border-radius: 7px;
     text-align: left;
     color: var(--text-secondary);
-    background: transparent;
+    background: var(--bg-surface);
     cursor: pointer;
+}
+
+.file-entry::before {
+    content: "›";
+    color: var(--text-muted);
+    font-size: .9rem;
+    line-height: 1;
+    transition: transform .12s ease;
 }
 
 .file-entry:hover,
 .file-entry:focus-visible {
     outline: none;
-    border-color: var(--border);
+    border-color: var(--accent);
     background: var(--bg-elevated);
 }
 
 .file-entry.active {
     border-color: var(--accent);
+    border-bottom-right-radius: 0;
+    border-bottom-left-radius: 0;
     background: rgba(203, 166, 247, .12);
 }
+
+.file-entry.active::before { transform: rotate(90deg); }
 
 .file-path {
     overflow: hidden;
@@ -188,7 +204,7 @@ button { font: inherit; }
 }
 
 .old-path {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     overflow: hidden;
     color: var(--text-muted);
     font-family: Consolas, "Courier New", monospace;
@@ -219,9 +235,19 @@ button { font: inherit; }
     background: var(--bg-deep);
 }
 
+.file-panel {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--accent);
+    border-top: 0;
+    border-bottom-right-radius: 7px;
+    border-bottom-left-radius: 7px;
+    background: var(--bg-deep);
+}
+
 .state-card {
     display: grid;
-    min-height: 100%;
+    min-height: 180px;
     place-content: center;
     gap: .45rem;
     padding: 2rem;
@@ -408,8 +434,6 @@ button { font: inherit; }
 @media (max-width: 720px) {
     .toolbar { flex-wrap: wrap; }
     .title { flex: 1 0 calc(100% - 80px); }
-    .workspace { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 28vh) minmax(0, 1fr); }
-    .navigator { border-right: 0; border-bottom: 1px solid var(--border); }
 }
 </style>
 <script src="/assets/diff2html/3.4.52/diff2html.min.js"></script>
@@ -428,17 +452,17 @@ button { font: inherit; }
         <button id="refresh" class="refresh-button" type="button">Refresh</button>
     </header>
     <div class="workspace">
-        <aside class="navigator" aria-label="Changed files">
+        <main id="content" class="content" aria-label="Changed files">
             <div class="navigator-heading">
                 <span>Changed files</span>
                 <span id="file-count">0</span>
             </div>
             <div id="file-list" class="file-list"></div>
-        </aside>
-        <main id="content" class="content">
-            <div class="state-card" data-state="loading-summary">
-                <div class="spinner" aria-hidden="true"></div>
-                <div class="state-title">Loading changed files…</div>
+            <div id="summary-state" aria-live="polite">
+                <div class="state-card" data-state="loading-summary">
+                    <div class="spinner" aria-hidden="true"></div>
+                    <div class="state-title">Loading changed files…</div>
+                </div>
             </div>
         </main>
     </div>
@@ -457,7 +481,9 @@ var state = {
     view: readViewPreference(),
     fileRequest: 0,
     fileAbort: null,
-    summaryRequest: 0
+    summaryRequest: 0,
+    selectedButton: null,
+    panel: null
 };
 var highlighterPromise = null;
 
@@ -501,7 +527,7 @@ function setView(view) {
 }
 
 function replaceContent(node) {
-    document.getElementById('content').replaceChildren(node);
+    (state.panel || document.getElementById('summary-state')).replaceChildren(node);
 }
 
 function renderState(status, title, detail, loading) {
@@ -532,7 +558,10 @@ function renderState(status, title, detail, loading) {
 function clearNavigator() {
     state.summary = null;
     state.selected = null;
+    state.selectedButton = null;
+    state.panel = null;
     document.getElementById('file-list').replaceChildren();
+    document.getElementById('summary-state').replaceChildren();
     document.getElementById('file-count').textContent = '0';
 }
 
@@ -543,11 +572,21 @@ function changeLabel(change) {
 function renderFileList(files) {
     var list = document.getElementById('file-list');
     list.replaceChildren();
-    files.forEach(function(file) {
+    files.forEach(function(file, index) {
+        var item = document.createElement('section');
+        item.className = 'file-item';
+        item.dataset.identity = file.identity;
+
+        var heading = document.createElement('h2');
+        heading.className = 'file-heading';
+
         var button = document.createElement('button');
         button.type = 'button';
         button.className = 'file-entry';
         button.dataset.identity = file.identity;
+        button.id = 'file-header-' + index;
+        button.setAttribute('aria-expanded', 'false');
+        button.setAttribute('aria-controls', 'file-panel-' + index);
         button.title = file.oldDisplayPath
             ? file.oldDisplayPath + ' → ' + file.displayPath
             : file.displayPath;
@@ -569,21 +608,51 @@ function renderFileList(files) {
             button.appendChild(oldPath);
         }
 
-        button.addEventListener('click', function() { selectFile(file); });
-        list.appendChild(button);
+        button.addEventListener('click', function() { selectFile(file, button, item); });
+        button.addEventListener('keydown', function(event) {
+            var buttons = Array.from(list.querySelectorAll('.file-entry'));
+            var current = buttons.indexOf(button);
+            var target = null;
+            if (event.key === 'ArrowDown') target = buttons[(current + 1) % buttons.length];
+            else if (event.key === 'ArrowUp') target = buttons[(current - 1 + buttons.length) % buttons.length];
+            else if (event.key === 'Home') target = buttons[0];
+            else if (event.key === 'End') target = buttons[buttons.length - 1];
+            if (target) {
+                event.preventDefault();
+                target.focus();
+            }
+        });
+
+        heading.appendChild(button);
+        item.appendChild(heading);
+        list.appendChild(item);
     });
 }
 
-function markActiveFile(identity) {
-    document.querySelectorAll('.file-entry').forEach(function(button) {
-        button.classList.toggle('active', button.dataset.identity === identity);
-    });
+function mountFilePanel(button, item) {
+    if (state.selectedButton) {
+        state.selectedButton.classList.remove('active');
+        state.selectedButton.setAttribute('aria-expanded', 'false');
+    }
+    if (state.panel) state.panel.remove();
+
+    var panel = document.createElement('div');
+    panel.id = button.getAttribute('aria-controls');
+    panel.className = 'file-panel';
+    panel.setAttribute('role', 'region');
+    panel.setAttribute('aria-labelledby', button.id);
+    item.appendChild(panel);
+
+    button.classList.add('active');
+    button.setAttribute('aria-expanded', 'true');
+    state.selectedButton = button;
+    state.panel = panel;
 }
 
-function selectFile(file) {
+function selectFile(file, button, item) {
+    if (state.selectedButton !== button) mountFilePanel(button, item);
     state.selected = file;
     writeStorage(SELECTION_KEY, fileSelectionKey(file));
-    markActiveFile(file.identity);
     loadFile(file);
 }
 
@@ -874,7 +943,9 @@ function renderReadySummary(summary) {
 
     var stored = readStorage(SELECTION_KEY);
     var selected = files.find(function(file) { return fileSelectionKey(file) === stored; }) || files[0];
-    selectFile(selected);
+    var button = Array.from(document.querySelectorAll('.file-entry'))
+        .find(function(candidate) { return candidate.dataset.identity === selected.identity; });
+    selectFile(selected, button, button.closest('.file-item'));
 }
 
 async function loadSummary() {

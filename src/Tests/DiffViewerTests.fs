@@ -85,6 +85,16 @@ let private syntaxFile =
 let private secondFile =
     fileJson "id-2" "src/new-name.txt" (Some "src/old-name.txt") "renamed"
 
+let private refreshedFirstFile =
+    fileJson "id-1-refreshed" "src/a.txt" None "modified"
+
+let private refreshedSecondFile =
+    fileJson
+        "id-2-refreshed"
+        "src/new-name.txt"
+        (Some "src/old-name.txt")
+        "renamed"
+
 let private readySummaryJson files =
     JsonSerializer.Serialize(
         {| status = "ready"
@@ -237,7 +247,18 @@ type DiffViewerE2ETests() =
                 let uri = Uri(route.Request.Url)
                 let identity = Uri.UnescapeDataString(uri.Query.Substring("?identity=".Length))
                 let file =
-                    if identity = "id-2" then secondFile else firstFile
+                    if identity.StartsWith("id-2", StringComparison.Ordinal) then
+                        fileJson
+                            identity
+                            secondFile.displayPath
+                            secondFile.oldDisplayPath
+                            secondFile.change
+                    else
+                        fileJson
+                            identity
+                            firstFile.displayPath
+                            firstFile.oldDisplayPath
+                            firstFile.change
 
                 route.FulfillAsync(
                     RouteFulfillOptions(
@@ -488,12 +509,16 @@ type DiffViewerE2ETests() =
             do! this.RouteSummary(readySummaryJson [| firstFile |])
             do! this.RouteFiles()
             do! this.Goto()
+            do!
+                this.Page.Locator(
+                    "#patch[data-highlight-status='ready'], #patch[data-highlight-status='plain'], #patch[data-highlight-status='failed']"
+                ).WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
             let codeLine = this.Page.Locator("#patch .d2h-code-line-ctn").First
             do! CanvasTestHelpers.assertStandaloneSelectionUnavailable this.Page codeLine
         }
 
     [<Test>]
-    member this.``a valid prior selection is restored and a missing one falls back to the first file``() =
+    member this.``initial summary expands exactly one file and mounts exactly one patch``() =
         task {
             do! this.RouteHighlighter()
             do! this.RouteSummary(readySummaryJson [| firstFile; secondFile |])
@@ -501,22 +526,212 @@ type DiffViewerE2ETests() =
             do! this.Goto()
             do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
 
+            let! state =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.querySelector('.file-entry.active').dataset.identity,
+                        document.querySelector('.file-entry.active').getAttribute('aria-expanded'),
+                        String(document.querySelectorAll('.file-entry[aria-expanded="true"]').length),
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length)
+                    ]"""
+                )
+
+            Assert.That(state, Is.EqualTo([| "id-1"; "true"; "1"; "1"; "1" |]))
+        }
+
+    [<Test>]
+    member this.``pointer and keyboard switching replace the single expanded patch``() =
+        task {
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile; secondFile |])
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let second = this.Page.Locator(".file-entry[data-identity='id-2']")
+            do! second.ClickAsync()
+            do! second.Locator("xpath=..").Locator("xpath=..").Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let! pointerState =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.querySelector('.file-entry.active').dataset.identity,
+                        String(document.querySelectorAll('.file-entry[aria-expanded="true"]').length),
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length)
+                    ]"""
+                )
+
+            let first = this.Page.Locator(".file-entry[data-identity='id-1']")
+            do! first.FocusAsync()
+            do! first.PressAsync("Enter")
+            do! first.Locator("xpath=..").Locator("xpath=..").Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let! keyboardState =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.querySelector('.file-entry.active').dataset.identity,
+                        String(document.querySelectorAll('.file-entry[aria-expanded="true"]').length),
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length)
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(pointerState, Is.EqualTo([| "id-2"; "1"; "1"; "1" |]))
+                Assert.That(keyboardState, Is.EqualTo([| "id-1"; "1"; "1"; "1" |])))
+        }
+
+    [<Test>]
+    member this.``refresh restores by paths and change kind then falls back to the first file``() =
+        task {
+            let summaries =
+                [| readySummaryJson [| firstFile; secondFile |]
+                   readySummaryJson [| refreshedFirstFile; refreshedSecondFile |]
+                   readySummaryJson [| refreshedFirstFile |] |]
+            // The route callback owns the sequence of refreshed identity snapshots.
+            let mutable summaryIndex = 0
+
+            do! this.RouteHighlighter()
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary",
+                    fun route ->
+                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
+                        summaryIndex <- summaryIndex + 1
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
             do! this.Page.Locator(".file-entry[data-identity='id-2']").ClickAsync()
+            do! this.Page.Locator(".file-entry[data-identity='id-2'].active").WaitForAsync()
+            do! this.Page.Locator("#refresh").ClickAsync()
             do!
-                this.Page.Locator(".file-entry[data-identity='id-2'].active").WaitForAsync()
-            let! _ = this.Page.ReloadAsync()
-            do!
-                this.Page.Locator(".file-entry[data-identity='id-2'].active").WaitForAsync()
+                this.Page.Locator(".file-entry[data-identity='id-2-refreshed'].active").WaitForAsync()
 
-            do! this.Page.UnrouteAsync("**/diff-summary")
-            do! this.RouteSummary(readySummaryJson [| firstFile |])
-            let! _ = this.Page.ReloadAsync()
-            do!
-                this.Page.Locator(".file-entry[data-identity='id-1'].active").WaitForAsync()
-
-            let! selected =
+            let! restored =
                 this.Page.Locator(".file-entry.active").GetAttributeAsync("data-identity")
-            Assert.That(selected, Is.EqualTo("id-1"))
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            do!
+                this.Page.Locator(".file-entry[data-identity='id-1-refreshed'].active").WaitForAsync()
+
+            let! fallback =
+                this.Page.Locator(".file-entry.active").GetAttributeAsync("data-identity")
+            let! patchCount = this.Page.Locator("#patch").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(restored, Is.EqualTo("id-2-refreshed"))
+                Assert.That(fallback, Is.EqualTo("id-1-refreshed"))
+                Assert.That(patchCount, Is.EqualTo(1)))
+        }
+
+    [<Test>]
+    member this.``switching files aborts and replaces the in-flight patch request``() =
+        task {
+            let firstStarted =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseFirst =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let firstHandlerFinished =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__firstFileOutcome = null;
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            const request = originalFetch.apply(this, arguments);
+                            if (url.includes('diff-file?identity=id-1')) {
+                                request.then(
+                                    () => { window.__firstFileOutcome = 'completed'; },
+                                    error => { window.__firstFileOutcome = error.name; }
+                                );
+                            }
+                            return request;
+                        };
+                    })()"""
+                )
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile; secondFile |])
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-file?*",
+                    fun route ->
+                        task {
+                            let uri = Uri(route.Request.Url)
+                            let identity =
+                                Uri.UnescapeDataString(uri.Query.Substring("?identity=".Length))
+                            let file = if identity = "id-1" then firstFile else secondFile
+
+                            if identity = "id-1" then
+                                firstStarted.TrySetResult(true) |> ignore
+                                let! _ = releaseFirst.Task
+                                ()
+
+                            try
+                                do!
+                                    route.FulfillAsync(
+                                        RouteFulfillOptions(
+                                            ContentType = "application/json",
+                                            Body =
+                                                fileResultJson
+                                                    "text"
+                                                    file.identity
+                                                    file.displayPath
+                                                    file.oldDisplayPath
+                                                    file.change
+                                        )
+                                    )
+                            with _ ->
+                                ()
+
+                            if identity = "id-1" then
+                                firstHandlerFinished.TrySetResult(true) |> ignore
+                        }
+                        :> Task
+                )
+
+            do! this.Goto()
+            let! _ = firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+            do! this.Page.Locator(".file-entry[data-identity='id-2']").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__firstFileOutcome === 'AbortError'"
+                )
+            do!
+                this.Page.Locator(
+                    ".file-entry[data-identity='id-2'].active"
+                ).Locator("xpath=..").Locator("xpath=..").Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            releaseFirst.TrySetResult(true) |> ignore
+            let! _ = firstHandlerFinished.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+
+            let! replacementState =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        window.__firstFileOutcome,
+                        document.querySelector('.file-entry.active').dataset.identity,
+                        state.currentResult.file.identity,
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length)
+                    ]"""
+                )
+
+            Assert.That(
+                replacementState,
+                Is.EqualTo([| "AbortError"; "id-2"; "id-2"; "1"; "1" |])
+            )
         }
 
     [<TestCase("clean", "No changes")>]
@@ -531,7 +746,18 @@ type DiffViewerE2ETests() =
             let card = this.Page.Locator($"[data-state='{status}']")
             do! card.WaitForAsync()
             let! title = card.Locator(".state-title").TextContentAsync()
-            Assert.That(title, Is.EqualTo(expectedTitle))
+            let! accordionCounts =
+                this.Page.EvaluateAsync<int array>(
+                    """() => [
+                        document.querySelectorAll('.file-entry[aria-expanded="true"]').length,
+                        document.querySelectorAll('.file-panel').length,
+                        document.querySelectorAll('#patch').length
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(title, Is.EqualTo(expectedTitle))
+                Assert.That(accordionCounts, Is.EqualTo([| 0; 0; 0 |])))
         }
 
     [<TestCase("deleted", "")>]
