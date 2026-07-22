@@ -79,7 +79,8 @@ rollups.
   history. Demo and fixture modes may continue returning their existing empty history response.
 - Cache entries are keyed by history window, published generation, and complete-through bucket.
   Concurrent callers for one missing key share one computation. Publication or repair naturally
-  invalidates prior entries; failed computations are removed for retry.
+  invalidates prior entries after the newer computation succeeds. A newer in-flight or failed entry
+  does not evict the last successful older entry; failed computations are removed for retry.
 - The API wire type remains `OverviewHistoryResponse`; only `Anchor` changes from an arbitrary
   request instant to the latest published grid boundary.
 

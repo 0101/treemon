@@ -41,12 +41,17 @@ let private removeIfCurrent
     cacheKey
     entry
     =
+    // The ConcurrentDictionary is the cache's synchronized mutable boundary; pairwise removal is
+    // required to evict only the observed entry without deleting a newer concurrent replacement.
     (entries :> ICollection<KeyValuePair<Key, Entry>>)
         .Remove(KeyValuePair(cacheKey, entry))
     |> ignore
 
 let private identity cacheKey =
     cacheKey.PublishedGeneration, cacheKey.CompleteThroughBucket
+
+let private completedSuccessfully (entry: Entry) =
+    entry.IsValueCreated && entry.Value.IsCompletedSuccessfully
 
 let private trimWindow
     (Cache entries as cache)
@@ -58,7 +63,7 @@ let private trimWindow
     |> Seq.iter (fun pair ->
         if identity pair.Key < identity cacheKey then
             removeIfCurrent cache pair.Key pair.Value
-        else
+        elif completedSuccessfully pair.Value then
             removeIfCurrent cache cacheKey entry)
 
 let get

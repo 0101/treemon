@@ -190,3 +190,67 @@ type OverviewHistoryCacheTests() =
                 Assert.That(retried, Is.EqualTo(response anchor 2))
                 Assert.That(calls, Is.EqualTo 2))
         }
+
+    [<Test>]
+    member _.``failed newer publication retains the older successful cache entry``() =
+        task {
+            let cache = OverviewHistoryCache.create ()
+            let olderKey = cacheKey HistoryWindow.Hours12 10L anchor
+            let newerKey = cacheKey HistoryWindow.Hours12 11L anchor
+            // Deterministic concurrent callbacks require shared completion gates and counters.
+            let mutable olderCalls = 0
+            let mutable newerCalls = 0
+            let olderStarted = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let newerStarted = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseOlder = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let failNewer = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let older =
+                get cache olderKey (fun () ->
+                    async {
+                        Interlocked.Increment(&olderCalls) |> ignore
+                        olderStarted.SetResult(())
+                        do! releaseOlder.Task |> Async.AwaitTask
+                        return response anchor 10
+                    })
+
+            do! olderStarted.Task.WaitAsync timeout
+
+            let newer =
+                get cache newerKey (fun () ->
+                    async {
+                        Interlocked.Increment(&newerCalls) |> ignore
+                        newerStarted.SetResult(())
+                        do! failNewer.Task |> Async.AwaitTask
+                        return raise (InvalidOperationException "newer publication failed")
+                    })
+
+            do! newerStarted.Task.WaitAsync timeout
+            releaseOlder.SetResult(())
+            let! olderResponse = older
+
+            failNewer.SetResult(())
+
+            let! newerError =
+                task {
+                    try
+                        let! _ = newer
+                        return None
+                    with ex ->
+                        return Some ex.Message
+                }
+
+            let! olderHit =
+                get cache olderKey (fun () ->
+                    async {
+                        return failwith "older successful publication should remain cached"
+                    })
+
+            Assert.Multiple(fun () ->
+                Assert.That(olderResponse, Is.EqualTo(response anchor 10))
+                Assert.That(newerError, Is.EqualTo(Some "newer publication failed"))
+                Assert.That(olderHit, Is.EqualTo olderResponse)
+                Assert.That(olderCalls, Is.EqualTo 1)
+                Assert.That(newerCalls, Is.EqualTo 1)
+                Assert.That(OverviewHistoryCache.entryCount cache, Is.EqualTo 1))
+        }
