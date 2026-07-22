@@ -390,12 +390,19 @@ type OverviewHistorySourceInvalidationTests() =
             let anchor = latestCompleteBoundary DateTimeOffset.UtcNow
             let eventAt = anchor.AddMinutes(-1.0)
             let livenessAt = eventAt.AddSeconds 1.0
+            let usageAt = livenessAt.AddSeconds 1.0
             let taskAt = eventAt.AddMinutes(-1.0).AddTicks 1L
             let sessionId = SessionId "s1"
             let event = evt "event-1" "s1" "worktree-a" SessionLevelStatus.Working None eventAt
+            let usageStored =
+                { stored sessionId eventAt with
+                    Status.ContextUsage = Some { CurrentTokens = 100; TokenLimit = 200 }
+                    ContextUsageAt = Some usageAt
+                    LastSeen = usageAt }
 
-            Assert.That(store.AppendAndUpsert(event, stored sessionId eventAt), Is.True)
+            Assert.That(store.AppendAndUpsert(event, stored sessionId eventAt).IsSome, Is.True)
             store.RecordLiveness(sessionId, livenessAt)
+            store.UpsertContextUsage usageStored |> ignore
             Assert.That(
                 store.AppendTaskSnapshotIfChanged(taskAt, [ { Kind = TaskBucketKind.Planned; Count = 1 } ]),
                 Is.True
@@ -405,16 +412,17 @@ type OverviewHistorySourceInvalidationTests() =
             let stateAfterWrites = store.OverviewRollupState()
 
             Assert.Multiple(fun () ->
-                Assert.That(stateAfterWrites.SourceGeneration, Is.EqualTo 3L)
+                Assert.That(stateAfterWrites.SourceGeneration, Is.EqualTo 4L)
                 Assert.That(stateAfterWrites.EarliestDirty, Is.EqualTo(Some expectedDirty))
                 Assert.That(
                     observationBounds path sessionId,
-                    Is.EqualTo(Some(eventAt, livenessAt))
+                    Is.EqualTo(Some(eventAt, usageAt))
                 ))
 
-            Assert.That(store.AppendAndUpsert(event, stored sessionId eventAt), Is.False)
+            Assert.That(store.AppendAndUpsert(event, stored sessionId eventAt).IsNone, Is.True)
             store.RecordLiveness(sessionId, livenessAt)
             store.RecordLiveness(sessionId, eventAt)
+            store.UpsertContextUsage usageStored |> ignore
             Assert.That(
                 store.AppendTaskSnapshotIfChanged(anchor, [ { Kind = TaskBucketKind.Planned; Count = 1 } ]),
                 Is.False
@@ -425,11 +433,11 @@ type OverviewHistorySourceInvalidationTests() =
             Assert.Multiple(fun () ->
                 Assert.That(stateAfterNoOps, Is.EqualTo stateAfterWrites)
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 1)
-                Assert.That(scalarInt path "SELECT count(*) FROM session_liveness;", Is.EqualTo 1)
+                Assert.That(scalarInt path "SELECT count(*) FROM session_liveness;", Is.EqualTo 2)
                 Assert.That(scalarInt path "SELECT count(*) FROM task_snapshots;", Is.EqualTo 1)
                 Assert.That(
                     observationBounds path sessionId,
-                    Is.EqualTo(Some(eventAt, livenessAt))
+                    Is.EqualTo(Some(eventAt, usageAt))
                 )))
 
     [<Test>]

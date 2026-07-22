@@ -62,6 +62,15 @@ let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
       OccurredAt = ts t
       Event = ev }
 
+let private storedWithUsage sid worktree status updatedAt usage usageAt =
+    { SessionId = SessionId sid
+      WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+      Provider = CopilotCli
+      Status = { status with ContextUsage = Some usage }
+      UpdatedAt = updatedAt
+      LastSeen = usageAt
+      ContextUsageAt = Some usageAt }
+
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Program owns the shared store, so the fixture disposes it after the
@@ -701,6 +710,31 @@ type IngestTests() =
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 0))
 
+    [<Test>]
+    member _.``usage recreates a pruned row from the retained live session``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-pruned-context-worktree")
+        let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
+        let report eventId occurredAt event =
+            { SessionId = SessionId "s1"
+              WorktreePath = normalizedWorktree
+              Provider = CopilotCli
+              EventId = EventId eventId
+              OccurredAt = occurredAt
+              Event = event }
+
+        withService worktree (fun (svc, _, store) ->
+            svc.Submit(report "started" (now.AddMinutes(-1.0)) TurnStarted)
+            svc.LiveSnapshot() |> ignore
+            store.PruneOld now |> ignore
+            Assert.That(store.LoadLiveStatuses now, Is.Empty)
+            svc.Submit(report "usage" now (UsageInfo(90000, 200000)))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.LoadLiveStatuses now |> List.find (fun row -> row.SessionId = SessionId "s1")
+            Assert.That(persisted, Is.EqualTo(live))
+            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 90000; TokenLimit = 200000 })))
+
 
 // ── restart rebuild ───────────────────────────────────────────────────────────
 [<TestFixture>]
@@ -709,30 +743,104 @@ type IngestTests() =
 type RestartRebuildTests() =
 
     [<Test>]
-    member _.``Start rebuilds live status from the store and feeds the scheduler``() =
+    member _.``Start rebuilds live status and context usage from the store and feeds the scheduler``() =
         let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
+        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+        let usageAt = now.AddSeconds(-30.0)
+        let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
 
         let seed (store: SessionActivityStore) =
-            store.UpsertStatus
-                { SessionId = SessionId "s1"
-                  WorktreePath = WorktreePath "C:/wt/a"
-                  Provider = CopilotCli
-                  Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
-                  UpdatedAt = now.AddMinutes(-1.0)
-                  LastSeen = now.AddMinutes(-1.0)
-                  ContextUsageAt = None }
+            storedWithUsage "s1" worktree status (now.AddMinutes(-1.0)) usage usageAt
+            |> store.UpsertContextUsage
+            |> ignore
 
-        withServiceSeeded "C:/wt/a" seed (fun (svc, agent, _) ->
+        withServiceSeeded worktree seed (fun (svc, agent, _) ->
             svc.Start()
             // The in-memory fold map is primed, so a subsequent event folds onto the rebuilt state.
             let live = svc.LiveSnapshot()
             let restored = live |> Map.find (SessionId "s1")
             Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(restored.Status.Skill, Is.EqualTo(Some "investigate"))
+            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt))
             // And the card path (scheduler) sees it immediately, before any new event.
             match schedulerStatus agent "s1" with
-            | Some stored -> Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
+            | Some stored ->
+                Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
+                Assert.That(stored.Status.ContextUsage, Is.EqualTo(Some usage))
             | None -> Assert.Fail "restart rebuild did not feed the scheduler")
+
+    [<Test>]
+    member _.``An older usage report after restart cannot replace the restored snapshot``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
+        let usage = { CurrentTokens = 150000; TokenLimit = 200000 }
+        let usageAt = now.AddMinutes(-1.0)
+        let status = { emptyStatus with Status = SessionLevelStatus.Working }
+
+        let seed (store: SessionActivityStore) =
+            storedWithUsage "s1" worktree status (now.AddMinutes(-2.0)) usage usageAt
+            |> store.UpsertContextUsage
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, _, _) ->
+            svc.Start()
+            svc.Submit
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  EventId = EventId "older-usage"
+                  OccurredAt = usageAt.AddSeconds(-30.0)
+                  Event = UsageInfo(80000, 200000) }
+
+            let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt)))
+
+    [<Test>]
+    member _.``A status event revives all retained state outside the live restart window``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-retained-context-worktree")
+        let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
+        let usage = { CurrentTokens = 110000; TokenLimit = 200000 }
+        let usageAt = now - idleWindow - TimeSpan.FromMinutes 5.0
+        let status =
+            { Status = SessionLevelStatus.Idle
+              Skill = Some "investigate"
+              Intent = Some { Text = "diagnosing context persistence"; At = usageAt.AddMinutes(-4.0) }
+              Title = Some { Text = "Persist context info"; At = usageAt.AddMinutes(-3.0) }
+              LastUserMessage = Some { Text = "keep the context"; At = usageAt.AddMinutes(-2.0) }
+              LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
+              ContextUsage = None }
+
+        let seed (store: SessionActivityStore) =
+            storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt
+            |> store.UpsertContextUsage
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, agent, _) ->
+            svc.Start()
+            Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "s1"), Is.False)
+
+            svc.Submit
+                { SessionId = SessionId "s1"
+                  WorktreePath = normalizedWorktree
+                  Provider = CopilotCli
+                  EventId = EventId "revive"
+                  OccurredAt = now
+                  Event = TurnStarted }
+
+            let revived = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(revived.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
+            Assert.That(revived.Status.Skill, Is.EqualTo(status.Skill))
+            Assert.That(revived.Status.Intent, Is.EqualTo(status.Intent))
+            Assert.That(revived.Status.Title, Is.EqualTo(status.Title))
+            Assert.That(revived.Status.LastUserMessage, Is.EqualTo(status.LastUserMessage))
+            Assert.That(revived.Status.LastAssistantMessage, Is.EqualTo(status.LastAssistantMessage))
+            Assert.That(revived.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(revived.ContextUsageAt, Is.EqualTo(Some usageAt))
+            Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some revived)))
 
     [<Test>]
     member _.``a session quiet longer than the idle window is not rebuilt as live``() =
