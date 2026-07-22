@@ -373,6 +373,7 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
 let private handleCanvasRequest
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (diffHandlers: WorktreeDiffApi.Handlers)
+    diffResponseDeadlineMs
     (ctx: HttpContext)
     : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -385,13 +386,15 @@ let private handleCanvasRequest
         let worktreePathEncoded = catchAll.Substring(0, lastSlash)
         let filename = catchAll.Substring(lastSlash + 1)
         let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded |> Server.PathUtils.normalizePath
+        let diffDeadline =
+            ProcessRunner.createResponseDeadline diffResponseDeadlineMs
 
         let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
 
         if filename = "diff-summary" then
-            do! diffHandlers.Summary worktreePath isKnown ctx
+            do! diffHandlers.Summary diffDeadline worktreePath isKnown ctx
         elif filename = "diff-file" then
-            do! diffHandlers.File worktreePath isKnown ctx
+            do! diffHandlers.File diffDeadline worktreePath isKnown ctx
         elif filename = "beads-data" then
             if not isKnown then
                 ctx.Response.StatusCode <- 404
@@ -464,7 +467,8 @@ let private requireLoopbackHost
         Log.log "Canvas" "Rejected non-loopback Host header"
 }
 
-let internal createHost
+let internal createHostWithDiffDeadline
+    diffResponseDeadlineMs
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (service: WorktreeDiffApi.Service)
     newIdentity
@@ -493,11 +497,25 @@ let internal createHost
                         handleCanvasRequest
                             agent
                             diffHandlers
+                            diffResponseDeadlineMs
                     )
                 )
                 |> ignore)
             |> ignore)
         .Build()
+
+let internal createHost
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (service: WorktreeDiffApi.Service)
+    newIdentity
+    (canvasPort: int)
+    =
+    createHostWithDiffDeadline
+        ProcessRunner.argumentListResponseDeadlineMs
+        agent
+        service
+        newIdentity
+        canvasPort
 
 let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) (cts: System.Threading.CancellationToken) =
     let host =

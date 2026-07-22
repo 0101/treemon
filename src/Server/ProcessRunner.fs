@@ -10,6 +10,12 @@ let internal argumentListResponseDeadlineMs = 10_000
 let private maxArgumentListShutdownMs = 250
 let private maxArgumentListResponseReserveMs = 500
 
+type internal ResponseDeadline =
+    private
+        { ExpiresAt: int64
+          ResponseReserveMs: int
+          ShutdownReserveMs: int }
+
 type CaptureStream =
     | StandardOutput
     | StandardError
@@ -27,6 +33,38 @@ type ArgumentListOutput =
 type private BoundedCapture =
     { Bytes: byte[]
       LimitExceeded: bool }
+
+let private responseReserveMs responseDeadlineMs =
+    min
+        maxArgumentListResponseReserveMs
+        (max 1 (responseDeadlineMs / 4))
+
+let private shutdownReserveMs responseDeadlineMs =
+    min
+        maxArgumentListShutdownMs
+        (max 1 (responseDeadlineMs / 8))
+
+let internal createResponseDeadline responseDeadlineMs =
+    let durationMs = max 1 responseDeadlineMs
+
+    { ExpiresAt =
+        Stopwatch.GetTimestamp()
+        + int64 durationMs * Stopwatch.Frequency / 1_000L
+      ResponseReserveMs = responseReserveMs durationMs
+      ShutdownReserveMs = shutdownReserveMs durationMs }
+
+let internal responseDeadlineRemainingMs deadline =
+    let remainingTicks =
+        deadline.ExpiresAt - Stopwatch.GetTimestamp()
+
+    if remainingTicks <= 0L then
+        0
+    else
+        int
+            ((remainingTicks * 1_000L
+              + Stopwatch.Frequency
+              - 1L)
+             / Stopwatch.Frequency)
 
 let private truncate (s: string) =
     if s.Length > 200 then s[..199] + "..." else s
@@ -176,6 +214,28 @@ let private observeCapture (captureTask: Tasks.Task<BoundedCapture>) =
             return ()
     }
 
+let private observeCapturesWithin
+    timeoutMs
+    (captureTasks: Tasks.Task<BoundedCapture> array)
+    =
+    task {
+        if timeoutMs > 0 then
+            let observation =
+                captureTasks
+                |> Array.map observeCapture
+                |> Tasks.Task.WhenAll
+
+            let! completed =
+                Tasks.Task.WhenAny(
+                    observation,
+                    Tasks.Task.Delay(timeoutMs)
+                )
+
+            if obj.ReferenceEquals(completed, observation) then
+                let! _ = observation
+                return ()
+    }
+
 /// Runs a process without shell argument parsing. Output capture is bounded and
 /// timeout cancellation terminates the complete process tree.
 let private runArgumentListCore
@@ -189,6 +249,8 @@ let private runArgumentListCore
     (workingDirectory: string option)
     : Async<Result<ArgumentListOutput, ArgumentListFailure>> =
     async {
+        let executionStopwatch = Stopwatch.StartNew()
+
         try
             let psi =
                 ProcessStartInfo(
@@ -207,7 +269,17 @@ let private runArgumentListCore
             if not (proc.Start()) then
                 return Error(StartFailed "Process did not start")
             else
-                use cts = new CancellationTokenSource(timeoutMs)
+                use cts = new CancellationTokenSource()
+
+                let remainingTimeoutMs =
+                    timeoutMs
+                    - int executionStopwatch.ElapsedMilliseconds
+
+                if remainingTimeoutMs <= 0 then
+                    cts.Cancel()
+                else
+                    cts.CancelAfter(remainingTimeoutMs)
+
                 let stdoutTask = captureBounded proc.StandardOutput.BaseStream stdoutLimitBytes cts.Token
                 let stderrTask = captureBounded proc.StandardError.BaseStream stderrLimitBytes cts.Token
 
@@ -233,20 +305,31 @@ let private runArgumentListCore
                 with :? OperationCanceledException ->
                     killProcessTree proc
 
-                    use killCts = new CancellationTokenSource(shutdownTimeoutMs)
+                    let remainingShutdownMs () =
+                        max
+                            0
+                            (timeoutMs
+                             + shutdownTimeoutMs
+                             - int executionStopwatch.ElapsedMilliseconds)
 
-                    try
-                        do! proc.WaitForExitAsync(killCts.Token) |> Async.AwaitTask
-                    with :? OperationCanceledException ->
-                        ()
+                    let exitWaitMs = remainingShutdownMs ()
+
+                    if exitWaitMs > 0 then
+                        use killCts =
+                            new CancellationTokenSource(exitWaitMs)
+
+                        try
+                            do!
+                                proc.WaitForExitAsync(killCts.Token)
+                                |> Async.AwaitTask
+                        with :? OperationCanceledException ->
+                            ()
 
                     do!
-                        Tasks.Task.WhenAll(
-                            [| observeCapture stdoutTask
-                               observeCapture stderrTask |]
-                        )
+                        observeCapturesWithin
+                            (remainingShutdownMs ())
+                            [| stdoutTask; stderrTask |]
                         |> Async.AwaitTask
-                        |> Async.Ignore
 
                     Log.log context $"{fileName} ({arguments.Length} args) -> timed out after {timeoutMs}ms"
                     return Error TimedOut
@@ -274,8 +357,8 @@ let runArgumentListWithTimeout
         arguments
         workingDirectory
 
-let internal runArgumentListWithResponseDeadline
-    (responseDeadlineMs: int)
+let internal runArgumentListWithinResponseDeadline
+    (deadline: ResponseDeadline)
     (stdoutLimitBytes: int)
     (stderrLimitBytes: int)
     (context: string)
@@ -283,24 +366,25 @@ let internal runArgumentListWithResponseDeadline
     (arguments: string list)
     (workingDirectory: string option)
     =
-    let responseReserveMs =
-        min maxArgumentListResponseReserveMs (max 1 (responseDeadlineMs / 4))
-
-    let shutdownTimeoutMs =
-        min maxArgumentListShutdownMs (max 1 (responseDeadlineMs / 8))
-
     let processTimeoutMs =
-        max 1 (responseDeadlineMs - responseReserveMs - shutdownTimeoutMs)
+        max
+            0
+            (responseDeadlineRemainingMs deadline
+             - deadline.ResponseReserveMs
+             - deadline.ShutdownReserveMs)
 
-    runArgumentListCore
-        processTimeoutMs
-        shutdownTimeoutMs
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory
+    if processTimeoutMs = 0 then
+        async.Return(Error TimedOut)
+    else
+        runArgumentListCore
+            processTimeoutMs
+            deadline.ShutdownReserveMs
+            stdoutLimitBytes
+            stderrLimitBytes
+            context
+            fileName
+            arguments
+            workingDirectory
 
 /// Argument-list process execution within the production 10-second response deadline.
 let runArgumentList
@@ -311,8 +395,8 @@ let runArgumentList
     (arguments: string list)
     (workingDirectory: string option)
     =
-    runArgumentListWithResponseDeadline
-        argumentListResponseDeadlineMs
+    runArgumentListWithinResponseDeadline
+        (createResponseDeadline argumentListResponseDeadlineMs)
         stdoutLimitBytes
         stderrLimitBytes
         context

@@ -75,6 +75,7 @@ let private mapDiffProcessFailure
         GitCaptureLimitExceeded(operation, stream)
 
 let private runDiffGit
+    (deadline: ProcessRunner.ResponseDeadline)
     (operation: WorktreeDiffOperation)
     (stdoutLimitBytes: int)
     (repoRoot: string)
@@ -85,7 +86,8 @@ let private runDiffGit
             [ "-C"; repoRoot; "-c"; "core.quotepath=false" ] @ arguments
 
         let! result =
-            ProcessRunner.runArgumentList
+            ProcessRunner.runArgumentListWithinResponseDeadline
+                deadline
                 stdoutLimitBytes
                 diffStderrLimitBytes
                 "WorktreeDiff"
@@ -127,10 +129,15 @@ let private trimSingleLine
         | [| line |] -> Ok line
         | _ -> Error(InvalidGitOutput operation))
 
-let private runRefExists (repoRoot: string) (gitRef: string) =
+let private runRefExists
+    (deadline: ProcessRunner.ResponseDeadline)
+    (repoRoot: string)
+    (gitRef: string)
+    =
     async {
         let! result =
-            ProcessRunner.runArgumentList
+            ProcessRunner.runArgumentListWithinResponseDeadline
+                deadline
                 smallGitCaptureLimitBytes
                 diffStderrLimitBytes
                 "WorktreeDiff"
@@ -156,13 +163,21 @@ let private runRefExists (repoRoot: string) (gitRef: string) =
                 Error(GitFailed(ResolveBase, output.ExitCode))
     }
 
-let private resolveDiffRemote (repoRoot: string) =
+let private resolveDiffRemote
+    (deadline: ProcessRunner.ResponseDeadline)
+    (repoRoot: string)
+    =
     async {
         match TreemonConfig.readUpstreamRemote repoRoot with
         | Some remote -> return Ok remote
         | None ->
             let! remotes =
-                runDiffGit ResolveRemote smallGitCaptureLimitBytes repoRoot [ "remote" ]
+                runDiffGit
+                    deadline
+                    ResolveRemote
+                    smallGitCaptureLimitBytes
+                    repoRoot
+                    [ "remote" ]
 
             return
                 remotes
@@ -172,13 +187,18 @@ let private resolveDiffRemote (repoRoot: string) =
     }
 
 let private resolveDiffBaseRef
+    (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
     (upstreamRemote: string)
     (baseBranch: string)
     =
     async {
         let remoteRef = GitWorktree.mainRef upstreamRemote baseBranch
-        let! remoteExists = runRefExists repoRoot $"refs/remotes/{remoteRef}"
+        let! remoteExists =
+            runRefExists
+                deadline
+                repoRoot
+                $"refs/remotes/{remoteRef}"
 
         match remoteExists with
         | Error error -> return Error error
@@ -187,7 +207,10 @@ let private resolveDiffBaseRef
                 if remoteExists then
                     async.Return(Ok false)
                 else
-                    runRefExists repoRoot $"refs/heads/{baseBranch}"
+                    runRefExists
+                        deadline
+                        repoRoot
+                        $"refs/heads/{baseBranch}"
 
             return
                 match localResult with
@@ -277,16 +300,23 @@ let private excludeGeneratedDiffViewer (entries: WorktreeDiffEntry list) =
     entries
     |> List.filter (fun entry -> entry.Path <> generatedDiffViewerPath)
 
-let getWorktreeDiffSummary
+let internal getWorktreeDiffSummaryWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
     : Async<Result<WorktreeDiffSummary, WorktreeDiffError>> =
     asyncResult {
-        let! upstreamRemote = resolveDiffRemote repoRoot
+        let! upstreamRemote = resolveDiffRemote deadline repoRoot
         let baseBranch = TreemonConfig.readBaseBranch repoRoot
-        let! baseRef = resolveDiffBaseRef repoRoot upstreamRemote baseBranch
+        let! baseRef =
+            resolveDiffBaseRef
+                deadline
+                repoRoot
+                upstreamRemote
+                baseBranch
 
         let! mergeBaseBytes =
             runDiffGit
+                deadline
                 ResolveMergeBase
                 smallGitCaptureLimitBytes
                 repoRoot
@@ -296,6 +326,7 @@ let getWorktreeDiffSummary
 
         let! trackedBytes =
             runDiffGit
+                deadline
                 EnumerateTracked
                 summaryCaptureLimitBytes
                 repoRoot
@@ -316,6 +347,7 @@ let getWorktreeDiffSummary
 
         let! untrackedBytes =
             runDiffGit
+                deadline
                 EnumerateUntracked
                 summaryCaptureLimitBytes
                 repoRoot
@@ -339,6 +371,12 @@ let getWorktreeDiffSummary
               MergeBase = mergeBase
               Files = sortDiffEntries files }
     }
+
+let getWorktreeDiffSummary (repoRoot: string) =
+    getWorktreeDiffSummaryWithinDeadline
+        (ProcessRunner.createResponseDeadline
+            ProcessRunner.argumentListResponseDeadlineMs)
+        repoRoot
 
 let private diffLineCount (bytes: byte[]) =
     if bytes.Length = 0 then
@@ -385,6 +423,7 @@ let private trackedDiffPaths entry =
     | _ -> [ entry.Path ]
 
 let private getTrackedDiffFile
+    (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
     (mergeBase: string)
     (entry: WorktreeDiffEntry)
@@ -392,6 +431,7 @@ let private getTrackedDiffFile
     async {
         let! patchResult =
             runDiffGit
+                deadline
                 LoadFile
                 maxWorktreeDiffBytes
                 repoRoot
@@ -585,11 +625,24 @@ let private getUntrackedDiffFile (repoRoot: string) (entry: WorktreeDiffEntry) =
                     | FileReadFailed -> Error FileUnavailable)
     }
 
-let getWorktreeDiffFile
+let internal getWorktreeDiffFileWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
     (mergeBase: string)
     (entry: WorktreeDiffEntry)
     : Async<Result<WorktreeDiffFile, WorktreeDiffError>> =
     match entry.Status with
     | Untracked -> getUntrackedDiffFile repoRoot entry
-    | _ -> getTrackedDiffFile repoRoot mergeBase entry
+    | _ -> getTrackedDiffFile deadline repoRoot mergeBase entry
+
+let getWorktreeDiffFile
+    (repoRoot: string)
+    (mergeBase: string)
+    (entry: WorktreeDiffEntry)
+    =
+    getWorktreeDiffFileWithinDeadline
+        (ProcessRunner.createResponseDeadline
+            ProcessRunner.argumentListResponseDeadlineMs)
+        repoRoot
+        mergeBase
+        entry

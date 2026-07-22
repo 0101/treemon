@@ -6,7 +6,8 @@ open Shared
 
 type internal Service =
     { GetSummary:
-        string
+        ProcessRunner.ResponseDeadline
+            -> string
             -> Async<
                 Result<
                     WorktreeDiff.WorktreeDiffSummary,
@@ -14,7 +15,8 @@ type internal Service =
                  >
              >
       GetFile:
-        string
+        ProcessRunner.ResponseDeadline
+            -> string
             -> string
             -> WorktreeDiff.WorktreeDiffEntry
             -> Async<
@@ -26,12 +28,14 @@ type internal Service =
 
 type internal Handlers =
     { Summary:
-        string
+        ProcessRunner.ResponseDeadline
+            -> string
             -> bool
             -> HttpContext
             -> System.Threading.Tasks.Task<unit>
       File:
-        string
+        ProcessRunner.ResponseDeadline
+            -> string
             -> bool
             -> HttpContext
             -> System.Threading.Tasks.Task<unit> }
@@ -264,8 +268,8 @@ let prune knownWorktrees =
     defaultIdentityStore.Value.Prune(knownWorktrees)
 
 let internal liveService =
-    { GetSummary = WorktreeDiff.getWorktreeDiffSummary
-      GetFile = WorktreeDiff.getWorktreeDiffFile }
+    { GetSummary = WorktreeDiff.getWorktreeDiffSummaryWithinDeadline
+      GetFile = WorktreeDiff.getWorktreeDiffFileWithinDeadline }
 
 let internal newOpaqueIdentity (_: WorktreeDiff.WorktreeDiffEntry) =
     System.Guid.NewGuid().ToString("N")
@@ -404,23 +408,81 @@ let private fileResult file =
         DiffFileResult.TimedOut file
     | Error _ -> DiffFileResult.GitError file
 
-let private writeJson (ctx: HttpContext) json = task {
-    ctx.Response.ContentType <- "application/json; charset=utf-8"
-    ctx.Response.Headers["Cache-Control"] <- "no-store"
-    do! ctx.Response.WriteAsync(json)
-}
+let private completeWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
+    (ctx: HttpContext)
+    =
+    task {
+        let completion = ctx.Response.CompleteAsync()
+        let remainingMs =
+            ProcessRunner.responseDeadlineRemainingMs deadline
+
+        if remainingMs <= 0 then
+            ctx.Abort()
+        else
+            let! completed =
+                System.Threading.Tasks.Task.WhenAny(
+                    completion,
+                    System.Threading.Tasks.Task.Delay(remainingMs)
+                )
+
+            if obj.ReferenceEquals(completed, completion) then
+                do! completion
+            else
+                ctx.Abort()
+    }
+
+let private writeResponse
+    (deadline: ProcessRunner.ResponseDeadline)
+    (ctx: HttpContext)
+    (contentType: string)
+    (content: string)
+    =
+    task {
+        let remainingMs =
+            ProcessRunner.responseDeadlineRemainingMs deadline
+
+        if remainingMs <= 0 then
+            ctx.Abort()
+        else
+            use cts =
+                System.Threading.CancellationTokenSource.CreateLinkedTokenSource(
+                    ctx.RequestAborted
+                )
+
+            cts.CancelAfter(remainingMs)
+            ctx.Response.ContentType <- contentType
+            ctx.Response.ContentLength <-
+                System.Text.Encoding.UTF8.GetByteCount(content)
+            ctx.Response.Headers["Cache-Control"] <- "no-store"
+
+            try
+                do! ctx.Response.WriteAsync(content, cts.Token)
+                do! completeWithinDeadline deadline ctx
+            with :? System.OperationCanceledException ->
+                ctx.Abort()
+    }
+
+let private writeJson deadline ctx json =
+    writeResponse
+        deadline
+        ctx
+        "application/json; charset=utf-8"
+        json
 
 let private writeError
+    (deadline: ProcessRunner.ResponseDeadline)
     (ctx: HttpContext)
     statusCode
     message
     =
-    task {
-        ctx.Response.StatusCode <- statusCode
-        ctx.Response.ContentType <- "text/plain; charset=utf-8"
-        ctx.Response.Headers["Cache-Control"] <- "no-store"
-        do! ctx.Response.WriteAsync(message)
-    }
+    ctx.Response.StatusCode <- statusCode
+
+    writeResponse
+        deadline
+        ctx
+        "text/plain; charset=utf-8"
+        message
 
 let private identityQuery (ctx: HttpContext) =
     if
@@ -453,22 +515,23 @@ let private handleSummary
     (service: Service)
     (store: DiffIdentityStore)
     newIdentity
+    deadline
     worktreePath
     isKnown
     (ctx: HttpContext)
     =
     task {
         if not isKnown then
-            do! writeError ctx 404 "Unknown worktree"
+            do! writeError deadline ctx 404 "Unknown worktree"
         else
             match viewerInstance ctx with
             | None ->
-                do! writeError ctx 400 "Invalid diff viewer"
+                do! writeError deadline ctx 400 "Invalid diff viewer"
             | Some _ when ctx.Request.Query.Count <> 0 ->
-                do! writeError ctx 400 "Unexpected query parameters"
+                do! writeError deadline ctx 400 "Unexpected query parameters"
             | Some viewer ->
                 let! result =
-                    service.GetSummary worktreePath
+                    service.GetSummary deadline worktreePath
                     |> Async.StartAsTask
 
                 let! response =
@@ -515,19 +578,20 @@ let private handleSummary
                 do!
                     response
                     |> serializeSummaryResult
-                    |> writeJson ctx
+                    |> writeJson deadline ctx
     }
 
 let private handleFile
     (service: Service)
     (store: DiffIdentityStore)
+    deadline
     worktreePath
     isKnown
     (ctx: HttpContext)
     =
     task {
         if not isKnown then
-            do! writeError ctx 404 "Unknown worktree"
+            do! writeError deadline ctx 404 "Unknown worktree"
         else
             match viewerInstance ctx, identityQuery ctx with
             | Some viewer, Some identity ->
@@ -541,19 +605,23 @@ let private handleFile
 
                 match resolved with
                 | None ->
-                    do! writeError ctx 404 "Unknown diff identity"
+                    do! writeError deadline ctx 404 "Unknown diff identity"
                 | Some (mergeBase, file, entry) ->
                     let! result =
-                        service.GetFile worktreePath mergeBase entry
+                        service.GetFile
+                            deadline
+                            worktreePath
+                            mergeBase
+                            entry
                         |> Async.StartAsTask
 
                     do!
                         result
                         |> fileResult file
                         |> serializeFileResult
-                        |> writeJson ctx
+                        |> writeJson deadline ctx
             | _ ->
-                do! writeError ctx 400 "Invalid diff-file query"
+                do! writeError deadline ctx 400 "Invalid diff-file query"
     }
 
 let internal createHandlersWithStore

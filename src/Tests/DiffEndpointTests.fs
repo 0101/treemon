@@ -5,7 +5,6 @@ open System.Diagnostics
 open System.IO
 open System.Net
 open System.Net.Http
-open System.Runtime.InteropServices
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
@@ -88,7 +87,8 @@ let private agentKnowing
 
     agent
 
-let private withDiffServer
+let private withDiffServerDeadline
+    responseDeadlineMs
     (worktreePaths: string list)
     (service: WorktreeDiffApi.Service)
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
@@ -98,7 +98,8 @@ let private withDiffServer
     let agent = agentKnowing worktreePaths
 
     use host =
-        CanvasDocServer.createHost
+        CanvasDocServer.createHostWithDiffDeadline
+            responseDeadlineMs
             agent
             service
             newIdentity
@@ -120,6 +121,19 @@ let private withDiffServer
             .GetAwaiter()
             .GetResult()
 
+let private withDiffServer
+    worktreePaths
+    service
+    newIdentity
+    action
+    =
+    withDiffServerDeadline
+        ProcessRunner.argumentListResponseDeadlineMs
+        worktreePaths
+        service
+        newIdentity
+        action
+
 let private fakeService
     (summary:
         Result<
@@ -133,8 +147,8 @@ let private fakeService
                 WorktreeDiff.WorktreeDiffError
              >)
     : WorktreeDiffApi.Service =
-    { GetSummary = fun _ -> async.Return summary
-      GetFile = fun _ _ entry -> async.Return(file entry) }
+    { GetSummary = fun _ _ -> async.Return summary
+      GetFile = fun _ _ _ entry -> async.Return(file entry) }
 
 let private summaryIdentity
     (displayPath: string)
@@ -404,46 +418,51 @@ type DiffEndpointHttpTests() =
         )
 
     [<Test>]
-    member _.``timeout summary completes within its response deadline without partial content``() =
+    member _.``earlier Git work consumes the shared deadline before a later command times out``() =
         let worktree = fakePath "timeout-deadline"
-        let responseDeadlineMs = 2_000
+        let responseDeadlineMs = 3_000
 
-        let fileName, arguments =
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-                "powershell",
-                [ "-NoProfile"
-                  "-Command"
-                  "Start-Sleep -Seconds 30" ]
-            else
-                "sh", [ "-c"; "sleep 30" ]
+        let runDelayedGit deadline seconds =
+            ProcessRunner.runArgumentListWithinResponseDeadline
+                deadline
+                1024
+                1024
+                "DiffEndpointDeadlineTest"
+                "git"
+                [ "-c"
+                  $"alias.pause=!sleep {seconds}"
+                  "pause" ]
+                None
 
         let service: WorktreeDiffApi.Service =
             { GetSummary =
-                fun _ ->
+                fun deadline _ ->
                     async {
-                        let! result =
-                            ProcessRunner.runArgumentListWithResponseDeadline
-                                responseDeadlineMs
-                                1024
-                                1024
-                                "DiffEndpointDeadlineTest"
-                                fileName
-                                arguments
-                                None
+                        let! earlier = runDelayedGit deadline 1
 
-                        return
-                            match result with
-                            | Error ProcessRunner.TimedOut ->
-                                Error(
-                                    WorktreeDiff.GitTimedOut
-                                        WorktreeDiff.ResolveRemote
-                                )
-                            | other ->
-                                failwith $"Expected process timeout, got {other}"
+                        match earlier with
+                        | Ok output when output.ExitCode = 0 ->
+                            let! later = runDelayedGit deadline 30
+
+                            return
+                                match later with
+                                | Error ProcessRunner.TimedOut ->
+                                    Error(
+                                        WorktreeDiff.GitTimedOut
+                                            WorktreeDiff.EnumerateTracked
+                                    )
+                                | other ->
+                                    failwith $"Expected later Git timeout, got {other}"
+                        | other ->
+                            return
+                                failwith $"Expected earlier Git success, got {other}"
                     }
-              GetFile = fun _ _ _ -> failwith "File endpoint was not expected" }
+              GetFile =
+                fun _ _ _ _ ->
+                    failwith "File endpoint was not expected" }
 
-        withDiffServer
+        withDiffServerDeadline
+            responseDeadlineMs
             [ worktree ]
             service
             (fun _ -> "unused")
@@ -535,8 +554,12 @@ type DiffEndpointHttpTests() =
         let filename = "secret.html"
 
         let service: WorktreeDiffApi.Service =
-            { GetSummary = fun _ -> failwith "Attacker Host reached diff-summary"
-              GetFile = fun _ _ _ -> failwith "Attacker Host reached diff-file" }
+            { GetSummary =
+                fun _ _ ->
+                    failwith "Attacker Host reached diff-summary"
+              GetFile =
+                fun _ _ _ _ ->
+                    failwith "Attacker Host reached diff-file" }
 
         Directory.CreateDirectory(canvasDir) |> ignore
         File.WriteAllText(
@@ -1038,10 +1061,10 @@ type DiffEndpointHttpTests() =
 
         let neverCallService: WorktreeDiffApi.Service =
             { GetSummary =
-                fun _ ->
+                fun _ _ ->
                     failwith "Unknown worktree reached diff summary"
               GetFile =
-                fun _ _ _ ->
+                fun _ _ _ _ ->
                     failwith "Unknown identity reached diff file" }
 
         withDiffServer
@@ -1180,9 +1203,9 @@ type DiffEndpointHttpTests() =
 
             let liveService: WorktreeDiffApi.Service =
                 { GetSummary =
-                    WorktreeDiff.getWorktreeDiffSummary
+                    WorktreeDiff.getWorktreeDiffSummaryWithinDeadline
                   GetFile =
-                    WorktreeDiff.getWorktreeDiffFile }
+                    WorktreeDiff.getWorktreeDiffFileWithinDeadline }
 
             withDiffServer
                 [ repoDir ]
