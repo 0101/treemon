@@ -34,6 +34,20 @@ let private samplePatch =
           "+four"
           "" ]
 
+let private syntaxPatch =
+    String.concat
+        Environment.NewLine
+        [ "diff --git a/src/example.js b/src/example.js"
+          "index 1111111..2222222 100644"
+          "--- a/src/example.js"
+          "+++ b/src/example.js"
+          "@@ -1,2 +1,3 @@"
+          "-const answer = 41;"
+          "+const answer = 42;"
+          "+console.log(\"answer\", answer);"
+          " export { answer };"
+          "" ]
+
 let private wrappedPatch =
     let longLine prefix word =
         prefix + String.replicate 24 $"{word} "
@@ -64,6 +78,9 @@ let private fileJson identity displayPath oldDisplayPath change =
 
 let private firstFile =
     fileJson "id-1" "src/a.txt" None "modified"
+
+let private syntaxFile =
+    fileJson "id-js" "src/example.js" (None: string option) "modified"
 
 let private secondFile =
     fileJson "id-2" "src/new-name.txt" (Some "src/old-name.txt") "renamed"
@@ -261,6 +278,19 @@ type DiffViewerE2ETests() =
                 firstFile.change
         )
 
+    member private this.RouteSyntaxPatch() =
+        this.RouteBody(
+            "**/diff-file?*",
+            "application/json",
+            fileResultJsonWithPatch
+                syntaxPatch
+                "text"
+                syntaxFile.identity
+                syntaxFile.displayPath
+                syntaxFile.oldDisplayPath
+                syntaxFile.change
+        )
+
     member private this.RouteHighlighter() =
         this.RouteBody(
             $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
@@ -315,7 +345,7 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
-    member this.``summary loads before one file and highlighting starts only after the plain standalone patch``() =
+    member this.``supported code is plain before loading and visibly tokenized before highlighting is ready``() =
         task {
             let plainBeforeHighlighter =
                 TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
@@ -339,8 +369,8 @@ type DiffViewerE2ETests() =
                         };
                     })()"""
                 )
-            do! this.RouteSummary(readySummaryJson [| firstFile |])
-            do! this.RouteFiles()
+            do! this.RouteSummary(readySummaryJson [| syntaxFile |])
+            do! this.RouteSyntaxPatch()
             do!
                 this.Page.RouteAsync(
                     $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
@@ -348,7 +378,10 @@ type DiffViewerE2ETests() =
                         task {
                             let! plain =
                                 this.Page.EvaluateAsync<bool>(
-                                    "() => Boolean(document.querySelector('#patch[data-render-status=\"plain\"] .d2h-wrapper'))"
+                                    """() => Boolean(
+                                        document.querySelector('#patch[data-render-status="plain"] .d2h-wrapper') &&
+                                        !document.querySelector('#patch .d2h-code-line-ctn [class*="hljs-"]')
+                                    )"""
                                 )
                             plainBeforeHighlighter.TrySetResult(plain) |> ignore
                             do!
@@ -364,7 +397,9 @@ type DiffViewerE2ETests() =
 
             do! this.Goto()
             do!
-                this.Page.Locator("#patch[data-highlight-status='ready'] .d2h-wrapper").WaitForAsync(
+                this.Page.Locator(
+                    "#patch[data-highlight-status='ready'] .d2h-file-wrapper[data-lang='js'] .d2h-code-line-ctn.hljs.javascript .hljs-keyword"
+                ).First.WaitForAsync(
                     LocatorWaitForOptions(Timeout = 15000.0f)
                 )
 
@@ -379,6 +414,16 @@ type DiffViewerE2ETests() =
                 this.Page.EvaluateAsync<bool>("() => window.top === window")
             let! selected =
                 this.Page.Locator(".file-entry.active").GetAttributeAsync("data-identity")
+            let token = this.Page.Locator("#patch .d2h-code-line-ctn .hljs-keyword").First
+            let! tokenColors =
+                token.EvaluateAsync<string array>(
+                    """element => [
+                        getComputedStyle(element).color,
+                        getComputedStyle(element.closest('.d2h-code-line-ctn')).color
+                    ]"""
+                )
+            let! tokenCount =
+                this.Page.Locator("#patch .d2h-code-line-ctn span[class*='hljs-']").CountAsync()
 
             Assert.Multiple(fun () ->
                 Assert.That(wasPlain, Is.True)
@@ -386,14 +431,54 @@ type DiffViewerE2ETests() =
                     requestPaths,
                     Is.EqualTo(
                         [| "/e2e-diff-worktree/diff-summary"
-                           "/e2e-diff-worktree/diff-file?identity=id-1" |]
+                           "/e2e-diff-worktree/diff-file?identity=id-js" |]
                     )
                 )
                 Assert.That(viewerHeaders.Length, Is.EqualTo(2))
                 Assert.That(viewerHeaders[1], Is.EqualTo(viewerHeaders[0]))
                 Assert.That(Guid.TryParseExact(viewerHeaders[0], "D") |> fst, Is.True)
                 Assert.That(isStandalone, Is.True)
-                Assert.That(selected, Is.EqualTo("id-1")))
+                Assert.That(selected, Is.EqualTo("id-js"))
+                Assert.That(tokenCount, Is.GreaterThan(0))
+                Assert.That(tokenColors[0], Is.Not.EqualTo(tokenColors[1])))
+        }
+
+    [<Test>]
+    member this.``highlighting cannot report ready when the bundle produces no token markup``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| syntaxFile |])
+            do! this.RouteSyntaxPatch()
+            do!
+                this.Page.RouteAsync(
+                    $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "text/javascript",
+                                Body =
+                                    """window.Diff2HtmlUI = function(target) {
+                                        this.highlightCode = function() {
+                                            target.querySelectorAll('.d2h-code-line-ctn')
+                                                .forEach(function(line) { line.classList.add('hljs'); });
+                                        };
+                                    };"""
+                            )
+                        )
+                )
+            do! this.Goto()
+            do!
+                this.Page.Locator("#patch[data-highlight-status='plain'] .d2h-wrapper").WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 15000.0f)
+                )
+
+            let! readyCount =
+                this.Page.Locator("#patch[data-highlight-status='ready']").CountAsync()
+            let! tokenCount =
+                this.Page.Locator("#patch .d2h-code-line-ctn span[class*='hljs-']").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(readyCount, Is.Zero)
+                Assert.That(tokenCount, Is.Zero))
         }
 
     [<Test>]
@@ -585,7 +670,7 @@ type DiffViewerE2ETests() =
             do! this.RoutePatch(wrappedPatch)
             do! this.Goto()
             do!
-                this.Page.Locator("#patch[data-highlight-status='ready'] .d2h-file-diff").WaitForAsync(
+                this.Page.Locator("#patch[data-highlight-status='plain'] .d2h-file-diff").WaitForAsync(
                     LocatorWaitForOptions(Timeout = 15000.0f)
                 )
 
@@ -760,8 +845,8 @@ type DiffViewerE2ETests() =
     [<Test>]
     member this.``patch stays usable when lazy syntax highlighting fails``() =
         task {
-            do! this.RouteSummary(readySummaryJson [| firstFile |])
-            do! this.RouteFiles()
+            do! this.RouteSummary(readySummaryJson [| syntaxFile |])
+            do! this.RouteSyntaxPatch()
             do!
                 this.Page.RouteAsync(
                     $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
@@ -773,10 +858,17 @@ type DiffViewerE2ETests() =
                     LocatorWaitForOptions(Timeout = 15000.0f)
                 )
             do! this.Page.Locator("#split-view").ClickAsync()
-            do! this.Page.Locator("#patch .d2h-files-diff").WaitForAsync()
+            do!
+                this.Page.Locator("#patch[data-highlight-status='failed'] .d2h-files-diff").WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 15000.0f)
+                )
 
             let! fileCount = this.Page.Locator(".file-entry").CountAsync()
-            Assert.That(fileCount, Is.EqualTo(1))
+            let! codeLineCount = this.Page.Locator("#patch .d2h-code-line-ctn").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(fileCount, Is.EqualTo(1))
+                Assert.That(codeLineCount, Is.GreaterThan(0)))
         }
 
     [<Test>]
@@ -784,8 +876,8 @@ type DiffViewerE2ETests() =
         task {
             // The asynchronous route callback must count requests across browser callbacks.
             let mutable requests = 0
-            do! this.RouteSummary(readySummaryJson [| firstFile |])
-            do! this.RouteFiles()
+            do! this.RouteSummary(readySummaryJson [| syntaxFile |])
+            do! this.RouteSyntaxPatch()
             do!
                 this.Page.RouteAsync(
                     $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
@@ -810,7 +902,9 @@ type DiffViewerE2ETests() =
 
             do! this.Page.Locator("#split-view").ClickAsync()
             do!
-                this.Page.Locator("#patch[data-highlight-status='ready'] .d2h-files-diff").WaitForAsync(
+                this.Page.Locator(
+                    "#patch[data-highlight-status='ready'] .d2h-files-diff .d2h-code-line-ctn .hljs-keyword"
+                ).First.WaitForAsync(
                     LocatorWaitForOptions(Timeout = 15000.0f)
                 )
 

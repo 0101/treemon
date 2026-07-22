@@ -375,6 +375,31 @@ button { font: inherit; }
     display: inline;
     background: rgba(166, 227, 161, .22);
 }
+#patch .hljs-comment,
+#patch .hljs-quote { color: #6c7086; }
+#patch .hljs-keyword,
+#patch .hljs-selector-tag,
+#patch .hljs-literal,
+#patch .hljs-section,
+#patch .hljs-link { color: #cba6f7; }
+#patch .hljs-string,
+#patch .hljs-regexp,
+#patch .hljs-addition { color: #a6e3a1; }
+#patch .hljs-number,
+#patch .hljs-symbol,
+#patch .hljs-bullet { color: #fab387; }
+#patch .hljs-title,
+#patch .hljs-name,
+#patch .hljs-selector-id,
+#patch .hljs-selector-class { color: #89b4fa; }
+#patch .hljs-type,
+#patch .hljs-attribute,
+#patch .hljs-variable,
+#patch .hljs-template-variable { color: #f9e2af; }
+#patch .hljs-built_in,
+#patch .hljs-doctag { color: #94e2d5; }
+#patch .hljs-meta,
+#patch .hljs-deletion { color: #f38ba8; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -712,6 +737,16 @@ function loadHighlighter() {
     return highlighterPromise;
 }
 
+function hasVisibleSyntaxTokens(patch) {
+    return Array.from(patch.querySelectorAll('.d2h-code-line-ctn span')).some(function(token) {
+        var hasTokenClass = Array.from(token.classList).some(function(name) {
+            return name.startsWith('hljs-');
+        });
+        var line = token.closest('.d2h-code-line-ctn');
+        return hasTokenClass && line && getComputedStyle(token).color !== getComputedStyle(line).color;
+    });
+}
+
 function highlightAfterPaint(patch, patchText) {
     patch.dataset.highlightStatus = 'waiting';
     requestAnimationFrame(function() {
@@ -723,7 +758,7 @@ function highlightAfterPaint(patch, patchText) {
                     if (!patch.isConnected || state.currentPatch !== patchText) return;
                     var ui = new Diff2HtmlUI(patch, patchText, configForView());
                     ui.highlightCode();
-                    patch.dataset.highlightStatus = 'ready';
+                    patch.dataset.highlightStatus = hasVisibleSyntaxTokens(patch) ? 'ready' : 'plain';
                 })
                 .catch(function() {
                     if (patch.isConnected) patch.dataset.highlightStatus = 'failed';
