@@ -338,6 +338,27 @@ button { font: inherit; }
     white-space: pre;
 }
 
+.replacement-marker {
+    display: grid;
+    gap: .3rem;
+    margin-top: .75rem;
+    padding: .85rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-elevated);
+}
+
+.replacement-marker .replacement-title {
+    font-size: .86rem;
+    font-weight: 700;
+}
+
+.replacement-marker .replacement-detail {
+    color: var(--text-muted);
+    font-size: .76rem;
+    line-height: 1.45;
+}
+
 #patch {
     min-width: 0;
     width: 100%;
@@ -650,7 +671,9 @@ function setView(view) {
     state.view = view;
     writeStorage(VIEW_KEY, view);
     updateViewButtons();
-    if (state.currentResult && isRenderablePatch(state.currentResult)) renderPatch(state.currentResult.patch);
+    if (state.currentResult && isRenderablePatch(state.currentResult)) {
+        renderPatch(state.currentResult.patch, state.currentResult.replacement);
+    }
 }
 
 function replaceContent(node) {
@@ -793,7 +816,7 @@ function selectFile(file, button, item) {
 }
 
 function isRenderablePatch(result) {
-    return result.status === 'text' || result.status === 'deleted';
+    return result.status === 'text' || result.status === 'deleted' || result.status === 'replacement';
 }
 
 function plainSpecialState(result, title, detail) {
@@ -812,12 +835,42 @@ function plainSpecialState(result, title, detail) {
     }
 }
 
+function appendReplacementMarker(patch, replacement) {
+    if (!replacement) return;
+    var presentation = replacement === 'binary'
+        ? {
+            title: 'Binary replacement',
+            detail: 'The tracked deletion is shown above. Binary replacement content is not rendered.'
+        }
+        : {
+            title: 'Symbolic link replacement',
+            detail: 'The tracked deletion is shown above. The replacement link target is unavailable.'
+        };
+    var marker = document.createElement('div');
+    marker.className = 'replacement-marker';
+    marker.dataset.state = replacement + '-replacement';
+    marker.setAttribute('role', 'note');
+    marker.setAttribute('aria-label', presentation.title);
+    var title = document.createElement('div');
+    title.className = 'replacement-title';
+    title.textContent = presentation.title;
+    marker.appendChild(title);
+    var detail = document.createElement('div');
+    detail.className = 'replacement-detail';
+    detail.textContent = presentation.detail;
+    marker.appendChild(detail);
+    patch.appendChild(marker);
+}
+
 function renderFileResult(result) {
     state.currentResult = result;
     switch (result.status) {
         case 'text':
         case 'deleted':
             renderPatch(result.patch);
+            break;
+        case 'replacement':
+            renderPatch(result.patch, result.replacement);
             break;
         case 'binary':
             renderState('binary', 'Binary file', 'Binary content is not rendered.', false);
@@ -972,7 +1025,7 @@ function highlightAfterPaint(patch, patchText) {
     });
 }
 
-function renderPatch(patchText) {
+function renderPatch(patchText, replacement) {
     state.currentPatch = patchText;
     var patch = document.createElement('div');
     patch.id = 'patch';
@@ -980,6 +1033,7 @@ function renderPatch(patchText) {
     try {
         patch.innerHTML = Diff2Html.html(patchText, configForView());
         annotateDiffRows(patch);
+        appendReplacementMarker(patch, replacement);
         replaceContent(patch);
         highlightAfterPaint(patch, patchText);
     } catch (_) {
@@ -988,6 +1042,7 @@ function renderPatch(patchText) {
         pre.dataset.state = 'renderer-fallback';
         pre.textContent = patchText;
         patch.replaceChildren(pre);
+        appendReplacementMarker(patch, replacement);
         patch.dataset.highlightStatus = 'failed';
         replaceContent(patch);
     }

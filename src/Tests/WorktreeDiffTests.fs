@@ -495,6 +495,73 @@ type WorktreeDiffIntegrationTests() =
             )
         | _ -> Assert.Fail($"Expected composed text patch, got {result}")
 
+    [<TestCase("binary")>]
+    [<TestCase("symlink")>]
+    member _.``tracked deletion patch survives a non-renderable untracked recreation``(
+        replacement: string
+    ) =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+        File.Delete(Path.Combine(repoDir, "delete.txt"))
+        gitOk repoDir [ "add"; "--"; "delete.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "delete tracked file" ]
+        let replacementPath = Path.Combine(repoDir, "delete.txt")
+
+        let expectedReplacement =
+            match replacement with
+            | "binary" ->
+                File.WriteAllBytes(replacementPath, [| 1uy; 0uy; 2uy |])
+                WorktreeDiffReplacement.BinaryContent
+            | "symlink" ->
+                let target = Path.Combine(tempDir, "replacement-target.txt")
+                File.WriteAllText(target, "replacement target")
+
+                try
+                    File.CreateSymbolicLink(replacementPath, target) |> ignore
+                with
+                | :? UnauthorizedAccessException
+                | :? PlatformNotSupportedException ->
+                    Assert.Ignore("Symbolic links are unavailable in this environment")
+
+                WorktreeDiffReplacement.SymbolicLink
+            | other -> failwith $"Unexpected replacement {other}"
+
+        let summary =
+            getWorktreeDiffSummary repoDir
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        let entry = findEntry "delete.txt" summary
+        let result =
+            getWorktreeDiffFile repoDir summary.MergeBase entry
+            |> TestUtils.runAsync
+
+        let trackedPatch =
+            gitOutput
+                repoDir
+                [ "-c"
+                  "core.quotepath=false"
+                  "diff"
+                  "--no-ext-diff"
+                  "--no-textconv"
+                  "--find-renames"
+                  "--full-index"
+                  "--no-color"
+                  summary.MergeBase
+                  "--"
+                  "delete.txt" ]
+
+        match result with
+        | Ok(Replacement(actualPatch, actualReplacement)) ->
+            Assert.Multiple(fun () ->
+                Assert.That(entry.Status, Is.EqualTo(TrackedAndUntracked Deleted))
+                Assert.That(
+                    normalizeNewlines actualPatch,
+                    Is.EqualTo(normalizeNewlines trackedPatch)
+                )
+                Assert.That(actualReplacement, Is.EqualTo(expectedReplacement)))
+        | _ -> Assert.Fail($"Expected composed replacement, got {result}")
+
     [<Test>]
     member _.``provisioned untracked diff viewer does not dirty a clean summary without an agents ignore``() =
         let repoDir = Path.Combine(tempDir, "repo")

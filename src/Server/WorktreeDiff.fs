@@ -46,9 +46,17 @@ type WorktreeDiffError =
     | TooManyFiles of minimumCount: int
     | FileUnavailable
 
+[<RequireQualifiedAccess>]
+type WorktreeDiffReplacement =
+    | BinaryContent
+    | SymbolicLink
+
 type WorktreeDiffFile =
     | Text of patch: string
     | DeletedFile of patch: string
+    | Replacement of
+        trackedPatch: string *
+        replacement: WorktreeDiffReplacement
     | Binary
     | Oversized
     | Truncated
@@ -520,6 +528,18 @@ let private combineTrackedAndUntrackedFiles tracked untracked =
     | _, Oversized -> Oversized
     | Truncated, _
     | _, Truncated -> Truncated
+    | (Text trackedPatch
+      | DeletedFile trackedPatch
+      | Symlink(Some trackedPatch)),
+      Binary ->
+        Replacement(trackedPatch, WorktreeDiffReplacement.BinaryContent)
+    | (Text trackedPatch
+      | DeletedFile trackedPatch
+      | Symlink(Some trackedPatch)),
+      Symlink None ->
+        Replacement(trackedPatch, WorktreeDiffReplacement.SymbolicLink)
+    | (Replacement _ as replacement), _
+    | _, (Replacement _ as replacement) -> replacement
     | Binary, _
     | _, Binary -> Binary
     | Symlink None, _

@@ -397,6 +397,10 @@ type DiffSerializationTests() =
               """{"status":"text","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"patch"}"""
               DiffFileResult.Deleted(file, "deleted patch"),
               """{"status":"deleted","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"deleted patch"}"""
+              DiffFileResult.Replacement(file, "tracked patch", DiffReplacementKind.Binary),
+              """{"status":"replacement","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"tracked patch","replacement":"binary"}"""
+              DiffFileResult.Replacement(file, "tracked patch", DiffReplacementKind.Symlink),
+              """{"status":"replacement","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"tracked patch","replacement":"symlink"}"""
               DiffFileResult.Binary file,
               """{"status":"binary","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
               DiffFileResult.Oversized file,
@@ -1048,6 +1052,14 @@ type DiffEndpointHttpTests() =
 
         let entries =
             [ entry "deleted.txt" None WorktreeDiff.Deleted
+              entry
+                  "binary-replacement.dat"
+                  None
+                  (WorktreeDiff.TrackedAndUntracked WorktreeDiff.Deleted)
+              entry
+                  "symlink-replacement.txt"
+                  None
+                  (WorktreeDiff.TrackedAndUntracked WorktreeDiff.Deleted)
               entry "binary.dat" None WorktreeDiff.Modified
               entry "oversized.txt" None WorktreeDiff.Untracked
               entry "truncated.txt" None WorktreeDiff.Modified
@@ -1068,6 +1080,20 @@ type DiffEndpointHttpTests() =
                     match file.Path with
                     | "deleted.txt" ->
                         Ok(WorktreeDiff.DeletedFile "deleted patch")
+                    | "binary-replacement.dat" ->
+                        Ok(
+                            WorktreeDiff.Replacement(
+                                "tracked binary replacement patch",
+                                WorktreeDiff.WorktreeDiffReplacement.BinaryContent
+                            )
+                        )
+                    | "symlink-replacement.txt" ->
+                        Ok(
+                            WorktreeDiff.Replacement(
+                                "tracked symlink replacement patch",
+                                WorktreeDiff.WorktreeDiffReplacement.SymbolicLink
+                            )
+                        )
                     | "binary.dat" -> Ok WorktreeDiff.Binary
                     | "oversized.txt" -> Ok WorktreeDiff.Oversized
                     | "truncated.txt" -> Ok WorktreeDiff.Truncated
@@ -1116,6 +1142,18 @@ type DiffEndpointHttpTests() =
                 DiffFileResult.Deleted(
                     descriptor,
                     "deleted patch"
+                )
+            | "binary-replacement.dat" ->
+                DiffFileResult.Replacement(
+                    descriptor,
+                    "tracked binary replacement patch",
+                    DiffReplacementKind.Binary
+                )
+            | "symlink-replacement.txt" ->
+                DiffFileResult.Replacement(
+                    descriptor,
+                    "tracked symlink replacement patch",
+                    DiffReplacementKind.Symlink
                 )
             | "binary.dat" ->
                 DiffFileResult.Binary descriptor

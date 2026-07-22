@@ -459,6 +459,11 @@ let private diffFileJson (file: DiffFileSummary) =
        oldDisplayPath = file.OldDisplayPath
        change = diffChangeName file.Change |}
 
+let private diffReplacementName =
+    function
+    | DiffReplacementKind.Binary -> "binary"
+    | DiffReplacementKind.Symlink -> "symlink"
+
 let internal serializeSummaryResult =
     function
     | DiffSummaryResult.Ready details ->
@@ -506,6 +511,13 @@ let internal serializeFileResult =
             {| status = "deleted"
                file = diffFileJson file
                patch = patch |}
+        )
+    | DiffFileResult.Replacement (file, patch, replacement) ->
+        JsonSerializer.Serialize(
+            {| status = "replacement"
+               file = diffFileJson file
+               patch = patch
+               replacement = diffReplacementName replacement |}
         )
     | DiffFileResult.Binary file ->
         JsonSerializer.Serialize(
@@ -566,6 +578,16 @@ let private fileResult file =
     | Ok(WorktreeDiff.Text patch) -> DiffFileResult.Text(file, patch)
     | Ok(WorktreeDiff.DeletedFile patch) ->
         DiffFileResult.Deleted(file, patch)
+    | Ok(WorktreeDiff.Replacement (patch, replacement)) ->
+        DiffFileResult.Replacement(
+            file,
+            patch,
+            match replacement with
+            | WorktreeDiff.WorktreeDiffReplacement.BinaryContent ->
+                DiffReplacementKind.Binary
+            | WorktreeDiff.WorktreeDiffReplacement.SymbolicLink ->
+                DiffReplacementKind.Symlink
+        )
     | Ok WorktreeDiff.Binary -> DiffFileResult.Binary file
     | Ok WorktreeDiff.Oversized -> DiffFileResult.Oversized file
     | Ok WorktreeDiff.Truncated -> DiffFileResult.Truncated file

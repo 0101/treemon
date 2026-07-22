@@ -129,6 +129,14 @@ let private fileResultJsonWithPatch patch status identity displayPath oldDisplay
 let private fileResultJson =
     fileResultJsonWithPatch samplePatch
 
+let private replacementResultJson replacement =
+    JsonSerializer.Serialize(
+        {| status = "replacement"
+           file = firstFile
+           patch = samplePatch
+           replacement = replacement |}
+    )
+
 let private summaryStateJson status =
     match status with
     | "clean" ->
@@ -1005,6 +1013,78 @@ type DiffViewerE2ETests() =
                 do! state.WaitForAsync()
                 let! title = state.Locator(".state-title").TextContentAsync()
                 Assert.That(title, Is.EqualTo(expectedTitle))
+        }
+
+    [<TestCase(
+        "binary",
+        "Binary replacement",
+        "The tracked deletion is shown above. Binary replacement content is not rendered."
+    )>]
+    [<TestCase(
+        "symlink",
+        "Symbolic link replacement",
+        "The tracked deletion is shown above. The replacement link target is unavailable."
+    )>]
+    member this.``composed replacement renders the tracked patch and special marker``(
+        replacement: string,
+        expectedTitle: string,
+        expectedDetail: string
+    ) =
+        task {
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do!
+                this.RouteBody(
+                    "**/diff-file?*",
+                    "application/json",
+                    replacementResultJson replacement
+                )
+            do! this.Goto()
+
+            let marker =
+                this.Page.Locator(
+                    $"#patch .replacement-marker[data-state='{replacement}-replacement']"
+                )
+
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+            do! marker.WaitForAsync()
+
+            let! initial =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const marker = document.querySelector('#patch .replacement-marker');
+                        const wrapper = document.querySelector('#patch .d2h-wrapper');
+                        return [
+                            document.querySelector('#patch .d2h-file-name').textContent,
+                            marker.getAttribute('aria-label'),
+                            marker.querySelector('.replacement-detail').textContent,
+                            String(Boolean(wrapper.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING)),
+                            state.currentResult.status,
+                            state.currentResult.replacement
+                        ];
+                    }"""
+                )
+
+            do! this.Page.Locator("#split-view").ClickAsync()
+            do! this.Page.Locator("#patch .d2h-files-diff").WaitForAsync()
+            let! markerCount =
+                this.Page.Locator(
+                    $"#patch .replacement-marker[data-state='{replacement}-replacement']"
+                ).CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    initial,
+                    Is.EqualTo(
+                        [| "src/a.txt"
+                           expectedTitle
+                           expectedDetail
+                           "true"
+                           "replacement"
+                           replacement |]
+                    )
+                )
+                Assert.That(markerCount, Is.EqualTo(1)))
         }
 
     [<Test>]

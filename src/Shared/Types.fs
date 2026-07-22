@@ -234,9 +234,18 @@ type DiffSummaryResult =
     | TooManyFiles of minimumFileCount: int
 
 [<RequireQualifiedAccess>]
+type DiffReplacementKind =
+    | Binary
+    | Symlink
+
+[<RequireQualifiedAccess>]
 type DiffFileResult =
     | Text of file: DiffFileSummary * patch: string
     | Deleted of file: DiffFileSummary * patch: string
+    | Replacement of
+        file: DiffFileSummary *
+        patch: string *
+        replacement: DiffReplacementKind
     | Binary of file: DiffFileSummary
     | Oversized of file: DiffFileSummary
     | Truncated of file: DiffFileSummary
