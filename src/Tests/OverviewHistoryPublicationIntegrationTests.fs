@@ -287,7 +287,7 @@ type OverviewHistoryPublicationIntegrationTests() =
 
             use worker = createWorker store clock.Clock hooks
             let baselineState =
-                worker.Backfill CancellationToken.None
+                worker.Backfill TestContext.CurrentContext.CancellationToken
 
             let beforeWrite =
                 latestCompleteBoundary DateTimeOffset.UtcNow
@@ -307,7 +307,8 @@ type OverviewHistoryPublicationIntegrationTests() =
 
             clock.AdvanceTo repairAnchor
             captureRepair <- true
-            let repaired = worker.Backfill CancellationToken.None
+            let repaired =
+                worker.Backfill TestContext.CurrentContext.CancellationToken
             let candidate =
                 { Generation = repaired.SourceGeneration
                   StartBoundary = dirty
@@ -420,10 +421,12 @@ type OverviewHistoryPublicationIntegrationTests() =
             use worker =
                 createWorker store (fixedClock anchor) hooks
 
-            worker.Backfill CancellationToken.None |> ignore
+            worker.Backfill TestContext.CurrentContext.CancellationToken
+            |> ignore
             store.AppendTaskSnapshot(firstLateAt, tc 2)
             captureRepair <- true
-            let repaired = worker.Backfill CancellationToken.None
+            let repaired =
+                worker.Backfill TestContext.CurrentContext.CancellationToken
             let published =
                 publishedCandidates.ToArray()
                 |> Array.exactlyOne
@@ -488,7 +491,7 @@ type OverviewHistoryPublicationIntegrationTests() =
                 createWorker store (fixedClock anchor) noHooks
 
             let baselineState =
-                worker.Backfill CancellationToken.None
+                worker.Backfill TestContext.CurrentContext.CancellationToken
 
             store.AppendTaskSnapshot(dirty, tc 9)
             let generation =
@@ -568,7 +571,8 @@ type OverviewHistoryPublicationIntegrationTests() =
              use worker =
                  createWorker store (fixedClock anchor) noHooks
 
-             worker.Backfill CancellationToken.None |> ignore
+             worker.Backfill TestContext.CurrentContext.CancellationToken
+             |> ignore
              store.AppendTaskSnapshot(dirty, tc 2)
              let generation =
                  store.OverviewRollupState().SourceGeneration
@@ -599,7 +603,8 @@ type OverviewHistoryPublicationIntegrationTests() =
                 createWorker reopened (fixedClock anchor) noHooks
 
             let repaired =
-                restarted.Backfill CancellationToken.None
+                restarted.Backfill
+                    TestContext.CurrentContext.CancellationToken
 
             let finalSources =
                 { baselineSources with
@@ -761,7 +766,8 @@ type OverviewHistoryPublicationIntegrationTests() =
             use worker =
                 createWorker store (fixedClock anchor) hooks
 
-            worker.Backfill CancellationToken.None |> ignore
+            worker.Backfill TestContext.CurrentContext.CancellationToken
+            |> ignore
             let stableState, stableRows =
                 readPublished
                     store
@@ -773,7 +779,8 @@ type OverviewHistoryPublicationIntegrationTests() =
 
             let reconstructionError =
                 Assert.Throws<InvalidOperationException>(fun () ->
-                    worker.Backfill CancellationToken.None
+                    worker.Backfill
+                        TestContext.CurrentContext.CancellationToken
                     |> ignore)
 
             let afterReconstructionState, afterReconstructionRows =
@@ -807,7 +814,8 @@ type OverviewHistoryPublicationIntegrationTests() =
                     Is.True
                 ))
 
-            worker.Backfill CancellationToken.None |> ignore
+            worker.Backfill TestContext.CurrentContext.CancellationToken
+            |> ignore
 
             let firstRepairSources =
                 { baselineSources with
@@ -840,7 +848,7 @@ END;
 """
 
             Assert.Throws<SqliteException>(fun () ->
-                worker.Backfill CancellationToken.None
+                worker.Backfill TestContext.CurrentContext.CancellationToken
                 |> ignore)
             |> ignore
 
@@ -868,7 +876,7 @@ END;
 
             execute path "DROP TRIGGER fail_publication_integration;"
             let repaired =
-                worker.Backfill CancellationToken.None
+                worker.Backfill TestContext.CurrentContext.CancellationToken
 
             let finalSources =
                 { baselineSources with
@@ -1010,14 +1018,16 @@ VALUES (0, '[]', '[]');
             use worker =
                 createWorker store (fixedClock anchor) hooks
 
-            worker.Backfill CancellationToken.None |> ignore
+            worker.Backfill TestContext.CurrentContext.CancellationToken
+            |> ignore
             store.AppendTaskSnapshot(dirty, tc 2)
             store.AppendTaskSnapshot(exactAt, tc 3)
             captureRepair <- true
 
             let repair =
                 Task.Run(fun () ->
-                    worker.Backfill CancellationToken.None)
+                    worker.Backfill
+                        TestContext.CurrentContext.CancellationToken)
 
             Assert.That(
                 stagePaused.Wait(TimeSpan.FromSeconds 10.0),
