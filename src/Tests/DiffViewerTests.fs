@@ -20,6 +20,18 @@ let private assetPath name =
 
 let private templatePath = serverPath "DiffTemplate.html"
 
+let private verificationArtifactPath filename =
+    Path.GetFullPath(
+        Path.Combine(
+            __SOURCE_DIRECTORY__,
+            "..",
+            "..",
+            ".agents",
+            "verify",
+            filename
+        )
+    )
+
 let private samplePatch =
     String.concat
         Environment.NewLine
@@ -69,6 +81,25 @@ let private wrappedPatch =
           longLine " second hunk context " "boundary"
           longLine "-second removed line " "old"
           longLine "+second added line " "new"
+          "" ]
+
+let private exactLinePatch =
+    let longLine prefix word =
+        prefix + String.replicate 80 $"{word} "
+
+    String.concat
+        Environment.NewLine
+        [ "diff --git a/src/a.txt b/src/a.txt"
+          "index 1111111..2222222 100644"
+          "--- a/src/a.txt"
+          "+++ b/src/a.txt"
+          "@@ -40,4 +40,5 @@"
+          longLine " context line 40 " "context"
+          longLine "+inserted line 41 " "inserted"
+          longLine "-deleted old line 41 " "removed"
+          longLine "+added new line 42 " "added"
+          longLine " following context " "following"
+          " trailing context"
           "" ]
 
 let private fileJson identity displayPath oldDisplayPath change =
@@ -729,6 +760,16 @@ type DiffViewerE2ETests() =
     [<Test>]
     member this.``pane-hosted diff selection exposes and emits all generic actions with exact source context``() =
         task {
+            let browserErrors =
+                System.Collections.Concurrent.ConcurrentQueue<string>()
+
+            this.Page.Console.Add(fun message ->
+                if message.Type = "error" then
+                    browserErrors.Enqueue($"console: {message.Text}"))
+
+            this.Page.PageError.Add(fun error ->
+                browserErrors.Enqueue($"pageerror: {error}"))
+
             do!
                 this.Page.AddInitScriptAsync(
                     """(() => {
@@ -818,6 +859,10 @@ type DiffViewerE2ETests() =
                 activeIframe.WaitForAsync(
                     LocatorWaitForOptions(Timeout = 10000.0f)
                 )
+            let! paneUrl = activeIframe.GetAttributeAsync("src")
+            TestContext.Out.WriteLine(
+                $"SIDE_BY_SIDE_PANE dashboard={ServerFixture.viteUrl} api={ServerFixture.serverUrl} canvas={ServerFixture.canvasUrl} iframe={paneUrl}"
+            )
 
             let diffFrame =
                 this.Page.FrameLocator(".canvas-pane .canvas-iframe-active")
@@ -965,9 +1010,318 @@ type DiffViewerE2ETests() =
                 + $"""{{"intent":"comment","doc":"diff.html","request":"User commented: Verify this change","action":"canvas-selection","sourceContext":{sourceContext}}}"""
                 + "]"
 
+            let browserErrorEvidence = browserErrors.ToArray()
+            TestContext.Out.WriteLine(
+                $"Pane browser errors:{Environment.NewLine}{JsonSerializer.Serialize(browserErrorEvidence)}"
+            )
+
             Assert.Multiple(fun () ->
                 Assert.That(evidence, Is.EqualTo(expected))
-                Assert.That(forwardedIndex, Is.EqualTo(3)))
+                Assert.That(forwardedIndex, Is.EqualTo(3))
+                Assert.That(browserErrorEvidence, Is.Empty))
+        }
+
+    [<Test>]
+    member this.``side-by-side pane and standalone smoke match across viewer controls``() =
+        task {
+            let browserErrors =
+                System.Collections.Concurrent.ConcurrentQueue<string>()
+
+            this.Page.Console.Add(fun message ->
+                if message.Type = "error" then
+                    browserErrors.Enqueue($"console: {message.Text}"))
+
+            this.Page.PageError.Add(fun error ->
+                browserErrors.Enqueue($"pageerror: {error}"))
+
+            let files =
+                [| syntaxFile
+                   firstFile
+                   secondFile
+                   fileJson "id-added" "src/added.txt" None "added"
+                   fileJson "id-deleted" "src/deleted.txt" None "deleted"
+                   fileJson "id-untracked" "src/untracked.txt" None "untracked" |]
+
+            do! this.RouteDashboardWithDiffDoc("feature-active")
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson files)
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-file?*",
+                    fun route ->
+                        let uri = Uri(route.Request.Url)
+                        let identity =
+                            Uri.UnescapeDataString(
+                                uri.Query.Substring("?identity=".Length)
+                            )
+                        let file =
+                            files
+                            |> Array.find (fun candidate ->
+                                candidate.identity = identity)
+                        let patch =
+                            if identity = syntaxFile.identity then
+                                syntaxPatch
+                            else
+                                exactLinePatch
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    fileResultJsonWithPatch
+                                        patch
+                                        "text"
+                                        file.identity
+                                        file.displayPath
+                                        file.oldDisplayPath
+                                        file.change
+                            )
+                        )
+                )
+
+            let! _ =
+                this.Page.GotoAsync(
+                    ServerFixture.viteUrl,
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load)
+                )
+
+            let card =
+                this.Page.Locator(
+                    ".wt-card",
+                    PageLocatorOptions(
+                        Has =
+                            this.Page.Locator(
+                                ".branch-name",
+                                PageLocatorOptions(HasText = "feature-active")
+                            )
+                    )
+                )
+
+            do! card.Locator(".diff-btn").ClickAsync()
+            let activeIframe =
+                this.Page.Locator(".canvas-pane .canvas-iframe-active")
+            do! activeIframe.WaitForAsync()
+            let! paneUrl = activeIframe.GetAttributeAsync("src")
+            let paneFrame =
+                this.Page.Frames
+                |> Seq.find (fun frame ->
+                    frame.Url.EndsWith("/diff.html", StringComparison.Ordinal))
+
+            let runSmoke (frame: IFrame) host =
+                task {
+                    do!
+                        frame.Locator(".file-entry[data-identity='id-js']").ClickAsync()
+                    do!
+                        frame.Locator(
+                            "#patch[data-highlight-status='ready'] .hljs-keyword"
+                        ).First.WaitForAsync(
+                            LocatorWaitForOptions(Timeout = 15000.0f)
+                        )
+                    let! highlightTokenCount =
+                        frame.Locator(
+                            "#patch .d2h-code-line-ctn span[class*='hljs-']"
+                        ).CountAsync()
+
+                    let setUntracked value =
+                        frame.EvaluateAsync(
+                            """value => {
+                                const input = document.getElementById('filter-untracked');
+                                input.checked = value;
+                                input.dispatchEvent(new Event('change', { bubbles: true }));
+                            }""",
+                            value
+                        )
+
+                    let waitForReady () =
+                        frame.Locator(".file-entry.active").WaitForAsync(
+                            LocatorWaitForOptions(Timeout = 10000.0f)
+                        )
+
+                    let first =
+                        frame.Locator(".file-entry[data-identity='id-1']")
+                    let second =
+                        frame.Locator(".file-entry[data-identity='id-2']")
+
+                    let! _ = setUntracked false
+                    do! waitForReady ()
+                    let! _ = setUntracked true
+                    do! waitForReady ()
+
+                    do! second.ClickAsync()
+                    do! second.Locator("xpath=../..").Locator("#patch").WaitForAsync()
+                    let! pointerActive =
+                        frame.Locator(".file-entry.active").GetAttributeAsync(
+                            "data-identity"
+                        )
+
+                    do! first.FocusAsync()
+                    do! first.PressAsync("Enter")
+                    do! first.Locator("xpath=../..").Locator("#patch").WaitForAsync()
+                    let! keyboardActive =
+                        frame.Locator(".file-entry.active").GetAttributeAsync(
+                            "data-identity"
+                        )
+
+                    do! frame.Locator("#unified-view").ClickAsync()
+                    do! frame.Locator("#patch .d2h-file-diff").WaitForAsync()
+                    let! unified =
+                        frame.Locator("#patch").EvaluateAsync<string>(
+                            """patch => {
+                                const failures = [];
+                                const roots = [
+                                    document.getElementById('content'),
+                                    patch,
+                                    patch.querySelector('.d2h-wrapper'),
+                                    patch.querySelector('.d2h-file-diff')
+                                ];
+                                roots.forEach((root, index) => {
+                                    if (root.scrollWidth > root.clientWidth + 1) {
+                                        failures.push('unified overflow ' + index);
+                                    }
+                                });
+                                [
+                                    "tr[data-old-line='41']:not([data-new-line])",
+                                    "tr[data-new-line='42']:not([data-old-line])",
+                                    "tr[data-old-line='42'][data-new-line='43']"
+                                ].forEach(selector => {
+                                    const row = patch.querySelector(selector);
+                                    const gutter = row.cells[0].getBoundingClientRect();
+                                    const code = row.cells[1].getBoundingClientRect();
+                                    const line = row.querySelector('.d2h-code-line');
+                                    const lineHeight =
+                                        parseFloat(getComputedStyle(line).lineHeight);
+                                    if (gutter.right > code.left + 1) {
+                                        failures.push(selector + ' gutter overlap');
+                                    }
+                                    if (row.getBoundingClientRect().height < lineHeight * 2) {
+                                        failures.push(selector + ' did not wrap');
+                                    }
+                                });
+                                return JSON.stringify({
+                                    failures,
+                                    splitColumns:
+                                        patch.querySelectorAll('.d2h-file-side-diff').length
+                                });
+                            }"""
+                        )
+
+                    do! frame.Locator("#split-view").ClickAsync()
+                    do! frame.Locator("#patch .d2h-files-diff").WaitForAsync()
+                    let! split =
+                        frame.Locator("#patch").EvaluateAsync<string>(
+                            """patch => {
+                                const failures = [];
+                                const sides =
+                                    [...patch.querySelectorAll('.d2h-file-side-diff')];
+                                if (sides.length !== 2) {
+                                    failures.push('split column count ' + sides.length);
+                                }
+                                if (sides.length === 2) {
+                                    const left = sides[0].getBoundingClientRect();
+                                    const right = sides[1].getBoundingClientRect();
+                                    if (left.right > right.left + 1) {
+                                        failures.push('split columns overlap');
+                                    }
+                                    sides.forEach((side, index) => {
+                                        if (side.scrollWidth > side.clientWidth + 1) {
+                                            failures.push('split overflow ' + index);
+                                        }
+                                    });
+                                }
+                                return JSON.stringify({
+                                    failures,
+                                    splitColumns: sides.length
+                                });
+                            }"""
+                        )
+
+                    let! semantics =
+                        frame.EvaluateAsync<string>(
+                            """() => JSON.stringify({
+                                host: window.top === window ? 'standalone' : 'pane',
+                                filters: [
+                                    document.getElementById('filter-committed').checked,
+                                    document.getElementById('filter-local').checked,
+                                    document.getElementById('filter-untracked').checked
+                                ],
+                                active: document.querySelector('.file-entry.active')
+                                    .dataset.identity,
+                                expanded:
+                                    document.querySelectorAll(
+                                        '.file-entry[aria-expanded="true"]'
+                                    ).length,
+                                panels: document.querySelectorAll('.file-panel').length,
+                                patches: document.querySelectorAll('#patch').length,
+                                controls: ['unified-view', 'split-view', 'refresh']
+                                    .map(id => {
+                                        const button = document.getElementById(id);
+                                        return [
+                                            button.getAttribute('aria-label'),
+                                            button.getAttribute('title'),
+                                            button.querySelectorAll(':scope > svg').length,
+                                            button.textContent.trim()
+                                        ];
+                                    }),
+                                statuses: [...document.querySelectorAll('.change-badge')]
+                                    .map(badge => [
+                                        badge.className,
+                                        badge.textContent,
+                                        badge.getAttribute('aria-label'),
+                                        badge.getAttribute('title')
+                                    ])
+                            })"""
+                        )
+
+                    TestContext.Out.WriteLine(
+                        $"SIDE_BY_SIDE_SMOKE host={host} unified={unified} split={split} semantics={semantics}"
+                    )
+
+                    use unifiedDocument = JsonDocument.Parse(unified)
+                    use splitDocument = JsonDocument.Parse(split)
+                    let unifiedFailures =
+                        unifiedDocument.RootElement
+                            .GetProperty("failures")
+                            .GetArrayLength()
+                    let splitFailures =
+                        splitDocument.RootElement
+                            .GetProperty("failures")
+                            .GetArrayLength()
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(pointerActive, Is.EqualTo("id-2"))
+                        Assert.That(keyboardActive, Is.EqualTo("id-1"))
+                        Assert.That(highlightTokenCount, Is.GreaterThan(0))
+                        Assert.That(unifiedFailures, Is.Zero)
+                        Assert.That(splitFailures, Is.Zero))
+
+                    return semantics
+                }
+
+            let! paneEvidence = runSmoke paneFrame "pane"
+            let! _ =
+                this.Page.GotoAsync(
+                    paneUrl,
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load)
+                )
+            let! standaloneEvidence =
+                runSmoke this.Page.MainFrame "standalone"
+
+            let normalizeHost (value: string) =
+                value
+                    .Replace("\"host\":\"pane\"", "\"host\":\"host\"")
+                    .Replace("\"host\":\"standalone\"", "\"host\":\"host\"")
+
+            let browserErrorEvidence = browserErrors.ToArray()
+            TestContext.Out.WriteLine(
+                $"Side-by-side browser errors:{Environment.NewLine}{JsonSerializer.Serialize(browserErrorEvidence)}"
+            )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    normalizeHost standaloneEvidence,
+                    Is.EqualTo(normalizeHost paneEvidence)
+                )
+                Assert.That(browserErrorEvidence, Is.Empty))
         }
 
     [<Test>]
@@ -1815,6 +2169,331 @@ type DiffViewerE2ETests() =
                             """{"start":10,"end":10}"""
                     )
                 ))
+        }
+
+    [<Test>]
+    member this.``exact old 41 new 42 fixture wraps without overflow at desktop and narrow widths``() =
+        task {
+            let apiPort = Uri(ServerFixture.serverUrl).Port
+            let canvasPort = Uri(ServerFixture.canvasUrl).Port
+            let vitePort = Uri(ServerFixture.viteUrl).Port
+            TestContext.Out.WriteLine(
+                $"SIDE_BY_SIDE_STANDALONE dashboard={ServerFixture.viteUrl} api={ServerFixture.serverUrl} canvas={ServerFixture.canvasUrl} document={pageUrl}"
+            )
+            Assert.Multiple(fun () ->
+                Assert.That(apiPort, Is.Not.EqualTo(5000))
+                Assert.That(canvasPort, Is.Not.EqualTo(5002))
+                Assert.That(vitePort, Is.Not.EqualTo(5000)))
+
+            let browserErrors =
+                System.Collections.Concurrent.ConcurrentQueue<string>()
+
+            this.Page.Console.Add(fun message ->
+                if message.Type = "error" then
+                    browserErrors.Enqueue($"console: {message.Text}"))
+
+            this.Page.PageError.Add(fun error ->
+                browserErrors.Enqueue($"pageerror: {error}"))
+
+            do! this.Page.SetViewportSizeAsync(1280, 900)
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RoutePatch(exactLinePatch)
+            do! this.Goto()
+            do!
+                this.Page.Locator(
+                    "#patch[data-highlight-status='plain'] .d2h-file-diff"
+                ).WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let settleLayout () =
+                this.Page.EvaluateAsync(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+                )
+
+            let sourceContext selector =
+                this.Page.Locator(selector).EvaluateAsync<string>(
+                    """element => {
+                        const range = document.createRange();
+                        range.selectNodeContents(element);
+                        return JSON.stringify(window.canvasSelectionMetadata({ range }));
+                    }"""
+                )
+
+            let geometry mode =
+                this.Page.Locator("#patch").EvaluateAsync<string>(
+                    $"""(patch) => {{
+                        const failures = [];
+                        const metrics = {{}};
+                        const noOverflow = (element, name) => {{
+                            if (!element) {{
+                                failures.push(name + ' is missing');
+                                return;
+                            }}
+                            metrics[name] = {{
+                                clientWidth: element.clientWidth,
+                                scrollWidth: element.scrollWidth
+                            }};
+                            if (element.scrollWidth > element.clientWidth + 1)
+                                failures.push(name + ' overflows horizontally');
+                        }};
+                        const checkRow = (row, name) => {{
+                            if (!row) {{
+                                failures.push(name + ' is missing');
+                                return;
+                            }}
+                            const gutter = row.cells[0];
+                            const code = row.cells[1];
+                            const line = code.querySelector(
+                                '.d2h-code-line, .d2h-code-side-line'
+                            );
+                            const rowRect = row.getBoundingClientRect();
+                            const gutterRect = gutter.getBoundingClientRect();
+                            const codeRect = code.getBoundingClientRect();
+                            const lineRect = line.getBoundingClientRect();
+                            const lineHeight = parseFloat(getComputedStyle(line).lineHeight);
+                            metrics[name] = {{
+                                row: [rowRect.left, rowRect.top, rowRect.right, rowRect.bottom],
+                                gutter: [
+                                    gutterRect.left,
+                                    gutterRect.top,
+                                    gutterRect.right,
+                                    gutterRect.bottom
+                                ],
+                                code: [codeRect.left, codeRect.top, codeRect.right, codeRect.bottom],
+                                line: [lineRect.left, lineRect.top, lineRect.right, lineRect.bottom],
+                                lineHeight
+                            }};
+                            if (gutterRect.right > codeRect.left + 1)
+                                failures.push(name + ' gutter overlaps code');
+                            if (
+                                lineRect.left < rowRect.left - 1 ||
+                                lineRect.right > rowRect.right + 1 ||
+                                lineRect.top < rowRect.top - 1 ||
+                                lineRect.bottom > rowRect.bottom + 1
+                            )
+                                failures.push(name + ' wrapped content escapes its logical row');
+                            if (rowRect.height < lineHeight * 2)
+                                failures.push(name + ' did not wrap');
+                            const oldNumber = row.querySelector('.line-num1');
+                            const newNumber = row.querySelector('.line-num2');
+                            const visibleNumberRect = element => {{
+                                if (!element || !element.textContent.trim()) return null;
+                                const range = document.createRange();
+                                range.selectNodeContents(element);
+                                return range.getBoundingClientRect();
+                            }};
+                            const oldRect = visibleNumberRect(oldNumber);
+                            const newRect = visibleNumberRect(newNumber);
+                            [oldRect, newRect].filter(Boolean).forEach(numberRect => {{
+                                if (
+                                    numberRect.left < gutterRect.left - 1 ||
+                                    numberRect.right > gutterRect.right + 1
+                                )
+                                    failures.push(name + ' number escapes its gutter');
+                            }});
+                            if (oldRect && newRect) {{
+                                if (oldRect.right > newRect.left + 1)
+                                    failures.push(name + ' old and new gutters overlap');
+                            }}
+                        }};
+
+                        noOverflow(document.body, '{mode} body');
+                        noOverflow(document.querySelector('.content'), '{mode} content');
+                        noOverflow(patch, '{mode} patch');
+                        noOverflow(patch.querySelector('.d2h-wrapper'), '{mode} wrapper');
+
+                        if ('{mode}' === 'unified') {{
+                            const diff = patch.querySelector('.d2h-file-diff');
+                            noOverflow(diff, 'unified diff');
+                            noOverflow(diff.querySelector('.d2h-diff-table'), 'unified table');
+                            checkRow(
+                                diff.querySelector(
+                                    "tr[data-old-line='41']:not([data-new-line])"
+                                ),
+                                'unified deletion old 41'
+                            );
+                            checkRow(
+                                diff.querySelector(
+                                    "tr[data-new-line='42']:not([data-old-line])"
+                                ),
+                                'unified addition new 42'
+                            );
+                            checkRow(
+                                diff.querySelector(
+                                    "tr[data-old-line='42'][data-new-line='43']"
+                                ),
+                                'unified following context'
+                            );
+                        }} else {{
+                            const sides = [...patch.querySelectorAll('.d2h-file-side-diff')];
+                            metrics.splitColumnCount = sides.length;
+                            if (sides.length !== 2)
+                                failures.push('split does not retain two columns');
+                            if (sides.length === 2) {{
+                                const leftRect = sides[0].getBoundingClientRect();
+                                const rightRect = sides[1].getBoundingClientRect();
+                                metrics.splitColumns = [
+                                    [leftRect.left, leftRect.right],
+                                    [rightRect.left, rightRect.right]
+                                ];
+                                if (leftRect.right > rightRect.left + 1)
+                                    failures.push('split columns overlap');
+                                sides.forEach((side, index) => {{
+                                    noOverflow(side, 'split side ' + index);
+                                    noOverflow(
+                                        side.querySelector('.d2h-diff-table'),
+                                        'split table ' + index
+                                    );
+                                }});
+                                checkRow(
+                                    sides[0].querySelector(
+                                        "tr[data-old-line='41']:not([data-new-line])"
+                                    ),
+                                    'split deletion old 41'
+                                );
+                                checkRow(
+                                    sides[1].querySelector(
+                                        "tr[data-new-line='42']:not([data-old-line])"
+                                    ),
+                                    'split addition new 42'
+                                );
+                                checkRow(
+                                    sides[1].querySelector(
+                                        "tr[data-old-line='42'][data-new-line='43']"
+                                    ),
+                                    'split following context'
+                                );
+                            }}
+                        }}
+
+                        return JSON.stringify({{
+                            viewportWidth: window.innerWidth,
+                            mode: '{mode}',
+                            failures,
+                            metrics
+                        }});
+                    }}"""
+                )
+
+            let expected oldRange newRange =
+                $"""{{"kind":"diff","fileIdentity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"hunkHeader":"@@ -40,4 +40,5 @@","oldLineRange":{oldRange},"newLineRange":{newRange}}}"""
+
+            let assertGeometry (width: int) (mode: string) (raw: string) =
+                use document = JsonDocument.Parse(raw)
+                let failures =
+                    document.RootElement.GetProperty("failures").EnumerateArray()
+                    |> Seq.map _.GetString()
+                    |> Seq.toArray
+
+                TestContext.Out.WriteLine(
+                    $"DIFF_EXACT_GEOMETRY width={width} mode={mode} evidence={raw}"
+                )
+                Assert.That(failures, Is.Empty)
+
+            let captureScreenshot name =
+                task {
+                    let path = verificationArtifactPath name
+                    Path.GetDirectoryName(path)
+                    |> Directory.CreateDirectory
+                    |> ignore
+
+                    let! _ =
+                        this.Page.Locator("#patch").ScreenshotAsync(
+                            LocatorScreenshotOptions(Path = path)
+                        )
+
+                    ()
+                }
+
+            for width in [ 1280; 360 ] do
+                do! this.Page.SetViewportSizeAsync(width, 900)
+                do! this.Page.Locator("#unified-view").ClickAsync()
+                do! this.Page.Locator("#patch .d2h-file-diff").WaitForAsync()
+                let! _ = settleLayout ()
+                let! unifiedGeometry = geometry "unified"
+                let! unifiedDeletion =
+                    sourceContext
+                        "tr[data-old-line='41']:not([data-new-line]) .d2h-code-line-ctn"
+                let! unifiedAddition =
+                    sourceContext
+                        "tr[data-new-line='42']:not([data-old-line]) .d2h-code-line-ctn"
+                let! unifiedFollowing =
+                    sourceContext
+                        "tr[data-old-line='42'][data-new-line='43'] .d2h-code-line-ctn"
+
+                assertGeometry width "unified" unifiedGeometry
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        unifiedDeletion,
+                        Is.EqualTo(expected """{"start":41,"end":41}""" "null")
+                    )
+                    Assert.That(
+                        unifiedAddition,
+                        Is.EqualTo(expected "null" """{"start":42,"end":42}""")
+                    )
+                    Assert.That(
+                        unifiedFollowing,
+                        Is.EqualTo(
+                            expected
+                                """{"start":42,"end":42}"""
+                                """{"start":43,"end":43}"""
+                        )
+                    ))
+                TestContext.Out.WriteLine(
+                    $"DIFF_EXACT_SOURCE_CONTEXT width={width} mode=unified deletion={unifiedDeletion} addition={unifiedAddition} following={unifiedFollowing}"
+                )
+
+                if width = 1280 then
+                    do!
+                        captureScreenshot
+                            "tm-diff-viewer-ain-unified.png"
+
+                do! this.Page.Locator("#split-view").ClickAsync()
+                do! this.Page.Locator("#patch .d2h-files-diff").WaitForAsync()
+                let! _ = settleLayout ()
+                let! splitGeometry = geometry "split"
+                let! splitDeletion =
+                    sourceContext
+                        ".d2h-file-side-diff:first-child tr[data-old-line='41']:not([data-new-line]) .d2h-code-line-ctn"
+                let! splitAddition =
+                    sourceContext
+                        ".d2h-file-side-diff:last-child tr[data-new-line='42']:not([data-old-line]) .d2h-code-line-ctn"
+                let! splitFollowing =
+                    sourceContext
+                        ".d2h-file-side-diff:last-child tr[data-old-line='42'][data-new-line='43'] .d2h-code-line-ctn"
+
+                assertGeometry width "split" splitGeometry
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        splitDeletion,
+                        Is.EqualTo(expected """{"start":41,"end":41}""" "null")
+                    )
+                    Assert.That(
+                        splitAddition,
+                        Is.EqualTo(expected "null" """{"start":42,"end":42}""")
+                    )
+                    Assert.That(
+                        splitFollowing,
+                        Is.EqualTo(
+                            expected
+                                """{"start":42,"end":42}"""
+                                """{"start":43,"end":43}"""
+                        )
+                    ))
+                TestContext.Out.WriteLine(
+                    $"DIFF_EXACT_SOURCE_CONTEXT width={width} mode=split deletion={splitDeletion} addition={splitAddition} following={splitFollowing}"
+                )
+
+                if width = 1280 then
+                    do!
+                        captureScreenshot
+                            "tm-diff-viewer-ain-split.png"
+
+            let browserErrorEvidence = browserErrors.ToArray()
+            TestContext.Out.WriteLine(
+                $"Standalone browser errors:{Environment.NewLine}{JsonSerializer.Serialize(browserErrorEvidence)}"
+            )
+            Assert.That(browserErrorEvidence, Is.Empty)
         }
 
     [<Test>]

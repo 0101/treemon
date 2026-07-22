@@ -712,22 +712,18 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Overview omits liveness dot for SystemView doc but keeps it for AgentDoc``() =
+    member this.``Overview omits SystemView docs and keeps AgentDoc liveness``() =
         task {
-            // Focus a worktree with no canvas docs to trigger the overview, which lists every
-            // worktree's docs (including the multirepo SystemView + AgentDocs).
+            // Focus a worktree with no canvas docs to trigger the overview.
             do! focusCanvasCard this.Page "feature-recent"
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! (this.Page.Locator(".canvas-overview")).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // The beads (SystemView) overview entry must have no liveness dot.
             let beadsDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "beads"))
-            do! beadsDoc.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! beadsDots = beadsDoc.Locator(".canvas-liveness-dot").CountAsync()
-            Assert.That(beadsDots, Is.EqualTo(0), "SystemView (beads) overview entry should not render a liveness dot")
+            let! beadsCount = beadsDoc.CountAsync()
+            Assert.That(beadsCount, Is.EqualTo(0), "SystemView docs must not appear in the Canvas Docs overview")
 
-            // An AgentDoc overview entry (dashboard) must keep its liveness dot.
             let dashboardDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "dashboard"))
             let! dashDots = dashboardDoc.Locator(".canvas-liveness-dot").CountAsync()
             Assert.That(dashDots, Is.EqualTo(1), "AgentDoc (dashboard) overview entry should still render a liveness dot")
@@ -745,7 +741,7 @@ type CanvasPaneTests() =
     // network-mock pattern) so exactly one AgentDoc is unviewed, serialising the map with the same
     // FableJsonConverter the client deserialises with so the wire format matches.
     [<Test>]
-    member this.``Overview marks only unviewed AgentDocs unread, never viewed or SystemView docs``() =
+    member this.``Overview marks only unviewed AgentDocs unread and omits SystemViews``() =
         task {
             // Build the last-viewed map for feature-multidoc (scopedKey "Q:/code/TestProject/feature-multidoc";
             // AgentDocs overview.html=multi-hash-001, details.html=multi-hash-002, metrics.html=multi-hash-003):
@@ -787,11 +783,9 @@ type CanvasPaneTests() =
             Assert.That(overviewClass, Does.Not.Contain("canvas-overview-doc-unviewed"),
                 "Viewed AgentDoc (overview) must NOT carry canvas-overview-doc-unviewed")
 
-            // beads.html — SystemView, excluded from awareness at the source -> must never carry the class.
             let beadsDoc = page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "beads"))
-            let! beadsClass = beadsDoc.First.GetAttributeAsync("class")
-            Assert.That(beadsClass, Does.Not.Contain("canvas-overview-doc-unviewed"),
-                "SystemView (beads) doc must never carry canvas-overview-doc-unviewed")
+            let! beadsCount = beadsDoc.CountAsync()
+            Assert.That(beadsCount, Is.EqualTo(0), "SystemView docs must not appear in the Canvas Docs overview")
 
             do! page.CloseAsync()
         }

@@ -217,7 +217,7 @@ let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStat
             ]
 
 let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
-    let ready = hasSystemView "diff.html" wt
+    let ready = hasSystemView WorktreeDiffFilename wt
     Html.button [
         prop.className (if ready then "diff-btn" else "diff-btn disabled")
         prop.disabled (not ready)

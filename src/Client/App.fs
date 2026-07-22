@@ -137,13 +137,15 @@ let update msg model =
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let currentCanvasModified = canvasModifiedByScopedKey repos
+            let existingCanvasEvents =
+                retainAgentDocEvents currentCanvasHashes model.Canvas.CanvasEvents
             let canvasEvents =
-                if isFirstLoad then model.Canvas.CanvasEvents
+                if isFirstLoad then existingCanvasEvents
                 else
                     let newEvents =
                         detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
                         |> gateCanvasEventsByFreshness now currentCanvasModified
-                    mergeCanvasEvents model.Canvas.CanvasEvents newEvents
+                    mergeCanvasEvents existingCanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []

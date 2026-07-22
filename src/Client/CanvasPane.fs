@@ -118,8 +118,11 @@ let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: stri
         ]
     ]
 
-let private latestDocModified (wt: WorktreeStatus) =
-    wt.CanvasDocs
+let private overviewDocs (wt: WorktreeStatus) =
+    wt.CanvasDocs |> List.filter (fun doc -> doc.Kind = AgentDoc)
+
+let private latestDocModified docs =
+    docs
     |> List.map _.LastModified
     |> List.sortDescending
     |> List.tryHead
@@ -129,18 +132,19 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         repos
         |> List.collect (fun repo ->
             repo.Worktrees
-            |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
-            |> List.map (fun wt ->
+            |> List.choose (fun wt ->
+                let docs = overviewDocs wt
                 let scopedKey = WorktreePath.value wt.Path
-                repo.Name, wt, scopedKey))
+                if List.isEmpty docs then None
+                else Some (repo.Name, wt, scopedKey, docs)))
 
     let sorted =
         entries
-        |> List.sortByDescending (fun (_, wt, _) -> latestDocModified wt)
+        |> List.sortByDescending (fun (_, _, _, docs) -> latestDocModified docs)
 
     let grouped =
         sorted
-        |> List.groupBy (fun (repoName, _, _) -> repoName)
+        |> List.groupBy (fun (repoName, _, _, _) -> repoName)
 
     Html.div [
         prop.className "canvas-overview"
@@ -157,7 +161,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                             prop.className "canvas-overview-repo-name"
                             prop.text repoName
                         ]
-                        yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
+                        yield! worktrees |> List.map (fun (_, wt, scopedKey, docs) ->
                             // From the badge-source map (`unviewedDocsByScopedKey`), so overview highlights and the badge count agree.
                             let unviewedSet = unviewedByScopedKey |> Map.tryFind scopedKey |> Option.defaultValue Set.empty
                             Html.div [
@@ -173,10 +177,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                     Html.span [
                                         prop.className "canvas-overview-docs"
                                         prop.children (
-                                            wt.CanvasDocs |> List.map (fun doc ->
-                                                // Unviewed docs render white (`canvas-overview-doc-unviewed`);
-                                                // viewed docs keep the muted base color. SystemView docs are
-                                                // never in `unviewedSet` (excluded at the awareness source).
+                                            docs |> List.map (fun doc ->
                                                 let docClass =
                                                     if Set.contains doc.Filename unviewedSet then "canvas-overview-doc canvas-overview-doc-unviewed"
                                                     else "canvas-overview-doc"

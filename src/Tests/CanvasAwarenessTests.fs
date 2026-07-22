@@ -731,6 +731,33 @@ type SystemViewAwarenessTests() =
         Assert.That(events[0].Filename, Is.EqualTo("status.html"),
             "Only the AgentDoc should yield a NewDoc event")
 
+    [<Test>]
+    member _.``retainAgentDocEvents removes all existing SystemView events``() =
+        let timestamp = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero)
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "status.html" "a1"
+                makeSystemDoc "beads.html" "b1"
+                makeSystemDoc "diff.html" "d1" ] ] ]
+        let existing =
+            Map.ofList [
+                "r/feat", [
+                    { Filename = "beads.html"; Timestamp = timestamp; Kind = NewDoc }
+                    { Filename = "diff.html"; Timestamp = timestamp; Kind = UpdatedDoc }
+                    { Filename = "status.html"; Timestamp = timestamp; Kind = UpdatedDoc }
+                ]
+            ]
+        let expected =
+            Map.ofList [
+                "r/feat", [
+                    { Filename = "status.html"; Timestamp = timestamp; Kind = UpdatedDoc }
+                ]
+            ]
+
+        let result = retainAgentDocEvents (canvasHashesByScopedKey repos) existing
+
+        Assert.That(result, Is.EqualTo(expected))
+
     // seedLastViewedHashes
 
     [<Test>]
@@ -1155,9 +1182,9 @@ type MostRecentUnviewedDocTests() =
 // ── Focus-transition retarget (select-the-worktree surfaces THAT doc) ─
 // When focus transitions ONTO a worktree card that has an unviewed (newly published/updated) doc,
 // its ActiveCanvasDoc is retargeted to that doc — via update(SetFocus …), the message every
-// "select the worktree" entry point funnels through. No retarget when the card is already focused
-// (manual tab choice preserved) or nothing is unviewed. The doc is marked viewed only when the pane
-// is open (it is actually shown).
+// "select the worktree" entry point funnels through. Manual tab choice is preserved when the card
+// is already focused, except that diff.html is explicit-only and yields to another available doc.
+// The doc is marked viewed only when the pane is open (it is actually shown).
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1201,6 +1228,43 @@ type FocusRetargetTests() =
         let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
         Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
             "re-focusing the already-focused card must preserve a manual in-worktree tab choice")
+
+    [<Test>]
+    member _.``worktree selection replaces a sticky diff with another canvas doc``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeSystemDoc WorktreeDiffFilename "diff"
+                makeDoc "status.html" "status" ] ] ]
+        let model =
+            { defaultModel with
+                Repos = repos
+                FocusedElement = Some (Card "r/feat")
+                Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", WorktreeDiffFilename ] }
+
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "status.html"))
+
+    [<Test>]
+    member _.``automatic visible doc skips diff when another canvas doc exists``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeSystemDoc WorktreeDiffFilename "diff"
+                makeDoc "status.html" "status" ] ] ]
+
+        let result = CanvasState.activeVisibleDoc repos (Some (Card "r/feat")) None Map.empty
+
+        Assert.That(result, Is.EqualTo(Some ("r/feat", "status.html")))
+
+    [<Test>]
+    member _.``automatic visible doc uses diff when it is the only canvas doc``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeSystemDoc WorktreeDiffFilename "diff" ] ] ]
+
+        let result = CanvasState.activeVisibleDoc repos (Some (Card "r/feat")) None Map.empty
+
+        Assert.That(result, Is.EqualTo(Some ("r/feat", WorktreeDiffFilename)))
 
     [<Test>]
     member _.``no retarget when there are no unviewed docs``() =

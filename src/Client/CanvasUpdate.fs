@@ -83,12 +83,13 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
     ]
 
-/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus genuinely
-/// transitions onto a worktree card, that card's active doc is retargeted to its most recently
+/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus selects a
+/// worktree card, that card's active doc is retargeted to its most recently
 /// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
-/// card was already focused or nothing is unviewed. An open pane shows the doc, so it routes through
-/// `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display passes
-/// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
+/// card was already focused or nothing is unviewed, except that a sticky worktree diff is replaced
+/// by another available doc because Diff is explicit-only. An open pane shows the doc, so it routes
+/// through `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display
+/// passes `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
     let focused =
@@ -96,8 +97,21 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
             FocusedElement = newFocus
             Canvas.TargetWorktree = None }
     match retarget, newFocus with
-    | true, Some (Card scopedKey) when previousFocus <> Some (Card scopedKey) ->
-        match CanvasAwareness.mostRecentUnviewedDoc focused.Repos focused.Canvas.LastViewedHashes scopedKey, focused.Canvas.CanvasPaneOpen with
+    | true, Some (Card scopedKey) ->
+        let unviewedDoc =
+            if previousFocus <> Some (Card scopedKey) then
+                CanvasAwareness.mostRecentUnviewedDoc focused.Repos focused.Canvas.LastViewedHashes scopedKey
+            else
+                None
+        let nonDiffFallback =
+            match focused.Canvas.ActiveCanvasDoc |> Map.tryFind scopedKey with
+            | Some filename when CanvasState.isWorktreeDiffFilename filename ->
+                findWorktree scopedKey focused
+                |> Option.bind CanvasState.preferredAutomaticDoc
+                |> Option.filter (fun doc -> not (CanvasState.isWorktreeDiffFilename doc.Filename))
+                |> Option.map _.Filename
+            | _ -> None
+        match unviewedDoc |> Option.orElse nonDiffFallback, focused.Canvas.CanvasPaneOpen with
         | Some filename, true -> selectCanvasDoc scopedKey filename focused
         | Some filename, false ->
             { focused with
@@ -124,7 +138,7 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     ]
 
 let openWorktreeDiff (scopedKey: string) (model: Model) =
-    let filename = "diff.html"
+    let filename = CanvasState.WorktreeDiffFilename
     if CanvasState.isKnownSystemView model.Repos scopedKey filename then
         let openPane = not model.Canvas.CanvasPaneOpen
         { model with

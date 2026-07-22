@@ -56,6 +56,17 @@ let empty : CanvasState =
       ShareNotice = None
       BridgeLiveness = Map.empty }
 
+[<Literal>]
+let WorktreeDiffFilename = "diff.html"
+
+let isWorktreeDiffFilename (filename: string) =
+    filename.Equals(WorktreeDiffFilename, System.StringComparison.OrdinalIgnoreCase)
+
+let preferredAutomaticDoc (worktree: WorktreeStatus) =
+    worktree.CanvasDocs
+    |> List.tryFind (fun doc -> not (isWorktreeDiffFilename doc.Filename))
+    |> Option.orElseWith (fun () -> worktree.CanvasDocs |> List.tryHead)
+
 let [<Literal>] private MaxLiveIframes = 3
 
 /// Move filename to front of visited list (LRU order, most recent first), capped at MaxLiveIframes.
@@ -92,7 +103,9 @@ let activeCanvasWorktree (focused: FocusTarget option) (targetWorktree: string o
         | _ -> None)
 
 /// The (scopedKey, filename) of the doc currently shown for the active canvas worktree: its
-/// ActiveCanvasDoc selection if it still names a real doc, else the worktree's first doc.
+/// ActiveCanvasDoc selection if it still names a real doc, else the preferred automatic doc.
+/// The worktree diff is explicit-only when another doc exists, but remains the fallback when it is
+/// the worktree's sole canvas document.
 /// Pure over the slices it reads rather than the whole Model.
 let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (targetWorktree: string option) (activeCanvasDoc: Map<string, string>) : (string * string) option =
     activeCanvasWorktree focused targetWorktree
@@ -105,8 +118,8 @@ let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (targ
                     match wt.CanvasDocs |> List.tryFind (fun d -> d.Filename = name) with
                     | Some selected -> Some selected
                     | None when targetWorktree.IsSome -> None
-                    | None -> wt.CanvasDocs |> List.tryHead
-                | None -> wt.CanvasDocs |> List.tryHead
+                    | None -> preferredAutomaticDoc wt
+                | None -> preferredAutomaticDoc wt
             doc |> Option.map (fun d -> scopedKey, d.Filename)))
 
 /// Command to mark the currently visible doc as viewed. `markViewed` builds the host app's
