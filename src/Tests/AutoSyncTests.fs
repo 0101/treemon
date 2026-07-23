@@ -37,6 +37,12 @@ let private gitData path branch behind revision dirty : GitWorktree.GitData =
       IsDirty = dirty
       WorkMetrics = None }
 
+let private emitVerification name fields =
+    let details = String.concat "; " fields
+    TestContext.Out.WriteLine($"VERIFICATION {name}: {details}")
+
+let private optionText = Option.defaultValue "<none>"
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -224,14 +230,24 @@ type AutoSyncTriggerTests() =
         |> Async.RunSynchronously
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Dirty behind worktrees remain eligible and up-to-date worktrees do not``() =
         let dirtyBehind = gitData "/repo/wt" "feature" 2 (Some "base-a") true
         let upToDate = gitData "/repo/wt" "feature" 0 (Some "base-a") true
+        let dirtyBehindRevision = revision true dirtyBehind
+        let upToDateRevision = revision true upToDate
+        let disabledRevision = revision false dirtyBehind
+
+        emitVerification
+            "eligibility"
+            [ $"dirtyBehindRevision={dirtyBehindRevision |> optionText}"
+              $"upToDateRevision={upToDateRevision |> optionText}"
+              $"disabledRevision={disabledRevision |> optionText}" ]
 
         Assert.Multiple(fun () ->
-            Assert.That(revision true dirtyBehind, Is.EqualTo(Some "base-a"))
-            Assert.That(revision true upToDate, Is.EqualTo None)
-            Assert.That(revision false dirtyBehind, Is.EqualTo None))
+            Assert.That(dirtyBehindRevision, Is.EqualTo(Some "base-a"))
+            Assert.That(upToDateRevision, Is.EqualTo None)
+            Assert.That(disabledRevision, Is.EqualTo None))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -239,6 +255,7 @@ type AutoSyncTriggerTests() =
 type AutoSyncSchedulerDispatchTests() =
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Slow auto-sync delivery does not delay the next scheduled task``() =
         let root = tempDirectory ()
         let releaseDelivery =
@@ -283,9 +300,18 @@ type AutoSyncSchedulerDispatchTests() =
             schedulerStep.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
             deliveryStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
 
+            let schedulerCompleted = schedulerStep.IsCompletedSuccessfully
+            let deliveryCompletedBeforeRelease = deliveryCompleted.Task.IsCompleted
+
+            emitVerification
+                "nonblocking-refresh-dispatch"
+                [ $"schedulerCompleted={schedulerCompleted}"
+                  $"deliveryStarted={deliveryStarted.Task.IsCompletedSuccessfully}"
+                  $"deliveryCompletedBeforeRelease={deliveryCompletedBeforeRelease}" ]
+
             Assert.Multiple(fun () ->
-                Assert.That(schedulerStep.IsCompletedSuccessfully, Is.True)
-                Assert.That(deliveryCompleted.Task.IsCompleted, Is.False))
+                Assert.That(schedulerCompleted, Is.True)
+                Assert.That(deliveryCompletedBeforeRelease, Is.False))
 
             releaseDelivery.TrySetResult(()) |> ignore
             deliveryCompleted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
@@ -344,6 +370,7 @@ type AutoSyncDeliveryTests() =
         Assert.That(accepted, Is.True)
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Open idle session beats newer retained session without fallback launch``() =
         let root = tempDirectory ()
 
@@ -390,6 +417,12 @@ type AutoSyncDeliveryTests() =
                     { request with SessionId = sessionId }
                 |> Async.RunSynchronously
 
+            emitVerification
+                "open-idle-over-retained"
+                [ $"selectedSession={sessionId |> optionText}"
+                  $"accepted={accepted}"
+                  "fallbackLaunch=false" ]
+
             Assert.Multiple(fun () ->
                 Assert.That(sessionId, Is.EqualTo(Some "open-idle"))
                 Assert.That(accepted, Is.True))
@@ -397,10 +430,13 @@ type AutoSyncDeliveryTests() =
             if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Selected session registering during grace receives prompt without fallback launch``() =
         // Callback probes cross async boundaries, so immutable values cannot capture their ordering.
         let mutable attempts = 0
         let mutable registrationCompleted = false
+        let mutable graceCalls = 0
+        let mutable launchAttempts = 0
 
         let tryDeliver _ =
             async {
@@ -418,17 +454,33 @@ type AutoSyncDeliveryTests() =
                 tryDeliver
                 (fun () ->
                     async {
+                        graceCalls <- graceCalls + 1
                         registrationCompleted <- true
                     })
                 (fun _ -> failwith "fallback launch guard must not run")
                 ignore
-                (fun _ _ -> failwith "fallback launch must not run")
+                (fun _ _ ->
+                    async {
+                        launchAttempts <- launchAttempts + 1
+                        return Ok ()
+                    })
                 request
             |> Async.RunSynchronously
 
+        emitVerification
+            "registration-grace"
+            [ $"deliveryAttempts={attempts}"
+              $"graceCalls={graceCalls}"
+              $"graceMilliseconds={registrationGraceMilliseconds}"
+              $"launchAttempts={launchAttempts}"
+              $"accepted={accepted}" ]
+
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
-            Assert.That(attempts, Is.EqualTo(2)))
+            Assert.That(attempts, Is.EqualTo(2))
+            Assert.That(graceCalls, Is.EqualTo(1))
+            Assert.That(registrationGraceMilliseconds, Is.InRange(1, 5000))
+            Assert.That(launchAttempts, Is.Zero))
 
     [<Test>]
     member _.``Registration grace expiry launches exactly one prompted session and releases the guard``() =
@@ -531,10 +583,14 @@ type AutoSyncDeliveryTests() =
         Assert.That(accepted, Is.False)
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Transient bridge POST failure queues the prompt for retry on registration``() =
         let path = $"/test/auto-sync-retry/{Guid.NewGuid():N}"
         let sessionId = $"session-{Guid.NewGuid():N}"
         let port = TestUtils.getFreeTcpPort ()
+        // Delivery callbacks cross async HTTP boundaries, so counters must be captured mutably.
+        let mutable fallbackGuardAttempts = 0
+        let mutable fallbackLaunchAttempts = 0
 
         use listener = new HttpListener()
         listener.Prefixes.Add($"http://127.0.0.1:{port}/")
@@ -547,9 +603,17 @@ type AutoSyncDeliveryTests() =
             deliver
                 SessionBridge.tryDeliver
                 (fun () -> failwith "registration grace must not run")
-                (fun _ -> failwith "fallback launch guard must not run")
+                (fun _ ->
+                    async {
+                        fallbackGuardAttempts <- fallbackGuardAttempts + 1
+                        return true
+                    })
                 ignore
-                (fun _ _ -> failwith "fallback launch must not run")
+                (fun _ _ ->
+                    async {
+                        fallbackLaunchAttempts <- fallbackLaunchAttempts + 1
+                        return Ok ()
+                    })
                 { request with
                     WorktreePath = WorktreePath path
                     SessionId = Some sessionId }
@@ -560,7 +624,7 @@ type AutoSyncDeliveryTests() =
         firstContext.Response.StatusCode <- 503
         firstContext.Response.Close()
 
-        Assert.That(delivery.GetAwaiter().GetResult(), Is.True)
+        let accepted = delivery.GetAwaiter().GetResult()
 
         let retryRequest = listener.GetContextAsync()
         SessionBridge.registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
@@ -572,11 +636,22 @@ type AutoSyncDeliveryTests() =
         retryContext.Response.StatusCode <- 200
         retryContext.Response.Close()
 
-        Assert.That(
-            body,
-            Is.EqualTo(
-                SessionBridge.serializePrompt(
-                    SessionBridge.Prompt.agentPrompt request.Prompt)))
+        let expectedBody =
+            SessionBridge.serializePrompt(
+                SessionBridge.Prompt.agentPrompt request.Prompt)
+
+        emitVerification
+            "known-live-post-retry"
+            [ $"initialDeliveryAccepted={accepted}"
+              $"retryBodyMatched={body = expectedBody}"
+              $"fallbackGuardAttempts={fallbackGuardAttempts}"
+              $"fallbackLaunchAttempts={fallbackLaunchAttempts}" ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(accepted, Is.True)
+            Assert.That(body, Is.EqualTo expectedBody)
+            Assert.That(fallbackGuardAttempts, Is.Zero)
+            Assert.That(fallbackLaunchAttempts, Is.Zero))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -701,7 +776,102 @@ type AutoSyncEndpointTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<Category("AutoSyncVerification")>]
 type AutoSyncVerificationTests() =
+
+    [<Test>]
+    member _.``Verification differently cased API input stores one canonical trigger key``() =
+        let root = tempDirectory ()
+        let worktree = Path.Combine(root, "feature-a")
+        Directory.CreateDirectory(worktree) |> ignore
+        let normalizedPath = PathUtils.normalizePath worktree
+        let differentlyCasedPath = normalizedPath.ToUpperInvariant()
+        let repoId = PathUtils.toRepoId root
+        let agent = createAgent ()
+        let sessionAgent = SessionManager.createAgent ()
+        let port = TestUtils.getFreeTcpPort ()
+
+        use listener = new HttpListener()
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
+        listener.Start()
+
+        try
+            let now = DateTimeOffset.UtcNow
+
+            agent.Post(
+                UpdateWorktreeList(
+                    repoId,
+                    [ { GitWorktree.WorktreeInfo.Path = normalizedPath
+                        Head = "head"
+                        Branch = Some "feature-a" } ]))
+
+            agent.Post(
+                UpdateGit(
+                    repoId,
+                    normalizedPath,
+                    gitData normalizedPath "feature-a" 2 (Some "base-a") true))
+
+            agent.Post(
+                UpdateSessionStatus(
+                    storedSession
+                        "selected-working"
+                        normalizedPath
+                        SessionLevelStatus.Working
+                        now
+                        now))
+
+            SessionBridge.registerSession
+                normalizedPath
+                $"http://127.0.0.1:{port}/"
+                (Some "selected-working")
+
+            let api =
+                WorktreeApi.worktreeApi
+                    agent
+                    (CardEventLog.createAgent ())
+                    sessionAgent
+                    None
+                    [ root ]
+                    None
+                    "1.0"
+                    None
+
+            let request = listener.GetContextAsync()
+            let toggle =
+                api.toggleAutoSync (WorktreePath differentlyCasedPath) true
+                |> Async.StartAsTask
+
+            let context =
+                request.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+            context.Response.StatusCode <- 200
+            context.Response.Close()
+
+            let toggleResult = toggle.GetAwaiter().GetResult()
+            let state = agent.PostAndReply(GetState)
+            let duplicateRefreshClaim =
+                agent.PostAndReply(fun reply ->
+                    ClaimAutoSyncTrigger(normalizedPath, "base-a", reply))
+            let triggerKeys =
+                state.AutoSyncTriggeredRevisions
+                |> Map.toList
+                |> List.map fst
+            let canonicalKeyMatched = triggerKeys = [ normalizedPath ]
+
+            emitVerification
+                "canonical-trigger-path"
+                [ $"apiPathDiffered={differentlyCasedPath <> normalizedPath}"
+                  $"toggleAccepted={Result.isOk toggleResult}"
+                  $"triggerKeyCount={triggerKeys.Length}"
+                  $"canonicalKeyMatched={canonicalKeyMatched}"
+                  $"duplicateRefreshClaim={duplicateRefreshClaim}" ]
+
+            Assert.Multiple(fun () ->
+                Assert.That(differentlyCasedPath, Is.Not.EqualTo(normalizedPath))
+                Assert.That(Result.isOk toggleResult, Is.True)
+                Assert.That(canonicalKeyMatched, Is.True)
+                Assert.That(duplicateRefreshClaim, Is.False))
+        finally
+            if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
     member _.``Verification selected working session receives one configured generic prompt``() =
@@ -793,18 +963,32 @@ type AutoSyncVerificationTests() =
             let result = toggleTask.GetAwaiter().GetResult()
             let duplicateSelectedRequest = selectedListener.GetContextAsync()
             let expectedPrompt = prompt "upstream" "develop"
+            let expectedBody =
+                SessionBridge.serializePrompt(
+                    SessionBridge.Prompt.agentPrompt expectedPrompt)
+            let otherReceived = otherRequest.IsCompleted
+            let duplicateDelivery = duplicateSelectedRequest.IsCompleted
+            let isAgentPromptEnvelope =
+                body.StartsWith("{\"kind\":\"agent-prompt\"", StringComparison.Ordinal)
+            let canvasPrefixPresent =
+                body.Contains("[canvas]", StringComparison.Ordinal)
+
+            emitVerification
+                "selected-working-session"
+                [ $"toggleAccepted={Result.isOk result}"
+                  $"promptMatched={body = expectedBody}"
+                  $"agentPromptEnvelope={isAgentPromptEnvelope}"
+                  $"canvasPrefixPresent={canvasPrefixPresent}"
+                  $"otherSessionReceived={otherReceived}"
+                  $"duplicateDelivery={duplicateDelivery}" ]
 
             Assert.Multiple(fun () ->
                 Assert.That(Result.isOk result, Is.True)
-                Assert.That(
-                    body,
-                    Is.EqualTo(
-                        SessionBridge.serializePrompt(
-                            SessionBridge.Prompt.agentPrompt expectedPrompt)))
+                Assert.That(body, Is.EqualTo expectedBody)
                 Assert.That(body.StartsWith("{\"kind\":\"agent-prompt\"", StringComparison.Ordinal), Is.True)
                 Assert.That(body.Contains("[canvas]", StringComparison.Ordinal), Is.False)
-                Assert.That(otherRequest.IsCompleted, Is.False, "The other session must not receive the prompt")
-                Assert.That(duplicateSelectedRequest.IsCompleted, Is.False, "Delivery must occur exactly once"))
+                Assert.That(otherReceived, Is.False, "The other session must not receive the prompt")
+                Assert.That(duplicateDelivery, Is.False, "Delivery must occur exactly once"))
         finally
             if Directory.Exists root then Directory.Delete(root, true)
 
@@ -850,9 +1034,21 @@ type AutoSyncVerificationTests() =
             trigger dependencies root "upstream" "develop" observation
             |> Async.RunSynchronously
 
+            let expectedLaunches = [ WorktreePath path, expectedPrompt ]
+            let pathMatched =
+                (launches |> List.map fst) = (expectedLaunches |> List.map fst)
+            let promptMatched =
+                (launches |> List.map snd) = (expectedLaunches |> List.map snd)
+
+            emitVerification
+                "repeated-no-live-observations"
+                [ $"launchCount={launches.Length}"
+                  $"pathMatched={pathMatched}"
+                  $"promptMatched={promptMatched}" ]
+
             Assert.That(
                 launches,
-                Is.EqualTo([ WorktreePath path, expectedPrompt ]),
+                Is.EqualTo expectedLaunches,
                 "Repeated observations of one base revision must start exactly one new prompted session")
         finally
             if Directory.Exists root then Directory.Delete(root, true)
@@ -916,8 +1112,18 @@ type AutoSyncVerificationTests() =
             let finalState = agent.PostAndReply(GetState)
             let expectedPrompt = prompt "upstream" "develop"
 
-            TestContext.Out.WriteLine(
-                $"VERIFICATION afterRepeated={afterRepeated}; afterAdvance={afterAdvance}; afterDisable={afterDisable}; afterReenable={afterReenable}")
+            emitVerification
+                "revision-disable-reenable-persistence"
+                [ $"afterRepeated={afterRepeated}"
+                  $"afterAdvance={afterAdvance}"
+                  $"afterDisable={afterDisable}"
+                  $"afterReenable={afterReenable}"
+                  $"promptCount={deliveries.Length}"
+                  $"autoSyncBranches={TreemonConfig.readAutoSyncBranchSet (Some root)}"
+                  $"archivedBranches={TreemonConfig.readArchivedBranches root}"
+                  $"baseBranch={TreemonConfig.readBaseBranch root}"
+                  $"customPreserved={custom}"
+                  $"triggerRevision={finalState.AutoSyncTriggeredRevisions |> Map.tryFind path |> optionText}" ]
 
             Assert.Multiple(fun () ->
                 Assert.That(afterRepeated, Is.EqualTo(1))
