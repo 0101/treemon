@@ -284,7 +284,15 @@ let private historyState
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
 /// never collides) and the scheduler agent it feeds. Call Start once before serving; Dispose on
 /// shutdown. Owns the store's lifetime — Dispose disposes it.
-type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
+type SessionActivityService(
+    store: SessionActivityStore,
+    scheduler: MailboxProcessor<RefreshScheduler.StateMsg>,
+    ?replayNow: unit -> DateTimeOffset
+) =
+
+    // The production clock defines the oldest supported lifecycle start. Tests inject a fixed clock
+    // so replay-boundary scenarios remain deterministic.
+    let replayNow = defaultArg replayNow (fun () -> DateTimeOffset.UtcNow)
 
     // Apply one report on the single writer. State-only reports have independent persistence/order
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
@@ -398,7 +406,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   Skill = rowState.Skill
                   Ts = report.OccurredAt }
 
-            match store.AppendBackgroundAgentAndUpsert(eventRow, orderedStored, toolCallId, lifecycle) with
+            let replayAfter = replayNow () - retentionPeriod
+
+            match store.AppendBackgroundAgentAndUpsert(eventRow, orderedStored, toolCallId, lifecycle, replayAfter) with
             | None -> live
             | Some persisted ->
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)

@@ -48,6 +48,26 @@ let private withDbPath (action: string -> unit) =
 let private connStr (dbPath: string) =
     SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
 
+let private lifecycleRowCount (dbPath: string) sessionId =
+    use conn = new SqliteConnection(connStr dbPath)
+    conn.Open()
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- "SELECT COUNT(*) FROM background_agent_lifecycle WHERE session_id = $sid;"
+    cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
+    cmd.ExecuteScalar() :?> int64 |> int
+
+let private replayAfter (dbPath: string) sessionId =
+    use conn = new SqliteConnection(connStr dbPath)
+    conn.Open()
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- "SELECT background_agent_replay_after FROM session_status WHERE session_id = $sid;"
+    cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
+
+    match cmd.ExecuteScalar() with
+    | null
+    | :? DBNull -> None
+    | value -> Some(ts (value :?> string))
+
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
 
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
@@ -271,10 +291,7 @@ type BackgroundAgentLifecyclePersistenceTests() =
                 aggregate,
                 Is.EqualTo(
                     Map.ofList
-                        [ "tool-1",
-                          lifecycle (Some "2026-03-01T10:01:00Z") None
-                          "tool-2",
-                          lifecycle None (Some "2026-03-01T10:02:00Z") ]
+                        [ "tool-1", ts "2026-03-01T10:01:00Z" ]
                 )
             )
 
@@ -304,10 +321,8 @@ type BackgroundAgentLifecyclePersistenceTests() =
                 )
 
             Assert.That(
-                effectiveStatus
-                    { emptyStatus with
-                        BackgroundAgents = completionBeforeStart },
-                Is.EqualTo SessionLevelStatus.Idle,
+                completionBeforeStart,
+                Is.Empty,
                 "an older late start must not resurrect an already-finished agent"
             )
 
@@ -329,10 +344,7 @@ type BackgroundAgentLifecyclePersistenceTests() =
                 authoritative,
                 Is.EqualTo(
                     Map.ofList
-                        [ "tool-1",
-                          lifecycle
-                              (Some "2026-03-01T10:06:00Z")
-                              (Some "2026-03-01T10:05:00Z") ]
+                        [ "tool-1", ts "2026-03-01T10:06:00Z" ]
                 ),
                 "the return value must be reread from persisted winners, not echo the stale input"
             )
@@ -366,8 +378,7 @@ type BackgroundAgentLifecyclePersistenceTests() =
                 row.Status.BackgroundAgents,
                 Is.EqualTo(
                     Map.ofList
-                        [ "tool-1",
-                          lifecycle (Some "2026-03-01T11:31:00Z") None ]
+                        [ "tool-1", ts "2026-03-01T11:31:00Z" ]
                 )
             )
 
@@ -623,6 +634,129 @@ type QueryWindowTests() =
 type PruneOldTests() =
 
     [<Test>]
+    member _.``the received replay floor blocks resurrection after the old session row is pruned``() =
+        withDbPath (fun dbPath ->
+            use store = new SessionActivityStore(dbPath)
+            let cutoff = ts "2026-03-01T10:00:00Z"
+
+            store.UpsertStatus(
+                storedOf "expired-session" "C:/wt/a" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z"
+            )
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "expired-session",
+                "tool-1",
+                lifecycle (Some "2026-03-01T08:00:00Z") (Some "2026-03-01T09:00:00Z")
+            )
+            |> ignore
+
+            Assert.That(store.PruneOld cutoff, Is.EqualTo 2, "the old status and its tombstone are removed")
+
+            let lateStart = lifecycle (Some "2026-03-01T08:30:00Z") None
+            let lateStartStatus =
+                fold emptyStatus (BackgroundAgentStarted("tool-1", ts "2026-03-01T08:30:00Z"))
+
+            let stored =
+                storedOf
+                    "expired-session"
+                    "C:/wt/a"
+                    lateStartStatus
+                    "2026-03-01T08:30:00Z"
+                    "2026-03-01T08:30:00Z"
+
+            let row = eventOf "late-start" "expired-session" "background_agent_started" SessionLevelStatus.Working None "2026-03-01T08:30:00Z"
+
+            let persisted =
+                store.AppendBackgroundAgentAndUpsert(row, stored, "tool-1", lateStart, cutoff)
+                |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(persisted.Status.BackgroundAgents, Is.Empty)
+                Assert.That(effectiveStatus persisted.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(lifecycleRowCount dbPath "expired-session", Is.EqualTo 0)
+                Assert.That(replayAfter dbPath "expired-session", Is.EqualTo(Some cutoff))))
+
+    [<Test>]
+    member _.``pruneOld expires terminal tombstones and the replay floor blocks older starts``() =
+        withDbPath (fun dbPath ->
+            use store = new SessionActivityStore(dbPath)
+            let cutoff = ts "2026-03-01T10:00:00Z"
+
+            store.UpsertStatus(
+                storedOf "live" "C:/wt/a" emptyStatus "2026-03-01T12:00:00Z" "2026-03-01T12:00:00Z"
+            )
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "live",
+                "expired",
+                lifecycle (Some "2026-03-01T08:00:00Z") (Some "2026-03-01T09:00:00Z")
+            )
+            |> ignore
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "live",
+                "retained",
+                lifecycle (Some "2026-03-01T10:15:00Z") (Some "2026-03-01T10:30:00Z")
+            )
+            |> ignore
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "live",
+                "active",
+                lifecycle (Some "2026-03-01T08:30:00Z") None
+            )
+            |> ignore
+
+            Assert.That(lifecycleRowCount dbPath "live", Is.EqualTo 3)
+            Assert.That(store.PruneOld cutoff, Is.EqualTo 1)
+
+            Assert.Multiple(fun () ->
+                Assert.That(lifecycleRowCount dbPath "live", Is.EqualTo 2, "only the expired terminal row is removed")
+                Assert.That(replayAfter dbPath "live", Is.EqualTo(Some cutoff)))
+
+            let afterLateStart =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "live",
+                    "expired",
+                    lifecycle (Some "2026-03-01T08:30:00Z") None
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    afterLateStart,
+                    Is.EqualTo(Map.ofList [ "active", ts "2026-03-01T08:30:00Z" ]),
+                    "a delayed start outside the replay window must not resurrect the expired tombstone"
+                )
+                Assert.That(lifecycleRowCount dbPath "live", Is.EqualTo 2, "the rejected clock is not persisted"))
+
+            let afterDelayedTerminal =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "live",
+                    "active",
+                    lifecycle None (Some "2026-03-01T09:00:00Z")
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(afterDelayedTerminal, Is.Empty, "an old terminal remains safe because it only deactivates state")
+                Assert.That(store.PruneOld cutoff, Is.EqualTo 1, "the newly completed old row expires immediately"))
+
+            let afterSupportedStart =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "live",
+                    "expired",
+                    lifecycle (Some "2026-03-01T10:00:01Z") None
+                )
+
+            Assert.That(
+                afterSupportedStart,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "expired", ts "2026-03-01T10:00:01Z" ]
+                ),
+                "a genuinely newer start inside the supported replay window remains valid"
+            ))
+
+    [<Test>]
     member _.``pruneOld drops events and session rows older than the cutoff and returns the count``() =
         withStore (fun store ->
             store.AppendEvent(eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z") |> ignore
@@ -666,8 +800,7 @@ type PruneOldTests() =
                 (find "recent" remainingSessions).Status.BackgroundAgents,
                 Is.EqualTo(
                     Map.ofList
-                        [ "recent-tool",
-                          lifecycle (Some "2026-03-01T03:00:00Z") None ]
+                        [ "recent-tool", ts "2026-03-01T03:00:00Z" ]
                 )
             ))
 

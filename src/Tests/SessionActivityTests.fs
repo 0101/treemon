@@ -207,9 +207,7 @@ type BackgroundAgentLifecycleTests() =
                 status.BackgroundAgents,
                 Is.EqualTo(
                     Map.ofList
-                        [ "tool-1",
-                          { StartedAt = Some at
-                            FinishedAt = None } ])))
+                        [ "tool-1", at ])))
 
     [<Test>]
     member _.``Parallel agents keep the session Working until the final terminal event``() =
@@ -237,26 +235,16 @@ type BackgroundAgentLifecycleTests() =
         Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.Idle)
 
     [<Test>]
-    member _.``Duplicate and out-of-order lifecycle reports merge deterministically``() =
-        let chronological =
+    member _.``Completed agents are removed from the live projection immediately``() =
+        let status =
             foldMany
                 emptyStatus
                 [ started "tool-1" "2026-03-01T10:00:00Z"
-                  started "tool-1" "2026-03-01T10:01:00Z"
-                  finished "tool-1" "2026-03-01T10:02:00Z"
-                  finished "tool-1" "2026-03-01T10:02:00Z" ]
-
-        let outOfOrder =
-            foldMany
-                emptyStatus
-                [ finished "tool-1" "2026-03-01T10:02:00Z"
-                  started "tool-1" "2026-03-01T10:01:00Z"
-                  started "tool-1" "2026-03-01T10:00:00Z"
                   finished "tool-1" "2026-03-01T10:02:00Z" ]
 
         Assert.Multiple(fun () ->
-            Assert.That(outOfOrder, Is.EqualTo chronological)
-            Assert.That(effectiveStatus outOfOrder, Is.EqualTo SessionLevelStatus.Idle))
+            Assert.That(status.BackgroundAgents, Is.Empty)
+            Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``Parent Idle and agent start commute for effective status``() =
@@ -321,7 +309,7 @@ type BackgroundAgentLifecycleTests() =
                 [ started "tool-1" "2026-03-01T10:00:00Z"
                   finished "tool-1" "2026-03-01T10:00:01Z" ]
 
-        Assert.That({ afterLifecycle with BackgroundAgents = Map.empty }, Is.EqualTo parent)
+        Assert.That(afterLifecycle, Is.EqualTo parent)
 
     [<Test>]
     member _.``Freshness suppresses waiting and background overlays for a stale session``() =
@@ -339,7 +327,7 @@ type BackgroundAgentLifecycleTests() =
         Assert.Multiple(fun () ->
             Assert.That(effectiveStatus stale, Is.EqualTo SessionLevelStatus.WaitingForUser)
             Assert.That(effectiveStatus adjusted, Is.EqualTo SessionLevelStatus.Idle)
-            Assert.That(adjusted.BackgroundAgents["tool-1"].FinishedAt, Is.EqualTo(Some startedAt)))
+            Assert.That(adjusted.BackgroundAgents, Is.Empty))
 
 
 [<TestFixture>]

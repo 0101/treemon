@@ -12,8 +12,9 @@ open Server.SessionActivity
 //
 //   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
 //                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
-//   background_agent_lifecycle — independent per-tool start/finish clocks used to reconstruct the
-//                     effective session status without trusting report arrival order.
+//   background_agent_lifecycle — independent per-tool start/finish clocks used to reconstruct active
+//                     agents without trusting report arrival order. Completed clocks are bounded
+//                     tombstones and never enter the live SessionStatus projection.
 //   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
 //                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
 //
@@ -124,10 +125,8 @@ let private readOptStr (r: SqliteDataReader) (i: int) =
 let private readOptTimestamp (r: SqliteDataReader) i =
     readOptStr r i |> Option.map parseIso
 
-let private readBackgroundAgent (r: SqliteDataReader) =
-    r.GetString 0,
-    { StartedAt = readOptTimestamp r 1
-      FinishedAt = readOptTimestamp r 2 }
+let private readActiveBackgroundAgent (r: SqliteDataReader) =
+    r.GetString 0, parseIso (r.GetString 1)
 
 let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimitIndex usageAtIndex =
     match r.IsDBNull currentTokensIndex, r.IsDBNull tokenLimitIndex, r.IsDBNull usageAtIndex with
@@ -202,7 +201,8 @@ CREATE TABLE IF NOT EXISTS session_status (
     context_token_limit     INTEGER,
     context_usage_at        TEXT,
     awaiting_user_since     TEXT,
-    user_input_completed_at TEXT
+    user_input_completed_at TEXT,
+    background_agent_replay_after TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
 
@@ -213,6 +213,9 @@ CREATE TABLE IF NOT EXISTS background_agent_lifecycle (
     finished_at  TEXT,
     PRIMARY KEY(session_id, tool_call_id)
 );
+CREATE INDEX IF NOT EXISTS ix_background_agent_finished
+ON background_agent_lifecycle(finished_at)
+WHERE finished_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS activity_events (
     event_id      TEXT PRIMARY KEY,
@@ -236,7 +239,8 @@ let private additiveColumnMigrations =
       "context_token_limit", "INTEGER"
       "context_usage_at", "TEXT"
       "awaiting_user_since", "TEXT"
-      "user_input_completed_at", "TEXT" ]
+      "user_input_completed_at", "TEXT"
+      "background_agent_replay_after", "TEXT" ]
 
 let rec private readColumnNames (reader: SqliteDataReader) names =
     if reader.Read() then
@@ -352,10 +356,29 @@ ON CONFLICT(session_id, tool_call_id) DO UPDATE SET
 
 let private backgroundAgentsBySessionSql =
     """
-SELECT tool_call_id, started_at, finished_at
+SELECT tool_call_id, started_at
 FROM background_agent_lifecycle
 WHERE session_id = $sid
+  AND started_at IS NOT NULL
+  AND (finished_at IS NULL OR started_at > finished_at)
 ORDER BY tool_call_id;
+"""
+
+let private backgroundAgentReplayAfterSql =
+    """
+SELECT background_agent_replay_after
+FROM session_status
+WHERE session_id = $sid
+LIMIT 1;
+"""
+
+let private advanceSessionBackgroundAgentReplaySql =
+    """
+UPDATE session_status
+SET background_agent_replay_after = $replayAfter
+WHERE session_id = $sid
+  AND (background_agent_replay_after IS NULL
+       OR background_agent_replay_after < $replayAfter);
 """
 
 let private upsertContextUsageSql =
@@ -418,17 +441,36 @@ WHERE ts >= $start AND ts <= $end
 ORDER BY ts;
 """
 
-// pruneOld trims all three tables past the retention cutoff: the append-only event stream (the
-// unbounded one), long-dead session rows, and their associated background-agent clocks.
-let private pruneSql =
+// The replay floor and terminal tombstone deletion move together in one transaction. Once a
+// completed clock leaves the bounded replay window, an event at or before the floor can still be
+// appended to history but can no longer recreate current lifecycle state.
+let private advanceBackgroundAgentReplaySql =
+    """
+UPDATE session_status
+SET background_agent_replay_after = $cutoff
+WHERE background_agent_replay_after IS NULL
+   OR background_agent_replay_after < $cutoff;
+"""
+
+let private pruneCompletedBackgroundAgentsSql =
+    """
+DELETE FROM background_agent_lifecycle
+WHERE finished_at IS NOT NULL
+  AND (started_at IS NULL OR started_at <= finished_at)
+  AND finished_at <= $cutoff;
+"""
+
+let private pruneOldSessionBackgroundAgentsSql =
     """
 DELETE FROM background_agent_lifecycle
 WHERE session_id IN (
     SELECT session_id FROM session_status WHERE last_seen < $cutoff
 );
-DELETE FROM activity_events WHERE ts < $cutoff;
-DELETE FROM session_status WHERE last_seen < $cutoff;
 """
+
+let private pruneOldEventsSql = "DELETE FROM activity_events WHERE ts < $cutoff;"
+
+let private pruneOldStatusesSql = "DELETE FROM session_status WHERE last_seen < $cutoff;"
 
 // Every stored session across all worktrees with NO idle-window filter — the durable footer/resume
 // substrate for cards whose sessions have aged out of the live map after a restart.
@@ -507,7 +549,7 @@ let private readBackgroundAgents
     (conn: SqliteConnection)
     (tx: SqliteTransaction option)
     (sessionId: SessionId)
-    : Map<string, BackgroundAgentLifecycle>
+    : Map<string, DateTimeOffset>
     =
     use cmd = conn.CreateCommand()
     tx |> Option.iter (fun transaction -> cmd.Transaction <- transaction)
@@ -515,7 +557,37 @@ let private readBackgroundAgents
     cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
     use reader = cmd.ExecuteReader()
 
-    readRows reader readBackgroundAgent [] |> Map.ofList
+    readRows reader readActiveBackgroundAgent [] |> Map.ofList
+
+let private readBackgroundAgentReplayAfter
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction option)
+    (sessionId: SessionId)
+    : DateTimeOffset option
+    =
+    use cmd = conn.CreateCommand()
+    tx |> Option.iter (fun transaction -> cmd.Transaction <- transaction)
+    cmd.CommandText <- backgroundAgentReplayAfterSql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    use reader = cmd.ExecuteReader()
+
+    if reader.Read() then readOptTimestamp reader 0 else None
+
+let private startAfterReplayFloor replayAfter startedAt =
+    match replayAfter, startedAt with
+    | Some floor, Some at when at <= floor -> None
+    | _, value -> value
+
+let private lifecycleAfterReplayFloor replayAfter lifecycle =
+    let eligible =
+        { StartedAt = startAfterReplayFloor replayAfter lifecycle.StartedAt
+          // Terminal clocks only deactivate state, so even a delayed terminal outside the start
+          // replay window is safe and may close an old still-active row.
+          FinishedAt = lifecycle.FinishedAt }
+
+    match eligible.StartedAt, eligible.FinishedAt with
+    | None, None -> None
+    | _ -> Some eligible
 
 let private attachBackgroundAgents (conn: SqliteConnection) (stored: StoredStatus) =
     { stored with
@@ -555,6 +627,19 @@ let private upsertBackgroundAgent
     cmd.Parameters.AddWithValue("$toolCallId", toolCallId) |> ignore
     cmd.Parameters.AddWithValue("$startedAt", timestampToDb lifecycle.StartedAt) |> ignore
     cmd.Parameters.AddWithValue("$finishedAt", timestampToDb lifecycle.FinishedAt) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
+let private advanceSessionBackgroundAgentReplay
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    (sessionId: SessionId)
+    (replayAfter: DateTimeOffset)
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- advanceSessionBackgroundAgentReplaySql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    cmd.Parameters.AddWithValue("$replayAfter", isoUtc replayAfter) |> ignore
     cmd.ExecuteNonQuery() |> ignore
 
 // --- Store ------------------------------------------------------------------------------------
@@ -658,16 +743,18 @@ type SessionActivityStore(dbPath: string) =
         cmd.ExecuteNonQuery() |> ignore
 
     /// Merge one background agent's independent start/terminal clocks by event time. Each clock only
-    /// moves forward, so duplicates and out-of-order delivery are idempotent. Returns the complete
-    /// authoritative lifecycle map reread in the same transaction.
+    /// moves forward, so duplicates and out-of-order delivery are idempotent. Returns active starts
+    /// only; completed clocks remain durable tombstones until the replay floor passes them.
     member _.UpsertBackgroundAgentLifecycle(
         sessionId: SessionId,
         toolCallId: string,
         lifecycle: BackgroundAgentLifecycle
-    ) : Map<string, BackgroundAgentLifecycle> =
+    ) : Map<string, DateTimeOffset> =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
-        upsertBackgroundAgent conn tx sessionId toolCallId lifecycle
+        let replayAfter = readBackgroundAgentReplayAfter conn (Some tx) sessionId
+        lifecycleAfterReplayFloor replayAfter lifecycle
+        |> Option.iter (upsertBackgroundAgent conn tx sessionId toolCallId)
         let persisted = readBackgroundAgents conn (Some tx) sessionId
         tx.Commit()
         persisted
@@ -681,7 +768,8 @@ type SessionActivityStore(dbPath: string) =
         row: ActivityEventRow,
         stored: StoredStatus,
         toolCallId: string,
-        lifecycle: BackgroundAgentLifecycle
+        lifecycle: BackgroundAgentLifecycle,
+        replayAfter: DateTimeOffset
     ) : StoredStatus option =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
@@ -693,7 +781,12 @@ type SessionActivityStore(dbPath: string) =
 
         let persisted =
             if inserted then
-                upsertBackgroundAgent conn tx stored.SessionId toolCallId lifecycle
+                let effectiveReplayAfter =
+                    readBackgroundAgentReplayAfter conn (Some tx) stored.SessionId
+                    |> Option.fold max replayAfter
+
+                lifecycleAfterReplayFloor (Some effectiveReplayAfter) lifecycle
+                |> Option.iter (upsertBackgroundAgent conn tx stored.SessionId toolCallId)
                 let authoritativeAgents = readBackgroundAgents conn (Some tx) stored.SessionId
                 let authoritativeInput =
                     { stored with
@@ -704,6 +797,7 @@ type SessionActivityStore(dbPath: string) =
                 upsertCmd.CommandText <- upsertSql
                 bindUpsert upsertCmd authoritativeInput
                 upsertCmd.ExecuteNonQuery() |> ignore
+                advanceSessionBackgroundAgentReplay conn tx stored.SessionId effectiveReplayAfter
                 let authoritative = readStoredBySession conn tx stored.SessionId
                 Some authoritative
             else
@@ -767,12 +861,11 @@ type SessionActivityStore(dbPath: string) =
             readRows reader readStored []
 
         rows
-        |> List.map (attachBackgroundAgents conn)
         |> List.groupBy (_.WorktreePath >> WorktreePath.value)
         |> List.choose (fun (path, sessions) ->
             sessions
             |> StoredStatus.tryMostRecentActivity
-            |> Option.map (fun session -> path, session))
+            |> Option.map (fun session -> path, attachBackgroundAgents conn session))
         |> Map.ofList
 
     /// Every stored session for a worktree, newest activity first, INDEPENDENT of the idle window
@@ -792,14 +885,30 @@ type SessionActivityStore(dbPath: string) =
 
         rows |> List.map (attachBackgroundAgents conn)
 
-    /// Retention: drop events older than `cutoff`, session rows last seen before it, and their
-    /// background-agent clocks. Returns the total number of rows deleted across all three tables.
+    /// Retention: atomically advance every session's lifecycle replay floor, remove completed
+    /// tombstones at/before it, then drop old events, dead sessions, and their remaining lifecycle
+    /// rows. Returns deleted rows only; replay-floor updates are not included.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- pruneSql
-        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        cmd.ExecuteNonQuery()
+        use tx = conn.BeginTransaction()
+
+        let execute sql =
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- sql
+            cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+            cmd.ExecuteNonQuery()
+
+        execute advanceBackgroundAgentReplaySql |> ignore
+
+        let completedAgentsDeleted = execute pruneCompletedBackgroundAgentsSql
+        let oldSessionAgentsDeleted = execute pruneOldSessionBackgroundAgentsSql
+        let oldEventsDeleted = execute pruneOldEventsSql
+        let oldStatusesDeleted = execute pruneOldStatusesSql
+        let deleted = completedAgentsDeleted + oldSessionAgentsDeleted + oldEventsDeleted + oldStatusesDeleted
+
+        tx.Commit()
+        deleted
 
     /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
     /// run concurrently with the mailbox writer.

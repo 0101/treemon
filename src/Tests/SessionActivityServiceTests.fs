@@ -94,7 +94,12 @@ let private withServiceSeeded
 
     agent.Post(RefreshScheduler.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
 
-    let svc = new SessionActivityService(store, agent)
+    let svc =
+        new SessionActivityService(
+            store,
+            agent,
+            replayNow = (fun () -> ts "2026-03-02T00:00:00Z")
+        )
 
     try
         action (svc, agent, store)
@@ -499,9 +504,7 @@ type IngestTests() =
                     live.Status.BackgroundAgents,
                     Is.EqualTo(
                         Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
-                                FinishedAt = None } ]))
+                            [ "tool-1", ts "2026-03-01T10:00:00Z" ]))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(persisted, Is.EqualTo live)
@@ -533,13 +536,7 @@ type IngestTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(
-                    live.Status.BackgroundAgents,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(ts "2026-03-01T10:00:04Z")
-                                FinishedAt = Some(ts "2026-03-01T10:00:05Z") } ]))
+                Assert.That(live.Status.BackgroundAgents, Is.Empty)
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
                 Assert.That(persisted, Is.EqualTo live)
@@ -577,13 +574,7 @@ type IngestTests() =
                 Assert.That(finishRow.Skill, Is.EqualTo(None))
                 Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
                 Assert.That(live.Status.Skill, Is.EqualTo(Some "review"))
-                Assert.That(
-                    live.Status.BackgroundAgents,
-                    Is.EqualTo(
-                        Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
-                                FinishedAt = Some(ts "2026-03-01T10:01:00Z") } ]))
+                Assert.That(live.Status.BackgroundAgents, Is.Empty)
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
                 Assert.That(persisted, Is.EqualTo live)
@@ -616,9 +607,7 @@ type IngestTests() =
                     live.Status.BackgroundAgents,
                     Is.EqualTo(
                         Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
-                                FinishedAt = None } ]))
+                            [ "tool-1", ts "2026-03-01T10:00:00Z" ]))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(events |> List.map _.Kind, Is.EqualTo([ "background_agent_started" ]))))
@@ -1070,9 +1059,7 @@ type RestartRebuildTests() =
                     restored.Status.BackgroundAgents,
                     Is.EqualTo(
                         Map.ofList
-                            [ "tool-1",
-                              { StartedAt = Some(now.AddSeconds(-45.0))
-                                FinishedAt = None } ]))
+                            [ "tool-1", now.AddSeconds(-45.0) ]))
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some restored))))
 
     [<Test>]
