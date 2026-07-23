@@ -1,10 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
-import {
-  buildNonBlankMessageReport,
-  buildReport,
-  mapSdkEvent,
-} from "./reporting-core.mjs";
+import { buildNonBlankMessageReport, mapSdkEvent } from "./reporting-core.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
