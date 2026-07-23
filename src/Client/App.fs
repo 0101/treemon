@@ -313,7 +313,10 @@ let update msg model =
 
     | AutoSyncToggleResult (path, previousEnabled, Error _) ->
         let attemptedEnabled = not previousEnabled
-        let completed = { model with AutoSyncPending = model.AutoSyncPending.Remove path }
+        let completed =
+            { model with
+                HasError = true
+                AutoSyncPending = model.AutoSyncPending.Remove path }
         match findWorktree (WorktreePath.value path) completed with
         | Some wt when wt.AutoSyncEnabled = attemptedEnabled ->
             { completed with Repos = setAutoSyncEnabled path previousEnabled completed.Repos }, Cmd.none

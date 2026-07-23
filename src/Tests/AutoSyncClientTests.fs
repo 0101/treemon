@@ -85,6 +85,7 @@ type AutoSyncMvuTests() =
         Assert.Multiple(fun () ->
             Assert.That(enabled updated, Is.EqualTo(Some previous))
             Assert.That(pending updated, Is.False)
+            Assert.That(updated.HasError, Is.True)
             Assert.That(cmd, Is.Empty))
 
     [<Test>]
