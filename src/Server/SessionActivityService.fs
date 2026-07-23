@@ -72,6 +72,17 @@ let internal maxTextLength = 8192
 let internal capText (s: string) : string =
     if isNull s || s.Length <= maxTextLength then s else s.Substring(0, maxTextLength)
 
+/// Opaque lifecycle identity keys are never truncated because that could alias distinct agents.
+/// The producer mirrors this bound, but the server still rejects oversized values independently.
+let internal maxToolCallIdLength = 512
+
+let private parseToolCallId kind (toolCallId: string) =
+    if String.IsNullOrWhiteSpace toolCallId then Error $"{kind} requires toolCallId"
+    elif toolCallId.Length > maxToolCallIdLength then
+        Error $"{kind} toolCallId exceeds {maxToolCallIdLength} characters"
+    else
+        Ok toolCallId
+
 /// Clock-skew allowance for the producer's `occurredAt`. Minor skew between the reporting client's
 /// clock and the server's is tolerated as-is; anything further ahead is implausible.
 let internal futureSkewAllowance = TimeSpan.FromMinutes 5.0
@@ -117,11 +128,11 @@ let internal parseEvent
     | "title_bootstrap" -> parseMessage message |> Result.map TitleBootstrap
     | "user_input_completed" -> Ok(UserInputCompleted occurredAt)
     | "background_agent_started" ->
-        if String.IsNullOrWhiteSpace toolCallId then Error "background_agent_started requires toolCallId"
-        else Ok(BackgroundAgentStarted(toolCallId, occurredAt))
+        parseToolCallId kind toolCallId
+        |> Result.map (fun id -> BackgroundAgentStarted(id, occurredAt))
     | "background_agent_finished" ->
-        if String.IsNullOrWhiteSpace toolCallId then Error "background_agent_finished requires toolCallId"
-        else Ok(BackgroundAgentFinished(toolCallId, occurredAt))
+        parseToolCallId kind toolCallId
+        |> Result.map (fun id -> BackgroundAgentFinished(id, occurredAt))
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
         else Ok(SkillInvoked(capText skillName))

@@ -240,7 +240,9 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   `heartbeat`→`Heartbeat`. `message` (`{ text; at }`) is mandatory for `user_prompt`,
   `assistant_message`, `intent_reported`, `title_reported`, and `title_bootstrap`, and optional only for
   `awaiting_user_input` (the ask_user question). `skillName` applies only to `skill_invoked`;
-  `toolCallId` is mandatory for both background-agent lifecycle kinds;
+  `toolCallId` is mandatory for both background-agent lifecycle kinds and is limited to 512 UTF-16
+  code units. Overlong values are rejected rather than truncated so distinct opaque identity keys
+  cannot alias; values within the bound are preserved exactly.
   `currentTokens` and `tokenLimit` apply only to `usage_info`, with `tokenLimit > 0` and negative
   `currentTokens` normalized to zero. All other kinds carry none of those event-specific fields.
   An unknown `kind` is a validation error, never silently dropped.
@@ -422,6 +424,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   `data.message ?? data.question`.) Blank-text messages and invalid usage gauges are dropped.
 - **Background-agent activity:** `subagent.started`, `subagent.completed`, and `subagent.failed`
   map directly to background-agent lifecycle wire reports carrying `data.toolCallId`. The extension
+  drops blank or over-512-code-unit IDs before POST without trimming or truncating accepted IDs. It
   keeps no active-agent set and performs no status suppression; the server fold and persistence own
   ordering, deduplication, restart recovery, and effective-status precedence.
 - **Title bootstrap:** after live subscriptions are installed and persisted history is replayed,
@@ -457,6 +460,9 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 - **Lifecycle state stays in the durable F# fold.** Ask-user clocks and background-agent lifecycle
   are order-sensitive, restart-sensitive state. The extension forwards facts without local state;
   the server fold and store own effective status and recovery.
+- **Opaque lifecycle IDs are bounded, never transformed.** Both producer and server enforce the same
+  512-code-unit `toolCallId` limit. The producer drops overlong events and the server rejects them;
+  accepted IDs are preserved exactly because truncation could merge distinct agents.
 - **`session.idle` is server-resolved; freshness is only a crash net.** Idle updates the base
   lifecycle status, while independent request/completion and per-agent lifecycle clocks decide
   whether WaitingForUser or Working still overlays it.

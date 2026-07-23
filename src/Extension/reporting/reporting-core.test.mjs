@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildNonBlankMessageReport,
+  MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
 } from "./reporting-core.mjs";
 
@@ -115,6 +116,38 @@ test("background lifecycle requires a nonblank data.toolCallId", () => {
         }),
       ]),
     [null, null, null, null, null, null],
+  );
+});
+
+test("background lifecycle preserves a maximum-length toolCallId", () => {
+  const toolCallId = ` ${"x".repeat(MAX_TOOL_CALL_ID_CHARS - 2)} `;
+
+  assert.deepEqual(
+    ["subagent.started", "subagent.completed", "subagent.failed"]
+      .map((type) => map({
+        id: `${type}-max-id`,
+        timestamp: context.occurredAt,
+        type,
+        agentId: "agent-1",
+        data: { toolCallId },
+      })?.toolCallId),
+    [toolCallId, toolCallId, toolCallId],
+  );
+});
+
+test("background lifecycle drops an overlong toolCallId instead of truncating it", () => {
+  const toolCallId = "x".repeat(MAX_TOOL_CALL_ID_CHARS + 1);
+
+  assert.deepEqual(
+    ["subagent.started", "subagent.completed", "subagent.failed"]
+      .map((type) => map({
+        id: `${type}-overlong-id`,
+        timestamp: context.occurredAt,
+        type,
+        agentId: "agent-1",
+        data: { toolCallId },
+      })),
+    [null, null, null],
   );
 });
 

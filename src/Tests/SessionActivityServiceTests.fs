@@ -174,6 +174,29 @@ type ParseReportTests() =
     member _.``background-agent lifecycle without toolCallId is rejected``(kind: string) =
         Assert.That(parseErr (baseReq kind), Does.Contain "toolCallId")
 
+    [<TestCase("background_agent_started")>]
+    [<TestCase("background_agent_finished")>]
+    member _.``background-agent lifecycle preserves a maximum-length toolCallId``(kind: string) =
+        let toolCallId = $" {String('x', maxToolCallIdLength - 2)} "
+        let event = (parseOk { baseReq kind with toolCallId = toolCallId }).Event
+
+        let actual =
+            match event with
+            | BackgroundAgentStarted(id, _)
+            | BackgroundAgentFinished(id, _) -> id
+            | other -> failwith $"unexpected event: {other}"
+
+        Assert.That(actual, Is.EqualTo toolCallId)
+
+    [<TestCase("background_agent_started")>]
+    [<TestCase("background_agent_finished")>]
+    member _.``background-agent lifecycle rejects an overlong toolCallId``(kind: string) =
+        let req =
+            { baseReq kind with
+                toolCallId = String('x', maxToolCallIdLength + 1) }
+
+        Assert.That(parseErr req, Does.Contain $"{maxToolCallIdLength}")
+
     [<Test>]
     member _.``user_prompt with a message maps to UserPrompt carrying that message``() =
         let req = { baseReq "user_prompt" with message = msgDto "hello" "2026-03-01T10:00:00Z" }

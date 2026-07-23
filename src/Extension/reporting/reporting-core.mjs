@@ -1,4 +1,5 @@
 const MAX_MESSAGE_CHARS = 2000;
+export const MAX_TOOL_CALL_ID_CHARS = 512;
 
 function cap(text) {
   const value = String(text ?? "");
@@ -41,7 +42,9 @@ function backgroundAgentReport(context, event, data) {
     ? "background_agent_started"
     : "background_agent_finished";
   const toolCallId = String(data.toolCallId ?? "");
-  return toolCallId.trim() ? { ...buildReport(context, kind), toolCallId } : null;
+  return toolCallId.trim() && toolCallId.length <= MAX_TOOL_CALL_ID_CHARS
+    ? { ...buildReport(context, kind), toolCallId }
+    : null;
 }
 
 export function mapSdkEvent(context, event) {
