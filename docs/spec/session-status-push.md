@@ -332,10 +332,14 @@ Terminal clocks remain accepted because they only deactivate state. This keeps S
 heartbeat-kept sessions and prevents an expired tombstone's delayed start from resurrecting the agent.
 `pruneOld` also trims old status, event, and remaining associated background-lifecycle rows.
 `loadLiveStatuses` rebuilds status, usage, user-input clocks, active background-agent projection,
-intent/title metadata, and their ordering state on restart for rows
-within the idle window. Retained rows outside that window still supply footer/resume metadata until
-pruning. The service is started only in the real monitoring path — demo/fixture mode serves
-synthetic data and takes no posts.
+intent/title metadata, and their ordering state on restart for rows within the idle window. It reads
+all active lifecycle rows for that live set in one set-based query and groups them in memory, so
+restart/dashboard hydration stays O(1) database reads rather than one lifecycle query per session.
+`RetainedByWorktree` selects one greatest-`(UpdatedAt, SessionId)` footer representative per
+worktree in SQLite and does not hydrate lifecycle state. Resume uses a dedicated scalar query for
+that same ordering and likewise does not load status content or lifecycle rows. Retained rows
+outside the live window remain available until pruning. The service is started only in the real
+monitoring path — demo/fixture mode serves synthetic data and takes no posts.
 
 ### Collapse to card fields (`CodingToolStatus.fs`)
 
@@ -368,10 +372,11 @@ Idle and frozen until it changes — **not** recomputed from `last_seen` (which 
 keeps advancing via heartbeat, which would reset the chip to ~0 each poll). `WorktreeApi` reads the
 frozen stamp for Idle worktrees; a new Working turn clears it.
 
-`getLastSessionId` is the distinct resume pick — greatest `UpdatedAt` from the **durable store**
-(not the idle-window live cache, so a session last active > 2 h ago still resolves after a restart),
-returning the stored session id. Provider for command-building comes from a per-worktree
-`.treemon.json` read (`CodingToolStatus.readConfiguredProvider`), not the retired detectors.
+`SessionActivityStore.LatestSessionIdForWorktree` is the distinct resume pick — a scalar
+greatest-`(UpdatedAt, SessionId)` query against the **durable store** (not the idle-window live
+cache, so a session last active > 2 h ago still resolves after a restart). Provider for
+command-building comes from a per-worktree `.treemon.json` read
+(`CodingToolStatus.readConfiguredProvider`), not the retired detectors.
 
 ### Overview-history unification (Agents dimension)
 
@@ -464,8 +469,10 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   session with the greatest `UpdatedAt`; retained fallback covers sessions outside the live window.
 - **Display pick ≠ footer pick ≠ resume pick.** Display = greatest-`UpdatedAt` *open active*; footer =
   active winner or greatest-`UpdatedAt` fallback; resume = greatest-`UpdatedAt` session from the
-  durable store. `LastSeen` continues to drive openness, freshness, retention, and per-session dot
-  ordering, but never representative footer/resume selection.
+  durable store via a scalar query. Retained footer and resume reads do not hydrate background-agent
+  lifecycle; only live-status reconstruction needs that projection. `LastSeen` continues to drive
+  openness, freshness, retention, and per-session dot ordering, but never representative
+  footer/resume selection.
 - **Future timestamps are normalized, not trusted; free text is length-capped server-side** (see
   Technical Approach) — the loopback endpoint clamps `occurredAt` and uses it for nested message
   timestamps before folding or comparing activity freshness.
@@ -491,10 +498,10 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 | File | Role |
 |------|------|
 | `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
-| `src/Server/SessionActivityStore.fs` | SQLite (WAL) session state + per-tool background-agent lifecycle table; authoritative persistence, restart reconstruction, pruning, and history queries. |
+| `src/Server/SessionActivityStore.fs` | SQLite (WAL) session state + per-tool background-agent lifecycle table; set-based live hydration, retained-footer and scalar-resume queries, pruning, and history. |
 | `src/Server/SessionActivityService.fs` | Wire parsing and single-writer integration for root, user-input, and background-agent lifecycle plus independent metadata, context, and liveness paths. |
 | `src/Server/UserMessageFormatting.fs` | Server-owned user-message classification: suppress system reminders and project canvas prompts for activity and footer display. |
-| `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `getLastSessionId` (resume), `readConfiguredProvider`. |
+| `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `readConfiguredProvider`. |
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |
 | `src/Server/WorktreeApi.fs` | Builds the card's coding-tool fields + `CodingToolSince` from push state. |
 | `src/Server/Program.fs` | Routes `/api/session/activity`; starts the service + rebuild. |
@@ -507,6 +514,6 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 
 - `docs/spec/worktree-monitor.md` — architecture, domain types, refresh model.
 - `docs/spec/beads-overview-band.md` / `docs/spec/overview-drilldown.md` — the Overview Agents band (Idle group).
-- `docs/spec/resume-last-session.md` — consumes `getLastSessionId`.
+- `docs/spec/resume-last-session.md` — consumes the store's durable scalar resume lookup.
 - `docs/spec/remoting-csrf-hardening.md` — the `csrfGuard` the endpoint reuses.
 - `docs/spec/native-session-management.md` — `HasActiveSession` (window-based; distinct from push openness).

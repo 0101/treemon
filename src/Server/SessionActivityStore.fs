@@ -128,6 +128,9 @@ let private readOptTimestamp (r: SqliteDataReader) i =
 let private readActiveBackgroundAgent (r: SqliteDataReader) =
     r.GetString 0, parseIso (r.GetString 1)
 
+let private readSessionActiveBackgroundAgent (r: SqliteDataReader) =
+    SessionId(r.GetString 0), (r.GetString 1, parseIso (r.GetString 2))
+
 let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimitIndex usageAtIndex =
     match r.IsDBNull currentTokensIndex, r.IsDBNull tokenLimitIndex, r.IsDBNull usageAtIndex with
     | true, true, true -> None, None
@@ -205,6 +208,8 @@ CREATE TABLE IF NOT EXISTS session_status (
     background_agent_replay_after TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
+CREATE INDEX IF NOT EXISTS ix_status_worktree_activity
+ON session_status(worktree_path, updated_at DESC, session_id DESC);
 
 CREATE TABLE IF NOT EXISTS background_agent_lifecycle (
     session_id   TEXT NOT NULL,
@@ -364,6 +369,17 @@ WHERE session_id = $sid
 ORDER BY tool_call_id;
 """
 
+let private liveBackgroundAgentsSql =
+    """
+SELECT lifecycle.session_id, lifecycle.tool_call_id, lifecycle.started_at
+FROM background_agent_lifecycle AS lifecycle
+INNER JOIN session_status AS status ON status.session_id = lifecycle.session_id
+WHERE status.last_seen >= $cutoff
+  AND lifecycle.started_at IS NOT NULL
+  AND (lifecycle.finished_at IS NULL OR lifecycle.started_at > lifecycle.finished_at)
+ORDER BY lifecycle.session_id, lifecycle.tool_call_id;
+"""
+
 let private backgroundAgentReplayAfterSql =
     """
 SELECT background_agent_replay_after
@@ -416,21 +432,14 @@ WHERE last_seen >= $cutoff
 ORDER BY last_seen;
 """
 
-// Every stored session for one worktree, newest activity first, with NO idle-window filter
-// (unlike loadSql).
-// The resume path reads this: after a restart the idle-window live cache drops sessions last active
-// >2h ago, so a resume pick over that cache returns None (→ wrong `--continue` fallback); this keeps
-// the durable identity available until the 14d retention prune. Uses the ix_status_worktree index.
-let private worktreeStatusesSql =
+// Resume only needs the durable identity, not the full status aggregate or lifecycle projection.
+let private latestSessionIdForWorktreeSql =
     """
-SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at,
-       awaiting_user_since, user_input_completed_at
+SELECT session_id
 FROM session_status
 WHERE worktree_path = $wt
-ORDER BY updated_at DESC, session_id DESC;
+ORDER BY updated_at DESC, session_id DESC
+LIMIT 1;
 """
 
 let private queryWindowSql =
@@ -472,16 +481,30 @@ let private pruneOldEventsSql = "DELETE FROM activity_events WHERE ts < $cutoff;
 
 let private pruneOldStatusesSql = "DELETE FROM session_status WHERE last_seen < $cutoff;"
 
-// Every stored session across all worktrees with NO idle-window filter — the durable footer/resume
-// substrate for cards whose sessions have aged out of the live map after a restart.
-let private allStatusesSql =
+// One durable footer representative per worktree, selected before rows cross the SQLite boundary.
+// Lifecycle hydration is intentionally absent: retained rows supply footer metadata, while any live
+// copy of the same session is merged separately with its authoritative active-agent projection.
+let private retainedByWorktreeSql =
     """
+WITH ranked AS (
+    SELECT session_id, worktree_path, provider, status, current_skill,
+           last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+           intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
+           context_current_tokens, context_token_limit, context_usage_at,
+           awaiting_user_since, user_input_completed_at,
+           ROW_NUMBER() OVER (
+               PARTITION BY worktree_path
+               ORDER BY updated_at DESC, session_id DESC
+           ) AS activity_rank
+    FROM session_status
+)
 SELECT session_id, worktree_path, provider, status, current_skill,
        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at,
        awaiting_user_since, user_input_completed_at
-FROM session_status
+FROM ranked
+WHERE activity_rank = 1;
 """
 
 let private statusBySessionSql =
@@ -546,11 +569,13 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$userInputCompletedAt", timestampToDb s.UserInputCompletedAt) |> ignore
 
 let private readBackgroundAgents
+    (observeBackgroundAgentRead: unit -> unit)
     (conn: SqliteConnection)
     (tx: SqliteTransaction option)
     (sessionId: SessionId)
     : Map<string, DateTimeOffset>
     =
+    observeBackgroundAgentRead ()
     use cmd = conn.CreateCommand()
     tx |> Option.iter (fun transaction -> cmd.Transaction <- transaction)
     cmd.CommandText <- backgroundAgentsBySessionSql
@@ -558,6 +583,23 @@ let private readBackgroundAgents
     use reader = cmd.ExecuteReader()
 
     readRows reader readActiveBackgroundAgent [] |> Map.ofList
+
+let private readLiveBackgroundAgents
+    (observeBackgroundAgentRead: unit -> unit)
+    (conn: SqliteConnection)
+    (cutoff: DateTimeOffset)
+    : Map<SessionId, Map<string, DateTimeOffset>>
+    =
+    observeBackgroundAgentRead ()
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- liveBackgroundAgentsSql
+    cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+    use reader = cmd.ExecuteReader()
+
+    readRows reader readSessionActiveBackgroundAgent []
+    |> List.groupBy fst
+    |> List.map (fun (sessionId, agents) -> sessionId, agents |> List.map snd |> Map.ofList)
+    |> Map.ofList
 
 let private readBackgroundAgentReplayAfter
     (conn: SqliteConnection)
@@ -589,11 +631,27 @@ let private lifecycleAfterReplayFloor replayAfter lifecycle =
     | None, None -> None
     | _ -> Some eligible
 
-let private attachBackgroundAgents (conn: SqliteConnection) (stored: StoredStatus) =
+let private attachBackgroundAgents
+    (observeBackgroundAgentRead: unit -> unit)
+    (conn: SqliteConnection)
+    (stored: StoredStatus)
+    =
     { stored with
-        Status.BackgroundAgents = readBackgroundAgents conn None stored.SessionId }
+        Status.BackgroundAgents =
+            readBackgroundAgents observeBackgroundAgentRead conn None stored.SessionId }
+
+let private attachBackgroundAgentsFrom
+    (agentsBySession: Map<SessionId, Map<string, DateTimeOffset>>)
+    (stored: StoredStatus)
+    =
+    { stored with
+        Status.BackgroundAgents =
+            agentsBySession
+            |> Map.tryFind stored.SessionId
+            |> Option.defaultValue Map.empty }
 
 let private readStoredBySession
+    (observeBackgroundAgentRead: unit -> unit)
     (conn: SqliteConnection)
     (tx: SqliteTransaction)
     (sessionId: SessionId)
@@ -610,7 +668,8 @@ let private readStoredBySession
     match stored with
     | Some row ->
         { row with
-            Status.BackgroundAgents = readBackgroundAgents conn (Some tx) row.SessionId }
+            Status.BackgroundAgents =
+                readBackgroundAgents observeBackgroundAgentRead conn (Some tx) row.SessionId }
     | None -> failwith $"{nameof StoredStatus}: persisted session row missing"
 
 let private upsertBackgroundAgent
@@ -648,7 +707,7 @@ let private advanceSessionBackgroundAgentReplay
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
 /// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
 /// (restart rebuild, Overview history, prune timer) never share a connection. Dispose on shutdown.
-type SessionActivityStore(dbPath: string) =
+type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: unit -> unit) =
 
     do
         let dir = Path.GetDirectoryName dbPath
@@ -684,6 +743,14 @@ type SessionActivityStore(dbPath: string) =
         cmd.CommandText <- migrateSql
         cmd.ExecuteNonQuery() |> ignore
         c
+
+    new(dbPath: string) = new SessionActivityStore(dbPath, ignore)
+
+    static member internal CreateWithBackgroundAgentReadObserver(
+        dbPath: string,
+        observeBackgroundAgentRead: unit -> unit
+    ) =
+        new SessionActivityStore(dbPath, observeBackgroundAgentRead)
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).
@@ -725,7 +792,7 @@ type SessionActivityStore(dbPath: string) =
                 upsertCmd.CommandText <- upsertSql
                 bindUpsert upsertCmd stored
                 upsertCmd.ExecuteNonQuery() |> ignore
-                Some(readStoredBySession conn tx stored.SessionId)
+                Some(readStoredBySession observeBackgroundAgentRead conn tx stored.SessionId)
             else
                 None
 
@@ -755,7 +822,7 @@ type SessionActivityStore(dbPath: string) =
         let replayAfter = readBackgroundAgentReplayAfter conn (Some tx) sessionId
         lifecycleAfterReplayFloor replayAfter lifecycle
         |> Option.iter (upsertBackgroundAgent conn tx sessionId toolCallId)
-        let persisted = readBackgroundAgents conn (Some tx) sessionId
+        let persisted = readBackgroundAgents observeBackgroundAgentRead conn (Some tx) sessionId
         tx.Commit()
         persisted
 
@@ -787,7 +854,8 @@ type SessionActivityStore(dbPath: string) =
 
                 lifecycleAfterReplayFloor (Some effectiveReplayAfter) lifecycle
                 |> Option.iter (upsertBackgroundAgent conn tx stored.SessionId toolCallId)
-                let authoritativeAgents = readBackgroundAgents conn (Some tx) stored.SessionId
+                let authoritativeAgents =
+                    readBackgroundAgents observeBackgroundAgentRead conn (Some tx) stored.SessionId
                 let authoritativeInput =
                     { stored with
                         Status.BackgroundAgents = authoritativeAgents }
@@ -798,7 +866,8 @@ type SessionActivityStore(dbPath: string) =
                 bindUpsert upsertCmd authoritativeInput
                 upsertCmd.ExecuteNonQuery() |> ignore
                 advanceSessionBackgroundAgentReplay conn tx stored.SessionId effectiveReplayAfter
-                let authoritative = readStoredBySession conn tx stored.SessionId
+                let authoritative =
+                    readStoredBySession observeBackgroundAgentRead conn tx stored.SessionId
                 Some authoritative
             else
                 None
@@ -817,7 +886,7 @@ type SessionActivityStore(dbPath: string) =
         cmd.CommandText <- upsertContextUsageSql
         bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
-        let persisted = readStoredBySession conn tx stored.SessionId
+        let persisted = readStoredBySession observeBackgroundAgentRead conn tx stored.SessionId
         tx.Commit()
         persisted
 
@@ -831,7 +900,7 @@ type SessionActivityStore(dbPath: string) =
             use reader = cmd.ExecuteReader()
             if reader.Read() then Some(readStored reader) else None
 
-        stored |> Option.map (attachBackgroundAgents conn)
+        stored |> Option.map (attachBackgroundAgents observeBackgroundAgentRead conn)
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.
@@ -845,45 +914,33 @@ type SessionActivityStore(dbPath: string) =
             use reader = cmd.ExecuteReader()
             readRows reader readStored []
 
-        rows |> List.map (attachBackgroundAgents conn)
+        let agentsBySession = readLiveBackgroundAgents observeBackgroundAgentRead conn cutoff
+        rows |> List.map (attachBackgroundAgentsFrom agentsBySession)
 
     /// The most recently active stored session per worktree across ALL rows, IGNORING the idle
-    /// window (unlike LoadLiveStatuses). The durable footer/resume substrate for cards: after a
-    /// restart a worktree whose sessions last ran outside the idle window is absent from the live
-    /// map, so its card would collapse to a blank NoSession and the resume button (which needs a
-    /// retained LastUserMessage) would be UI-unreachable. Keyed by worktree_path.
+    /// window (unlike LoadLiveStatuses). This is the durable footer and resume-button-visibility
+    /// substrate for cards whose sessions have aged out of the live map. Keyed by worktree_path.
     member _.RetainedByWorktree() : Map<string, StoredStatus> =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
-        cmd.CommandText <- allStatusesSql
+        cmd.CommandText <- retainedByWorktreeSql
         let rows =
             use reader = cmd.ExecuteReader()
             readRows reader readStored []
 
         rows
-        |> List.groupBy (_.WorktreePath >> WorktreePath.value)
-        |> List.choose (fun (path, sessions) ->
-            sessions
-            |> StoredStatus.tryMostRecentActivity
-            |> Option.map (fun session -> path, attachBackgroundAgents conn session))
+        |> List.map (fun session -> WorktreePath.value session.WorktreePath, session)
         |> Map.ofList
 
-    /// Every stored session for a worktree, newest activity first, INDEPENDENT of the idle window
-    /// (unlike LoadLiveStatuses). The RESUME substrate: after a restart a session last active >2h ago
-    /// is absent from the idle-window live cache, so a resume pick over that cache returned None and
-    /// resume wrongly fell back to `--continue` instead of `--resume <id>` (F10/C-02). Reading
-    /// session_status directly by worktree_path returns those older sessions too (kept until the 14d
-    /// retention prune), so `getLastSessionId` still finds the most-recent one across a restart.
-    member _.StatusesForWorktree(worktreePath: WorktreePath) : StoredStatus list =
+    /// Resume identity for a worktree, independent of the idle window and retained until pruning.
+    /// This scalar path deliberately avoids loading status content or background-agent lifecycle.
+    member _.LatestSessionIdForWorktree(worktreePath: WorktreePath) : string option =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
-        cmd.CommandText <- worktreeStatusesSql
+        cmd.CommandText <- latestSessionIdForWorktreeSql
         cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
-        let rows =
-            use reader = cmd.ExecuteReader()
-            readRows reader readStored []
-
-        rows |> List.map (attachBackgroundAgents conn)
+        use reader = cmd.ExecuteReader()
+        if reader.Read() then Some(reader.GetString 0) else None
 
     /// Retention: atomically advance every session's lifecycle replay floor, remove completed
     /// tombstones at/before it, then drop old events, dead sessions, and their remaining lifecycle

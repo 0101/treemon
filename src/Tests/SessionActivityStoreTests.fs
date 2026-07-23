@@ -69,6 +69,7 @@ let private replayAfter (dbPath: string) sessionId =
     | value -> Some(ts (value :?> string))
 
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
+let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-worktree")
 
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
     { SessionId = SessionId sid
@@ -534,37 +535,118 @@ type LoadLiveStatusesTests() =
         withStore (fun store ->
             Assert.That(store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z"), Is.Empty))
 
+    [<Test>]
+    member _.``Restart hydration reads active lifecycle once for every live session``() =
+        withDbPath (fun dbPath ->
+            (use store = new SessionActivityStore(dbPath)
+             let waiting =
+                 { emptyStatus with
+                     AwaitingUserSince = Some(ts "2026-03-01T11:30:00Z") }
+
+             [ storedOf "active" contextWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z"
+               storedOf "finished" contextWorktree emptyStatus "2026-03-01T11:31:00Z" "2026-03-01T11:31:00Z"
+               storedOf "waiting" otherWorktree waiting "2026-03-01T11:32:00Z" "2026-03-01T11:32:00Z" ]
+             |> List.iter store.UpsertStatus
+
+             store.UpsertBackgroundAgentLifecycle(
+                 SessionId "active",
+                 "tool-active",
+                 lifecycle (Some "2026-03-01T11:33:00Z") None
+             )
+             |> ignore
+
+             store.UpsertBackgroundAgentLifecycle(
+                 SessionId "finished",
+                 "tool-finished",
+                 lifecycle (Some "2026-03-01T11:34:00Z") (Some "2026-03-01T11:35:00Z")
+             )
+             |> ignore
+
+             store.UpsertBackgroundAgentLifecycle(
+                 SessionId "waiting",
+                 "tool-waiting",
+                 lifecycle (Some "2026-03-01T11:36:00Z") None
+             )
+             |> ignore)
+
+            // Mutation is confined to the test callback boundary so query-count behavior is observable.
+            let mutable backgroundAgentReads = 0
+            let observeRead () = backgroundAgentReads <- backgroundAgentReads + 1
+
+            use reopened =
+                SessionActivityStore.CreateWithBackgroundAgentReadObserver(dbPath, observeRead)
+            let rows = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
+
+            Assert.Multiple(fun () ->
+                Assert.That(backgroundAgentReads, Is.EqualTo 1, "bulk restart hydration must stay O(1)")
+                Assert.That(
+                    (find "active" rows).Status.BackgroundAgents,
+                    Is.EqualTo(Map.ofList [ "tool-active", ts "2026-03-01T11:33:00Z" ])
+                )
+                Assert.That(effectiveStatus (find "active" rows).Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That((find "finished" rows).Status.BackgroundAgents, Is.Empty)
+                Assert.That(effectiveStatus (find "finished" rows).Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(
+                    (find "waiting" rows).Status.BackgroundAgents,
+                    Is.EqualTo(Map.ofList [ "tool-waiting", ts "2026-03-01T11:36:00Z" ])
+                )
+                Assert.That(
+                    effectiveStatus (find "waiting" rows).Status,
+                    Is.EqualTo SessionLevelStatus.WaitingForUser
+                )))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type StatusesForWorktreeTests() =
+type LatestSessionIdForWorktreeTests() =
 
     [<Test>]
-    member _.``Sessions outside the idle window are returned in activity order``() =
-        withStore (fun store ->
+    member _.``Session outside the idle window is returned by latest activity``() =
+        withDbPath (fun dbPath ->
             let now = ts "2026-03-01T12:00:00Z"
-            store.UpsertStatus(storedOf "heartbeat" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
-            store.UpsertStatus(storedOf "activity" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            (use store = new SessionActivityStore(dbPath)
+             store.UpsertStatus(storedOf "heartbeat" contextWorktree emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
+             store.UpsertStatus(storedOf "activity" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+             store.UpsertBackgroundAgentLifecycle(
+                 SessionId "activity",
+                 "tool-active",
+                 lifecycle (Some "2026-03-01T09:01:00Z") None
+             )
+             |> ignore
+             Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window"))
 
-            Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window")
+            // Mutation is confined to the test callback boundary so query-count behavior is observable.
+            let mutable backgroundAgentReads = 0
+            let observeRead () = backgroundAgentReads <- backgroundAgentReads + 1
 
-            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
-            Assert.That(ids, Is.EqualTo([ "activity"; "heartbeat" ])))
+            use reopened =
+                SessionActivityStore.CreateWithBackgroundAgentReadObserver(dbPath, observeRead)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                    Is.EqualTo(Some "activity")
+                )
+                Assert.That(backgroundAgentReads, Is.Zero, "resume identity must not hydrate lifecycle")))
 
     [<Test>]
-    member _.``Only the requested worktree's sessions are returned``() =
+    member _.``Latest session query is scoped by worktree and uses session id as tie breaker``() =
         withStore (fun store ->
-            store.UpsertStatus(storedOf "a1" "C:/wt/a" emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
-            store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
+            store.UpsertStatus(storedOf "a1" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
+            store.UpsertStatus(storedOf "a2" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T10:00:00Z")
+            store.UpsertStatus(storedOf "b1" otherWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
 
-            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
-            Assert.That(ids, Is.EqualTo([ "a1" ])))
+            Assert.That(
+                store.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                Is.EqualTo(Some "a2")
+            ))
 
     [<Test>]
-    member _.``A worktree that never reported yields an empty list``() =
+    member _.``A worktree that never reported yields no session id``() =
         withStore (fun store ->
-            Assert.That(store.StatusesForWorktree(WorktreePath "C:/wt/never"), Is.Empty))
+            let unknownWorktree = Path.Combine(Path.GetTempPath(), "treemon-unknown-worktree")
+            Assert.That(store.LatestSessionIdForWorktree(WorktreePath unknownWorktree), Is.EqualTo None))
 
 
 [<TestFixture>]
@@ -588,6 +670,30 @@ type RetainedByWorktreeTests() =
     member _.``An empty store yields no retained rows``() =
         withStore (fun store ->
             Assert.That(store.RetainedByWorktree() |> Map.isEmpty, Is.True))
+
+    [<Test>]
+    member _.``Retained footer representatives do not hydrate lifecycle``() =
+        withDbPath (fun dbPath ->
+            (use store = new SessionActivityStore(dbPath)
+             store.UpsertStatus(storedOf "s1" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+             store.UpsertBackgroundAgentLifecycle(
+                 SessionId "s1",
+                 "tool-active",
+                 lifecycle (Some "2026-03-01T09:01:00Z") None
+             )
+             |> ignore)
+
+            // Mutation is confined to the test callback boundary so query-count behavior is observable.
+            let mutable backgroundAgentReads = 0
+            let observeRead () = backgroundAgentReads <- backgroundAgentReads + 1
+
+            use reopened =
+                SessionActivityStore.CreateWithBackgroundAgentReadObserver(dbPath, observeRead)
+            let retained = reopened.RetainedByWorktree()
+
+            Assert.Multiple(fun () ->
+                Assert.That(retained[contextWorktree].Status.BackgroundAgents, Is.Empty)
+                Assert.That(backgroundAgentReads, Is.Zero, "footer fallback must not hydrate lifecycle")))
 
 
 [<TestFixture>]
@@ -815,8 +921,8 @@ type PruneOldTests() =
 type LegacyDoneStatusTests() =
 
     // Pre-idle-only builds persisted the retired "done" status; live DBs still hold such rows. The
-    // idempotent construction-time migration rewrites 'done' rows to 'idle' so the unguarded reads
-    // (LoadLiveStatuses at startup, StatusesForWorktree on resume) never hit an unknown status.
+    // idempotent construction-time migration rewrites 'done' rows to 'idle' so startup hydration
+    // never hits an unknown status.
 
     /// Insert a raw session_status row with an arbitrary status text, bypassing the store's typed
     /// writers (which can only emit the live vocabulary) — the shape of a row a pre-idle-only build

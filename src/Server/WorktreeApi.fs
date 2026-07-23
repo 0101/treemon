@@ -671,24 +671,15 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value wtPath
                       let provider = CodingToolStatus.readConfiguredProvider path
-                      // Resume pick is the most-recent session for this worktree regardless of
-                      // active/idle (distinct from the display pick). Read from the DURABLE store,
-                      // not the idle-window live cache (state.SessionStatuses): after a restart a
-                      // session last active >2h ago is absent from that cache, so the pick returned
-                      // None and resume wrongly fell back to `--continue` instead of `--resume <id>`
-                      // (F10/C-02). session_status keeps the row until the 14d retention prune, so
-                      // the resume identity survives a restart.
-                      let sessions =
-                          activityStore
-                          |> Option.map _.StatusesForWorktree(PathUtils.toWorktreePath path)
-                          |> Option.defaultValue []
                       // Only resume by stored ID when it belongs to the configured provider. Push
                       // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
                       // future provider that resumes differently (or can't) gets its own arm — the
                       // compiler flags this match when a new provider case is added.
                       let sessionId =
                           match provider |> Option.defaultValue CodingToolProvider.Default with
-                          | CodingToolProvider.CopilotCli -> CodingToolStatus.getLastSessionId sessions
+                          | CodingToolProvider.CopilotCli ->
+                              activityStore
+                              |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })

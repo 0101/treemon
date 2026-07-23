@@ -9,9 +9,8 @@ open Server.SessionActivityStore
 open Server.CodingToolStatus
 
 // Covers the push-only repoint of the worktree card's coding-tool fields onto the SessionActivity
-// live state: fromPushSessions (the pickActive collapse → CodingToolResult), collapseByWorktree
-// (group a flat live set by worktree), and getLastSessionId (the DISTINCT resume pick —
-// most-recent-any, not the display pick). Pure/in-process — no HTTP, no store IO.
+// live state: fromPushSessions (the pickActive collapse → CodingToolResult) and collapseByWorktree
+// (group a flat live set by worktree). Pure/in-process — no HTTP, no store IO.
 
 let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
 let private msg text t : Message = { Text = text; At = ts t }
@@ -464,59 +463,3 @@ type RetainedSessionsTests() =
     [<Test>]
     member _.``An empty live set yields an empty map``() =
         Assert.That(collapseByWorktree now [] |> Map.isEmpty, Is.True)
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type GetLastSessionIdTests() =
-
-    [<Test>]
-    member _.``No sessions yields None (CLI --continue fallback)``() =
-        Assert.That(getLastSessionId [], Is.EqualTo None)
-
-    [<Test>]
-    member _.``The most-recent session wins regardless of active or idle``() =
-        // Resume = most-recent-ANY. The newest session here is Idle, yet it is still the resume pick.
-        let older = stored "older" "wt" SessionLevelStatus.Working None None None "2026-03-01T11:00:00Z"
-        let newerIdle = stored "newer" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z"
-        Assert.That(getLastSessionId [ older; newerIdle ], Is.EqualTo(Some "newer"))
-
-    [<Test>]
-    member _.``The resume pick differs from the display pick when the newest session just went idle``() =
-        // Display (pickActive) drops the newer Idle session and shows the older Working one; resume
-        // (getLastSessionId) picks the newer Idle one — the two picks are deliberately distinct.
-        let active = stored "active" "wt" SessionLevelStatus.Working (Some "review") None None "2026-03-01T11:58:00Z"
-        let justIdled = stored "idled" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:59:00Z"
-
-        let display = fromPushSessions now [ active; justIdled ]
-        let resume = getLastSessionId [ active; justIdled ]
-
-        Assert.That(display.Status, Is.EqualTo Working, "display pick is the active session")
-        Assert.That(resume, Is.EqualTo(Some "idled"), "resume pick is the most-recent (idle) session")
-
-    [<Test>]
-    member _.``A heartbeat cannot replace the most-recent resume session``() =
-        let heartbeatNewest =
-            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle None None None
-                "2026-03-01T11:00:00Z"
-                "2026-03-01T11:59:00Z"
-        let activityNewest =
-            storedWithClocks "activity" "wt" SessionLevelStatus.Idle None None None
-                "2026-03-01T11:58:00Z"
-                "2026-03-01T11:58:00Z"
-
-        Assert.That(getLastSessionId [ heartbeatNewest; activityNewest ], Is.EqualTo(Some "activity"))
-
-    [<Test>]
-    member _.``Equal activity timestamps use session id instead of heartbeat recency``() =
-        let a =
-            storedWithClocks "a" "wt" SessionLevelStatus.Idle None None None
-                "2026-03-01T11:58:00Z"
-                "2026-03-01T11:59:00Z"
-        let b =
-            storedWithClocks "b" "wt" SessionLevelStatus.Idle None None None
-                "2026-03-01T11:58:00Z"
-                "2026-03-01T11:58:00Z"
-
-        Assert.That(getLastSessionId [ a; b ], Is.EqualTo(Some "b"))

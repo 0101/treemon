@@ -494,7 +494,8 @@ type IngestTests() =
 
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let persisted = store.StatusBySession(SessionId "s1") |> Option.get
-            let byWorktree = store.StatusesForWorktree(WorktreePath(PathUtils.normalizePath "C:/wt/a")) |> List.exactlyOne
+            let latestSessionId =
+                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath "C:/wt/a"))
             let retained = store.RetainedByWorktree() |> Map.find (PathUtils.normalizePath "C:/wt/a")
 
             Assert.Multiple(fun () ->
@@ -508,8 +509,14 @@ type IngestTests() =
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(persisted, Is.EqualTo live)
-                Assert.That(byWorktree, Is.EqualTo live)
-                Assert.That(retained, Is.EqualTo live)
+                Assert.That(latestSessionId, Is.EqualTo(Some "s1"))
+                Assert.That(
+                    retained,
+                    Is.EqualTo(
+                        { live with
+                            Status.BackgroundAgents = Map.empty }
+                    )
+                )
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
 
     [<Test>]
