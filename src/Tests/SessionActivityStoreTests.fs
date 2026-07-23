@@ -390,18 +390,16 @@ type LoadLiveStatusesTests() =
 type StatusesForWorktreeTests() =
 
     [<Test>]
-    member _.``Sessions outside the idle window are still returned (the resume substrate, unlike LoadLiveStatuses)``() =
+    member _.``Sessions outside the idle window are returned in activity order``() =
         withStore (fun store ->
             let now = ts "2026-03-01T12:00:00Z"
-            // idleWindow is 2h → cutoff 10:00. Both sessions are >2h stale (last active 07:00 / 09:00),
-            // so LoadLiveStatuses drops both — the exact post-restart gap F10/C-02 is about.
-            store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T07:00:00Z")
-            store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            store.UpsertStatus(storedOf "heartbeat" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
+            store.UpsertStatus(storedOf "activity" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
 
             Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window")
 
             let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
-            Assert.That(ids, Is.EqualTo([ "recent"; "old" ]), "durable rows returned newest last_seen first, no idle filter"))
+            Assert.That(ids, Is.EqualTo([ "activity"; "heartbeat" ])))
 
     [<Test>]
     member _.``Only the requested worktree's sessions are returned``() =
@@ -424,16 +422,15 @@ type StatusesForWorktreeTests() =
 type RetainedByWorktreeTests() =
 
     [<Test>]
-    member _.``Returns the newest session per worktree, ignoring the idle window``() =
+    member _.``Returns the most recently active session per worktree``() =
         withStore (fun store ->
-            // wt/a has two sessions well outside any idle window (last active 07:00 / 09:00); wt/b one.
-            store.UpsertStatus(storedOf "a-old" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T07:00:00Z")
-            store.UpsertStatus(storedOf "a-new" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            store.UpsertStatus(storedOf "a-heartbeat" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
+            store.UpsertStatus(storedOf "a-activity" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
             store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z")
 
             let retained = store.RetainedByWorktree()
             Assert.That(retained.Count, Is.EqualTo 2, "one row per worktree")
-            Assert.That(retained["C:/wt/a"].SessionId, Is.EqualTo(SessionId "a-new"), "the most-recent session for the worktree")
+            Assert.That(retained["C:/wt/a"].SessionId, Is.EqualTo(SessionId "a-activity"))
             Assert.That(retained["C:/wt/b"].SessionId, Is.EqualTo(SessionId "b1")))
 
     [<Test>]
