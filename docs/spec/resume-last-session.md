@@ -15,7 +15,8 @@ The resume button appears on a worktree card when ALL of these conditions are tr
 - A previous session message exists (`LastUserMessage.IsSome`) — proves there was a real session to resume
 - The coding tool is not actively running (`CodingTool = Idle` or `NoSession`)
 
-The button is **hidden** (not disabled) when conditions aren't met — unlike contextual action buttons which show disabled.
+The button is **hidden** (not disabled) when conditions aren't met — unlike contextual card actions,
+which remain visible and temporarily disable during their launch cooldown.
 
 ### Button Appearance
 
@@ -112,7 +113,7 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 ## Decisions
 
 - **`--resume <id>` over `--continue`**: `--continue` is supposed to resume the most recent session in the current directory, but in practice Copilot's `--continue` doesn't reliably scope to the working directory — it can resume sessions from other worktrees. Using `--resume <session-id>` with the specific UUID ensures the correct session is targeted. Falls back to `--continue` if no session ID is found.
-- **Hidden over disabled**: Unlike contextual actions (which show disabled when tool is active), the resume button is hidden when not applicable — it targets a specific scenario (post-reboot) and showing a disabled "resume" button when a session IS active would be confusing
+- **Hidden over disabled**: Unlike contextual card actions (which remain visible and temporarily disable during launch cooldown), the resume button is hidden when not applicable — it targets a specific scenario (post-reboot) and showing a disabled "resume" button when a session IS active would be confusing
 - **No new shared types needed**: Client already has `HasActiveSession`, `LastUserMessage`, and `CodingTool` — enough to determine visibility. Server resolves provider at request time.
 - **Spawn (not new-tab)**: Resume always spawns a new terminal window since the precondition is "no tracked terminal exists"
 
@@ -131,5 +132,5 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 
 ## Related Specs
 
-- `docs/spec/contextual-actions.md` — Similar pattern for action buttons with provider-aware command construction
-- `docs/spec/native-session-management.md` — Session spawning/tracking foundation
+- `docs/spec/worktree-monitor.md` — Contextual card-action visibility and launch behavior
+- `docs/spec/native-session-management.md` — Session spawning/tracking and smart action-launch foundation

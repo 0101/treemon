@@ -18,7 +18,7 @@
 - Merged PRs get dimmed cards with delete button
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
-- Fixed header bar with system metrics and deploy branch badge (see `docs/spec/fixed-header.md`)
+- Fixed header bar with system metrics and deploy branch badge
 - Keyboard navigation: arrow keys move focus spatially across cards and repo headers (see `docs/spec/keyboard-navigation.md`)
 - Canvas pane: per-worktree interactive HTML documents for agent-to-user rich content (see `docs/spec/canvas-pane.md`)
 
@@ -54,9 +54,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Beads counts (open / in-progress / done) with progress bar
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
-- Event log (last 3 events), terminal/delete actions
+- Event log (up to the last 2 events), terminal/delete actions
 - Green left border on cards with active terminal sessions
-- Contextual action buttons: fix PR comments, fix failed build, create PR (see `docs/spec/contextual-actions.md`)
+- Contextual action buttons: fix PR comments, fix failed builds, and create PRs
 
 ### Branch Sync
 
@@ -73,6 +73,13 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - With no live bridge session, Treemon opens a terminal and starts a new session with the sync prompt. A per-worktree in-flight guard prevents duplicate launches.
 - The prompt asks the agent to sync with `{upstreamRemote}/{baseBranch}` when safe, preserve in-progress work, and run appropriate checks.
 - Treemon does not run a separate pull/merge/conflict-resolution/test/commit/push pipeline. Agent prompt acceptance is observable; completion of the Git synchronization is not.
+
+### Contextual Card Actions
+
+- An open PR with unresolved review threads shows **Fix PR comments** beside the thread badge. A failed build with a result URL shows **Fix build** beside that build badge. A branch with no PR shows **Create PR**, except on `main` and `master`.
+- The same buttons render in full and compact cards. Clicking one sends an `ActionKind` through `IWorktreeApi.launchAction`; the button stays visible but is disabled for a per-worktree 10-second cooldown to prevent duplicate launches.
+- `FixPr` and `FixBuild` become provider-specific skill prompts; `CreatePr` uses the fixed commit/push/create-PR prompt. The command runs interactively so the user can inspect or continue the session.
+- Session placement is server-owned: an existing tracked Windows Terminal window gets a new action tab; otherwise Treemon opens and tracks a new window. See `docs/spec/native-session-management.md`.
 
 ### Coding Tool Detection
 
@@ -116,7 +123,7 @@ A "+" button on each repo header opens a modal to create new worktrees without l
 - Server expedites worktree list refresh for the repo so the new card appears quickly
 - **Optional prompt** — a multi-line textarea below the source-branch dropdown. A non-blank value auto-launches a coding-agent session in the new worktree; **Enter inserts a newline** (it does not submit — the Create button submits, Escape closes), and a blank/whitespace prompt is a no-op (identical to the no-prompt flow). The prompt rides the create request as a `string option`.
 - **Skill selection** — a radio group between the source-branch dropdown and the prompt textarea chooses which skill wraps the prompt on launch. A built-in **None** option (always present) sends the prompt **verbatim**; each configured skill wraps it. The chosen skill rides the create request as a `string option` (`None` ⇒ verbatim). The offered skills are the machine-level `worktreeSkills` list (see below); the first entry is the default selection. When no skills are configured the only option is None, and a subtle hint next to it points at `~/.treemon/config.json` (`worktreeSkills`).
-- On a non-blank prompt the server, after a successful create, **fire-and-forget** spawns a tracked coding-agent window in the new worktree. When a skill was chosen it seeds a provider-aware skill invocation (`use {skill} skill with {prompt}` for Copilot, `/{skill} {prompt}` for Claude); for **None** it seeds the prompt verbatim. It reuses `SessionManager.launchAction` — the same path the contextual-action buttons use (see `docs/spec/contextual-actions.md`) — so there is no bespoke spawn logic; the modal still returns/closes on the create result and does not wait for the window. The launch runs even when create returned a post-fork warning.
+- On a non-blank prompt the server, after a successful create, **fire-and-forget** spawns a tracked coding-agent window in the new worktree. When a skill was chosen it seeds a provider-aware skill invocation (`use {skill} skill with {prompt}` for Copilot, `/{skill} {prompt}` for Claude); for **None** it seeds the prompt verbatim. It reuses `SessionManager.launchAction` — the same tracked-window launch path as contextual card actions — so there is no bespoke spawn logic; the modal still returns/closes on the create result and does not wait for the window. The launch runs even when create returned a post-fork warning.
 - The offered skills are config-driven: the machine-level `~/.treemon/config.json` `worktreeSkills` (a string array, blank entries dropped, **empty by default**), surfaced to the client via `DashboardResponse.WorktreeSkills` (like `EditorName`).
 
 ### Native Session Management
@@ -271,7 +278,6 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking, including the no-live-session auto-sync fallback
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
-- `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges
 - `docs/spec/remoting-csrf-hardening.md` — Origin/Referer CSRF guard fronting the remoting and canvas POST surfaces (the create-worktree auto-launch made state-changing remoting an agent-execution sink)
 - `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
 - `docs/spec/session-status-push.md` — coding-tool session collapse and the related auto-sync target selection

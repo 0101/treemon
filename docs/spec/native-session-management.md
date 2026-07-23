@@ -26,7 +26,20 @@
 ### launchSession (API-level)
 - Spawns `wt.exe --window new new-tab -d <path> -- <coding-tool> "prompt"`
 - If session already exists for worktree, kills it first (one window per worktree)
-- Used by `launchAction` (see `docs/spec/contextual-actions.md`) and the worktree auto-sync no-live-session fallback (see `docs/spec/worktree-monitor.md`) when no tracked window exists; `launchAction` handles the new-tab-in-existing-window path separately
+- Used when a caller intentionally replaces the worktree's tracked session with a prompted session
+
+### Contextual Action Launch
+
+`IWorktreeApi.launchAction` accepts an `ActionRequest` for card actions (`FixPr`, `FixBuild`,
+`CreatePr`) and canvas continuation. The server resolves the configured provider, turns the action
+into a provider-specific prompt, and builds an interactive command (`copilot --yolo -i` today).
+
+`SessionManager.launchAction` validates the tracked HWND and chooses the placement:
+- **Tracked window exists**: open a new tab in that window with the command.
+- **No tracked window**: spawn and track a new Windows Terminal window with the command.
+
+This smart launch path is also reused by create-worktree prompt auto-launches, so callers do not
+duplicate window-selection logic.
 
 ### Focus / Kill
 - `focusSession` calls `SetForegroundWindow(hwnd)` with ALT keypress workaround for foreground lock
@@ -73,9 +86,13 @@
 - **Full rewrite persistence** — map is small, atomic rewrite is simpler than incremental updates
 - **No locking beyond MailboxProcessor** — writes only inside single-threaded agent, no concurrent races
 - **P/Invoke EntryPoint attributes** — DLL export names (`IsWindow`, `PostMessageW`) differ from F# binding names; missing EntryPoint crashes the MailboxProcessor silently
+- **Single smart action launch** — callers provide an action or command; `SessionManager` owns the existing-window-vs-new-window choice
+- **Interactive action sessions** — contextual actions use Copilot's interactive mode with `--yolo`; prompts are predefined or server-generated and escaped at the `CodingToolCli` shell boundary
 
 ## Key Files
 
 - `src/Server/Win32.fs` — P/Invoke declarations, HWND resolution, focus/kill helpers
 - `src/Server/SessionManager.fs` — MailboxProcessor state agent, spawn/focus/kill/persist logic
-- `src/Server/WorktreeApi.fs` — API wiring, `HasActiveSession` population
+- `src/Server/CodingToolStatus.fs` / `CodingToolCli.fs` — action-to-prompt mapping and interactive command construction
+- `src/Server/WorktreeApi.fs` — API wiring, contextual action launch, `HasActiveSession` population
+- `src/Client/CardViews.fs` — contextual action visibility and placement on worktree cards
