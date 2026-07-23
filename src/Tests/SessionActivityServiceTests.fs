@@ -544,7 +544,50 @@ type IngestTests() =
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
                 Assert.That(persisted, Is.EqualTo live)
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
-                Assert.That(events |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Idle; SessionLevelStatus.Idle ]))))
+                Assert.That(events |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Working; SessionLevelStatus.Idle ]))))
+
+    [<Test>]
+    member _.``a delayed finish records event-time history without regressing newer root work``() =
+        withService "C:/wt/a" (fun (svc, agent, store) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-start"
+                    "2026-03-01T10:00:00Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+            svc.Submit(mkReport "s1" "C:/wt/a" "root-start" "2026-03-01T11:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-finish"
+                    "2026-03-01T10:01:00Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:01:00Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            let finishRow =
+                store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T12:00:00Z")
+                |> List.find (fun row -> row.EventId = EventId "bg-finish")
+
+            Assert.Multiple(fun () ->
+                Assert.That(finishRow.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(finishRow.Skill, Is.EqualTo(None))
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.Status.Skill, Is.EqualTo(Some "review"))
+                Assert.That(
+                    live.Status.BackgroundAgents,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ "tool-1",
+                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
+                                FinishedAt = Some(ts "2026-03-01T10:01:00Z") } ]))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
+                Assert.That(persisted, Is.EqualTo live)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
 
     [<Test>]
     member _.``a duplicate background event id changes neither lifecycle nor history``() =

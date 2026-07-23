@@ -319,13 +319,6 @@ INSERT OR IGNORE INTO activity_events
 VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 """
 
-let private updateAppendedEventStateSql =
-    """
-UPDATE activity_events
-SET status = $status, skill = $skill
-WHERE event_id = $eid;
-"""
-
 // Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
 // or any message/skill field, and only ever forward. Heartbeats take this path instead of
 // upsert+append, so they refresh openness without moving the last-write-wins clock or polluting the
@@ -682,8 +675,8 @@ type SessionActivityStore(dbPath: string) =
     /// Atomically dedupe and append a background-agent event, merge that tool call's independent
     /// lifecycle clocks, upsert the session shell/aggregate, and return the authoritative persisted
     /// row. The event is inserted first inside the transaction, so a duplicate event_id skips both
-    /// lifecycle and status changes. The final history status is rewritten from the authoritative
-    /// reread after the clock merge, so out-of-order delivery is represented by its effective state.
+    /// lifecycle and status changes. The supplied event-time history row remains unchanged; merged
+    /// lifecycle clocks are used only for the authoritative current session aggregate.
     member _.AppendBackgroundAgentAndUpsert(
         row: ActivityEventRow,
         stored: StoredStatus,
@@ -712,14 +705,6 @@ type SessionActivityStore(dbPath: string) =
                 bindUpsert upsertCmd authoritativeInput
                 upsertCmd.ExecuteNonQuery() |> ignore
                 let authoritative = readStoredBySession conn tx stored.SessionId
-
-                use eventStateCmd = conn.CreateCommand()
-                eventStateCmd.Transaction <- tx
-                eventStateCmd.CommandText <- updateAppendedEventStateSql
-                eventStateCmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
-                eventStateCmd.Parameters.AddWithValue("$status", statusText (effectiveStatus authoritative.Status)) |> ignore
-                eventStateCmd.Parameters.AddWithValue("$skill", optToDb authoritative.Status.Skill) |> ignore
-                eventStateCmd.ExecuteNonQuery() |> ignore
                 Some authoritative
             else
                 None

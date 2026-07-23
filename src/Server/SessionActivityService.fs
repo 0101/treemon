@@ -262,6 +262,23 @@ type private ServiceMsg =
     | Seed of StoredStatus list
     | Snapshot of AsyncReplyChannel<Map<SessionId, StoredStatus>>
 
+let private historyState
+    (prior: StoredStatus option)
+    (report: SessionActivityReport)
+    (currentStatus: SessionStatus)
+    =
+    let isOutOfOrder =
+        prior
+        |> Option.exists (fun stored -> report.OccurredAt < stored.UpdatedAt)
+
+    let rowState =
+        if isOutOfOrder then
+            SessionActivity.fold emptyStatus report.Event
+        else
+            currentStatus
+
+    isOutOfOrder, rowState
+
 /// The SessionActivity ingestion service: the single-writer mailbox, the POST handler, and the
 /// start/stop lifecycle (restart rebuild + retention timer). Construct with an instance-specific
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
@@ -297,7 +314,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                       UpdatedAt = DateTimeOffset.MinValue
                       LastSeen = report.OccurredAt
                       ContextUsageAt = None }
-            status, stored
+            prior, status, stored
 
         match report.Event with
         | Heartbeat ->
@@ -350,13 +367,14 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
-            let _, stored = foldReportState ()
+            let _, _, stored = foldReportState ()
             store.UpsertStatus stored
             scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
             live |> Map.add report.SessionId stored
         | BackgroundAgentStarted(toolCallId, at)
         | BackgroundAgentFinished(toolCallId, at) ->
-            let status, stored = foldReportState ()
+            let prior, status, stored = foldReportState ()
+            let _, rowState = historyState prior report status
             let orderedStored =
                 { stored with
                     UpdatedAt = max stored.UpdatedAt report.OccurredAt
@@ -376,8 +394,8 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   WorktreePath = report.WorktreePath
                   Provider = report.Provider
                   Kind = kindText report.Event
-                  Status = SessionActivity.effectiveStatus status
-                  Skill = status.Skill
+                  Status = SessionActivity.effectiveStatus rowState
+                  Skill = rowState.Skill
                   Ts = report.OccurredAt }
 
             match store.AppendBackgroundAgentAndUpsert(eventRow, orderedStored, toolCallId, lifecycle) with
@@ -392,7 +410,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // Interaction clocks and activity fields are ordered independently from lifecycle status.
             // Ask events merge even when older while advancing UpdatedAt only forward; activity fields
             // preserve UpdatedAt so they cannot block an older lifecycle transition.
-            let status, stored = foldReportState ()
+            let _, status, stored = foldReportState ()
             let orderedStored =
                 match report.Event with
                 | AwaitingUserInput _
@@ -424,16 +442,11 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
             let newStatus = SessionActivity.fold priorStatus report.Event
 
-            let isOutOfOrder =
-                match prior with
-                | Some p -> report.OccurredAt < p.UpdatedAt
-                | None -> false
-
             // The history row records the fold state AFTER this event. For an out-of-order (older) event
             // that must be the event's OWN direct effect (fold onto empty), never the current newest live
             // status — which never held at this event's point in history (F19). In-order events fold onto
             // the running state as usual.
-            let rowState = if isOutOfOrder then SessionActivity.fold emptyStatus report.Event else newStatus
+            let isOutOfOrder, rowState = historyState prior report newStatus
 
             let eventRow =
                 { EventId = report.EventId

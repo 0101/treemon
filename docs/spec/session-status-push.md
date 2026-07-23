@@ -249,8 +249,11 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   activity ordering.
 - Background-agent lifecycle uses the same order-independent discipline per `toolCallId`: start and
   terminal clocks merge by maximum event time, effective status reads an agent as active only when
-  its start is newer than its terminal, and lifecycle changes append to history with the resulting
-  effective status.
+  its start is newer than its terminal, and lifecycle changes append event-time history separately
+  from current-state reconstruction. In-order rows use the running fold; delayed rows use the same
+  event-local stale-event policy as other history-bearing reports (folding the event onto an empty
+  state), so a newer live status or skill is never attributed to an older event. Merged lifecycle
+  clocks affect only the authoritative current aggregate.
 - A lifecycle report may be the first report received for a session because POST delivery is
   fire-and-forget. A start creates an Idle-base shell whose effective status is Working; a terminal
   creates or updates an inactive lifecycle row. A later older start cannot resurrect it.
@@ -313,9 +316,10 @@ an equal-or-newer usage timestamp. Transactional history-bearing writes and cont
 and return the authoritative persisted row, which is then used for the scheduler and service maps so
 persisted metadata/context winners cannot diverge from live state. `appendEvent` is `INSERT OR
 IGNORE`; usage remains a last-known gauge and is not appended to history.
-Background lifecycle writes update the per-tool row and reread the authoritative aggregate in the
-same single-writer flow. `pruneOld(now − 14d)` runs hourly and trims status, event, and associated
-background-lifecycle rows. `loadLiveStatuses` rebuilds status, usage, user-input clocks,
+Background lifecycle writes append the already-classified history row unchanged, update the per-tool
+row, and reread the authoritative current aggregate in the same single-writer flow. `pruneOld(now −
+14d)` runs hourly and trims status, event, and associated background-lifecycle rows.
+`loadLiveStatuses` rebuilds status, usage, user-input clocks,
 background-agent lifecycle, intent/title metadata, and their ordering state on restart for rows
 within the idle window. Retained rows outside that window still supply footer/resume metadata until
 pruning. The service is started only in the real monitoring path — demo/fixture mode serves
