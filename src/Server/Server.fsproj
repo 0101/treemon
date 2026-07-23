@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="JsonStore.fs" />
     <Compile Include="PathUtils.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
@@ -31,6 +32,7 @@
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
+    <Compile Include="MergedPrStore.fs" />
     <Compile Include="CanvasBridge.fs" />
     <Compile Include="EmbeddedResource.fs" />
     <Compile Include="CanvasDocKinds.fs" />

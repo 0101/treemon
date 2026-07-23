@@ -285,6 +285,7 @@ let main args =
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
+            MergedPrStore.load ()
 
             match config.TestFixtures with
             | Some path ->
