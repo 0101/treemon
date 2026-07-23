@@ -41,6 +41,7 @@ let private model enabled : Model =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
@@ -49,6 +50,9 @@ let private model enabled : Model =
 
 let private enabled (model: Model) =
     findWorktree scopedKey model |> Option.map _.AutoSyncEnabled
+
+let private pending (model: Model) =
+    model.AutoSyncPending.Contains path
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -61,23 +65,35 @@ type AutoSyncMvuTests() =
         let updated, cmd = update (ToggleAutoSync path) (model previous)
         Assert.Multiple(fun () ->
             Assert.That(enabled updated, Is.EqualTo(Some(not previous)))
+            Assert.That(pending updated, Is.True)
             Assert.That(cmd, Is.Not.Empty))
+
+    [<Test>]
+    member _.``Second toggle is ignored while the first request is pending``() =
+        let first, _ = update (ToggleAutoSync path) (model false)
+        let second, cmd = update (ToggleAutoSync path) first
+        Assert.Multiple(fun () ->
+            Assert.That(enabled second, Is.EqualTo(Some true))
+            Assert.That(pending second, Is.True)
+            Assert.That(cmd, Is.Empty))
 
     [<TestCase(false)>]
     [<TestCase(true)>]
     member _.``API error rolls the optimistic toggle back``(previous: bool) =
-        let optimistic = model (not previous)
+        let optimistic = { model (not previous) with AutoSyncPending = Set.singleton path }
         let updated, cmd = update (AutoSyncToggleResult(path, previous, Error "persist failed")) optimistic
         Assert.Multiple(fun () ->
             Assert.That(enabled updated, Is.EqualTo(Some previous))
+            Assert.That(pending updated, Is.False)
             Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Successful API result keeps the optimistic state``() =
-        let optimistic = model true
+        let optimistic = { model true with AutoSyncPending = Set.singleton path }
         let updated, cmd = update (AutoSyncToggleResult(path, false, Ok ())) optimistic
         Assert.Multiple(fun () ->
             Assert.That(enabled updated, Is.EqualTo(Some true))
+            Assert.That(pending updated, Is.False)
             Assert.That(cmd, Is.Empty))
 
     [<Test>]

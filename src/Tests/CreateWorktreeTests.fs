@@ -32,6 +32,7 @@ let private defaultModel : Model =
       EditorName = "VS Code"
       WorktreeSkills = []
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty

@@ -41,6 +41,7 @@ let init () =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
@@ -290,28 +291,34 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
     | ToggleAutoSync path ->
-        match findWorktree (WorktreePath.value path) model with
-        | None -> model, Cmd.none
-        | Some wt ->
-            let previousEnabled = wt.AutoSyncEnabled
-            let enabled = not previousEnabled
-            { model with Repos = setAutoSyncEnabled path enabled model.Repos },
-            Cmd.OfAsync.either
-                (fun () -> worktreeApi.Value.toggleAutoSync path enabled)
-                ()
-                (fun result -> AutoSyncToggleResult (path, previousEnabled, result))
-                (fun ex -> AutoSyncToggleResult (path, previousEnabled, Error ex.Message))
+        if model.AutoSyncPending.Contains path then
+            model, Cmd.none
+        else
+            match findWorktree (WorktreePath.value path) model with
+            | None -> model, Cmd.none
+            | Some wt ->
+                let previousEnabled = wt.AutoSyncEnabled
+                let enabled = not previousEnabled
+                { model with
+                    Repos = setAutoSyncEnabled path enabled model.Repos
+                    AutoSyncPending = model.AutoSyncPending.Add path },
+                Cmd.OfAsync.either
+                    (fun () -> worktreeApi.Value.toggleAutoSync path enabled)
+                    ()
+                    (fun result -> AutoSyncToggleResult (path, previousEnabled, result))
+                    (fun ex -> AutoSyncToggleResult (path, previousEnabled, Error ex.Message))
 
-    | AutoSyncToggleResult (_, _, Ok ()) ->
-        model, Cmd.none
+    | AutoSyncToggleResult (path, _, Ok ()) ->
+        { model with AutoSyncPending = model.AutoSyncPending.Remove path }, Cmd.none
 
     | AutoSyncToggleResult (path, previousEnabled, Error _) ->
         let attemptedEnabled = not previousEnabled
-        match findWorktree (WorktreePath.value path) model with
+        let completed = { model with AutoSyncPending = model.AutoSyncPending.Remove path }
+        match findWorktree (WorktreePath.value path) completed with
         | Some wt when wt.AutoSyncEnabled = attemptedEnabled ->
-            { model with Repos = setAutoSyncEnabled path previousEnabled model.Repos }, Cmd.none
+            { completed with Repos = setAutoSyncEnabled path previousEnabled completed.Repos }, Cmd.none
         | _ ->
-            model, Cmd.none
+            completed, Cmd.none
 
     | Tick now ->
         // Tick stays in the root update because it also expires canvas events and drives the
@@ -823,6 +830,7 @@ let view model dispatch =
           FocusedElement = model.FocusedElement
           BranchEvents = model.BranchEvents
           ActionCooldowns = model.ActionCooldowns
+          AutoSyncPending = model.AutoSyncPending
           CanvasEvents = model.Canvas.CanvasEvents
           CanvasPaneOpen = model.Canvas.CanvasPaneOpen }
 

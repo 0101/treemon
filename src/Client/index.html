@@ -96,10 +96,11 @@
         .delete-btn { padding: 3px 4px; }
         .resume-btn { padding: 3px 4px; }
         .auto-sync-btn { padding: 3px 4px; }
-        .terminal-btn:hover, .new-tab-btn:hover, .auto-sync-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .terminal-btn:hover, .new-tab-btn:hover, .auto-sync-btn:not(:disabled):hover { color: #a6e3a1; border-color: #a6e3a1; }
         .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
         .resume-btn:hover { color: #fab387; border-color: #fab387; }
         .has-session .terminal-btn, .auto-sync-btn.active { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
+        .auto-sync-btn:disabled { opacity: 0.55; cursor: not-allowed; }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
         .btn-icon { width: 13px; height: 13px; display: block; }
 

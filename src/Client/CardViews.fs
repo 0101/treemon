@@ -127,6 +127,7 @@ type CardViewProps =
       FocusedElement: FocusTarget option
       BranchEvents: Map<string, CardEvent list>
       ActionCooldowns: Set<WorktreePath>
+      AutoSyncPending: Set<WorktreePath>
       CanvasEvents: Map<string, CanvasEvent list>
       /// Currently unread by the card views; kept as part of the model read-slice — it
       /// formalizes the previously dead `canvasPaneOpen` arg that was threaded through renderCard.
@@ -196,17 +197,20 @@ let autoSyncIcon () =
         ]
     ]
 
-let autoSyncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+    let isPending = pendingPaths.Contains wt.Path
     Html.button [
         prop.className (if wt.AutoSyncEnabled then "auto-sync-btn active" else "auto-sync-btn")
         prop.title $"Auto-sync with {baseBranch} (S)"
         prop.ariaPressed wt.AutoSyncEnabled
+        prop.ariaDisabled isPending
+        prop.disabled isPending
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); callbacks.ToggleAutoSync wt)
         prop.children [ autoSyncIcon () ]
     ]
 
-let mainBehindRow (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+let mainBehindRow (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
@@ -216,7 +220,7 @@ let mainBehindRow (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeS
                     prop.className "dirty-warning"
                     prop.text "uncommitted changes"
                 ]
-            autoSyncButton callbacks baseBranch wt
+            autoSyncButton pendingPaths callbacks baseBranch wt
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -646,7 +650,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
-                    autoSyncButton callbacks baseBranch wt
+                    autoSyncButton props.AutoSyncPending callbacks baseBranch wt
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
             ]
@@ -700,7 +704,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                         ]
 
-                    mainBehindRow callbacks baseBranch wt
+                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt
 
                     prRow callbacks props.ActionCooldowns wt repoName
                 ]

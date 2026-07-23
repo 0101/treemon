@@ -2021,13 +2021,16 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Local")>]
-    member this.``Auto-sync toggles optimistically and rolls back on API error``() =
+    member this.``Auto-sync serializes input and rolls back on API error``() =
         task {
             let! page = this.Context.NewPageAsync()
 
             let toggleFulfill = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+            // Mutable because Playwright's route callback is an impure event boundary.
+            let mutable toggleRequests = 0
 
             do! page.RouteAsync("**/IWorktreeApi/toggleAutoSync", fun route ->
+                toggleRequests <- toggleRequests + 1
                 toggleFulfill.TrySetResult(route) |> ignore
                 System.Threading.Tasks.Task.CompletedTask)
 
@@ -2044,6 +2047,13 @@ type DashboardTests() =
             let! route = toggleFulfill.Task
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
             do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active")
+            do! Assertions.Expect(toggle).ToBeDisabledAsync()
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "true")
+
+            do! multirepoCard.ClickAsync()
+            do! page.Keyboard.PressAsync("s")
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
+            Assert.That(toggleRequests, Is.EqualTo(1), "A second input must not start another persistence request")
 
             do! route.FulfillAsync(
                 RouteFulfillOptions(
@@ -2055,6 +2065,8 @@ type DashboardTests() =
                 "false",
                 LocatorAssertionsToHaveAttributeOptions(Timeout = 5000.0f))
             do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn")
+            do! Assertions.Expect(toggle).ToBeEnabledAsync()
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "false")
 
             do! page.CloseAsync()
         }
