@@ -17,3 +17,9 @@ let disconnectObserver (observer: obj) : unit = jsNative
 
 [<Emit("$0[0]")>]
 let firstIntersectionEntry (entries: obj) : obj = jsNative
+
+[<Emit("new DOMMatrix(getComputedStyle($0).transform).m42")>]
+let translatedY (element: Browser.Types.Element) : float = jsNative
+
+[<Emit("parseFloat(getComputedStyle($0).getPropertyValue($1))")>]
+let cssPixelValue (element: Browser.Types.Element) (propertyName: string) : float = jsNative

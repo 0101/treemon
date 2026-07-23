@@ -908,6 +908,7 @@ let view model dispatch =
             prop.children [
                 if model.OverviewPanelOpen then
                     OverviewBand.view
+                        model.OverviewAgentsStuck
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)

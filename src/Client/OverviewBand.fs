@@ -37,13 +37,30 @@ open BrowserObserverInterop
 let isPastStickyBoundary (sentinelBottom: float) (dashboardTop: float) =
     sentinelBottom < dashboardTop
 
-let private createPinnedObserver (onChange: bool -> unit) =
+let private setCircleShift (dashboard: Browser.Types.Element) (agentsBand: Browser.Types.Element) =
+    let circle: Browser.Types.Element = agentsBand?querySelector(".overview-circle")
+    let items: Browser.Types.Element = agentsBand?querySelector(".overview-items")
+    match Option.ofObj circle, Option.ofObj items with
+    | Some circle, Some items ->
+        let bandRect = agentsBand?getBoundingClientRect()
+        let circleRect = circle?getBoundingClientRect()
+        let bandTop: float = bandRect?top
+        let circleTop: float = circleRect?top
+        let circleHeight: float = circleRect?height
+        let unshiftedCenter = circleTop + circleHeight / 2.0 - bandTop - translatedY items
+        let compactCenter = cssPixelValue dashboard "--pane-header-height" / 2.0
+        agentsBand?style?setProperty("--overview-agents-items-shift", $"{compactCenter - unshiftedCenter}px")
+    | _ -> ()
+
+let private createPinnedObservers (onChange: bool -> unit) =
     match
         Dom.document.querySelector ".dashboard" |> Option.ofObj,
-        Dom.document.querySelector ".overview-agents-stick-sentinel" |> Option.ofObj
+        Dom.document.querySelector ".overview-agents-stick-sentinel" |> Option.ofObj,
+        Dom.document.querySelector ".overview-agents-band" |> Option.ofObj
     with
-    | Some dashboard, Some sentinel ->
-        let observer =
+    | Some dashboard, Some sentinel, Some agentsBand ->
+        setCircleShift dashboard agentsBand
+        let intersectionObserver =
             createIntersectionObserver
                 (fun entries ->
                     let entry = firstIntersectionEntry entries
@@ -54,21 +71,24 @@ let private createPinnedObserver (onChange: bool -> unit) =
                         let dashboardTop: float = rootBounds?top
                         onChange (isPastStickyBoundary sentinelBottom dashboardTop)))
                 (createObj [ "root" ==> dashboard; "threshold" ==> 0 ])
-        observeElement observer sentinel
-        Some observer
-    | _ -> None
+        let resizeObserver =
+            createResizeObserver (fun _ -> setCircleShift dashboard agentsBand)
+        observeElement intersectionObserver sentinel
+        observeElement resizeObserver agentsBand
+        [ intersectionObserver; resizeObserver ]
+    | _ -> []
 
 let observePinnedState (onChange: bool -> unit) =
-    // Observer attachment follows the React commit, so its handle must live across the frame callback.
-    let mutable observer = None
+    // Observer attachment follows the React commit, so the handles must live across the frame callback.
+    let mutable observers = []
     let frameId: int =
         Dom.window?requestAnimationFrame(fun (_: float) ->
-            observer <- createPinnedObserver onChange)
+            observers <- createPinnedObservers onChange)
 
     { new System.IDisposable with
         member _.Dispose() =
             Dom.window?cancelAnimationFrame(frameId)
-            observer |> Option.iter disconnectObserver }
+            observers |> List.iter disconnectObserver }
 
 // Display label per task bucket, in the aggregate's canonical left-to-right order.
 let private taskLabel =
@@ -352,6 +372,7 @@ let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel li
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
 /// arrow-nav parity.
 let view
+    (isAgentsStuck: bool)
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
@@ -403,7 +424,10 @@ let view
               | _ ->
                   Html.div [ prop.className "overview-agents-stick-sentinel" ]
                   Html.div
-                      [ prop.className "overview-band overview-agents-band"
+                      [ prop.className
+                            [ "overview-band"
+                              "overview-agents-band"
+                              if isAgentsStuck then "overview-agents-band-pinned" ]
                         prop.children [ agentSection ] ]
               Html.div
                   [ prop.className [ "overview-band"; if not (List.isEmpty agents) then "overview-band-rest" ]

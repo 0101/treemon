@@ -17,7 +17,13 @@
         ::-webkit-scrollbar-thumb { background: rgba(88, 91, 112, 0.5); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(88, 91, 112, 0.8); }
 
-        .dashboard { padding: 16px; padding-bottom: 0; max-width: 2000px; margin: 0 auto; }
+        .dashboard {
+            --dashboard-padding: 16px;
+            padding: var(--dashboard-padding);
+            padding-bottom: 0;
+            max-width: 2000px;
+            margin: 0 auto;
+        }
 
         .app-header {
             position: fixed; top: 0; left: 0; right: 0; z-index: 100;
@@ -191,7 +197,7 @@
         }
         .overview-agents-band::after {
             content: ''; position: absolute; left: 0; right: 0;
-            top: calc(16px + var(--pane-header-height) - 1px);
+            top: calc(var(--dashboard-padding) + var(--pane-header-height) - 1px);
             border-bottom: 1px solid #313244; opacity: 0;
             animation: overview-agents-line-enter linear both;
             animation-timeline: --overview-dashboard-scroll;
@@ -201,13 +207,21 @@
         .overview-agents-band .overview-meta {
             animation: overview-agents-meta-exit linear both;
             animation-timeline: --overview-dashboard-scroll;
-            animation-range: 0 var(--overview-agents-morph-range);
+            animation-range: 0 24px;
         }
         .overview-agents-band .overview-items {
             animation: overview-agents-items-morph linear both;
             animation-timeline: --overview-dashboard-scroll;
             animation-range: 0 var(--overview-agents-morph-range);
         }
+        .overview-agents-band-pinned .overview-items {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            overflow-y: hidden;
+            overscroll-behavior-inline: contain;
+            scrollbar-width: none;
+        }
+        .overview-agents-band-pinned .overview-items::-webkit-scrollbar { display: none; }
         @keyframes overview-agents-shell-morph {
             from {
                 transform: translateY(0);
@@ -215,8 +229,12 @@
                 background-color: #1e1e2e;
             }
             to {
-                transform: translateY(-16px);
-                clip-path: inset(16px 0 calc(100% - 16px - var(--pane-header-height)) 0);
+                transform: translateY(calc(-1 * var(--dashboard-padding)));
+                clip-path: inset(
+                    var(--dashboard-padding)
+                    0
+                    calc(100% - var(--dashboard-padding) - var(--pane-header-height))
+                    0);
                 background-color: #181825;
             }
         }
@@ -226,7 +244,7 @@
         }
         @keyframes overview-agents-items-morph {
             from { transform: translateY(0); }
-            to { transform: translateY(-55.5px); }
+            to { transform: translateY(var(--overview-agents-items-shift, -55.5px)); }
         }
         @keyframes overview-agents-line-enter {
             from { opacity: 0; }

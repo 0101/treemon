@@ -441,6 +441,7 @@ type OverviewBandE2ETests() =
                     """() => {
                       const dashboard = document.querySelector('.dashboard');
                       const agents = document.querySelector('.overview-agents-band');
+                      const items = agents.querySelector('.overview-items');
                       const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
                       dashboard.scrollTop = morphRange / 2;
                       return new Promise(resolve =>
@@ -448,6 +449,9 @@ type OverviewBandE2ETests() =
                           resolve(JSON.stringify({
                             bandCount: document.querySelectorAll('.overview-agents-band').length,
                             compactCount: document.querySelectorAll('.overview-agents-compact').length,
+                            shellTranslateY: new DOMMatrix(getComputedStyle(agents).transform).m42,
+                            itemProgress: new DOMMatrix(getComputedStyle(items).transform).m42
+                              / parseFloat(getComputedStyle(agents).getPropertyValue('--overview-agents-items-shift')),
                             headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
                             metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity)
                           })))));
@@ -456,8 +460,10 @@ type OverviewBandE2ETests() =
             let morph = JObject.Parse(morphJson)
             Assert.That(morph.Value<int>("bandCount"), Is.EqualTo(1))
             Assert.That(morph.Value<int>("compactCount"), Is.EqualTo(0))
-            Assert.That(morph.Value<float>("headerOpacity"), Is.InRange(0.1, 0.9))
-            Assert.That(morph.Value<float>("metaOpacity"), Is.InRange(0.1, 0.9))
+            Assert.That(morph.Value<float>("shellTranslateY"), Is.InRange(-15.0, -1.0))
+            Assert.That(morph.Value<float>("itemProgress"), Is.InRange(0.1, 0.9))
+            Assert.That(morph.Value<float>("headerOpacity"), Is.LessThan(0.01))
+            Assert.That(morph.Value<float>("metaOpacity"), Is.LessThan(0.01))
 
             let! _ =
                 this.Page.EvaluateAsync(
@@ -524,6 +530,39 @@ type OverviewBandE2ETests() =
             Assert.That(sticky.Value<float>("lineOpacity"), Is.EqualTo(1.0).Within(0.01))
             Assert.That(sticky.Value<string>("lineColor"), Is.EqualTo(sticky.Value<string>("canvasBorderColor")))
             Assert.That(sticky.Value<string>("groupGap"), Is.EqualTo("22px"))
+
+            do! this.Page.SetViewportSizeAsync(700, 800)
+            let! narrowJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => new Promise(resolve =>
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        const items = document.querySelector('.overview-agents-band .overview-items');
+                        const circles = Array.from(items.querySelectorAll('.overview-circle'));
+                        const centers = circles.map(circle => {
+                          const rect = circle.getBoundingClientRect();
+                          return rect.top + rect.height / 2;
+                        });
+                        const hasOverflow = items.scrollWidth > items.clientWidth;
+                        items.scrollLeft = items.scrollWidth;
+                        requestAnimationFrame(() => {
+                          const itemsRect = items.getBoundingClientRect();
+                          const lastRect = circles[circles.length - 1].getBoundingClientRect();
+                          resolve(JSON.stringify({
+                            flexWrap: getComputedStyle(items).flexWrap,
+                            overflowX: getComputedStyle(items).overflowX,
+                            hasOverflow,
+                            rowSpread: Math.max(...centers) - Math.min(...centers),
+                            lastCircleVisible: lastRect.left >= itemsRect.left - 1 && lastRect.right <= itemsRect.right + 1
+                          }));
+                        });
+                      })))""")
+
+            let narrow = JObject.Parse(narrowJson)
+            Assert.That(narrow.Value<string>("flexWrap"), Is.EqualTo("nowrap"))
+            Assert.That(narrow.Value<string>("overflowX"), Is.EqualTo("auto"))
+            Assert.That(narrow.Value<bool>("hasOverflow"), Is.True)
+            Assert.That(narrow.Value<float>("rowSpread"), Is.LessThanOrEqualTo(1.0))
+            Assert.That(narrow.Value<bool>("lastCircleVisible"), Is.True)
 
             do! investigating.Locator(".overview-circle").First.ClickAsync()
             let! _ =

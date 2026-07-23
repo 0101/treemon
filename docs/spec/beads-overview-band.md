@@ -270,13 +270,13 @@ the solution compiling (no compat shims, per house rules).
   normal-flow breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs that single Agents
   DOM across the first 112px of scrolling: heading and metadata fade, the existing circle groups
   translate into one compact row, and `clip-path` reduces the same background to Canvas-header
-  height. No duplicate circle tree exists. An `IntersectionObserver` watches only the sentinel and
-  reports pinned only after the sentinel passes strictly above the dashboard boundary. Its Elmish
-  subscription exists only while agent groups are rendered, so removing the Agents DOM disposes the
-  observer and resets pinned state; a later group reappearance starts a fresh observer. Entering the
-  pinned state closes an agent drill-down; the observer does not control visual interpolation.
-  The two sections stay **stacked** at every width; category columns wrap via
-  `.overview-items { flex-wrap: wrap }`.
+  height. No duplicate circle tree exists. The final translation is measured from rendered circle
+  geometry and refreshed by `ResizeObserver`, avoiding platform-font pixel tuning. An
+  `IntersectionObserver` watches only the sentinel and reports pinned after it passes strictly above
+  the dashboard boundary. Its Elmish subscription exists only while agent groups are rendered, so
+  removing the Agents DOM disposes the observers and resets pinned state. Entering the pinned state
+  closes an agent drill-down and switches Agents to one `nowrap` row with hidden-scrollbar horizontal
+  overflow. Expanded category columns still wrap normally.
 
 ## Decisions
 

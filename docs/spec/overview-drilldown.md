@@ -34,8 +34,9 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 - The breakdown panel appears **inside its own section**:
   - Agent-group breakdown renders **between the Agents row and the Tasks section**.
   - Task-bucket breakdown renders **directly below the Tasks row**.
-- Within each section, the group columns **wrap** to the next line when the pane is too narrow (a
-  row-gap keeps wrapped lines legible), instead of a horizontal scrollbar.
+- In the expanded Overview, group columns **wrap** to the next line when the pane is too narrow (a
+  row-gap keeps wrapped lines legible). The compact pinned Agents row stays on one line and uses
+  horizontal overflow when needed, so no agent group is clipped.
 - The panel closes when: the group is re-clicked, the panel's **✕** button is clicked, or **Esc** is
   pressed while a group is selected. An agent-group panel also closes when scrolling transitions
   the Agents strip into its compact pinned state.
@@ -153,17 +154,18 @@ type OverviewSelection =
 - Render one sticky Agents section plus a 1px zero-net-flow sentinel and the normal-flow
   breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs the same Agents DOM: heading and
   metadata fade, the existing circle groups translate upward, and the band clips to compact
-  Canvas-header height. There is no second compact circle tree to overlap during transition. An
-  `IntersectionObserver` is active only while agent groups exist, watches only the sentinel, and
-  closes an agent selection after the sentinel passes strictly above the dashboard boundary;
-  visual progress remains entirely scroll-driven.
+  Canvas-header height. There is no second compact circle tree to overlap during transition. Circle
+  translation is derived from rendered geometry and refreshed by `ResizeObserver`, so platform font
+  metrics land on the same center. An `IntersectionObserver` is active only while agent groups
+  exist, watches only the sentinel, closes an agent selection after it passes strictly above the
+  dashboard boundary, and enables the pinned `nowrap` layout with horizontal overflow.
 - Render the breakdown panel below the relevant row when a matching group is selected: the ✕ close
   button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members,
   agent chips vs. task bars.
 - CSS additions near the existing `.overview-*` rules (`index.html`): the selected black tab
   (rounded top corners), the `.overview-breakdown` panel, `.overview-chips`/chip, the task
-  `name + bar` rows, the close button, and `.overview-items` wrapping (`flex-wrap: wrap`, no
-  horizontal scrollbar). Follow
+  `name + bar` rows, the close button, expanded `.overview-items` wrapping, and pinned-agent
+  single-row overflow. Follow
   the existing Catppuccin palette and the CSS-classes-only rule (the proportional bar width is the
   already-documented inline-width exception).
 
@@ -174,8 +176,9 @@ type OverviewSelection =
   `isActive`/`IsArchived`, and repo names populated.
 - **E2E** (`OverviewBandE2ETests`): verifies exactly one Agents band/circle tree exists, heading and
   metadata have intermediate opacity midway through the morph, entering the pinned state closes an
-  agent drill-down, final circles share one centered row at Canvas-header height, and clicking a
-  circle scrolls back to its drill-down.
+  agent drill-down, final circles share one centered row at Canvas-header height on Windows/Linux,
+  a narrow dashboard keeps one horizontally scrollable row with the last group reachable, and
+  clicking a circle scrolls back to its drill-down.
 
 ## Decisions
 
@@ -185,7 +188,8 @@ Locked during prototyping (see the canvas prototype doc):
 - **Panel placement: inside the band**, directly under the selected group's section row.
 - **Single-select**; re-click / ✕ / Esc closes.
 - **Ephemeral** selection (not persisted).
-- **Groups wrap** to the next line per section on narrow panes (no horizontal scrollbar).
+- **Expanded groups wrap** on narrow panes; the compact pinned Agents row stays single-line and
+  horizontally scrolls only when required.
 - **Agent breakdown** = borderless activity-colored `[● name]` chips; **task breakdown** = `name + bar`
   rows on the band's shared task scale.
 - **Sticky strip stays separate from the breakdown.** Only the agent summary remains pinned; the
