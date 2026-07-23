@@ -697,3 +697,244 @@ type AutoSyncEndpointTests() =
             Assert.That(
                 finalState.AutoSyncTriggeredRevisions |> Map.tryFind normalizedPath,
                 Is.EqualTo(Some "base-a")))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AutoSyncVerificationTests() =
+
+    [<Test>]
+    member _.``Verification selected working session receives one configured generic prompt``() =
+        let root = tempDirectory ()
+        let worktree = Path.Combine(root, "feature-a")
+        Directory.CreateDirectory(worktree) |> ignore
+        let normalizedPath = PathUtils.normalizePath worktree
+        let repoId = PathUtils.toRepoId root
+        let agent = createAgent ()
+        let sessionAgent = SessionManager.createAgent ()
+        let selectedPort, otherPort =
+            match TestUtils.getFreeTcpPorts 2 with
+            | [ selected; other ] -> selected, other
+            | ports -> failwith $"expected two free ports, got {ports.Length}"
+
+        use selectedListener = new HttpListener()
+        use otherListener = new HttpListener()
+        selectedListener.Prefixes.Add($"http://127.0.0.1:{selectedPort}/")
+        otherListener.Prefixes.Add($"http://127.0.0.1:{otherPort}/")
+        selectedListener.Start()
+        otherListener.Start()
+
+        try
+            let now = DateTimeOffset.UtcNow
+
+            agent.Post(
+                UpdateWorktreeList(
+                    repoId,
+                    [ { GitWorktree.WorktreeInfo.Path = normalizedPath
+                        Head = "head"
+                        Branch = Some "feature-a" } ]))
+            agent.Post(UpdateUpstreamRemote(repoId, "upstream"))
+            agent.Post(UpdateBaseBranch(repoId, "develop"))
+            agent.Post(
+                UpdateGit(
+                    repoId,
+                    normalizedPath,
+                    gitData normalizedPath "feature-a" 2 (Some "base-a") true))
+            agent.Post(
+                UpdateSessionStatus(
+                    storedSession
+                        "selected-working"
+                        normalizedPath
+                        SessionLevelStatus.Working
+                        (now.AddMinutes(-2.0))
+                        now))
+            agent.Post(
+                UpdateSessionStatus(
+                    storedSession
+                        "other-idle"
+                        normalizedPath
+                        SessionLevelStatus.Idle
+                        (now.AddMinutes(-1.0))
+                        now))
+
+            SessionBridge.registerSession
+                normalizedPath
+                $"http://127.0.0.1:{selectedPort}/"
+                (Some "selected-working")
+            SessionBridge.registerSession
+                normalizedPath
+                $"http://127.0.0.1:{otherPort}/"
+                (Some "other-idle")
+
+            let api =
+                WorktreeApi.worktreeApi
+                    agent
+                    (CardEventLog.createAgent ())
+                    sessionAgent
+                    None
+                    [ root ]
+                    None
+                    "1.0"
+                    None
+
+            let selectedRequest = selectedListener.GetContextAsync()
+            let otherRequest = otherListener.GetContextAsync()
+            let toggleTask =
+                api.toggleAutoSync (WorktreePath normalizedPath) true
+                |> Async.StartAsTask
+
+            let selectedContext =
+                selectedRequest.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+            use reader = new StreamReader(selectedContext.Request.InputStream)
+            let body = reader.ReadToEnd()
+            selectedContext.Response.StatusCode <- 200
+            selectedContext.Response.Close()
+
+            let result = toggleTask.GetAwaiter().GetResult()
+            let duplicateSelectedRequest = selectedListener.GetContextAsync()
+            let expectedPrompt = prompt "upstream" "develop"
+
+            Assert.Multiple(fun () ->
+                Assert.That(Result.isOk result, Is.True)
+                Assert.That(
+                    body,
+                    Is.EqualTo(
+                        SessionBridge.serializePrompt(
+                            SessionBridge.Prompt.agentPrompt expectedPrompt)))
+                Assert.That(body.StartsWith("{\"kind\":\"agent-prompt\"", StringComparison.Ordinal), Is.True)
+                Assert.That(body.Contains("[canvas]", StringComparison.Ordinal), Is.False)
+                Assert.That(otherRequest.IsCompleted, Is.False, "The other session must not receive the prompt")
+                Assert.That(duplicateSelectedRequest.IsCompleted, Is.False, "Delivery must occur exactly once"))
+        finally
+            if Directory.Exists root then Directory.Delete(root, true)
+
+    [<Test>]
+    member _.``Verification repeated no-live observations launch one new session with the same prompt``() =
+        let root = tempDirectory ()
+        let path = Path.Combine(root, "feature-a")
+        Directory.CreateDirectory(path) |> ignore
+        let agent = createAgent ()
+        let expectedPrompt = prompt "upstream" "develop"
+        // Mutable because the launch callback is the impure boundary whose invocation count is under test.
+        let mutable launches = []
+
+        try
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+
+            let dependencies =
+                { ClaimRevision =
+                    fun worktreePath baseRevision ->
+                        agent.PostAndAsyncReply(fun reply ->
+                            ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
+                  ReleaseRevision =
+                    fun worktreePath baseRevision ->
+                        agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
+                  SelectSessionId = fun _ -> async { return Some "retained-session" }
+                  Deliver =
+                    deliver
+                        (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
+                        (fun () -> async { return () })
+                        (fun worktreePath ->
+                            agent.PostAndAsyncReply(fun reply ->
+                                TryBeginAutoSyncLaunch(worktreePath, reply)))
+                        (CompleteAutoSyncLaunch >> agent.Post)
+                        (fun worktreePath promptText ->
+                            async {
+                                launches <- (worktreePath, promptText) :: launches
+                                return Ok ()
+                            }) }
+
+            let observation = gitData path "feature-a" 2 (Some "base-a") true
+            trigger dependencies root "upstream" "develop" observation
+            |> Async.RunSynchronously
+            trigger dependencies root "upstream" "develop" observation
+            |> Async.RunSynchronously
+
+            Assert.That(
+                launches,
+                Is.EqualTo([ WorktreePath path, expectedPrompt ]),
+                "Repeated observations of one base revision must start exactly one new prompted session")
+        finally
+            if Directory.Exists root then Directory.Delete(root, true)
+
+    [<Test>]
+    member _.``Verification revision observations disabling re-enabling and config reload``() =
+        let root = tempDirectory ()
+        let path = Path.Combine(root, "feature-a")
+        Directory.CreateDirectory(path) |> ignore
+        let agent = createAgent ()
+        // Mutable because delivery is the impure boundary whose exact invocation sequence is under test.
+        let mutable deliveries = []
+
+        try
+            File.WriteAllText(
+                Path.Combine(root, ".treemon.json"),
+                """{ "archivedBranches": ["old"], "baseBranch": "develop", "custom": {"keep": true} }""")
+            TreemonConfig.modifyAutoSyncBranches root (Set.ofList >> Set.add "feature-a" >> Set.toList)
+
+            let dependencies =
+                { ClaimRevision =
+                    fun worktreePath baseRevision ->
+                        agent.PostAndAsyncReply(fun reply ->
+                            ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
+                  ReleaseRevision =
+                    fun worktreePath baseRevision ->
+                        agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
+                  SelectSessionId = fun _ -> async { return Some "selected-working" }
+                  Deliver =
+                    fun request ->
+                        async {
+                            deliveries <- request :: deliveries
+                            return true
+                        } }
+
+            let observe revision =
+                gitData path "feature-a" 2 (Some revision) true
+                |> trigger dependencies root "upstream" "develop"
+                |> Async.RunSynchronously
+
+            observe "base-a"
+            observe "base-a"
+            let afterRepeated = deliveries.Length
+
+            observe "base-b"
+            let afterAdvance = deliveries.Length
+
+            TreemonConfig.modifyAutoSyncBranches root (Set.ofList >> Set.remove "feature-a" >> Set.toList)
+            agent.Post(ClearAutoSyncTrigger path)
+            observe "base-b"
+            let afterDisable = deliveries.Length
+
+            TreemonConfig.modifyAutoSyncBranches root (Set.ofList >> Set.add "feature-a" >> Set.toList)
+            observe "base-b"
+            let afterReenable = deliveries.Length
+
+            use config =
+                System.Text.Json.JsonDocument.Parse(
+                    File.ReadAllText(Path.Combine(root, ".treemon.json")))
+            let custom = config.RootElement.GetProperty("custom").GetProperty("keep").GetBoolean()
+            let finalState = agent.PostAndReply(GetState)
+            let expectedPrompt = prompt "upstream" "develop"
+
+            TestContext.Out.WriteLine(
+                $"VERIFICATION afterRepeated={afterRepeated}; afterAdvance={afterAdvance}; afterDisable={afterDisable}; afterReenable={afterReenable}")
+
+            Assert.Multiple(fun () ->
+                Assert.That(afterRepeated, Is.EqualTo(1))
+                Assert.That(afterAdvance, Is.EqualTo(2))
+                Assert.That(afterDisable, Is.EqualTo(2))
+                Assert.That(afterReenable, Is.EqualTo(3))
+                Assert.That(
+                    deliveries |> List.map _.Prompt,
+                    Is.EqualTo(List.replicate 3 expectedPrompt))
+                Assert.That(
+                    TreemonConfig.readAutoSyncBranchSet (Some root),
+                    Is.EqualTo(Set.singleton "feature-a"))
+                Assert.That(TreemonConfig.readArchivedBranches root, Is.EqualTo([ "old" ]))
+                Assert.That(TreemonConfig.readBaseBranch root, Is.EqualTo("develop"))
+                Assert.That(custom, Is.True)
+                Assert.That(
+                    finalState.AutoSyncTriggeredRevisions |> Map.tryFind path,
+                    Is.EqualTo(Some "base-b")))
+        finally
+            if Directory.Exists root then Directory.Delete(root, true)
