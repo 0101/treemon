@@ -563,13 +563,13 @@ type CardActivityLine =
     | Empty
 
 let private duplicatesLastUserMessage
-    (lastUserMessage: (string * System.DateTimeOffset) option)
+    (lastUserMessage: UserFooterMessage option)
     (activity: AgentActivity)
     =
     let activityText, _ = AgentActivity.textAndTimestamp activity
     lastUserMessage
-    |> Option.exists (fun (userText, _) ->
-        System.String.Equals(activityText.Trim(), userText.Trim(), System.StringComparison.OrdinalIgnoreCase))
+    |> Option.exists (fun userMessage ->
+        System.String.Equals(activityText.Trim(), userMessage.Text.Trim(), System.StringComparison.OrdinalIgnoreCase))
 
 let cardActivityLine (wt: WorktreeStatus) : CardActivityLine =
     let activity =
@@ -602,27 +602,51 @@ let activityLineView (wt: WorktreeStatus) =
             ]
         ]
 
-/// A footer message line: `[time-ago] <source?> <text>`. Shared by the last-user-message and
-/// last-assistant-message lines; the assistant line tags its provider, the user line does not.
-let private messageLineView (source: string option) (msg: (string * System.DateTimeOffset) option) =
-    match msg with
-    | None -> Html.none
-    | Some (text, ts) ->
-        Html.div [
-            prop.className (match source with Some _ -> "user-prompt assistant-line" | None -> "user-prompt")
-            prop.children [
-                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                match source with
-                | Some s -> Html.span [ prop.className "event-source"; prop.text s ]
-                | None -> ()
-                Html.span [ prop.text text ]
+let private canvasMessageGlyph =
+    Svg.svg [
+        svg.className "canvas-message-glyph"
+        svg.viewBox (0, 0, 297, 297)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.title "Canvas"
+            Svg.path [
+                svg.d "M247.5,188H241V43h6.5c5.523,0,10-4.478,10-10s-4.477-10-10-10h-89V10c0-5.523-4.477-10-10-10s-10,4.477-10,10v13h-89c-5.522,0-10,4.478-10,10s4.478,10,10,10H56v145h-6.5c-5.522,0-10,4.477-10,10s4.478,10,10,10h53.829l-30.114,75.283c-2.051,5.128,0.443,10.947,5.571,12.999c1.218,0.487,2.475,0.718,3.711,0.718c3.969,0,7.724-2.379,9.288-6.289l33.001-82.5c0.027-0.07,0.046-0.141,0.072-0.211H138.5v78.997c0,5.522,4.477,10,10,10s10-4.478,10-10V208h13.642c0.026,0.07,0.045,0.141,0.072,0.211l33.001,82.5c1.564,3.91,5.319,6.289,9.288,6.289c1.236,0,2.493-0.231,3.711-0.718c5.128-2.052,7.622-7.871,5.571-12.999L193.671,208H247.5c5.523,0,10-4.477,10-10S253.023,188,247.5,188z M76,43h145v145H76V43z"
             ]
         ]
+    ]
+
+let private messageLineView
+    (className: string)
+    (source: string option)
+    (glyph: MessageGlyph option)
+    (text: string)
+    (timestamp: System.DateTimeOffset)
+    =
+    Html.div [
+        prop.className className
+        prop.children [
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime timestamp) ]
+            match source with
+            | Some value -> Html.span [ prop.className "event-source"; prop.text value ]
+            | None -> ()
+            match glyph with
+            | Some MessageGlyph.Canvas -> canvasMessageGlyph
+            | None -> ()
+            Html.span [ prop.text text ]
+        ]
+    ]
 
 /// Line 2 (last user message) and line 3 (last assistant message, tagged by provider) of the footer.
-let userMsgLineView (wt: WorktreeStatus) = messageLineView None wt.LastUserMessage
+let userMsgLineView (wt: WorktreeStatus) =
+    match wt.LastUserMessage with
+    | Some message -> messageLineView "user-prompt" None message.Glyph message.Text message.Timestamp
+    | None -> Html.none
+
 let assistantMsgLineView (wt: WorktreeStatus) =
-    messageLineView (Some(providerDisplayName wt.CodingToolProvider)) wt.LastAssistantMessage
+    match wt.LastAssistantMessage with
+    | Some (text, timestamp) ->
+        messageLineView "user-prompt assistant-line" (Some(providerDisplayName wt.CodingToolProvider)) None text timestamp
+    | None -> Html.none
 
 let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"

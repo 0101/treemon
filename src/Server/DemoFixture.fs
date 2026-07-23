@@ -17,6 +17,11 @@ let private baseTimestamp = DateTimeOffset(2025, 6, 15, 10, 0, 0, TimeSpan.FromH
 
 // --- Helpers ---
 
+let private userMessage text timestamp =
+    { Glyph = None
+      Text = text
+      Timestamp = timestamp }
+
 let private evt source message secsAgo status duration =
     { Source = source
       Message = message
@@ -187,7 +192,7 @@ let private wtRetryLogic: WorktreeStatus =
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
       CurrentSkill = None
-      LastUserMessage = Some("implement retry with jitter", baseTimestamp.AddMinutes(-5.0))
+      LastUserMessage = Some(userMessage "implement retry with jitter" (baseTimestamp.AddMinutes(-5.0)))
       AgentActivity = Some(AgentActivity.Intent("Adding jitter to the backoff delays", baseTimestamp.AddMinutes(-1.0)))
       LastAssistantMessage = Some("Updating the retry helper to spread out retries with jitter…", baseTimestamp.AddSeconds(-40.0))
       Pr = HasPr prRetryBuilding
@@ -212,7 +217,7 @@ let private wtConfigLoading: WorktreeStatus =
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
       CurrentSkill = None
-      LastUserMessage = Some("refactor env-specific config loading", baseTimestamp.AddMinutes(-15.0))
+      LastUserMessage = Some(userMessage "refactor env-specific config loading" (baseTimestamp.AddMinutes(-15.0)))
       AgentActivity = Some(AgentActivity.Intent("Extracting env overrides into a typed loader", baseTimestamp.AddMinutes(-2.0)))
       LastAssistantMessage = Some("Splitting config validation into its own module", baseTimestamp.AddMinutes(-1.0))
       Pr = NoPr
@@ -237,7 +242,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
       CurrentSkill = None
-      LastUserMessage = Some("add admin role check to delete endpoint", baseTimestamp.AddMinutes(-35.0))
+      LastUserMessage = Some(userMessage "add admin role check to delete endpoint" (baseTimestamp.AddMinutes(-35.0)))
       AgentActivity = Some(AgentActivity.Intent("Verifying the admin-role check on the delete endpoint", baseTimestamp.AddMinutes(-8.0)))
       LastAssistantMessage = Some("Added the admin role guard — let me know if that covers it", baseTimestamp.AddMinutes(-8.0))
       Pr = HasPr prAuth
@@ -315,7 +320,7 @@ let private wtStreaming: WorktreeStatus =
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
       CurrentSkill = None
-      LastUserMessage = Some("add tumbling window support", baseTimestamp.AddMinutes(-3.0))
+      LastUserMessage = Some(userMessage "add tumbling window support" (baseTimestamp.AddMinutes(-3.0)))
       AgentActivity = Some(AgentActivity.Intent("Wiring tumbling windows into the aggregator", baseTimestamp.AddSeconds(-30.0)))
       LastAssistantMessage = Some("Windowed aggregation added; running the tests now", baseTimestamp.AddSeconds(-20.0))
       Pr = HasPr prStreaming
@@ -521,7 +526,7 @@ let private f10 =
 let private f11 =
     f10
     |> withRetry (fun wt ->
-        { wt with LastUserMessage = Some("add request deduplication", baseTimestamp.AddMinutes(-1.0)) })
+        { wt with LastUserMessage = Some(userMessage "add request deduplication" (baseTimestamp.AddMinutes(-1.0))) })
     |> withCardEvt retryKey
         (retryEvt "Starting next task: request deduplication" 1 None None)
     |> withCpu 39.0 14400
@@ -561,7 +566,7 @@ let private adjustWorktreeTimestamps (now: DateTimeOffset) (wt: WorktreeStatus) 
         CodingToolSince = wt.CodingToolSince |> Option.map (fun ts -> ts + shift)
         LastUserMessage =
             wt.LastUserMessage
-            |> Option.map (fun (msg, ts) -> msg, ts + shift) }
+            |> Option.map (fun message -> { message with Timestamp = message.Timestamp + shift }) }
 
 let private adjustEventTimestamp (now: DateTimeOffset) (e: CardEvent) =
     let shift = now - baseTimestamp

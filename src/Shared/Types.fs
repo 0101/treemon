@@ -276,6 +276,15 @@ module AgentActivity =
         | AgentActivity.Intent (text, changedAt) -> AgentActivity.Intent(transform text, changedAt)
         | AgentActivity.SessionTitle (text, changedAt) -> AgentActivity.SessionTitle(transform text, changedAt)
 
+[<RequireQualifiedAccess>]
+type MessageGlyph =
+    | Canvas
+
+type UserFooterMessage =
+    { Glyph: MessageGlyph option
+      Text: string
+      Timestamp: DateTimeOffset }
+
 type WorktreeStatus =
     { Path: WorktreePath
       Branch: string
@@ -298,7 +307,7 @@ type WorktreeStatus =
       /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
       /// CodingTool above still drives the card's overall accent/border.
       Sessions: SessionDot list
-      LastUserMessage: (string * DateTimeOffset) option
+      LastUserMessage: UserFooterMessage option
       /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
       /// footer line. `None` when the session has produced no assistant message yet.
       LastAssistantMessage: (string * DateTimeOffset) option

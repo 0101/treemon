@@ -374,8 +374,10 @@ let assembleRepos
     (state: RefreshScheduler.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
-        CodingToolStatus.collapseByWorktree inputs.Now (state.SessionStatuses |> Map.values)
-        |> CodingToolStatus.withRetainedFallback inputs.RetainedByWorktree
+        state.SessionStatuses
+        |> Map.values
+        |> CodingToolStatus.includeRetainedSessions inputs.RetainedByWorktree
+        |> CodingToolStatus.collapseByWorktree inputs.Now
 
     assembleReposCore
         inputs.IgnorePredicate
