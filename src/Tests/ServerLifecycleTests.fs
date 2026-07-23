@@ -69,12 +69,10 @@ type ServerLifecycleTests() =
     member _.``an empty new snapshot store starts without publication preparation``() =
         withDbPath (fun path ->
             let agent = RefreshScheduler.createAgent ()
-            let sessionAgent = SessionManager.createAgent ()
             let runtime =
                 createSessionActivityRuntime
                     path
                     agent
-                    sessionAgent
                     Map.empty
 
             try

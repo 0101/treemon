@@ -98,11 +98,11 @@ missed time, late inputs, or downtime.
 ### Shared projection
 
 `src/Shared/OverviewData.fs` owns the live aggregate and count-only history types. Snapshot capture
-reuses the existing complete `WorktreeApi` assembly path and calls `OverviewData.aggregate`; it does
-not introduce a second history-specific task or agent projector.
-
-A leaner projection may replace the complete assembly only if both live Overview and history share
-the same implementation.
+uses a lean `WorktreeApi` assembly path that shares the live path's task/session projection,
+ignore filtering, archived-branch policy, idle debounce, and `OverviewData.aggregate`. It omits
+card-only retained-footer queries, terminal-session decoration, test-log probes, Git/PR fields, and
+canvas data. With no monitored repos it aggregates an empty repo list directly without loading
+assembly inputs.
 
 ### Snapshot store and capture
 
@@ -144,6 +144,7 @@ history work inside its task loop.
 | Request path | Snapshot table only; no raw fallback or cache |
 | Rendering gaps | Keep stepped carry-forward behavior |
 | Wire contract | Keep `OverviewHistoryResponse` and 12h/24h/72h windows |
+| Capture assembly | Share the canonical Overview fields with live assembly; omit card-only inputs |
 
 ## Key Files
 

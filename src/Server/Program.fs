@@ -283,7 +283,6 @@ let internal stopBackgroundLoop name (loop: BackgroundLoop) =
 let internal createSessionActivityRuntime
     (dbPath: string)
     (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (sessionAgent: SessionManager.SessionAgent)
     (rootPaths: Map<RepoId, string>)
     =
     let snapshotStore = OverviewSnapshotStore.OverviewSnapshotStore(dbPath)
@@ -295,8 +294,6 @@ let internal createSessionActivityRuntime
           Capture =
             OverviewSnapshotCapture.create
                 scheduler
-                sessionAgent
-                (Some components.Store)
                 rootPaths
                 snapshotStore }
     with _ ->
@@ -418,7 +415,6 @@ let main args =
                     createSessionActivityRuntime
                         dbPath
                         agent
-                        sessionAgent
                         rootPaths
                 let store = activity.Components.Store
 

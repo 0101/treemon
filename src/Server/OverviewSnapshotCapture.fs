@@ -11,14 +11,9 @@ type internal CaptureClock =
 
 type internal CaptureDependencies =
     { GetState: unit -> Async<RefreshScheduler.DashboardState>
-      GetActiveSessionPaths: unit -> Async<Set<string>>
-      LoadAssemblyInputs:
-        DateTimeOffset ->
-            RefreshScheduler.DashboardState ->
-            WorktreeApi.RepoAssemblyInputs
+      LoadAssemblyInputs: DateTimeOffset -> WorktreeApi.OverviewAssemblyInputs
       AssembleRepos:
-        WorktreeApi.RepoAssemblyInputs ->
-            Set<string> ->
+        WorktreeApi.OverviewAssemblyInputs ->
             RefreshScheduler.DashboardState ->
             RepoWorktrees list
       Aggregate: RepoWorktrees list -> OverviewData.Overview
@@ -59,10 +54,14 @@ let internal captureBoundary
         cancellationToken.ThrowIfCancellationRequested()
         let! state = dependencies.GetState()
         cancellationToken.ThrowIfCancellationRequested()
-        let! activeSessionPaths = dependencies.GetActiveSessionPaths()
-        cancellationToken.ThrowIfCancellationRequested()
-        let inputs = dependencies.LoadAssemblyInputs boundary state
-        let repos = dependencies.AssembleRepos inputs activeSessionPaths state
+
+        let repos =
+            if Map.isEmpty state.Repos then
+                []
+            else
+                let inputs = dependencies.LoadAssemblyInputs boundary
+                dependencies.AssembleRepos inputs state
+
         let overview = dependencies.Aggregate repos
         let snapshot = snapshotAt boundary overview
         cancellationToken.ThrowIfCancellationRequested()
@@ -134,8 +133,6 @@ type internal SnapshotCapture
 
 let internal create
     (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (sessionAgent: SessionManager.SessionAgent)
-    (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore)
     =
@@ -143,25 +140,12 @@ let internal create
         { GetState =
             fun () ->
                 scheduler.PostAndAsyncReply RefreshScheduler.GetState
-          GetActiveSessionPaths =
-            fun () -> async {
-                let! activeSessions = SessionManager.getActiveSessions sessionAgent
-                return activeSessions |> Map.keys |> Set.ofSeq
-            }
           LoadAssemblyInputs =
-            fun boundary state ->
-                WorktreeApi.loadRepoAssemblyInputs
-                    boundary
-                    activityStore
-                    rootPaths
-                    state
+            fun boundary ->
+                WorktreeApi.loadOverviewAssemblyInputs boundary rootPaths
           AssembleRepos =
-            fun inputs activeSessionPaths state ->
-                WorktreeApi.assembleRepos
-                    inputs
-                    rootPaths
-                    activeSessionPaths
-                    state
+            fun inputs state ->
+                WorktreeApi.assembleOverviewRepos inputs rootPaths state
           Aggregate = OverviewData.aggregate
           Insert = snapshotStore.Insert }
 
