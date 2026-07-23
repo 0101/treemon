@@ -14,13 +14,14 @@ import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
 // pure state machine with no branches for sub-agents or skill injections:
 //   * sub-agent events (any event carrying `agentId`) are dropped;
 //   * a skill's own `<skill-context>` injection (a `user.message` tagged `source: skill-*`) is dropped;
+//   * runtime `<system_reminder>` user-channel messages are classified by the server;
 //   * only the relevant SDK event types are mapped — everything else is ignored.
 //
 // The wire contract (the single coupling point with the F# handler, Server/SessionActivityService.fs):
 //   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, currentTokens?, tokenLimit? }
 // where `kind` is one of the closed set mapped 1:1 onto the server's SessionEvent union:
 //   assistant.turn_start   -> turn_started
-//   user.message (genuine) -> user_prompt         (message required)
+//   user.message           -> user_prompt         (message required; server drops system reminders)
 //   assistant.message      -> assistant_message   (message required)
 //   skill.invoked          -> skill_invoked        (skillName required)
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)

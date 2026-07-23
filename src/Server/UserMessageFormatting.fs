@@ -1,4 +1,4 @@
-module Server.CanvasMessageFormatting
+module Server.UserMessageFormatting
 
 open System
 open System.Text.Json
@@ -6,6 +6,12 @@ open System.Text.RegularExpressions
 open Shared
 
 let private canvasPrefix = "[canvas] "
+let private systemReminderPrefix = "<system_reminder>"
+
+[<RequireQualifiedAccess>]
+type internal UserMessageClassification =
+    | SystemReminder
+    | Display of glyph: MessageGlyph option * text: string
 
 let private identifierWords (identifier: string) =
     identifier.Replace('-', ' ').Replace('_', ' ')
@@ -91,8 +97,10 @@ let private formatCanvasPayload (payload: string) =
     with :? JsonException ->
         readableMalformedPayload payload
 
-let internal formatUserMessage (text: string) : MessageGlyph option * string =
-    if text.StartsWith(canvasPrefix, StringComparison.Ordinal) then
-        Some MessageGlyph.Canvas, formatCanvasPayload text[canvasPrefix.Length..]
+let internal classify (text: string) =
+    if text.TrimStart().StartsWith(systemReminderPrefix, StringComparison.Ordinal) then
+        UserMessageClassification.SystemReminder
+    elif text.StartsWith(canvasPrefix, StringComparison.Ordinal) then
+        UserMessageClassification.Display(Some MessageGlyph.Canvas, formatCanvasPayload text[canvasPrefix.Length..])
     else
-        None, text
+        UserMessageClassification.Display(None, text)

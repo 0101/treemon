@@ -25,7 +25,7 @@
     <Compile Include="SessionActivityTests.fs" />
     <Compile Include="SessionActivityStoreTests.fs" />
     <Compile Include="SessionActivityServiceTests.fs" />
-    <Compile Include="CanvasMessageFormattingTests.fs" />
+    <Compile Include="UserMessageFormattingTests.fs" />
     <Compile Include="CodingToolPushSourceTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />
     <Compile Include="SyncEngineTests.fs" />

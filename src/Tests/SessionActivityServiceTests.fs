@@ -336,6 +336,17 @@ type TryAcceptReportTests() =
             | other -> Assert.Fail $"expected Unmonitored, got {other}")
 
     [<Test>]
+    member _.``a system reminder for a monitored worktree is ignored before ingestion``() =
+        let request =
+            { baseReq "user_prompt" with
+                message = msgDto "<system_reminder>internal runtime guidance" "2026-03-01T10:00:00Z" }
+
+        withService "C:/wt/a" (fun (_, agent, _) ->
+            match runAsync (tryAcceptReport agent request) with
+            | IgnoredSystemReminder -> ()
+            | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}")
+
+    [<Test>]
     member _.``an invalid body is rejected before the guard``() =
         withService "C:/wt/a" (fun (_, agent, _) ->
             match runAsync (tryAcceptReport agent (baseReq "bogus_kind")) with

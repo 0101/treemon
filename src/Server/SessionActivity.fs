@@ -8,10 +8,9 @@ open Shared
 // Everything here is pure — no IO, no mutation — so it can be unit-tested in isolation and folded
 // incrementally (a later batch onto an earlier result == the whole stream at once).
 //
-// This is the SAME state machine as the old CopilotDetector.foldForwardEvent, MINUS the sub-agent
-// depth gating and the <skill-context> injection handling. Those two sources of complexity are
-// eliminated at the SOURCE (the extension drops any event carrying an agentId and any skill-context
-// injection), so the server never sees them and the fold has no branch for them.
+// This is the SAME state machine as the old CopilotDetector.foldForwardEvent, MINUS transport
+// classification. The extension drops sub-agent and <skill-context> events, while the server
+// ingestion boundary drops runtime <system_reminder> user-channel events before this fold.
 
 // --- Value types ------------------------------------------------------------------------------
 
@@ -35,7 +34,7 @@ type Message = { Text: string; At: DateTimeOffset }
 /// map 1:1 onto the wire `kind` values (see the handler).
 type SessionEvent =
     | TurnStarted
-    /// A genuine user prompt (never a skill-context injection — those are dropped at the source).
+    /// A genuine user prompt after transport-level synthetic messages are filtered.
     | UserPrompt of Message
     | AssistantMessage of Message
     | SkillInvoked of name: string

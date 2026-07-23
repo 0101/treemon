@@ -20,7 +20,8 @@ an open CLI session between turns), or **NoSession** (grey — no live session).
   The last context-window gauge is persisted for donut recovery. Usage, title bootstrap, and
   heartbeat reports update current state without being appended to history.
 - **Simple.** Events are a closed union; the server logic is a tiny pure fold with no branching for
-  sub-agents, injections, or bracket depth — all ambiguity is filtered at the source.
+  sub-agents, synthetic messages, or bracket depth — ambiguity is removed at the extension and
+  server-ingestion boundaries before the fold.
 - **Four-way status dot** driven purely by push state (below).
 
 ## Expected Behavior
@@ -113,7 +114,7 @@ The server owns the domain; the extension is a thin forwarder. `SessionActivity.
 ```fsharp
 type SessionEvent =
     | TurnStarted
-    | UserPrompt of Message                 // a genuine user prompt (never a skill-context injection)
+    | UserPrompt of Message                 // genuine after extension + server boundary filtering
     | AssistantMessage of Message
     | SkillInvoked of name: string
     | IntentReported of Message             // SDK assistant.intent
@@ -161,16 +162,17 @@ only advance `LastSeen`. Equal `UpdatedAt` values use `SessionId` as a stable ti
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
 
-### Source-side filtering (why the server stays simple)
+### Transport filtering (why the fold stays simple)
 
-The extension forwards **only** what the fold needs, so three sources of complexity never reach the
-server:
+The extension and server ingestion boundary ensure only genuine lifecycle events reach the fold:
 1. **Sub-agent events** — every SDK event carries `agentId` (absent for the root); the extension
    drops any event that has one. → no depth tracking on the server.
 2. **Skill-context injections** — a skill's `<skill-context>` injection arrives as a `user.message`;
-   the extension drops it (source starts `skill-` AND content starts `<skill-context`). → every
-   `UserPrompt` the server sees is genuine.
-3. **Irrelevant events** — only events mapping to the ten SDK-backed wire kinds are forwarded; all
+   the extension drops it (source starts `skill-` AND content starts `<skill-context`).
+3. **System reminders** — runtime `<system_reminder>` instructions also arrive through the
+   `user.message` channel. The server classifies and ignores them before the single-writer mailbox,
+   so they cannot replace the last genuine prompt, change status, clear a skill, or enter history.
+4. **Irrelevant events** — only events mapping to the ten SDK-backed wire kinds are forwarded; all
    other SDK events are ignored. `title_bootstrap` is metadata-generated and `heartbeat` is
    timer-generated. → the `SessionEvent` union has no catch-all.
 
@@ -178,6 +180,9 @@ server:
 
 - `POST /api/session/activity` mirrors `canvasRegisterHandler`: JSON DTO → domain
   `SessionActivityReport`, validate, known-worktree guard, `HttpSecurity.csrfGuard`.
+- A monitored `<system_reminder>` `user_prompt` is a valid but synthetic report: the handler returns
+  `recorded=false, monitored=true` and does not submit it to the mailbox. This filtering is
+  server-owned because user-message projection and persisted-footer cleanup are server-owned too.
 - **Wire contract — the single coupling point between `extension.mjs` (producer) and the
   handler (consumer).** The POST body is one report:
   `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?,
@@ -274,12 +279,13 @@ The footer exposes `AgentActivity` as a source-tagged union: the freshest intent
 its original source while the card renders either as the activity line with its relative time and an
 optional running-skill pill. An activity identical to the last user message is suppressed rather
 than duplicated. The last user message crosses the dashboard wire as
-`UserFooterMessage { Glyph; Text; Timestamp }`. `CanvasMessageFormatting` recognizes the
-`[canvas] ` transport prefix, preserves the semantic Canvas glyph, prioritizes the `request` from
-first-party `canvas-selection` actions, summarizes known actions, and formats unknown valid JSON
-structurally without rewriting punctuation inside string values. The same display-text projection
-is applied to `AgentActivity` before truncation, so duplicate suppression compares equivalent
-representations. Assistant footer messages use a direct `(text, timestamp)` value; the enclosing
+`UserFooterMessage { Glyph; Text; Timestamp }`. `UserMessageFormatting` suppresses
+`<system_reminder>` text, recognizes the `[canvas] ` transport prefix, preserves the semantic Canvas
+glyph, prioritizes the `request` from first-party `canvas-selection` actions, summarizes known
+actions, and formats unknown valid JSON structurally without rewriting punctuation inside string
+values. The same projection is applied to `AgentActivity` before truncation, so duplicate
+suppression compares equivalent representations and previously persisted reminders remain hidden.
+Assistant footer messages use a direct `(text, timestamp)` value; the enclosing
 `CodingToolProvider` supplies the rendered provider label. The push provider is Copilot-only today,
 so an active card reads `Copilot`.
 
@@ -349,9 +355,10 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 - **Push-only, clean cutover.** All parsing deleted; the push model is the sole status source. The
   user is CLI-only, explicit events beat mtime inference, and three detectors collapse to one pure
   fold.
-- **Filter at the source, fold on the server.** Sub-agent (`agentId`) and injection filtering live in
-  the extension so the server fold has no branch for them — the single biggest simplification vs the
-  old parser.
+- **Filter before the fold, at the boundary with enough context.** Sub-agent (`agentId`) and
+  skill-context filtering remain in the extension, where trusted SDK metadata is available.
+  Runtime system reminders are filtered by the server's shared user-message classifier before
+  ingestion, so display policy and state policy cannot diverge.
 - **Reuse the F# fold; don't rewrite in JS.** The risky logic stays server-side F# (compiler help +
   ported tests); the extension is a thin forwarder (no Fable/TS).
 - **`session.idle` sets Idle directly; freshness is only a crash net** — unlike the old parser, which
@@ -399,7 +406,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 | `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
 | `src/Server/SessionActivityStore.fs` | SQLite (WAL) schema + additive metadata/context migration + authoritative aggregate persistence + restart load / pruning / history queries. |
 | `src/Server/SessionActivityService.fs` | Single-writer mailbox; independent lifecycle, metadata, context, and liveness paths; endpoint + startup rebuild + retention. |
-| `src/Server/CanvasMessageFormatting.fs` | Canvas prompt parsing and stable dashboard display projection for activity and last-user messages. |
+| `src/Server/UserMessageFormatting.fs` | Server-owned user-message classification: suppress system reminders and project canvas prompts for activity and footer display. |
 | `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `getLastSessionId` (resume), `readConfiguredProvider`. |
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |
 | `src/Server/WorktreeApi.fs` | Builds the card's coding-tool fields + `CodingToolSince` from push state. |

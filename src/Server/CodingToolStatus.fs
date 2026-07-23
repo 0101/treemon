@@ -99,15 +99,29 @@ let noSessionPushResult: CodingToolResult =
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
 
-let private formatActivityText text =
-    let _, displayText = CanvasMessageFormatting.formatUserMessage text
-    FileUtils.truncateMessage 120 displayText
+let private tryFormatActivityText text =
+    match UserMessageFormatting.classify text with
+    | UserMessageFormatting.UserMessageClassification.SystemReminder -> None
+    | UserMessageFormatting.UserMessageClassification.Display(_, displayText) ->
+        Some(FileUtils.truncateMessage 120 displayText)
+
+let private tryFormatActivity =
+    function
+    | AgentActivity.Intent(text, changedAt) ->
+        tryFormatActivityText text
+        |> Option.map (fun displayText -> AgentActivity.Intent(displayText, changedAt))
+    | AgentActivity.SessionTitle(text, changedAt) ->
+        tryFormatActivityText text
+        |> Option.map (fun displayText -> AgentActivity.SessionTitle(displayText, changedAt))
 
 let private toUserFooterMessage (message: Message) =
-    let glyph, text = CanvasMessageFormatting.formatUserMessage message.Text
-    { Glyph = glyph
-      Text = FileUtils.truncateMessage 120 text
-      Timestamp = message.At }
+    match UserMessageFormatting.classify message.Text with
+    | UserMessageFormatting.UserMessageClassification.SystemReminder -> None
+    | UserMessageFormatting.UserMessageClassification.Display(glyph, text) ->
+        Some
+            { Glyph = glyph
+              Text = FileUtils.truncateMessage 120 text
+              Timestamp = message.At }
 
 /// Collapse a worktree's live push sessions into the card's coding-tool fields. Two DECOUPLED picks:
 ///
@@ -194,11 +208,11 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       AgentActivity =
         footer
         |> Option.bind SessionActivity.effectiveActivity
-        |> Option.map (AgentActivity.mapText formatActivityText)
+        |> Option.bind tryFormatActivity
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
-        |> Option.map toUserFooterMessage
+        |> Option.bind toUserFooterMessage
       LastAssistantMessage =
         footer
         |> Option.bind _.LastAssistantMessage

@@ -187,13 +187,22 @@ let private isKnownWorktree agent path = async {
     return paths |> Set.contains path
 }
 
+let private isSyntheticSystemReminder (report: SessionActivityReport) =
+    match report.Event with
+    | UserPrompt message ->
+        match UserMessageFormatting.classify message.Text with
+        | UserMessageFormatting.UserMessageClassification.SystemReminder -> true
+        | UserMessageFormatting.UserMessageClassification.Display _ -> false
+    | _ -> false
+
 /// The decision for one incoming request, decoupled from HTTP so it is unit-testable exactly like
 /// CanvasDocServer.attributeOwnership: a malformed/invalid body is rejected, a well-formed body for
-/// an unmonitored worktree records nothing (soft accept), and a well-formed body for a monitored
-/// worktree yields the domain report ready for the single writer.
+/// an unmonitored worktree records nothing (soft accept), synthetic system reminders are ignored,
+/// and a well-formed body for a monitored worktree yields the domain report ready for the single writer.
 type AcceptOutcome =
     | Accepted of SessionActivityReport   // validated + monitored — hand to the mailbox
     | Unmonitored of worktreePath: string // well-formed but unmonitored — nothing recorded
+    | IgnoredSystemReminder               // runtime-generated user-channel content — nothing recorded
     | Rejected of reason: string          // invalid body — nothing recorded
 
 /// Validate + guard a request without touching HTTP or the mailbox: parse the DTO to a domain
@@ -206,7 +215,10 @@ let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: S
         | Ok report ->
             let path = WorktreePath.value report.WorktreePath
             let! known = isKnownWorktree agent path
-            return (if known then Accepted report else Unmonitored path)
+            return
+                if not known then Unmonitored path
+                elif isSyntheticSystemReminder report then IgnoredSystemReminder
+                else Accepted report
     }
 
 // --- Retention ---------------------------------------------------------------------------------
@@ -461,6 +473,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 | Unmonitored path ->
                     Log.log "Activity" $"Report for unmonitored worktree — {path} (ignored)"
                     return! Successful.ok (json {| recorded = false; monitored = false |}) next ctx
+                | IgnoredSystemReminder ->
+                    Log.log "Activity" "Ignored synthetic system reminder"
+                    return! Successful.ok (json {| recorded = false; monitored = true |}) next ctx
                 | Accepted report ->
                     this.Submit report
                     return! Successful.ok (json {| recorded = true; monitored = true |}) next ctx

@@ -111,7 +111,7 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
 - The extension bridge calls `session.send()` with the canvas payload.
 - When the reporting extension later publishes that `[canvas]` prompt as session activity, the
-  dashboard collapse projects it through `CanvasMessageFormatting`: the first-party
+  dashboard collapse projects it through `UserMessageFormatting`: the first-party
   `canvas-selection` action displays its human-readable `request`, other known actions get concise
   summaries, and unknown valid JSON preserves string values. The resulting dashboard field is
   `UserFooterMessage { Glyph; Text; Timestamp }`; activity titles use the same text projection so
