@@ -15,6 +15,10 @@ open Server.CodingToolStatus
 
 let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
 let private msg text t : Message = { Text = text; At = ts t }
+let private footerMessage text t : UserFooterMessage =
+    { Glyph = None
+      Text = text
+      Timestamp = ts t }
 
 let private storedWithClocks
     (sid: string)
@@ -100,7 +104,7 @@ type FromPushSessionsTests() =
         let result = fromPushSessions now [ session ]
         Assert.That(result.Status, Is.EqualTo Idle)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "bd-execute"))
-        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "ship it"))
+        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "ship it"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "done, all green"))
 
     [<Test>]
@@ -115,7 +119,7 @@ type FromPushSessionsTests() =
         let result = fromPushSessions now [ session ]
         Assert.That(result.Status, Is.EqualTo NoSession)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "look at auth"))
+        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "look at auth"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
@@ -136,7 +140,7 @@ type FromPushSessionsTests() =
         Assert.That(result.Status, Is.EqualTo WaitingForUser)
         Assert.That(result.Provider, Is.EqualTo(Some CopilotCli))
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "review"))
-        Assert.That(result.LastUserMessage |> Option.map fst, Is.EqualTo(Some "the auth module"))
+        Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "the auth module"))
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
@@ -158,7 +162,7 @@ type FromPushSessionsTests() =
 
         Assert.That(result.Status, Is.EqualTo WaitingForUser)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
-        Assert.That(result.LastUserMessage, Is.EqualTo(Some("new prompt", ts "2026-03-01T11:58:30Z")))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
         Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
         Assert.That(result.LastActivity, Is.EqualTo(Some(ts "2026-03-01T11:59:00Z")))
 
@@ -181,7 +185,7 @@ type FromPushSessionsTests() =
 
         Assert.That(result.Status, Is.EqualTo Idle)
         Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
-        Assert.That(result.LastUserMessage, Is.EqualTo(Some("new prompt", ts "2026-03-01T11:58:30Z")))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
         Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
 
     [<Test>]
@@ -230,9 +234,45 @@ type FromPushSessionsTests() =
             stored "a" "wt" SessionLevelStatus.Working None (Some(msg longText "2026-03-01T11:59:00Z")) None
                 "2026-03-01T11:59:00Z"
         let result = fromPushSessions now [ session ]
-        let truncated = result.LastUserMessage |> Option.map fst |> Option.get
+        let truncated = result.LastUserMessage |> Option.map _.Text |> Option.get
         Assert.That(truncated.Length, Is.EqualTo 123)
         Assert.That(truncated, Does.EndWith "...")
+
+    [<Test>]
+    member _.``Canvas display text is truncated after parsing``() =
+        let longText = String('x', 200)
+        let payload = $"[canvas] {{\"action\":\"comment\",\"text\":\"{longText}\"}}"
+        let session =
+            stored "a" "wt" SessionLevelStatus.Working None (Some(msg payload "2026-03-01T11:59:00Z")) None
+                "2026-03-01T11:59:00Z"
+        let message = (fromPushSessions now [ session ]).LastUserMessage |> Option.get
+        Assert.Multiple(fun () ->
+            Assert.That(message.Glyph, Is.EqualTo(Some MessageGlyph.Canvas))
+            Assert.That(message.Text, Is.EqualTo(String('x', 120) + "...")))
+
+    [<Test>]
+    member _.``Canvas activity and user footer share display text for live and retained sessions``() =
+        let canvasSession seen =
+            let timestamp = seen
+            let raw = "[canvas] {\"action\":\"comment\",\"text\":\"Why is retry not jittered?\"}"
+            stored "a" "wt" SessionLevelStatus.Working None (Some(msg raw timestamp)) None seen
+            |> fun value -> { value with Status.Title = Some(msg raw timestamp) }
+
+        let liveResult = fromPushSessions now [ canvasSession "2026-03-01T11:59:00Z" ]
+        let retained = Map.ofList [ "wt", canvasSession "2026-03-01T08:00:00Z" ]
+        let retainedResult =
+            includeRetainedSessions retained []
+            |> collapseByWorktree now
+            |> Map.find "wt"
+
+        [ liveResult; retainedResult ]
+        |> List.iter (fun result ->
+            let timestamp = result.LastUserMessage |> Option.map _.Timestamp |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    result.AgentActivity,
+                    Is.EqualTo(Some(AgentActivity.SessionTitle("Why is retry not jittered?", timestamp))))
+                Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "Why is retry not jittered?"))))
 
     [<Test>]
     member _.``The last assistant message is truncated to the 80-char cap``() =
@@ -338,7 +378,7 @@ type RetainedSessionsTests() =
         Assert.That(merged["wt-old"].Status, Is.EqualTo NoSession, "the dot stays grey — no OPEN session")
         Assert.That(merged["wt-old"].SessionStatuses, Is.Empty)
         Assert.That(
-            merged["wt-old"].LastUserMessage |> Option.map fst,
+            merged["wt-old"].LastUserMessage |> Option.map _.Text,
             Is.EqualTo(Some "resume me"),
             "the retained footer/resume message is surfaced so the resume button is reachable"
         )
@@ -394,7 +434,7 @@ type RetainedSessionsTests() =
 
         Assert.That(result.Status, Is.EqualTo NoSession)
         Assert.That(result.SessionStatuses, Is.Empty)
-        Assert.That(result.LastUserMessage, Is.EqualTo(Some("resume me", ts "2026-03-01T09:30:00Z")))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "resume me" "2026-03-01T09:30:00Z")))
 
     [<Test>]
     member _.``A worktree with only a STALE idle session collapses to grey NoSession``() =

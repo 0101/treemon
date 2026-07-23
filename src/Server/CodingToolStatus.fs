@@ -40,7 +40,7 @@ type CodingToolResult =
       CurrentSkill: string option
       /// The freshest source-tagged activity value from the same footer session as the other fields.
       AgentActivity: AgentActivity option
-      LastUserMessage: (string * DateTimeOffset) option
+      LastUserMessage: UserFooterMessage option
       LastAssistantMessage: (string * DateTimeOffset) option
       /// `LastSeen` of the active session that won status resolution. None when every session is Idle.
       LastActivity: DateTimeOffset option }
@@ -98,6 +98,16 @@ let noSessionPushResult: CodingToolResult =
 
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
+
+let private formatActivityText text =
+    let _, displayText = CanvasMessageFormatting.formatUserMessage text
+    FileUtils.truncateMessage 120 displayText
+
+let private toUserFooterMessage (message: Message) =
+    let glyph, text = CanvasMessageFormatting.formatUserMessage message.Text
+    { Glyph = glyph
+      Text = FileUtils.truncateMessage 120 text
+      Timestamp = message.At }
 
 /// Collapse a worktree's live push sessions into the card's coding-tool fields. Two DECOUPLED picks:
 ///
@@ -184,11 +194,11 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       AgentActivity =
         footer
         |> Option.bind SessionActivity.effectiveActivity
-        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
+        |> Option.map (AgentActivity.mapText formatActivityText)
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
-        |> Option.map (toFooterMessage 120)
+        |> Option.map toUserFooterMessage
       LastAssistantMessage =
         footer
         |> Option.bind _.LastAssistantMessage

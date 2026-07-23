@@ -110,6 +110,12 @@ A `SystemView` drives its own updates: the beads dashboard polls `/beads-data` e
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
 - The extension bridge calls `session.send()` with the canvas payload.
+- When the reporting extension later publishes that `[canvas]` prompt as session activity, the
+  dashboard collapse projects it through `CanvasMessageFormatting`: the first-party
+  `canvas-selection` action displays its human-readable `request`, other known actions get concise
+  summaries, and unknown valid JSON preserves string values. The resulting dashboard field is
+  `UserFooterMessage { Glyph; Text; Timestamp }`; activity titles use the same text projection so
+  duplicate footer lines remain suppressible.
 - Client send state is modeled as `CanvasSendState = Idle | Waiting of scopedKey: string | Failed of message: string`. The `Waiting` case carries the target worktree's `scopedKey` rather than a timestamp, so the banner is cleared only by that worktree's delivery (see Message Queue and the `CanvasSendState` decision).
 
 ### Message Queue

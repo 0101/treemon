@@ -9,6 +9,11 @@ open Shared
 open CardViews
 open Tests.WorktreeFixtures
 
+let private userMessage glyph text timestamp =
+    { Glyph = glyph
+      Text = text
+      Timestamp = timestamp }
+
 /// The card's activity line (footer line 1) combines the freshest source-tagged activity (SDK
 /// `assistant.intent` or `session.title_changed`, carried as `Shared.AgentActivity`) with the running
 /// skill as a pill. These tests exercise CardViews.cardActivityLine — the pure decision behind
@@ -38,7 +43,7 @@ type CardActivityLineTests() =
             { baseWt with
                 AgentActivity = Some(AgentActivity.Intent("Use conflict skill to resolve conflicts", ts))
                 CurrentSkill = Some "conflict"
-                LastUserMessage = Some("  use conflict skill to resolve conflicts  ", ts) }
+                LastUserMessage = Some(userMessage None "  use conflict skill to resolve conflicts  " ts) }
         Assert.That(cardActivityLine wt, Is.EqualTo(CardActivityLine.Line(None, Some "conflict")))
 
     [<Test>]
@@ -46,7 +51,7 @@ type CardActivityLineTests() =
         let wt =
             { baseWt with
                 AgentActivity = Some(AgentActivity.SessionTitle("use conflict skill to resolve conflicts", ts))
-                LastUserMessage = Some("use conflict skill to resolve conflicts", ts) }
+                LastUserMessage = Some(userMessage None "use conflict skill to resolve conflicts" ts) }
         Assert.That(cardActivityLine wt, Is.EqualTo CardActivityLine.Empty)
 
     [<Test>]
@@ -94,7 +99,7 @@ let private withChangedCanvasAndFooter branch changedAt (response: DashboardResp
         else
             { wt with
                 AgentActivity = Some(AgentActivity.SessionTitle("Investigate Intent Title Runtime", changedAt))
-                LastUserMessage = Some("user prompt", changedAt)
+                LastUserMessage = Some(userMessage (Some MessageGlyph.Canvas) "user prompt" changedAt)
                 LastAssistantMessage = Some("assistant response", changedAt)
                 CanvasDocs =
                     wt.CanvasDocs
@@ -152,6 +157,8 @@ type CardFooterRenderingTests() =
             let! activityLineCount = activityLine.CountAsync()
             let! activityTextCount = activityLine.Locator(":scope > .activity-text").CountAsync()
             let! userSpanCount = userLine.Locator(":scope > span").CountAsync()
+            let! userGlyphCount = userLine.Locator(":scope > .canvas-message-glyph").CountAsync()
+            let! userSourceCount = userLine.Locator(":scope > .event-source").CountAsync()
             let! assistantSpanCount = assistantLine.Locator(":scope > span").CountAsync()
             let! eventTimeCount = assistantLine.Locator(":scope > .event-time").CountAsync()
             let! eventSourceCount = assistantLine.Locator(":scope > .event-source").CountAsync()
@@ -160,7 +167,9 @@ type CardFooterRenderingTests() =
             Assert.Multiple(fun () ->
                 Assert.That(activityLineCount, Is.EqualTo(1), "Activity line should remain visible beside a canvas event")
                 Assert.That(activityTextCount, Is.EqualTo(1), "Activity line should contain one activity-text span")
-                Assert.That(userSpanCount, Is.EqualTo(2), "User line should keep its two-span DOM structure")
+                Assert.That(userSpanCount, Is.EqualTo(2), "User line should keep time and message spans")
+                Assert.That(userGlyphCount, Is.EqualTo(1), "Canvas user line should contain the easel glyph")
+                Assert.That(userSourceCount, Is.Zero, "Canvas user line should not add a text source tag")
                 Assert.That(assistantSpanCount, Is.EqualTo(3), "Assistant line should keep its three-span DOM structure")
                 Assert.That(eventTimeCount, Is.EqualTo(1), "Assistant line should contain one event-time span")
                 Assert.That(eventSourceCount, Is.EqualTo(1), "Assistant line should contain one event-source span")

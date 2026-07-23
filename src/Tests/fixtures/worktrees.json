@@ -14,7 +14,7 @@
             "CodingTool": "Working",
             "CodingToolProvider": "CopilotCli",
             "HasActiveSession": true,
-            "LastUserMessage": ["Add comprehensive input validation for all user-facing forms", "2026-02-16T22:30:00+00:00"],
+            "LastUserMessage": { "Glyph": null, "Text": "Add comprehensive input validation for all user-facing forms", "Timestamp": "2026-02-16T22:30:00+00:00" },
             "Pr": {
               "HasPr": {
                 "Id": 101,
@@ -55,7 +55,7 @@
             "Beads": { "Open": 1, "InProgress": 1, "Blocked": 0, "Closed": 0 },
             "CodingTool": "WaitingForUser",
             "CodingToolProvider": "CopilotCli",
-            "LastUserMessage": ["Refactor the data access layer for better separation of concerns", "2026-02-16T21:00:00+00:00"],
+            "LastUserMessage": { "Glyph": null, "Text": "Refactor the data access layer for better separation of concerns", "Timestamp": "2026-02-16T21:00:00+00:00" },
             "Pr": {
               "HasPr": {
                 "Id": 102,
@@ -143,7 +143,7 @@
             "CodingTool": "Working",
             "CodingToolProvider": "CopilotCli",
             "HasActiveSession": true,
-            "LastUserMessage": ["Wire up API endpoints for the new reporting feature", "2026-02-16T20:00:00+00:00"],
+            "LastUserMessage": { "Glyph": null, "Text": "Wire up API endpoints for the new reporting feature", "Timestamp": "2026-02-16T20:00:00+00:00" },
             "Pr": {
               "HasPr": {
                 "Id": 103,
