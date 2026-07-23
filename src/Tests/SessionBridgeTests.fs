@@ -6,7 +6,7 @@ open NUnit.Framework
 open Server.SessionBridge
 
 let private uniquePath prefix =
-    $"/test/{prefix}/{Guid.NewGuid():N}"
+    Path.Combine(Path.GetTempPath(), "treemon-session-bridge-tests", prefix, $"{Guid.NewGuid():N}")
 
 let private clockSnapshot = DateTime(2042, 7, 23, 12, 0, 0, DateTimeKind.Utc)
 
