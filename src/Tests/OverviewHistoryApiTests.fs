@@ -1,7 +1,6 @@
 module Tests.OverviewHistoryApiTests
 
 open System
-open Microsoft.Data.Sqlite
 open NUnit.Framework
 open OverviewData
 open Server
@@ -33,23 +32,6 @@ let private createApi store =
 let private readHistory store window =
     (createApi store).getOverviewHistory window
     |> Async.RunSynchronously
-
-let private hasTable path tableName =
-    use connection =
-        new SqliteConnection(
-            SqliteConnectionStringBuilder(DataSource = path, Pooling = false).ConnectionString
-        )
-
-    connection.Open()
-    use command = connection.CreateCommand()
-    command.CommandText <-
-        """
-SELECT count(*)
-FROM sqlite_master
-WHERE type = 'table' AND name = $name;
-"""
-    command.Parameters.AddWithValue("$name", tableName) |> ignore
-    Convert.ToInt32(command.ExecuteScalar()) > 0
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -147,7 +129,12 @@ type OverviewHistoryApiTests() =
             let expected = snapshot anchor 7
             store.Insert expected |> ignore
 
-            Assert.That(hasTable path "activity_events", Is.False)
+            Assert.That(
+                Tests.SqliteTestDatabase.scalarInt
+                    path
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'activity_events';",
+                Is.EqualTo 0
+            )
 
             let response = readHistory store HistoryWindow.Hours24
 

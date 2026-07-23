@@ -40,19 +40,11 @@ let private withStoreAndPath (action: string -> SessionActivityStore -> unit) =
 let private withStore action =
     withStoreAndPath (fun _ store -> action store)
 
-let private scalarInt dbPath sql =
-    use conn = new SqliteConnection(connStr dbPath)
-    conn.Open()
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- sql
-    Convert.ToInt32(cmd.ExecuteScalar())
-
 let private eventCount dbPath =
-    scalarInt dbPath "SELECT count(*) FROM activity_events;"
+    Tests.SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM activity_events;"
 
 let private eventCountById dbPath eventId =
-    use conn = new SqliteConnection(connStr dbPath)
-    conn.Open()
+    use conn = Tests.SqliteTestDatabase.openConnection dbPath
     use cmd = conn.CreateCommand()
     cmd.CommandText <- "SELECT count(*) FROM activity_events WHERE event_id = $eventId;"
     cmd.Parameters.AddWithValue("$eventId", eventId) |> ignore

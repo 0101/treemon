@@ -43,16 +43,17 @@ let private schemaNames path objectType names =
     use command = connection.CreateCommand()
     let parameters =
         names
-        |> List.mapi (fun index name ->
-            let parameterName = $"$name{index}"
-            command.Parameters.AddWithValue(parameterName, name) |> ignore
-            parameterName)
+        |> List.mapi (fun index name -> $"$name{index}", name)
+
+    parameters
+    |> List.iter (fun (parameterName, name) ->
+        command.Parameters.AddWithValue(parameterName, name) |> ignore)
 
     command.CommandText <-
         $"""
 SELECT name
 FROM sqlite_master
-WHERE type = $type AND name IN ({String.concat ", " parameters})
+WHERE type = $type AND name IN ({parameters |> List.map fst |> String.concat ", "})
 ORDER BY name;
 """
     command.Parameters.AddWithValue("$type", objectType) |> ignore
