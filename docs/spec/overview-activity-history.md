@@ -2,107 +2,81 @@
 
 ## Overview
 
-Treemon records count-only Overview history on a durable canonical 30-second grid and renders
-stepped 12-hour, 24-hour, or 72-hour charts inside the Overview band. Raw activity events, liveness,
-and task snapshots remain authoritative repair inputs; normal history requests read only published
-rollups.
+Treemon records the canonical live Overview as durable count-only snapshots on a UTC 30-second
+grid. History contains observations captured while Treemon is running; it does not reconstruct
+missed time, late inputs, or downtime.
 
 ## Goals
 
-- Keep 12-hour, 24-hour, and 72-hour history available from durable server data without an open
-  browser.
-- Match the live task and per-session agent projections at every emitted boundary.
-- Make normal uncached request work, allocations, and database reads independent of raw history
-  volume.
-- Publish only coherent generations across late writes, concurrent ingestion, compaction, restart,
-  migration, and retention.
-- Retain count data only and never expose drill-down membership.
+- Persist the same task and per-session agent projection shown by the live Overview.
+- Keep captured 12-hour, 24-hour, and 72-hour history available across restart without requiring an
+  open browser.
+- Store only task and agent counts, never drill-down membership or session content.
+- Keep capture and request work bounded independently of activity-event volume.
 - Render history inside the existing Overview band without a charting dependency.
 
 ## Expected Behavior
 
-### Durable history
+### Canonical capture
 
-- `activity_events`, `session_liveness`, and `task_snapshots` remain the authoritative sources for
-  rebuilding history. The rollup tables are disposable derived state.
-- Published rollups contain only `TaskCount` and `AgentCount` values at canonical UTC boundaries
-  divisible by 30 seconds. No session IDs, worktree IDs, messages, titles, or members are stored.
-- Events and task changes timestamped exactly at a boundary apply before that boundary is emitted.
-  Historical agent values preserve the stored post-event semantics used by the current pure sampler,
-  including for out-of-order events.
-- Agent counts use the same openness rules and `OverviewData.agentCountsOf` projection as live
-  Overview. Multiple sessions in one worktree count independently.
-- Task snapshot change detection, event insertion, and liveness insertion update source generation
-  and the earliest dirty boundary in the same SQLite transaction. Duplicate or unchanged writes do
-  neither; liveness is inserted only when it advances the durable session observation time.
-- The first affected boundary is the smallest canonical boundary greater than or equal to the source
-  timestamp. It is clamped to the oldest retained boundary needed by the currently exposed 72-hour
-  horizon, so arbitrarily old late writes repair the visible baseline without creating unbounded
-  work. Once publication exists, that horizon is anchored to its complete-through boundary rather
-  than wall clock; wall clock is used only before the first publication.
-- Activity and liveness writes update each session's earliest and latest observation bounds in the
-  same transaction. Reconstruction uses those bounds only to exclude sessions that cannot affect a
-  candidate range; they are derived state and are rebuilt with the rollups.
-- A late source write invalidates its first affected boundary and every later published boundary.
-  The currently published generation remains available until the repaired generation is complete.
-- Initial schema migration and exposed-horizon backfill complete before history requests are served.
-  There is no raw reconstruction fallback and no partially available history response. If the
-  initial rebuild cannot complete, real-mode startup fails before binding the HTTP server.
-- Derived-state schema changes or detected corruption discard and rebuild rollups idempotently from
-  retained raw sources. A failed runtime repair leaves the last coherent generation published and is
-  retried.
-- Rollups retain the exposed 72-hour horizon plus the predecessor needed for the left-edge baseline.
-  Raw-source retention preserves its existing baselines and cannot prune data required by an
-  in-progress rebuild.
+- A dedicated serial background loop targets every UTC Unix-second boundary divisible by 30. It
+  does not adapt to client activity level or scheduler polling intervals and never runs overlapping
+  capture attempts.
+- For boundary `B`, the capture uses `B` as `RepoAssemblyInputs.Now`, one immutable
+  `RefreshScheduler.GetState` result, one set of assembly inputs, one
+  `WorktreeApi.assembleRepos` result, and one `OverviewData.aggregate` result. Wall-clock reads
+  performed later in the attempt cannot change the projection time.
+- Tasks and agents are reduced from that same `Overview` value and committed atomically as one
+  `OverviewSnapshot`.
+- Capture is independent of the refresh scheduler's task-execution loop and cannot delay Git,
+  Beads, PR, or worktree refresh work.
+- A failed attempt creates no row. If the loop is not ready to start a boundary before a later
+  boundary arrives, the unstarted boundary is missed; after every attempt the loop advances to the
+  next future boundary and never overlaps, catches up, or repairs missed history.
+- Startup performs no backfill or immediate synthetic capture. Existing rows are available
+  immediately; a new database returns empty history until the first successful future boundary.
+- Source events arriving after a boundary never alter an already captured snapshot.
+
+### Durable snapshots
+
+- SQLite stores one table:
+
+  | Column | Contract |
+  |---|---|
+  | `bucket` | Primary-key UTC Unix seconds divisible by 30 |
+  | `tasks` | Serialized `TaskCount list` |
+  | `agents` | Serialized `AgentCount list` |
+
+- Inserting a snapshot and pruning expired rows use one transaction.
+- A bucket is insert-once: an existing primary-key row is never overwritten by a duplicate capture.
+- On a successful insert for bucket `B`, pruning deletes rows with
+  `bucket < B - 72 hours`; the inclusive cutoff row is retained. A gap does not change this rule.
+- Treemon downtime produces no rows. Captured rows before the gap remain available.
+- Legacy liveness, task-snapshot, rollup, staging, publication-state, and observation-bound history
+  tables are removed. Existing reconstructed history is not migrated.
+- `activity_events` remains unchanged for ingestion idempotency and is not read by Overview history.
 
 ### Sampling and API
 
-- `getOverviewHistory` accepts 12 hours, 24 hours, or 72 hours. Its anchor is the latest completely
-  published 30-second boundary. A healthy caught-up worker wakes for every new boundary and leaves
-  the anchor at most one 30-second interval behind wall clock after each completed cycle.
-- The response samples the canonical grid at fixed strides:
+- `getOverviewHistory` accepts 12 hours, 24 hours, or 72 hours and reads only the snapshot table.
+- `Anchor` is the latest committed snapshot boundary. With no rows, the API returns a successful
+  empty response anchored to `floor(UTC Unix seconds / 30) * 30`.
+- The query considers the inclusive range `[Anchor - window, Anchor]`, which contains at most 8,641
+  possible capture buckets for the 72-hour window.
+- The response selects captured rows on an anchor-aligned bucket grid:
 
-  | Window | Grid stride | Sample interval |
+  | Window | Capture-bucket stride | Interval |
   |---|---:|---:|
-  | 12 hours | 5 rows | 2.5 minutes |
-  | 24 hours | 10 rows | 5 minutes |
-  | 72 hours | 30 rows | 15 minutes |
+  | 12 hours | 5 buckets | 2.5 minutes |
+  | 24 hours | 10 buckets | 5 minutes |
+  | 72 hours | 30 buckets | 15 minutes |
 
-- Each response contains the left-edge baseline and up to 288 later samples, for at most 289 ordered
-  snapshots. Consecutive equal snapshots are collapsed.
-- Every returned timestamp is between `Anchor - Window` and `Anchor`, inclusive. Counts are complete
-  observed states, never averages or independently selected maxima.
-- A normal uncached request opens one SQLite read snapshot, reads rollup publication metadata, and
-  reads at most 289 rows from the published rollup. It reads no raw `activity_events`,
-  `session_liveness`, or `task_snapshots` rows.
-- In real mode, missing publication state is an availability error rather than an empty successful
-  history. Demo and fixture modes may continue returning their existing empty history response.
-- Cache entries are keyed by history window, published generation, and complete-through bucket.
-  Concurrent callers for one missing key share one computation. Publication or repair naturally
-  invalidates prior entries after the newer computation succeeds. A newer in-flight or failed entry
-  does not evict the last successful older entry; failed computations are removed for retry.
-- The API wire type remains `OverviewHistoryResponse`; only `Anchor` changes from an arbitrary
-  request instant to the latest published grid boundary.
-
-### Publication and repair
-
-- Each reconstruction batch contains at most 512 canonical boundaries, uses one stable SQLite read
-  snapshot, and stages candidate rows under the source generation it observed. Multi-batch work is
-  coherent because every batch carries the same generation and publication verifies it again.
-- Publication uses one write transaction that verifies the source generation is unchanged, applies
-  the complete candidate range, advances completeness and published generation, and clears only the
-  dirty range covered by that generation.
-- A concurrent source write either invalidates the candidate before publication or executes after
-  publication and creates a new dirty range. It cannot be lost by dirty-marker clearing.
-- Readers observe either the previous published generation or the replacement generation through one
-  SQLite snapshot, never a mixture.
-- Forward compaction may publish complete contiguous batches. Repair of an already published dirty
-  range publishes only after the full affected range through the current anchor is rebuilt.
-- Worker state is restart-safe. Incomplete or generation-mismatched staging data is discarded or
-  resumed without changing the published generation.
-- Only one compactor loop runs per store. It wakes for each new grid boundary and reads durable
-  source/dirty metadata on every cycle, so invalidation needs no second in-memory signaling path;
-  retries are serialized through the same loop.
+- A row is selected when `(Anchor.bucket - row.bucket) / 30` is divisible by the window stride.
+  Missing buckets stay missing rather than shifting later samples onto a different grid.
+- Responses contain at most 289 snapshots ordered oldest-first. Consecutive equal snapshots may be
+  collapsed, retaining the earliest timestamp in each equal run.
+- Missing intervals remain absent from storage and the response; there is no raw fallback,
+  reconstruction, publication availability state, generation, dirty range, repair, or server cache.
 
 ### In-band charts
 
@@ -113,147 +87,76 @@ rollups.
   visible.
 - When switching windows, the installed chart remains mounted until the matching response succeeds.
   A stale or failed response cannot replace the selected chart.
-- Agents and Tasks render stepped stacked-area charts below their live sections. A chart is omitted
-  when that live section is empty.
+- Agents and Tasks render stepped stacked-area charts below their live sections. The existing
+  stepped carry-forward rendering visually spans missing capture or downtime intervals.
 - Hover shows a snapped crosshair, non-empty series, total, and absolute local time. Static geometry
-  is reused until the window, anchor, or snapshots change; hover work is frame-coalesced.
-
-### Acceptance bounds
-
-- Release-build uncached SQLite + API + serialization for a 72-hour database with at least 40,000
-  status events across at least 130 sessions, plus liveness and task changes, completes below
-  1,000 ms, returns at most 289 ordered snapshots, and serializes below 250 KB.
-- Repeating the same visible history with 400,000 raw events keeps request time and allocations
-  effectively flat and performs zero normal-path raw history reads.
-- Rollups match the pure sampler across exact boundaries, duplicates, liveness gaps, status and skill
-  transitions, multiple sessions per worktree, task baselines and changes, late writes, and restarts.
-- Dirty-boundary tests prove exact-boundary inclusion, ceiling to the next boundary, and clamping of
-  older late writes to the retained exposed horizon.
-- After successful startup and after a healthy forward-compaction cycle, the published anchor is no
-  more than one 30-second interval behind wall clock. Startup never serves an empty or partial real
-  history while initial backfill is incomplete.
-- A repeated cached request completes within 100 ms, and simultaneous callers trigger one rollup
-  read.
-- For a loaded 24-hour chart, a 10-second idle measurement has at most 1,500 ms of main-thread task
-  time, at most 1,500 ms of script time, and no task lasting 50 ms or longer.
-- Thirty measured pointer moves complete within 1,000 ms total with no task lasting 50 ms or longer,
-  while tooltip and crosshair values remain correct.
+  is reused until the window, anchor, or snapshots change.
 
 ## Technical Approach
 
-### Shared count model
+### Shared projection
 
-`OverviewData` owns `TaskCount`, `AgentCount`, `OverviewSnapshot`, requested windows, and the anchored
-history response. History omits members and scale. Client-only selection, labels, and CSS mappings
-remain in `OverviewPresentation`.
+`src/Shared/OverviewData.fs` owns the live aggregate and count-only history types. Snapshot capture
+reuses the existing complete `WorktreeApi` assembly path and calls `OverviewData.aggregate`; it does
+not introduce a second history-specific task or agent projector.
 
-### Derived schema
+A leaner projection may replace the complete assembly only if both live Overview and history share
+the same implementation.
 
-`OverviewHistoryRollupStore` owns idempotent creation, migration, validation, and reset of:
+### Snapshot store and capture
 
-- published count-only rollup rows keyed by canonical bucket;
-- singleton publication state containing schema version, resolution, source generation, published
-  generation, complete-through bucket, and earliest dirty bucket;
-- durable staging rows tagged with their candidate generation;
-- session observation bounds used by indexed background reconstruction.
+A small history store owns table creation, atomic insert/prune, bounded window reads, serialization,
+retention, insert-once behavior, and anchor-aligned sampling. A separate capture component owns
+canonical-boundary timing and obtains immutable scheduler state through `GetState`.
 
-Every source mutation uses the same transaction as generation and dirty-range maintenance.
-`AppendTaskSnapshotIfChanged` performs comparison and insertion on one connection and transaction.
-Dirty boundaries use a shared ceiling-to-grid function and clamp to the retained exposed baseline.
-Event and liveness mutations maintain session observation bounds; task mutations do not.
-`SessionActivityStore` remains the facade that coordinates these derived updates with authoritative
-raw-source writes. `SqliteStorage` owns the shared UTC timestamp encoding/parsing and immutable
-reader draining used by both stores and reconstruction.
+Capture failures are logged and isolated to the affected boundary. The store has no staging,
+publication generations, recovery worker, or reconstruction dependency.
 
-### Reconstruction and compaction
+### Lifecycle and API
 
-`OverviewHistory` remains the pure correctness oracle. `OverviewHistoryRollup` owns the count model,
-grid arithmetic, and candidate validation. `OverviewHistoryRollupStore` owns durable staging,
-publication, retention, recovery, and published reads.
-`OverviewHistoryReconstruction` owns the background-only indexed source reads and dense boundary
-projection, keeping raw reconstruction separate from both request handling and store persistence.
+`Program` starts and stops the capture component with the server runtime but never blocks HTTP
+startup on history availability. `WorktreeApi.getOverviewHistory` performs one bounded snapshot
+query and returns the existing `OverviewHistoryResponse` wire type.
 
-The background reconstruction query seeks task, status, and latest-observation predecessors at each
-boundary. It may read raw history because it is outside the request path. It maps reconstructed open
-sessions through the same shared agent classifier as live Overview.
-
-Initial startup rebuilds the full exposed horizon before API availability. Later work incrementally
-fills new boundaries and repairs dirty history in batches of at most 512 boundaries. Each batch gets
-its own stable read snapshot; generation tagging plus the final transactional check makes the whole
-candidate range coherent. Durable staging holds one generation and one dense range; later batches
-must append contiguously, and stale staging is explicitly discarded before restaging. The worker
-retries generation conflicts and keeps the last published generation readable on runtime failure.
-Missing or out-of-retention publication state rebuilds observation bounds, stages only the current
-retained horizon, and atomically replaces all published rows instead of filling an unbounded gap.
-The store serializes raw-source retention with active multi-batch reconstruction.
-
-### Lifecycle, API, and cache
-
-`Program` owns one shared `SessionActivityStore` and disposes it only after ingestion, compaction, and
-API users stop. `SessionActivityService` receives the shared store instead of owning its lifetime.
-
-`WorktreeApi.getOverviewHistory` reads publication state and the selected published rows only.
-`OverviewHistoryCache` identifies entries by window plus publication identity rather than wall-clock
-anchor age.
-
-`OverviewHistoryPerformanceTests` is the reproducible release-mode request harness. It bulk-seeds
-deterministic on-disk databases with equivalent visible 72-hour histories at 40,000 and 400,000 raw
-events, rebuilds both through the production rollup worker, and measures API plus Fable-remoting JSON
-serialization. SQLite tracing and rollup-read callbacks run in separate audit requests so timed
-samples are not instrumented; the test emits one JSON report containing runtime/database
-configuration, every sample, statement/table access, cache and concurrency counts, and threshold
-comparisons. Run it in Release with a `Category=Performance` test filter and detailed console logger.
+The refresh scheduler no longer receives history assembly or persistence callbacks and performs no
+history work inside its task loop.
 
 ## Decisions
 
 | Decision | Choice |
 |---|---|
-| Authoritative data | Raw events, liveness, and task snapshots remain repair sources; rollups are rebuildable derived state. |
-| Canonical resolution | 30 seconds, shared by all windows through strides of 5, 10, and 30. |
-| Wall-clock boundary | The latest complete boundary is the greatest UTC grid point at or before the clock instant; an exact boundary is included, and a later-arriving same-timestamp source write follows the normal dirty-repair path. |
-| Bucket encoding | Published and staging buckets use canonical UTC Unix seconds; their payloads are typed `TaskCount` and `AgentCount` lists only. Session observation bounds remain separate reconstruction metadata. |
-| Response anchor | Latest completely published grid boundary. |
-| Request path | Published rollups only; no raw fallback, raw-row cap, or boundary-indexed raw query. |
-| Stored shape | Count-only task and agent values. |
-| Late event semantics | Preserve current stored post-event behavior in this performance change. |
-| Liveness no-op | Equal or stale observations do not append liveness, advance generation, or change observation bounds. |
-| Dirty boundary | Ceiling source timestamps to the 30-second grid and clamp to the oldest exposed baseline anchored to published completeness when available, using wall clock only before first publication. |
-| Initial availability | Complete the 72-hour backfill before serving history; keep the existing wire type. |
-| Initial failure | Fail real-mode startup before binding rather than serve empty, partial, or raw-reconstructed history. |
-| Publication | Generation check plus transactional candidate publication and dirty-marker update. |
-| Repair consistency | Keep the prior coherent generation visible until the complete affected range is ready. |
-| Stale publication | Atomically replace it with a current retained-horizon rebuild rather than reconstruct an unbounded downtime gap. |
-| Reconstruction batch | At most 512 canonical boundaries per stable read snapshot. |
-| Retention | Exposed 72-hour rollup horizon plus predecessor; raw retention remains authoritative. |
-| Cache | Key by window, published generation, and complete-through bucket. |
-| Rendering | Hand-written stepped SVG with memoized geometry and frame-coalesced hover. |
-| Performance evidence | A Release-only NUnit harness uses deterministic on-disk data and separate untimed SQLite tracing; Debug runs skip it rather than applying release thresholds to unoptimized code. |
+| Authoritative data | The canonical `OverviewData.aggregate` result observed at capture time |
+| Storage | One durable SQLite `overview_snapshots` table |
+| Canonical resolution | 30 seconds |
+| Capture cadence | Independent fixed boundary loop |
+| Stored shape | Count-only tasks and agents captured atomically |
+| Retention | Exactly 72 hours |
+| Startup | Existing rows or empty history; no backfill |
+| Missed time | Leave gaps; never catch up or reconstruct |
+| Late events | Do not modify captured snapshots |
+| Activity events | Keep unchanged for event-ID idempotency |
+| Request path | Snapshot table only; no raw fallback or cache |
+| Rendering gaps | Keep stepped carry-forward behavior |
+| Wire contract | Keep `OverviewHistoryResponse` and 12h/24h/72h windows |
 
 ## Key Files
 
 | File | Role |
 |---|---|
-| `src/Shared/OverviewData.fs` | Count-only history types and shared agent grouping. |
-| `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract. |
-| `src/Server/OverviewHistory.fs` | Pure sampler oracle and response collapsing. |
-| `src/Server/OverviewHistoryRollup.fs` | Count model, grid arithmetic, serialization, and candidate validation. |
-| `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/OverviewHistoryRollupStore.fs` | Derived schema, invariant validation/reset, source invalidation metadata, staging, publication, retention, and published reads. |
-| `src/Server/OverviewHistoryReconstruction.fs` | Stable-snapshot indexed source reads and dense count reconstruction. |
-| `src/Server/OverviewHistoryRollupWorker.fs` | Serialized startup backfill, boundary wake loop, conflict recovery, and retention coordination. |
-| `src/Server/OverviewHistoryCache.fs` | Publication-keyed cache and in-flight request deduplication. |
-| `src/Server/SessionActivityStore.fs` | Raw persistence and the public facade coordinating source transactions with rollup storage. |
-| `src/Server/SessionActivityService.fs` | Ingestion through the shared store. |
-| `src/Server/Program.fs` | Shared store and compactor lifecycle plus startup backfill. |
-| `src/Server/WorktreeApi.fs` | Published-rollup history query. |
-| `src/Tests/OverviewHistoryPublicationIntegrationTests.fs` | On-disk SQLite publication, recovery, restart, failure, retention, and startup-availability coverage. |
-| `src/Tests/OverviewHistoryPerformanceTests.fs` | Release-mode on-disk SQLite, API, serialization, cache, concurrency, allocation, and statement-access harness. |
-| `src/Client/App.fs` | Window state, fetching, and refresh throttle. |
-| `src/Client/OverviewChart.fs` | Stepped chart geometry, SVG, and tooltip. |
-| `src/Client/OverviewBand.fs` | In-band chart placement and controls. |
+| `src/Shared/OverviewData.fs` | Canonical aggregate, count types, windows, and response |
+| `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract |
+| `src/Server/OverviewSnapshotStore.fs` | Direct snapshot schema, migration, retention, and bounded reads |
+| `src/Server/WorktreeApi.fs` | Shared repo assembly and bounded history query |
+| `src/Server/RefreshScheduler.fs` | Immutable live state and `GetState` |
+| `src/Server/Program.fs` | Capture lifecycle |
+| `src/Client/App.fs` | Window state, fetching, and refresh cadence |
+| `src/Client/OverviewChart.fs` | Stepped chart geometry and hover |
+| `src/Client/OverviewBand.fs` | In-band chart placement and controls |
 
 ## Related Specs
 
-- `docs/spec/session-status-push.md` - authoritative session events, liveness, and storage.
-- `docs/spec/beads-overview-band.md` - live Overview aggregation and presentation.
+- `docs/spec/session-status-push.md` - live session ingestion and event idempotency.
+- `docs/spec/beads-overview-band.md` - canonical live Overview aggregation.
 - `docs/spec/overview-drilldown.md` - the mutually exclusive detail view.
+- `docs/spec/user-idle-detection.md` - adaptive dashboard polling, intentionally separate from
+  history capture cadence.

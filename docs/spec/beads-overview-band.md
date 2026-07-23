@@ -115,8 +115,8 @@ distinct server-side bucket for fidelity but folds into **Planned** for display 
 
 ## Technical Approach
 
-Two parts: (1) enrich the per-worktree beads data + surface the running skill server-side;
-(2) add the collapsible band + toggle client-side, aggregating client-side across worktrees.
+The server enriches per-worktree beads and session data. The shared Overview aggregate is consumed
+by the client band and by server-side history capture.
 
 ### Data source — parse `.beads/issues.jsonl` (no SQLite dependency)
 
@@ -214,7 +214,7 @@ the solution compiling (no compat shims, per house rules).
 
 ### Client aggregation + band
 
-- Aggregate **client-side** (the client already receives every worktree). `Client/OverviewData.fs`
+- Aggregate with the shared `src/Shared/OverviewData.fs`
   (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
   task buckets (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has
   `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
@@ -256,8 +256,9 @@ the solution compiling (no compat shims, per house rules).
 - **Section chrome.** The band renders bare `AGENTS` and `TASKS` headings (no count suffix, no
   "across all worktrees" caption — the columns carry the counts), separated by a 1px dashed rule,
   and has no top/bottom border hairlines or task footer caption.
-- **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
-  `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
+- **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`) so decision
+  (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten. Durable history capture receives
+  the server-shaped `RepoWorktrees` directly and calls the same shared `aggregate`.
 - **Empty-state collapse.** `view` drops an all-empty lens by pattern-matching (each section is built
   by the `section` helper) and returns `Html.none` when both lenses are empty, so an opened-but-empty
   band adds no chrome (not even margin).
@@ -299,13 +300,10 @@ call site; running skill and persisted per-session context usage from the existi
 - (f) **Archived worktrees are excluded from the entire roll-up; the aggregation folds the un-split
   `RepoWorktrees list`.** `OverviewData.aggregate` drops `IsArchived` worktrees up front (when
   building `taggedWorktrees`), so an archived worktree contributes to **no** task bucket and **no**
-  agent group — archiving a worktree removes all of its Overview contributions at once. (This
-  reverses the original decision, which scoped the `not IsArchived` filter to `Done` alone and let
-  archived worktrees keep inflating Planned/Queued/In-progress/Blocked; users reported the residual
-  counts as a bug — archived means "put away", so it should leave the band entirely.) Consequence for
-  wiring: the aggregation receives the server-shaped `RepoWorktrees list` (every worktree present,
-  archived ones flagged via `IsArchived`), **not** the client `RepoModel`, which pre-splits archived
-  worktrees into a separate `ArchivedWorktrees` field. A `RepoModel`-based caller recombines
+  agent group — archiving a worktree removes all of its Overview contributions at once. The
+  aggregation receives the server-shaped `RepoWorktrees list` (every worktree present, archived ones
+  flagged via `IsArchived`), **not** the client `RepoModel`, which pre-splits archived worktrees into
+  a separate `ArchivedWorktrees` field. A `RepoModel`-based caller recombines
   `Worktrees @ ArchivedWorktrees` before calling `aggregate` and lets `aggregate` — the single owner
   of the archived policy — drop the archived ones.
 
@@ -327,7 +325,7 @@ call site; running skill and persisted per-session context usage from the existi
 |---|---|
 | Domain types | `src/Shared/Types.fs` (`BeadsSummary`, `WorktreeStatus`, `DashboardResponse`, `IWorktreeApi`) |
 | Beads collection | `src/Server/BeadsStatus.fs` (`getBeadsData`, `getBeadsIssueList`) |
-| Cross-worktree aggregation | `src/Client/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `AgentGroup`) |
+| Cross-worktree aggregation | `src/Shared/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `AgentGroup`) |
 | Session/skill scan | `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs`, `CodingToolStatus.fs` |
 | Refresh + assembly | `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs` |
 | Toggle precedent | `src/Client/App.fs` (`ToggleCanvasPane`, `header-controls`), `saveCanvasPaneOpen` |
@@ -346,7 +344,8 @@ call site; running skill and persisted per-session context usage from the existi
 - **Unit** (in impl tasks): the planning classifier (feature open/in_progress/closed; task with no
   parent; a `blocks` edge must **not** be treated as parent-child; loose bucket) and the
   skill→activity classifier (each known skill → its bucket; unknown/empty → Working); cross-worktree
-  aggregation (sums match inputs; archived excluded from Done; empty categories omitted).
+  aggregation (sums match inputs; archived excluded from every task and agent group; empty
+  categories omitted).
 - **Data correctness E2E**: the enriched collection over a known worktree's `.beads/issues.jsonl`
   matches the manual issues+dependencies join. Choose a worktree that actually exercises the split
   (open tasks under **both** an open and an in_progress feature) so Planned **and** Queued are

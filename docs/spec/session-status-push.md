@@ -3,7 +3,7 @@
 ## Overview
 
 Treemon receives Copilot CLI lifecycle and activity events through a passive reporting extension and
-folds them into durable per-session state. Worktree cards, Overview agent groups, history, activity
+folds them into durable per-session state. Worktree cards, live Overview agent groups, activity
 titles, context usage, and session resume all use this shared state; no session-log parsing remains.
 
 ## Goals
@@ -34,9 +34,8 @@ titles, context usage, and session resume all use this shared state; no session-
   (3 minutes). A defensive `stalenessTimeout` (5 minutes) can downgrade stale active state, and
   `idleWindow` (2 hours) bounds the in-memory session map.
 - The extension sends liveness-only heartbeats every 60 seconds after a real status has been
-  established. Heartbeats update `last_seen` without changing status or adding `activity_events`;
-  their compact `session_liveness` rows preserve historical openness.
-- Accepted usage reports also append compact liveness observations without becoming status events.
+  established. Heartbeats update `last_seen` without changing status or adding `activity_events`.
+- Accepted usage reports also advance `last_seen` without becoming status events.
 
 ### Multiple sessions and card fields
 
@@ -99,13 +98,13 @@ timestamps are normalized to that value before ordering. Free text is bounded be
 A `SessionActivityService` mailbox is the single writer. Event IDs provide idempotency. Lifecycle
 status, activity fields, usage, and liveness use independent ordering paths:
 
-- Lifecycle reports append history and update the lifecycle last-write-wins clock.
+- Lifecycle reports append an idempotent event record and update the lifecycle last-write-wins clock.
 - Intent and live title reports persist source activity without blocking older lifecycle transitions.
-- Title bootstrap hydrates durable state without appending source history or advancing lifecycle time.
-- Usage persists only the latest accepted gauge, advances `last_seen` forward, and records liveness.
-- Heartbeats only advance `last_seen` and record liveness.
+- Title bootstrap hydrates durable state without appending an event record or advancing lifecycle time.
+- Usage persists only the latest accepted gauge and advances `last_seen` forward.
+- Heartbeats only advance `last_seen`.
 
-Older lifecycle events remain available for history but cannot regress live state.
+Older lifecycle events remain persisted for event-ID idempotency but cannot regress live state.
 
 ### Persistence
 
@@ -113,33 +112,22 @@ Older lifecycle events remain available for history but cannot regress live stat
 
 - `session_status` stores the latest folded status, messages, intent, title, context gauge, independent
   usage timestamp, and session identity for live rebuild, footer data, and resume.
-- `activity_events` stores post-event status and skill needed to reconstruct agent history without
-  replaying the full fold.
-- `session_liveness` stores heartbeat and accepted usage timestamps separately from status history,
-  allowing a quiet open session to remain open in historical reconstruction.
-- `task_snapshots` stores count-only Overview task values on change.
+- `activity_events` retains accepted lifecycle events under their unique event IDs so duplicate
+  reports remain full no-ops. Overview history does not read this table.
 
-Store construction applies additive columns idempotently for existing databases, then ensures the
-disposable Overview rollup schema. Context usage fields are nullable, so legacy rows restore a plain
-status dot until a gauge arrives.
+Store construction applies additive columns idempotently for existing databases. Context usage
+fields are nullable, so legacy rows restore a plain status dot until a gauge arrives.
 
-Event append/status upsert, context/liveness updates, and rollup invalidation are transactional.
-Duplicate or stale writes do not advance rollup generations. Hourly retention removes redundant raw
-rows older than 60 days while preserving the latest old status event for each retained session and
-the latest old task snapshot as history baselines. Raw retention is serialized with active Overview
-rollup reconstruction so a multi-batch rebuild cannot lose inputs between snapshots.
-
-The disposable `overview_history_*` schema and publication operations live in
-`OverviewHistoryRollupStore`; `SessionActivityStore` coordinates them with raw-source transactions.
-`SqliteStorage` owns the UTC timestamp encoding/parsing and immutable reader draining shared by the
-raw and derived stores.
+Event append/status upsert and context updates are transactional. Hourly retention bounds durable
+session and event data without coordinating with Overview history. `SqliteStorage` owns shared UTC
+timestamp encoding/parsing and immutable reader draining.
 
 ### Worktree projection
 
 `CodingToolStatus.collapseByWorktree` is the single live projection from session state to card
 fields. It keeps the activity source through the `AgentActivity` union and exposes each open session
 for status/context rendering. `WorktreeApi` reuses the collapse for dashboard assembly and retained
-footer fallback. Published Overview rollups use the same openness and per-session grouping; see
+footer fallback. Overview history captures the complete shared live aggregate; see
 `docs/spec/overview-activity-history.md`.
 
 ## Decisions
@@ -148,13 +136,13 @@ footer fallback. Published Overview rollups use the same openness and per-sessio
 |---|---|
 | Source of truth | Push events only; log-parsing detectors are removed. |
 | Session model | Working, WaitingForUser, Idle; NoSession only at worktree collapse. |
-| Liveness | Heartbeats and accepted usage update `last_seen` and `session_liveness` without status-history writes. |
+| Liveness | Heartbeats and accepted usage update `last_seen` without lifecycle event writes. |
 | Multiple sessions | Preserve per-session status, skill, and context usage; collapse only card-level fields. |
 | Footer | Decouple from the active status winner so retained activity and messages remain visible. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
 | Ordering | Separate lifecycle, activity, usage, and title-bootstrap ordering paths. |
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
-| Persistence | Store latest session state plus post-fold event and compact liveness streams in SQLite WAL. |
+| Persistence | Store latest session state plus idempotent accepted lifecycle events in SQLite WAL. |
 | Resume | Query durable most-recent session identity, not the bounded live cache. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
@@ -168,11 +156,10 @@ footer fallback. Published Overview rollups use the same openness and per-sessio
 | `src/Server/SessionActivity.fs` | Event domain, pure fold, effective activity, freshness, and active selection. |
 | `src/Server/SessionActivityService.fs` | Request validation, independent ordering paths, mailbox ingestion, and lifecycle. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/SessionActivityStore.fs` | Raw persistence, additive migration, queries, retention, and rollup facade. |
-| `src/Server/OverviewHistoryRollupStore.fs` | Disposable rollup schema, validation, invalidation metadata, staging, publication, and reads. |
+| `src/Server/SessionActivityStore.fs` | Session persistence, additive migration, idempotent event append, queries, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, activity/footer projection, and resume lookup. |
 | `src/Server/RefreshScheduler.fs` | Live session state and `CodingToolSince` transitions. |
-| `src/Server/WorktreeApi.fs` | Card assembly, published history API, and resume command wiring. |
+| `src/Server/WorktreeApi.fs` | Card assembly, direct snapshot history API, and resume command wiring. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, per-session markers, and worktree wire types. |
 | `src/Shared/OverviewData.fs` | Shared per-session Overview grouping. |
 | `src/Client/OverviewPresentation.fs` | Client-only Overview selection and visual mappings. |
@@ -182,7 +169,7 @@ footer fallback. Published Overview rollups use the same openness and per-sessio
 
 - `docs/spec/worktree-monitor.md` - dashboard architecture and refresh model.
 - `docs/spec/beads-overview-band.md` - live task and agent aggregation.
-- `docs/spec/overview-activity-history.md` - durable published history rollups.
+- `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.
 - `docs/spec/overview-drilldown.md` - per-group session details.
 - `docs/spec/resume-last-session.md` - resume command behavior.
 - `docs/spec/remoting-csrf-hardening.md` - endpoint origin protection.
