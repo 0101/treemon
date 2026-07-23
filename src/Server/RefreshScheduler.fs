@@ -805,29 +805,8 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
-let internal updateTaskHistory
-    (assembleTasks: DashboardState -> Async<OverviewData.TaskCount list>)
-    (persistTasks: DateTimeOffset -> OverviewData.TaskCount list -> bool)
-    (state: DashboardState)
-    (lastLoggedTasks: OverviewData.TaskCount list option)
-    =
-    async {
-        try
-            let! tasks = assembleTasks state
-
-            if OverviewHistory.tasksChanged lastLoggedTasks tasks then
-                return if persistTasks DateTimeOffset.UtcNow tasks then Some tasks else lastLoggedTasks
-            else
-                return lastLoggedTasks
-        with ex ->
-            Log.log "OverviewHistory" $"task history update failed, continuing refresh scheduling: {ex.Message}"
-            return lastLoggedTasks
-    }
-
 let start
     (agent: MailboxProcessor<StateMsg>)
-    (assembleTasks: DashboardState -> Async<OverviewData.TaskCount list>)
-    (persistTasks: DateTimeOffset -> OverviewData.TaskCount list -> bool)
     (worktreeRoots: string list)
     (ct: CancellationToken)
     =
@@ -879,14 +858,9 @@ let start
         watchers
         watcherCleanup
         lastRuns
-        lastLoggedTasks
         =
         async {
             try
-                // Optional task-history capture has its own failure boundary. A slow or failed
-                // history read/write must never skip the core refresh task selected below.
-                let! lastLoggedTasks = updateTaskHistory assembleTasks persistTasks state lastLoggedTasks
-
                 let archivedBranchSets = readArchivedBranchSets rootPaths
                 let archivedPaths = resolveArchivedPaths archivedBranchSets repos
                 let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
@@ -914,39 +888,37 @@ let start
                     | _ -> ()
 
                     let updatedRuns = lastRuns |> Map.add task now
-                    return updatedRuns, watchers, watcherCleanup, lastLoggedTasks
+                    return updatedRuns, watchers, watcherCleanup
                 | None ->
                     let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
                     do! Async.Sleep sleepMs
-                    return lastRuns, watchers, watcherCleanup, lastLoggedTasks
+                    return lastRuns, watchers, watcherCleanup
             with ex ->
                 do! recoverIteration ex
-                return lastRuns, watchers, watcherCleanup, lastLoggedTasks
+                return lastRuns, watchers, watcherCleanup
         }
 
     let rec loop
         (lastRuns: Map<RefreshTask, DateTimeOffset>)
         (watchers: Map<string, FileSystemWatcher>)
         (watcherCleanup: CancellationTokenRegistration)
-        (lastLoggedTasks: OverviewData.TaskCount list option)
         =
         async {
             let! prepared = prepareIteration watchers watcherCleanup
 
             match prepared with
             | None ->
-                return! loop lastRuns watchers watcherCleanup lastLoggedTasks
+                return! loop lastRuns watchers watcherCleanup
             | Some(state, repos, nextWatchers, nextCleanup) ->
-                let! nextRuns, nextWatchers, nextCleanup, nextTasks =
+                let! nextRuns, nextWatchers, nextCleanup =
                     runPreparedIteration
                         state
                         repos
                         nextWatchers
                         nextCleanup
                         lastRuns
-                        lastLoggedTasks
 
-                return! loop nextRuns nextWatchers nextCleanup nextTasks
+                return! loop nextRuns nextWatchers nextCleanup
         }
 
     let startup =
@@ -955,7 +927,7 @@ let start
             let! state = agent.PostAndAsyncReply(GetState)
             let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
             let watcherCleanup = registerWatcherCleanup initialWatchers
-            return! loop lastRuns initialWatchers watcherCleanup None
+            return! loop lastRuns initialWatchers watcherCleanup
         }
 
     Async.StartAsTask(startup, cancellationToken = ct) :> Task

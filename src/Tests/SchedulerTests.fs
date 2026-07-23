@@ -158,31 +158,7 @@ type ComputeSleepMsTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type TaskHistoryUpdateTests() =
-
-    let tasks : OverviewData.TaskCount list =
-        [ { Kind = OverviewData.TaskBucketKind.Planned
-            Count = 1 } ]
-
-    [<Test>]
-    member _.``history assembly failure preserves the prior value instead of escaping``() =
-        let previous = Some tasks
-        let assemble _ = async { return failwith "history unavailable" }
-        let result = updateTaskHistory assemble (fun _ _ -> true) DashboardState.empty previous |> Async.RunSynchronously
-
-        Assert.That(result, Is.EqualTo previous)
-
-    [<Test>]
-    member _.``failed persistence keeps the prior value for retry``() =
-        let result =
-            updateTaskHistory
-                (fun _ -> async { return tasks })
-                (fun _ _ -> false)
-                DashboardState.empty
-                None
-            |> Async.RunSynchronously
-
-        Assert.That(result, Is.EqualTo None)
+type SchedulerSleepTests() =
 
     [<Test>]
     member _.``Empty task list returns max int``() =

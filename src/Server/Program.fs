@@ -234,12 +234,12 @@ type internal BackgroundLoop =
 
 type internal SessionActivityComponents =
     { Store: SessionActivityStore.SessionActivityStore
-      Service: SessionActivityService.SessionActivityService
-      Worker: OverviewHistoryRollupWorker.OverviewHistoryRollupWorker }
+      Service: SessionActivityService.SessionActivityService }
 
 type internal SessionActivityRuntime =
     { Components: SessionActivityComponents
-      RollupLoop: BackgroundLoop }
+      SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore
+      Capture: OverviewSnapshotCapture.SnapshotCapture }
 
 let internal usesSessionActivity (config: ServerConfig) =
     not config.Demo && config.TestFixtures.IsNone
@@ -251,15 +251,8 @@ let internal createSessionActivityComponents
     let store = new SessionActivityStore.SessionActivityStore(dbPath)
 
     try
-        let worker = new OverviewHistoryRollupWorker.OverviewHistoryRollupWorker(store)
-
-        try
-            { Store = store
-              Service = new SessionActivityService.SessionActivityService(store, scheduler)
-              Worker = worker }
-        with _ ->
-            (worker :> System.IDisposable).Dispose()
-            reraise ()
+        { Store = store
+          Service = new SessionActivityService.SessionActivityService(store, scheduler) }
     with _ ->
         (store :> System.IDisposable).Dispose()
         reraise ()
@@ -287,72 +280,75 @@ let internal stopBackgroundLoop name (loop: BackgroundLoop) =
     finally
         loop.Cancellation.Dispose()
 
-let internal initializeOverviewHistory
-    (worker: OverviewHistoryRollupWorker.OverviewHistoryRollupWorker)
-    =
-    let requiredThrough =
-        OverviewHistoryRollup.latestCompleteBoundary System.DateTimeOffset.UtcNow
-
-    let publication = worker.Backfill CancellationToken.None
-
-    match publication.CompleteThrough with
-    | Some completeThrough
-        when completeThrough >= requiredThrough
-             && publication.PublishedGeneration = publication.SourceGeneration ->
-        publication
-    | _ ->
-        invalidOp
-            $"Overview history startup did not produce a coherent publication through {requiredThrough:O}."
-
-let internal startSessionActivityRuntime
+let internal createSessionActivityRuntime
     (dbPath: string)
     (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (sessionAgent: SessionManager.SessionAgent)
+    (rootPaths: Map<RepoId, string>)
     =
+    let snapshotStore = OverviewSnapshotStore.OverviewSnapshotStore(dbPath)
     let components = createSessionActivityComponents dbPath scheduler
 
     try
-        let publication = initializeOverviewHistory components.Worker
-        let completeThrough = publication.CompleteThrough |> Option.get
-        Log.log "Startup" $"Overview history ready through {completeThrough:O}"
-
         { Components = components
-          RollupLoop = startBackgroundLoop components.Worker.Run }
+          SnapshotStore = snapshotStore
+          Capture =
+            OverviewSnapshotCapture.create
+                scheduler
+                sessionAgent
+                (Some components.Store)
+                rootPaths
+                snapshotStore }
     with _ ->
         (components.Service :> System.IDisposable).Dispose()
-        (components.Worker :> System.IDisposable).Dispose()
         (components.Store :> System.IDisposable).Dispose()
         reraise ()
 
 let internal shutdownStoreUsers
-    (stopWorker: unit -> unit)
     (disposeIngestion: unit -> unit)
     (stopScheduler: unit -> unit)
     (disposeStore: unit -> unit)
     =
     try
-        stopWorker ()
+        disposeIngestion ()
     finally
         try
-            disposeIngestion ()
+            stopScheduler ()
         finally
-            try
-                stopScheduler ()
-            finally
-                disposeStore ()
+            disposeStore ()
 
 let internal shutdownSessionActivityRuntime
     (runtime: SessionActivityRuntime)
     (schedulerLoop: BackgroundLoop option)
     =
     shutdownStoreUsers
-        (fun () ->
-            stopBackgroundLoop "Overview history rollup worker" runtime.RollupLoop
-            (runtime.Components.Worker :> System.IDisposable).Dispose())
         (fun () -> (runtime.Components.Service :> System.IDisposable).Dispose())
         (fun () ->
             schedulerLoop
             |> Option.iter (stopBackgroundLoop "Refresh scheduler"))
         (fun () -> (runtime.Components.Store :> System.IDisposable).Dispose())
+
+let internal runHostWithCapture
+    (startHost: unit -> unit)
+    (waitForShutdown: unit -> unit)
+    (stopping: CancellationToken)
+    (capture: (CancellationToken -> Async<unit>) option)
+    =
+    startHost ()
+
+    match capture with
+    | None -> waitForShutdown ()
+    | Some workflow ->
+        let loop = startBackgroundLoop workflow
+        let stoppingRegistration =
+            stopping.Register(fun () -> loop.Cancellation.Cancel())
+        Log.log "Startup" "Overview snapshot capture started"
+
+        try
+            waitForShutdown ()
+        finally
+            stoppingRegistration.Dispose()
+            stopBackgroundLoop "Overview snapshot capture" loop
 
 [<EntryPoint>]
 let main args =
@@ -417,43 +413,14 @@ let main args =
             | None ->
                 let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
                 Log.log "Startup" $"Session activity store db: {dbPath}"
-                let activity = startSessionActivityRuntime dbPath agent
-                let store = activity.Components.Store
-
-                // 24/7 Tasks history logging: give the scheduler the SAME count-only Tasks projection
-                // the client-poll path builds (assembleRepos + OverviewData.aggregate), including active
-                // agent sessions, so the logged history matches what the band shows. Persisted to the
-                // push-model store's task_snapshots table (the Agents dimension is derived on read from
-                // status events plus liveness). Injected here because assembleRepos/SessionManager and the store
-                // live in modules compiled after RefreshScheduler.
                 let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
-
-                let assembleTasks (state: RefreshScheduler.DashboardState) =
-                    async {
-                        let! activeSessions = SessionManager.getActiveSessions sessionAgent
-                        let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-                        let inputs =
-                            WorktreeApi.loadRepoAssemblyInputs
-                                System.DateTimeOffset.UtcNow
-                                (Some store)
-                                rootPaths
-                                state
-                        let repos = WorktreeApi.assembleRepos inputs rootPaths activeSessionPaths state
-                        return
-                            OverviewData.aggregate repos
-                            |> _.Tasks
-                            |> List.map (fun bucket ->
-                                { Kind = bucket.Kind
-                                  Count = bucket.Count } : OverviewData.TaskCount)
-                    }
-
-                let persistTasks (ts: System.DateTimeOffset) (tasks: OverviewData.TaskCount list) : bool =
-                    try
-                        store.AppendTaskSnapshotIfChanged(ts, tasks) |> ignore
-                        true
-                    with ex ->
-                        Log.log "OverviewHistory" $"task snapshot append failed, will retry next iteration: {ex.Message}"
-                        false
+                let activity =
+                    createSessionActivityRuntime
+                        dbPath
+                        agent
+                        sessionAgent
+                        rootPaths
+                let store = activity.Components.Store
 
                 let schedulerCancellation = new CancellationTokenSource()
 
@@ -463,8 +430,6 @@ let main args =
                           Completion =
                             RefreshScheduler.start
                                 agent
-                                assembleTasks
-                                persistTasks
                                 worktreeRoots
                                 schedulerCancellation.Token }
                     with _ ->
@@ -497,6 +462,10 @@ let main args =
 
     let sessionActivityService =
         activityRuntime |> Option.map _.Components.Service
+
+    let capture =
+        activityRuntime
+        |> Option.map (fun runtime -> runtime.Capture.Run)
 
     // The register/attribute routes need the scheduler agent for their known-worktree guard. In
     // demo mode there is no agent (and the canvas doc server is never started — see above), so
@@ -552,7 +521,15 @@ let main args =
 
         try
             use host = app.Build()
-            host.Run()
+            let applicationLifetime =
+                host.Services.GetService(typeof<IHostApplicationLifetime>)
+                :?> IHostApplicationLifetime
+
+            runHostWithCapture
+                (fun () -> host.Start())
+                (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
+                applicationLifetime.ApplicationStopping
+                capture
         finally
             canvasHost
             |> Option.iter (fun host ->
@@ -563,7 +540,7 @@ let main args =
     finally
         activityRuntime
         |> Option.iter (fun runtime ->
-            Log.log "Shutdown" "Stopping Overview history and session activity"
+            Log.log "Shutdown" "Stopping session activity"
             shutdownSessionActivityRuntime runtime schedulerLoop)
 
     0

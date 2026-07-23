@@ -5,7 +5,6 @@ open System.Collections.Concurrent
 open System.IO
 open System.Threading
 open System.Threading.Tasks
-open Microsoft.Data.Sqlite
 open NUnit.Framework
 open Program
 open Shared
@@ -41,8 +40,7 @@ type ServerLifecycleTests() =
             try
                 try
                     Assert.Multiple(fun () ->
-                        Assert.That(Object.ReferenceEquals(components.Store, components.Service.Store), Is.True)
-                        Assert.That(Object.ReferenceEquals(components.Store, components.Worker.Store), Is.True))
+                        Assert.That(Object.ReferenceEquals(components.Store, components.Service.Store), Is.True))
                     components.Service.Submit report
                 finally
                     (components.Service :> IDisposable).Dispose()
@@ -55,7 +53,6 @@ type ServerLifecycleTests() =
 
                 Assert.That(events |> List.map _.EventId, Is.EqualTo([ EventId "lifecycle-event" ]))
             finally
-                (components.Worker :> IDisposable).Dispose()
                 (components.Store :> IDisposable).Dispose())
 
     [<Test>]
@@ -70,72 +67,117 @@ type ServerLifecycleTests() =
             Assert.That(usesSessionActivity fixture, Is.False))
 
     [<Test>]
-    member _.``failed initial publication prevents a real runtime from becoming available``() =
+    member _.``an empty new snapshot store starts without publication preparation``() =
         withDbPath (fun path ->
-            (new SessionActivityStore(path) :> IDisposable).Dispose()
-
-            execute
-                path
-                """
-CREATE TRIGGER fail_initial_publication
-BEFORE INSERT ON overview_history_rows
-BEGIN
-    SELECT RAISE(ABORT, 'forced initial publication failure');
-END;
-"""
-
             let agent = RefreshScheduler.createAgent ()
+            let sessionAgent = SessionManager.createAgent ()
+            let runtime =
+                createSessionActivityRuntime
+                    path
+                    agent
+                    sessionAgent
+                    Map.empty
 
-            Assert.Throws<SqliteException>(fun () ->
-                startSessionActivityRuntime path agent |> ignore)
-            |> ignore
-
-            use reopened = new SessionActivityStore(path)
-            let state = reopened.OverviewRollupState()
-
-            Assert.Multiple(fun () ->
-                Assert.That(state.CompleteThrough, Is.EqualTo None)
-                Assert.That(state.PublishedGeneration, Is.EqualTo 0L)))
+            try
+                runtime.Components.Service.Start()
+                Assert.That(runtime.SnapshotStore.LatestAnchor(), Is.EqualTo None)
+            finally
+                shutdownSessionActivityRuntime runtime None)
 
     [<Test>]
     member _.``shutdown stops every store user before disposing the store``() =
         let order = ConcurrentQueue<string>()
 
         shutdownStoreUsers
-            (fun () -> order.Enqueue "worker")
             (fun () -> order.Enqueue "ingestion")
             (fun () -> order.Enqueue "scheduler")
             (fun () -> order.Enqueue "store")
 
         Assert.That(
             order.ToArray(),
-            Is.EqualTo([| "worker"; "ingestion"; "scheduler"; "store" |])
+            Is.EqualTo([| "ingestion"; "scheduler"; "store" |])
         )
 
     [<Test>]
-    member _.``shutdown awaits the rollup worker and scheduler``() =
-        withDbPath (fun path ->
-            let agent = RefreshScheduler.createAgent ()
-            let runtime = startSessionActivityRuntime path agent
+    member _.``capture failure does not stop host startup or scheduler work``() =
+        let order = ConcurrentQueue<string>()
+        let failed =
+            TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
 
-            let scheduler =
-                startBackgroundLoop (fun cancellationToken -> async {
+        let capture _ =
+            async {
+                order.Enqueue "capture-started"
+
+                try
+                    return failwith "forced capture failure"
+                with ex ->
+                    order.Enqueue "capture-failed"
+                    failed.SetResult ex.Message
+                    return raise ex
+            }
+
+        runHostWithCapture
+            (fun () -> order.Enqueue "http-started")
+            (fun () ->
+                failed.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+                |> ignore
+                order.Enqueue "scheduler-work")
+            CancellationToken.None
+            (Some capture)
+
+        Assert.That(
+            order.ToArray(),
+            Is.EqualTo(
+                [| "http-started"
+                   "capture-started"
+                   "capture-failed"
+                   "scheduler-work" |]
+            )
+        )
+
+    [<Test>]
+    member _.``shutdown cancels and awaits the background capture``() =
+        let order = ConcurrentQueue<string>()
+        let started =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let stopped =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        use hostStopping = new CancellationTokenSource()
+
+        let capture (cancellationToken: CancellationToken) =
+            async {
+                order.Enqueue "capture-started"
+                started.SetResult()
+
+                try
                     try
                         do!
                             Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
                             |> Async.AwaitTask
                     with :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
                         ()
-                })
+                finally
+                    order.Enqueue "capture-stopped"
+                    stopped.SetResult()
+            }
 
-            runtime.Components.Service.Start()
+        runHostWithCapture
+            (fun () -> order.Enqueue "http-started")
+            (fun () ->
+                started.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+                order.Enqueue "shutdown"
+                hostStopping.Cancel())
+            hostStopping.Token
+            (Some capture)
 
-            Assert.Multiple(fun () ->
-                Assert.That(runtime.RollupLoop.Completion.IsCompleted, Is.False)
-                Assert.That(scheduler.Completion.IsCompleted, Is.False))
-
-            shutdownSessionActivityRuntime runtime (Some scheduler)
-
-            Assert.Multiple(fun () ->
-                Assert.That(runtime.RollupLoop.Completion.IsCompletedSuccessfully, Is.True)
-                Assert.That(scheduler.Completion.IsCompletedSuccessfully, Is.True)))
+        Assert.Multiple(fun () ->
+            Assert.That(stopped.Task.IsCompletedSuccessfully, Is.True)
+            Assert.That(
+                order.ToArray(),
+                Is.EqualTo(
+                    [| "http-started"
+                       "capture-started"
+                       "shutdown"
+                       "capture-stopped" |]
+                )
+            ))
