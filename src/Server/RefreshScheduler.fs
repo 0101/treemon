@@ -414,65 +414,32 @@ type SchedulerServices =
     { SessionAgent: SessionManager.SessionAgent
       ActivityStore: SessionActivityStore.SessionActivityStore option }
 
-let internal triggerAutoSync
-    (agent: MailboxProcessor<StateMsg>)
-    (services: SchedulerServices)
-    (repoRoot: string)
-    (repo: PerRepoState)
-    (gitData: GitWorktree.GitData)
-    =
-    async {
-        let enabled =
-            TreemonConfig.readAutoSyncBranchSet (Some repoRoot)
-            |> Set.contains gitData.Branch
+let internal autoSyncDependencies (agent: MailboxProcessor<StateMsg>) (services: SchedulerServices) : AutoSync.TriggerDependencies =
+    let tryBeginLaunch path =
+        agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
 
-        match AutoSync.revision enabled gitData with
-        | None -> ()
-        | Some baseRevision ->
-            let! claimed =
-                agent.PostAndAsyncReply(fun reply ->
-                    ClaimAutoSyncTrigger(gitData.Path, baseRevision, reply))
+    let launch worktreePath text =
+        let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
+        let command =
+            CodingToolCli.build provider (CodingToolCli.Interactive text)
+        SessionManager.launchAction services.SessionAgent worktreePath command.AsShellString
 
-            if claimed then
-                try
-                    let! state = agent.PostAndAsyncReply(GetState)
-                    let sessionId =
-                        AutoSync.selectSessionId
-                            services.ActivityStore
-                            (state.SessionStatuses |> Map.values)
-                            gitData.Path
-
-                    let prompt = AutoSync.prompt repo.UpstreamRemote repo.BaseBranch
-
-                    let tryBeginLaunch path =
-                        agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
-
-                    let launch worktreePath text =
-                        let provider =
-                            CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
-                        let command =
-                            CodingToolCli.build provider (CodingToolCli.Interactive text)
-                        SessionManager.launchAction services.SessionAgent worktreePath command.AsShellString
-
-                    let! accepted =
-                        AutoSync.deliver
-                            SessionBridge.tryDeliver
-                            (fun () -> Async.Sleep AutoSync.registrationGraceMilliseconds)
-                            tryBeginLaunch
-                            (CompleteAutoSyncLaunch >> agent.Post)
-                            launch
-                            { WorktreePath = WorktreePath gitData.Path
-                              SessionId = sessionId
-                              Prompt = prompt }
-
-                    if accepted then
-                        Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
-                    else
-                        agent.Post(ReleaseAutoSyncTrigger(gitData.Path, baseRevision))
-                with ex ->
-                    Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
-                    agent.Post(ReleaseAutoSyncTrigger(gitData.Path, baseRevision))
-    }
+    { ClaimRevision =
+        fun path baseRevision -> agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
+      ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
+      SelectSessionId =
+        fun path ->
+            async {
+                let! state = agent.PostAndAsyncReply(GetState)
+                return AutoSync.selectSessionId services.ActivityStore (state.SessionStatuses |> Map.values) path
+            }
+      Deliver =
+        AutoSync.deliver
+            SessionBridge.tryDeliver
+            (fun () -> Async.Sleep AutoSync.registrationGraceMilliseconds)
+            tryBeginLaunch
+            (CompleteAutoSyncLaunch >> agent.Post)
+            launch }
 
 type RefreshTask =
     | RefreshWorktreeList of repoId: RepoId
@@ -647,7 +614,12 @@ let private executeTask
             let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
             agent.Post(UpdateGit(repoId, path, gitData))
             let repoRoot = rootPaths |> Map.find repoId
-            do! triggerAutoSync agent services repoRoot repo gitData
+            AutoSync.triggerInBackground
+                (autoSyncDependencies agent services)
+                repoRoot
+                repo.UpstreamRemote
+                repo.BaseBranch
+                gitData
 
             let! canvasDocs = CanvasScanner.scan path
             let branch = Path.GetFileName(path)

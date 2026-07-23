@@ -66,6 +66,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - While persistence is pending for a worktree, the toggle is disabled and additional mouse or `S` key inputs for that path are ignored. Other worktrees remain independently toggleable, and the pending state clears on either success or failure.
 - `autoSyncBranches` is intentionally not pruned when a worktree is archived or deleted. Branch-name reuse may restore the preference; avoiding cleanup machinery is preferred for this low-impact case.
 - When enabled, fresh Git observations request a sync when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
+- Refresh-triggered delivery runs as guarded background work so bridge HTTP, registration grace, or fallback launch latency cannot stall the sequential scheduler. The explicit toggle API awaits its immediate trigger attempt before returning.
 - The prompt targets the active open session when one is running; otherwise it targets the open
   session with the greatest activity `UpdatedAt`. A retained/offline session identity is used only
   when no open session exists (see `docs/spec/session-status-push.md`).
@@ -260,6 +261,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
 - Agent-driven auto-sync over a deterministic pipeline: one persistent preference delegates synchronization and conflict handling to the coding session instead of maintaining a second Git/test/push implementation.
+- Nonblocking polling over awaited refresh delivery: scheduled Git observations dispatch guarded auto-sync work in the background to preserve polling cadence, while the explicit toggle path awaits delivery so its request lifecycle stays deterministic.
 - Open-session-first auto-sync target: prefer the active open winner, then the greatest-`UpdatedAt`
   open idle session; use retained/offline identity only when no open session exists. Delivery
   liveness outranks footer identity so an open CLI receives the prompt instead of triggering an

@@ -10,6 +10,12 @@ type DeliveryRequest =
       SessionId: string option
       Prompt: string }
 
+type TriggerDependencies =
+    { ClaimRevision: string -> string -> Async<bool>
+      ReleaseRevision: string -> string -> unit
+      SelectSessionId: string -> Async<string option>
+      Deliver: DeliveryRequest -> Async<bool> }
+
 let prompt upstreamRemote baseBranch =
     $"Sync this worktree with {upstreamRemote}/{baseBranch} when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete."
 
@@ -99,3 +105,53 @@ let deliver
         | SessionBridge.DeliveryResult.NoLiveSession ->
             return! launchFallback ()
     }
+
+let trigger
+    (dependencies: TriggerDependencies)
+    (repoRoot: string)
+    (upstreamRemote: string)
+    (baseBranch: string)
+    (gitData: GitWorktree.GitData)
+    =
+    async {
+        let enabled =
+            TreemonConfig.readAutoSyncBranchSet (Some repoRoot)
+            |> Set.contains gitData.Branch
+
+        match revision enabled gitData with
+        | None -> ()
+        | Some baseRevision ->
+            let! claimed = dependencies.ClaimRevision gitData.Path baseRevision
+
+            if claimed then
+                try
+                    let! sessionId = dependencies.SelectSessionId gitData.Path
+
+                    let! accepted =
+                        dependencies.Deliver
+                            { WorktreePath = WorktreePath gitData.Path
+                              SessionId = sessionId
+                              Prompt = prompt upstreamRemote baseBranch }
+
+                    if accepted then
+                        Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
+                    else
+                        dependencies.ReleaseRevision gitData.Path baseRevision
+                with ex ->
+                    Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
+                    dependencies.ReleaseRevision gitData.Path baseRevision
+    }
+
+let internal startGuarded onError workflow =
+    async {
+        try
+            do! workflow
+        with ex ->
+            onError ex
+    }
+    |> Async.Start
+
+let triggerInBackground dependencies repoRoot upstreamRemote baseBranch (gitData: GitWorktree.GitData) =
+    startGuarded
+        (fun ex -> Log.log "AutoSync" $"Background trigger failed for {gitData.Branch}: {ex.Message}")
+        (trigger dependencies repoRoot upstreamRemote baseBranch gitData)

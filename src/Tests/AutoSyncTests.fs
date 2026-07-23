@@ -3,6 +3,7 @@ module Tests.AutoSyncTests
 open System
 open System.IO
 open System.Net
+open System.Threading.Tasks
 open NUnit.Framework
 open Shared
 open Server
@@ -230,6 +231,79 @@ type AutoSyncTriggerTests() =
             Assert.That(revision true dirtyBehind, Is.EqualTo(Some "base-a"))
             Assert.That(revision true upToDate, Is.EqualTo None)
             Assert.That(revision false dirtyBehind, Is.EqualTo None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AutoSyncSchedulerDispatchTests() =
+
+    [<Test>]
+    member _.``Slow auto-sync delivery does not delay the next scheduled task``() =
+        let root = tempDirectory ()
+        let releaseDelivery =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let deliveryStarted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let deliveryCompleted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let nextTaskRan =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        try
+            TreemonConfig.setAutoSyncBranches root [ "feature" ]
+
+            let dependencies =
+                { ClaimRevision = fun _ _ -> async { return true }
+                  ReleaseRevision = fun _ _ -> ()
+                  SelectSessionId = fun _ -> async { return Some "session-a" }
+                  Deliver =
+                    fun _ ->
+                        async {
+                            deliveryStarted.TrySetResult(()) |> ignore
+                            do! releaseDelivery.Task |> Async.AwaitTask
+                            deliveryCompleted.TrySetResult(()) |> ignore
+                            return true
+                        } }
+
+            let schedulerStep =
+                async {
+                    triggerInBackground
+                        dependencies
+                        root
+                        "origin"
+                        "main"
+                        (gitData (Path.Combine(root, "feature")) "feature" 1 (Some "base-a") false)
+
+                    nextTaskRan.TrySetResult(()) |> ignore
+                }
+                |> Async.StartAsTask
+
+            nextTaskRan.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+            schedulerStep.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+            deliveryStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+
+            Assert.Multiple(fun () ->
+                Assert.That(schedulerStep.IsCompletedSuccessfully, Is.True)
+                Assert.That(deliveryCompleted.Task.IsCompleted, Is.False))
+
+            releaseDelivery.TrySetResult(()) |> ignore
+            deliveryCompleted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        finally
+            releaseDelivery.TrySetResult(()) |> ignore
+            if Directory.Exists root then Directory.Delete(root, true)
+
+    [<Test>]
+    member _.``Guarded background execution catches workflow failures``() =
+        let observed =
+            TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        startGuarded
+            (fun ex -> observed.TrySetResult(ex.Message) |> ignore)
+            (async { return raise (InvalidOperationException "configuration read failed") })
+
+        Assert.That(
+            observed.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
+            Is.EqualTo("configuration read failed"))
 
 [<TestFixture>]
 [<Category("Unit")>]

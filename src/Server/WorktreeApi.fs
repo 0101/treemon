@@ -424,6 +424,7 @@ let worktreeApi
     let schedulerServices : RefreshScheduler.SchedulerServices =
         { SessionAgent = sessionAgent
           ActivityStore = activityStore }
+    let autoSyncDependencies = RefreshScheduler.autoSyncDependencies agent schedulerServices
 
     let validatePath path =
         async {
@@ -481,7 +482,13 @@ let worktreeApi
                               | Some repo ->
                                   match repo.GitData |> Map.tryFind ctx.Worktree.Path with
                                   | Some gitData ->
-                                      do! RefreshScheduler.triggerAutoSync agent schedulerServices ctx.RepoRoot repo gitData
+                                      do!
+                                          AutoSync.trigger
+                                              autoSyncDependencies
+                                              ctx.RepoRoot
+                                              repo.UpstreamRemote
+                                              repo.BaseBranch
+                                              gitData
                                   | None -> ()
                               | None -> ()
 
