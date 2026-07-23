@@ -590,8 +590,9 @@ type AutoSyncEndpointTests() =
         if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
-    member _.``Enabling an already-behind worktree persists and delivers immediately``() =
+    member _.``Differently-cased disable lets the same base revision trigger again``() =
         let normalizedPath = PathUtils.normalizePath worktree
+        let differentlyCasedPath = normalizedPath.ToUpperInvariant()
         let repoId = PathUtils.toRepoId root
         let now = DateTimeOffset.UtcNow
         let agent = createAgent ()
@@ -640,17 +641,20 @@ type AutoSyncEndpointTests() =
                 "1.0"
                 None
 
-        let receive = listener.GetContextAsync()
-        let toggleTask =
-            api.toggleAutoSync (WorktreePath normalizedPath) true
-            |> Async.StartAsTask
+        let enableAndReceive () =
+            let receive = listener.GetContextAsync()
+            let toggleTask =
+                api.toggleAutoSync (WorktreePath normalizedPath) true
+                |> Async.StartAsTask
 
-        let context = receive.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
-        use reader = new StreamReader(context.Request.InputStream)
-        let body = reader.ReadToEnd()
-        context.Response.StatusCode <- 200
-        context.Response.Close()
-        let result = toggleTask.GetAwaiter().GetResult()
+            let context = receive.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+            use reader = new StreamReader(context.Request.InputStream)
+            let body = reader.ReadToEnd()
+            context.Response.StatusCode <- 200
+            context.Response.Close()
+            body, toggleTask.GetAwaiter().GetResult()
+
+        let body, result = enableAndReceive ()
         let dashboard = api.getWorktrees () |> Async.RunSynchronously
         let status = dashboard.Repos |> List.collect _.Worktrees |> List.exactlyOne
 
@@ -667,12 +671,21 @@ type AutoSyncEndpointTests() =
             Assert.That(status.AutoSyncEnabled, Is.True))
 
         let disableResult =
-            api.toggleAutoSync (WorktreePath normalizedPath) false
+            api.toggleAutoSync (WorktreePath differentlyCasedPath) false
             |> Async.RunSynchronously
 
-        let state = agent.PostAndReply(GetState)
+        let disabledBranches = TreemonConfig.readAutoSyncBranchSet (Some root)
+        let disabledState = agent.PostAndReply(GetState)
+        let secondBody, reenableResult = enableAndReceive ()
+        let finalState = agent.PostAndReply(GetState)
 
         Assert.Multiple(fun () ->
+            Assert.That(differentlyCasedPath, Is.Not.EqualTo(normalizedPath))
             Assert.That(Result.isOk disableResult, Is.True)
-            Assert.That(TreemonConfig.readAutoSyncBranchSet (Some root), Is.Empty)
-            Assert.That(Map.containsKey normalizedPath state.AutoSyncTriggeredRevisions, Is.False))
+            Assert.That(disabledBranches, Is.Empty)
+            Assert.That(Map.containsKey normalizedPath disabledState.AutoSyncTriggeredRevisions, Is.False)
+            Assert.That(Result.isOk reenableResult, Is.True)
+            Assert.That(secondBody, Is.EqualTo(body))
+            Assert.That(
+                finalState.AutoSyncTriggeredRevisions |> Map.tryFind normalizedPath,
+                Is.EqualTo(Some "base-a")))

@@ -476,7 +476,7 @@ let worktreeApi
                               |> Set.toList)
 
                           if not enabled then
-                              agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger path)
+                              agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
                           else
                               match state.Repos |> Map.tryFind ctx.RepoId with
                               | Some repo ->

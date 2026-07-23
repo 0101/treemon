@@ -66,6 +66,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - While persistence is pending for a worktree, the toggle is disabled and additional mouse or `S` key inputs for that path are ignored. Other worktrees remain independently toggleable, and the pending state clears on either success or failure.
 - `autoSyncBranches` is intentionally not pruned when a worktree is archived or deleted. Branch-name reuse may restore the preference; avoiding cleanup machinery is preferred for this low-impact case.
 - When enabled, fresh Git observations request a sync when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
+- Scheduler trigger and fallback-launch guards use the resolved canonical worktree path, so differently-cased API input cannot create or clear alternate keys.
 - Refresh-triggered delivery runs as guarded background work so bridge HTTP, registration grace, or fallback launch latency cannot stall the sequential scheduler. The explicit toggle API awaits its immediate trigger attempt before returning.
 - The prompt targets the active open session when one is running; otherwise it targets the open
   session with the greatest activity `UpdatedAt`. A retained/offline session identity is used only
