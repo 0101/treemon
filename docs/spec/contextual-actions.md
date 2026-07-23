@@ -3,7 +3,7 @@
 ## Goals
 
 - Launch a coding tool (Claude/Copilot) in interactive mode directly from dashboard card badges
-- Target four specific workflows: fix unresolved PR comments, fix failing builds, create a PR, configure tests
+- Target three specific workflows: fix unresolved PR comments, fix failing builds, create a PR
 - Reuse existing session management — spawn window if none exists, open new tab if tracked window exists
 - Buttons disabled when coding tool is already active (Working/WaitingForUser)
 
@@ -18,13 +18,10 @@ Four contextual action buttons appear on cards when conditions are met:
 | Unresolved PR comments (AzDo: `unresolved > 0`, GitHub: `total > 0` on open PRs only) | Next to thread/comment badge | `FixPr <pr-url>` |
 | Failed build | Next to failed build badge | `FixBuild <build-url>` |
 | No PR exists (suppressed on main/master branches) | PR row area (where badge would be) | `CreatePr` |
-| Test command not configured (`StepStatus.NotConfigured`) | Clickable "not configured" text in event log | `ConfigureTests` |
-
-> **Note:** Unlike the other three actions which appear as standalone card buttons, `ConfigureTests` is triggered from clickable text in the event log. When the test step status is `NotConfigured`, the "not configured" text in the event log becomes a clickable link that launches the action.
 
 ### Disabled State
 
-All action buttons disabled when `CodingTool = Working` or `CodingTool = WaitingForUser`, matching the sync button pattern. Tooltip shows "{provider} is active".
+All action buttons are disabled when `CodingTool = Working` or `CodingTool = WaitingForUser`. Tooltip shows "{provider} is active". Auto-sync is different: its prompt is queued through the extension while the session is busy.
 
 ### Session Handling
 

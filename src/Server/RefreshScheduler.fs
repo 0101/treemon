@@ -702,7 +702,7 @@ module CanvasWatchers =
     /// previous last-registered attribution (`getSessionForWorktree`) that credited every
     /// changed doc to whichever session registered last — the misattribution bug that
     /// cross-credited docs whenever two sessions shared a worktree.
-    let fallbackOwner (sessions: CanvasBridge.SessionEntry list) : string option =
+    let fallbackOwner (sessions: SessionBridge.SessionEntry list) : string option =
         match sessions with
         | [ single ] -> single.SessionId
         | _ -> None
@@ -714,7 +714,7 @@ module CanvasWatchers =
     /// declared via the endpoint or previously attributed — is skipped: the scanner never
     /// overwrites it. With zero or many registered sessions, nothing is attributed.
     let attributeChangedDocs
-        (sessions: CanvasBridge.SessionEntry list)
+        (sessions: SessionBridge.SessionEntry list)
         (worktreePath: string)
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
@@ -783,7 +783,7 @@ module CanvasWatchers =
                             // primary path. The scanner only attributes a no-owner changed doc when exactly one
                             // session is registered for the worktree — never the old last-registered guess that
                             // misattributed every changed doc whenever two sessions shared a worktree.
-                            attributeChangedDocs (CanvasBridge.sessionsForWorktree path) path prev canvasDocs
+                            attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs
                             previousDocs.Value <- canvasDocs
                             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                         return

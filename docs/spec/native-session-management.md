@@ -26,7 +26,7 @@
 ### launchSession (API-level)
 - Spawns `wt.exe --window new new-tab -d <path> -- <coding-tool> "prompt"`
 - If session already exists for worktree, kills it first (one window per worktree)
-- Used by `launchAction` (see `docs/spec/contextual-actions.md`) when no tracked window exists for the worktree; `launchAction` handles the new-tab-in-existing-window path separately
+- Used by `launchAction` (see `docs/spec/contextual-actions.md`) and the worktree auto-sync no-live-session fallback (see `docs/spec/worktree-monitor.md`) when no tracked window exists; `launchAction` handles the new-tab-in-existing-window path separately
 
 ### Focus / Kill
 - `focusSession` calls `SetForegroundWindow(hwnd)` with ALT keypress workaround for foreground lock

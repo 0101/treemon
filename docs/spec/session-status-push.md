@@ -68,6 +68,10 @@ message — is sourced from the active winner, or otherwise the session with the
 therefore does **not** blank that session's retained footer fields; durable fallback keeps them
 available beyond the live window.
 
+The selected footer session is also the target for worktree auto-sync prompts. The selection rule
+remains owned here; the prompt is delivered by `SessionBridge`, while the reporting extension stays
+passive and never calls `session.send`.
+
 The session title is the reliable activity source: after joining, subscribing, and replaying
 persisted history, the reporting extension reads `session.rpc.metadata.snapshot().summary` and
 reports a nonblank summary when no live `session.title_changed` arrived during startup. Live
@@ -386,6 +390,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   collapsed status enters Idle and hold it.
 - **Footer decoupled from the dot.** Card messages/skill come from the active winner, otherwise the
   session with the greatest `UpdatedAt`; retained fallback covers sessions outside the live window.
+  Auto-sync reuses this selected session rather than defining another representative-session rule.
 - **Display pick ≠ footer pick ≠ resume pick.** Display = greatest-`UpdatedAt` *open active*; footer =
   active winner or greatest-`UpdatedAt` fallback; resume = greatest-`UpdatedAt` session from the
   durable store. `LastSeen` continues to drive openness, freshness, retention, and per-session dot

@@ -748,7 +748,7 @@ let worktreeApi
                   shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
-          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
+          getBridgeLiveness = fun paths -> async { return SessionBridge.getAllLiveness paths }
           // Roots are managed restart-to-apply: persist to global config only (no scheduler
           // message, no live-roots read). getWorktrees/createWorktree/path-validation keep using
           // the `rootPaths` captured at startup above — correct, since roots only change across

@@ -4,6 +4,7 @@
 
 - At-a-glance visibility into all active worktrees across multiple repositories
 - Surface activity signals from multiple sources (git, beads, coding AI tools, Azure DevOps, GitHub) so stalled branches are obvious
+- Keep worktrees current through an agent-driven auto-sync preference rather than a mechanical Git pipeline
 - Lightweight polling — no hooks or agents inside worktrees
 - Zero configuration — point at root directories, provider detection is automatic from git remotes
 
@@ -41,7 +42,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Worktree Identification
 
 - All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
-- Server resolves repo and branch from path internally; archive persistence still stores branch names per repo in `.treemon.json`
+- Server resolves repo and branch from path internally; archive and auto-sync persistence store branch names per repo in `.treemon.json`
 - Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
 
 ### Per-Worktree Card
@@ -49,22 +50,26 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Branch name header with work metrics (commit grid + diff stats)
 - Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
-- "N behind main" with sync button; dirty indicator
+- "N behind {base}" with an always-visible two-arrow auto-sync toggle; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
-- Event log (last 3 events), sync/cancel/terminal/delete actions
+- Event log (last 3 events), terminal/delete actions
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed build, create PR (see `docs/spec/contextual-actions.md`)
 
 ### Branch Sync
 
-- Available when `MainBehindCount > 0` and worktree is clean
-- Pipeline: CheckClean -> Pull -> Merge -> ResolveConflicts -> Test -> Commit -> Push (if PR exists)
-- Conflict resolution uses the detected/configured coding tool CLI (Claude or Copilot)
-- Test step runs the shell command from `.treemon.json` `"testCommand"` (e.g. `"dotnet test src/Tests/Tests.fsproj"`, `"npm test"`, `"pytest"`)
-- If `testCommand` is not configured, the sync engine skips tests and shows a "not configured" status with a clickable action to configure it
-- Cancellable mid-pipeline; progress shown in card event log
+- Every card shows a two-arrow auto-sync toggle in the behind-base row, including when the worktree is clean, dirty, behind, or up to date.
+- The unpressed toggle uses the normal neutral card-action style. The pressed state reuses the green glow of the active-terminal button and persists per branch in `.treemon.json` under `autoSyncBranches`.
+- `autoSyncBranches` is intentionally not pruned when a worktree is archived or deleted. Branch-name reuse may restore the preference; avoiding cleanup machinery is preferred for this low-impact case.
+- When enabled, fresh Git observations request a sync when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
+- The prompt targets the same session selected for the card footer: the active winner when one is running, otherwise the session with the greatest activity `UpdatedAt` (see `docs/spec/session-status-push.md`).
+- A live session receives the prompt immediately through `SessionBridge`; the extension serializes it through the same `enqueueSend` chain used by canvas messages, including while the session is busy.
+- `SessionBridge` POSTs a typed `{kind,prompt}` envelope. The extension passes `agent-prompt` text verbatim to `session.send`; `canvas` retains the existing `[canvas]` display/routing prefix.
+- With no live bridge session, Treemon opens a terminal and starts a new session with the sync prompt. A per-worktree in-flight guard prevents duplicate launches.
+- The prompt asks the agent to sync with `{upstreamRemote}/{baseBranch}` when safe, preserve in-progress work, and run appropriate checks.
+- Treemon does not run a separate pull/merge/conflict-resolution/test/commit/push pipeline. Agent prompt acceptance is observable; completion of the Git synchronization is not.
 
 ### Coding Tool Detection
 
@@ -152,7 +157,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - `MailboxProcessor` state agent with `Map<string, PerRepoState>` — each repo has its own data partitions
 - Tail-recursive async loop picks most-overdue task, executes it, posts result to mailbox
 - API responses are instant reads from in-memory state
-- Client polls every 1–15s depending on activity level (see `docs/spec/user-idle-detection.md`); 2s fast poll during active sync
+- Client polls every 1–15s depending on activity level (see `docs/spec/user-idle-detection.md`)
 
 ### Refresh Intervals
 
@@ -169,16 +174,16 @@ Intervals adapt to user activity level (Active / Idle / Deep Idle). See `docs/sp
 For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects and uses the correct remote:
 
 - **Resolution order**: `.treemon.json` `"upstreamRemote"` field → auto-detect `upstream` remote → fall back to `origin`
-- **Affects**: PR fetching (remote URL), base branch comparisons (`{remote}/{baseBranch}`), fetch cycle, sync merge target
+- **Affects**: PR fetching (remote URL), base branch comparisons (`{remote}/{baseBranch}`), fetch cycle, auto-sync prompt target
 - **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh
 - **Config example**: `{ "upstreamRemote": "upstream" }` in `.treemon.json` at repo root
 
 ### Base Branch Resolution
 
-Each repo can configure which branch is considered the "base" for ahead/behind counts, diff stats, fetch, fast-forward, and sync operations:
+Each repo can configure which branch is considered the "base" for ahead/behind counts, diff stats, fetch, fast-forward, and auto-sync prompts:
 
 - **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
-- **Affects**: `git rev-list` behind/commit counts, `git diff --shortstat`, `git fetch`, fast-forward, merge/rebase targets, branch sort priority
+- **Affects**: `git rev-list` behind/commit counts, `git diff --shortstat`, `git fetch`, fast-forward, auto-sync prompt target, branch sort priority
 - **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
@@ -207,16 +212,17 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
+| `src/Server/SessionBridge.fs` | Generic session registration, liveness, queued prompt delivery, and forwarding |
+| `src/Extension/extension.mjs`, `session-prompt.mjs` | Session bridge HTTP receiver, serialized `session.send` queue, and typed prompt-transport decoding |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, work metrics |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
-| `src/Server/SyncEngine.fs` | Branch sync pipeline, provider-aware conflict resolution |
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
-| `src/Client/CardViews.fs` | Worktree card rendering (cards, action buttons, badges, PR/sync/event-log helpers, `repoSection`) via `CardViewProps`/`CardCallbacks` records |
+| `src/Client/CardViews.fs` | Worktree card rendering, including the persistent two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
 | `src/Client/OverviewViews.fs` | Status-overview row + scheduler footer rendering |
 | `src/Client/MascotState.fs` / `MascotView.fs` | Mascot eyes: gaze slice + eye SVG render (observes `ActivityLevel`) |
 | `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |
@@ -238,11 +244,15 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Push model over log-parsing for coding-tool status: explicit lifecycle events beat mtime inference; one pure server fold replaces three per-provider detectors (see `docs/spec/session-status-push.md`)
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
+- Agent-driven auto-sync over a deterministic pipeline: one persistent preference delegates synchronization and conflict handling to the coding session instead of maintaining a second Git/test/push implementation.
+- Footer-selected session as the auto-sync target: reuses the session the card already represents rather than introducing another per-worktree session-selection rule.
+- Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
+- New session fallback: if no live bridge exists, launch a new prompted session immediately rather than leaving auto-sync dormant.
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 - Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
-- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the per-worktree `.treemon.json` (`testCommand`, `baseBranch`, `upstreamRemote`) are deliberately separate stores in separate modules, named so the machine-vs-worktree scope is obvious and the two never collide.
+- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
 - Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider is read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
 - The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
 
@@ -250,8 +260,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 
 - `docs/spec/user-idle-detection.md` — adaptive refresh cadence based on user activity level
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
-- `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking
+- `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking, including the no-live-session auto-sync fallback
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
 - `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges
 - `docs/spec/remoting-csrf-hardening.md` — Origin/Referer CSRF guard fronting the remoting and canvas POST surfaces (the create-worktree auto-launch made state-changing remoting an agent-execution sink)
-- `docs/spec/canvas-pane.md` — interactive HTML docs in the canvas pane, including awareness, liveness, and bridge routing
+- `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
+- `docs/spec/session-status-push.md` — coding-tool session collapse and the footer-session selection reused by auto-sync
