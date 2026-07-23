@@ -26,8 +26,14 @@ type internal Reassignment =
     { Token: Guid
       PreviousOwner: string option }
 
+type FollowResult =
+    | Assigned
+    | Unchanged
+    | Deferred
+
 type private Msg =
     | Assign of worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<unit>
+    | FollowLastActive of worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<FollowResult>
     | BeginClaim of worktreeKey: string * filename: string * AsyncReplyChannel<InitialClaim>
     | CancelClaim of worktreeKey: string * filename: string * token: Guid * AsyncReplyChannel<unit>
     | BeginReassignment of worktreeKey: string * filename: string * AsyncReplyChannel<Result<Reassignment, string>>
@@ -174,6 +180,25 @@ let private createAgent filePath owners =
                     do! persist filePath state'.Owners
                     reply.Reply()
                     return! loop state'
+
+                | FollowLastActive(worktreeKey, filename, sessionId, reply) ->
+                    let pending =
+                        state.Pending
+                        |> Map.tryFind worktreeKey
+                        |> Option.bind (Map.tryFind filename)
+
+                    match pending, ownerFor worktreeKey filename state.Owners with
+                    | Some _, _ ->
+                        reply.Reply(Deferred)
+                        return! loop state
+                    | None, Some owner when owner = sessionId ->
+                        reply.Reply(Unchanged)
+                        return! loop state
+                    | None, _ ->
+                        let owners = state.Owners |> addOwner worktreeKey filename sessionId
+                        do! persist filePath owners
+                        reply.Reply(Assigned)
+                        return! loop { state with Owners = owners }
 
                 | BeginClaim(worktreeKey, filename, reply) ->
                     match ownerFor worktreeKey filename state.Owners with
@@ -347,6 +372,10 @@ type internal OwnershipStore(filePath: string) =
         agent.PostAndAsyncReply(fun reply ->
             Assign(normalizePath worktreePath, normalizeFilename filename, sessionId, reply))
 
+    member _.FollowLastActive(worktreePath: string, filename: string, sessionId: string) =
+        agent.PostAndAsyncReply(fun reply ->
+            FollowLastActive(normalizePath worktreePath, normalizeFilename filename, sessionId, reply))
+
     member _.BeginClaim(worktreePath: string, filename: string) =
         agent.PostAndAsyncReply(fun reply ->
             BeginClaim(normalizePath worktreePath, normalizeFilename filename, reply))
@@ -404,6 +433,9 @@ let load () =
 
 let assign worktreePath filename sessionId =
     defaultStore.Value.Assign(worktreePath, filename, sessionId)
+
+let followLastActive worktreePath filename sessionId =
+    defaultStore.Value.FollowLastActive(worktreePath, filename, sessionId)
 
 let internal beginClaim worktreePath filename =
     defaultStore.Value.BeginClaim(worktreePath, filename)

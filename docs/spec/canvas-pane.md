@@ -100,7 +100,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - `LaunchCanvasSession` uses the existing action-launch flow and includes the full on-disk doc path (`{worktree}/.agents/canvas/{filename}`) plus canvas context in the prompt, so the agent is pointed at the real file the doc server serves. That path is built once by `CanvasPrompt.continueWorking` in `src/Shared/Types.fs` — the single source of truth shared by the client launch and server auto-spawn flows.
 - Canvas messages route to the author session for the selected doc.
 - If the author session is dead, Treemon resumes or replaces that specific session without changing doc identity.
-- SystemView interactions route through a persistent interaction-session owner keyed by worktree and view filename. This is separate from `OwnerSessionId`, does not affect liveness UI, and persists until explicit reassignment or view/worktree removal.
+- SystemView interactions route through a persistent interaction-session owner keyed by worktree and view filename. This is separate from `OwnerSessionId` and does not affect liveness UI. Sticky views retain it until explicit reassignment or removal; `diff.html` automatically transfers it to the worktree's most-recently-active session.
 
 ### Message Flow
 

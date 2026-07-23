@@ -2,10 +2,12 @@ module Server.DiffProvisioner
 
 open System.IO
 
+let filename = "diff.html"
+
 /// Keep diff.html synchronized with the embedded viewer template for every known worktree.
 /// Returns a description of the action taken, or None when the file is already current.
 let provisionViewer (worktreePath: string) =
-    let diffHtml = Path.Combine(worktreePath, ".agents", "canvas", "diff.html")
+    let diffHtml = Path.Combine(worktreePath, ".agents", "canvas", filename)
     let existing =
         if File.Exists(diffHtml) then
             Some(File.ReadAllText(diffHtml))

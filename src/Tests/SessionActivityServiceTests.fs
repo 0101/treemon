@@ -74,7 +74,8 @@ let private storedWithUsage sid worktree status updatedAt usage usageAt =
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Disposing the service disposes the store; the dir is then removed.
-let private withServiceSeeded
+let private withServiceSeededFollowing
+    (followDiffInteractionOwner: WorktreePath -> string -> Async<CanvasInteractionOwnership.FollowResult>)
     (knownWorktree: string)
     (seed: SessionActivityStore -> unit)
     (action: SessionActivityService * MailboxProcessor<RefreshScheduler.StateMsg> * SessionActivityStore -> unit)
@@ -93,7 +94,7 @@ let private withServiceSeeded
 
     agent.Post(RefreshScheduler.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
 
-    let svc = new SessionActivityService(store, agent)
+    let svc = new SessionActivityService(store, agent, followDiffInteractionOwner)
 
     try
         action (svc, agent, store)
@@ -101,7 +102,40 @@ let private withServiceSeeded
         (svc :> IDisposable).Dispose()
         try Directory.Delete(dir, true) with _ -> ()
 
+let private withServiceSeeded knownWorktree seed action =
+    withServiceSeededFollowing
+        (fun _ _ -> async { return CanvasInteractionOwnership.Unchanged })
+        knownWorktree
+        seed
+        action
+
 let private withService knownWorktree action = withServiceSeeded knownWorktree ignore action
+
+type private FollowRecorderMsg =
+    | RecordFollow of WorktreePath * string * AsyncReplyChannel<CanvasInteractionOwnership.FollowResult>
+    | ReadFollows of AsyncReplyChannel<(WorktreePath * string) list>
+
+let private createFollowRecorder () =
+    let recorder =
+        MailboxProcessor.Start(fun inbox ->
+            let rec loop calls =
+                async {
+                    match! inbox.Receive() with
+                    | RecordFollow(worktreePath, sessionId, reply) ->
+                        reply.Reply(CanvasInteractionOwnership.Assigned)
+                        return! loop ((worktreePath, sessionId) :: calls)
+                    | ReadFollows reply ->
+                        reply.Reply(List.rev calls)
+                        return! loop calls
+                }
+
+            loop [])
+
+    let follow worktreePath sessionId =
+        recorder.PostAndAsyncReply(fun reply -> RecordFollow(worktreePath, sessionId, reply))
+
+    let calls () = recorder.PostAndReply ReadFollows
+    follow, calls
 
 /// The scheduler's live status for a session (fed via UpdateSessionStatus). GetState is a barrier,
 /// so calling it after a LiveSnapshot barrier guarantees the mailbox's feed has been applied.
@@ -379,6 +413,34 @@ type IngestTests() =
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
             Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Working))
+
+    [<Test>]
+    member _.``diff interaction routing follows real activity rather than heartbeats``() =
+        let follow, calls = createFollowRecorder ()
+        let worktree = "C:/wt/a"
+        let normalized = WorktreePath(PathUtils.normalizePath worktree)
+
+        withServiceSeededFollowing follow worktree ignore (fun (svc, _, _) ->
+            svc.Submit(
+                mkReport
+                    "metadata-only"
+                    worktree
+                    "metadata-bootstrap"
+                    "2026-03-01T13:00:00Z"
+                    (TitleBootstrap(msg "Metadata only" "2026-03-01T13:00:00Z")))
+            svc.Submit(mkReport "s1" worktree "s1-active" "2026-03-01T10:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s2" worktree "s2-older" "2026-03-01T09:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s2" worktree "s2-heartbeat" "2026-03-01T11:00:00Z" Heartbeat)
+            svc.Submit(mkReport "s2" worktree "s2-active" "2026-03-01T12:00:00Z" TurnStarted)
+            svc.LiveSnapshot() |> ignore
+
+            Assert.That(
+                calls (),
+                Is.EqualTo(
+                    [ normalized, "s1"
+                      normalized, "s2" ]
+                )
+            ))
 
     [<Test>]
     member _.``an ingested status is fed to the scheduler``() =
@@ -761,6 +823,31 @@ type IngestTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type RestartRebuildTests() =
+
+    [<Test>]
+    member _.``Start routes diff interactions to the most-recently-active restored session``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-owner-worktree")
+        let normalized = WorktreePath(PathUtils.normalizePath worktree)
+        let follow, calls = createFollowRecorder ()
+
+        let status sessionId updatedAt =
+            { SessionId = SessionId sessionId
+              WorktreePath = normalized
+              Provider = CopilotCli
+              Status = { emptyStatus with Status = SessionLevelStatus.Idle }
+              UpdatedAt = updatedAt
+              LastSeen = updatedAt
+              ContextUsageAt = None }
+
+        let seed (store: SessionActivityStore) =
+            store.UpsertStatus(status "older" (now.AddMinutes(-2.0)))
+            store.UpsertStatus(status "newer" (now.AddMinutes(-1.0)))
+
+        withServiceSeededFollowing follow worktree seed (fun (svc, _, _) ->
+            svc.Start()
+            svc.LiveSnapshot() |> ignore
+            Assert.That(calls (), Is.EqualTo([ normalized, "newer" ])))
 
     [<Test>]
     member _.``Start rebuilds live status and context usage from the store and feeds the scheduler``() =

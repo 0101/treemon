@@ -311,7 +311,18 @@ let main args =
     let sessionActivityService =
         match schedulerAgent, sessionActivityStore with
         | Some agent, Some store when config.TestFixtures.IsNone ->
-            let svc = new SessionActivityService.SessionActivityService(store, agent)
+            let followDiffInteractionOwner worktreePath sessionId =
+                CanvasInteractionOwnership.followLastActive
+                    (WorktreePath.value worktreePath)
+                    DiffProvisioner.filename
+                    sessionId
+
+            let svc =
+                new SessionActivityService.SessionActivityService(
+                    store,
+                    agent,
+                    followDiffInteractionOwner
+                )
             svc.Start()
             Log.log "Startup" "Session activity ingestion started"
             Some svc

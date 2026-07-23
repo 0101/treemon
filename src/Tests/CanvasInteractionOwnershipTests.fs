@@ -166,6 +166,46 @@ type PersistenceTests() =
                 "The claim must persist the replacement owner before queue delivery"))
 
     [<Test>]
+    member _.``last-active routing defers to an explicit pending reassignment``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            runAsync (store.Assign(worktree, "diff.html", "session-a"))
+
+            let reassignment =
+                match runAsync (store.BeginReassignment(worktree, "diff.html")) with
+                | Ok value -> value
+                | Error err -> failwith err
+
+            Assert.That(
+                runAsync (store.FollowLastActive(worktree, "diff.html", "session-b")),
+                Is.EqualTo(Deferred))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-a"))
+
+            runAsync (store.CancelReassignment(worktree, "diff.html", reassignment.Token))
+            Assert.That(
+                runAsync (store.FollowLastActive(worktree, "diff.html", "session-b")),
+                Is.EqualTo(Assigned))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "session-b"))
+            Assert.That(
+                runAsync (store.FollowLastActive(worktree, "diff.html", "session-b")),
+                Is.EqualTo(Unchanged)))
+
+    [<Test>]
+    member _.``last-active routing cannot steal an initial pending claim``() =
+        withOwnershipFile (fun dir filePath ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = createStore filePath
+            let token = startClaim store worktree "diff.html"
+
+            Assert.That(
+                runAsync (store.FollowLastActive(worktree, "diff.html", "unrelated-session")),
+                Is.EqualTo(Deferred))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(None: string option))
+            Assert.That(store.ClaimPending(worktree, token, "launched-session"), Is.EqualTo(Some "diff.html"))
+            Assert.That(runAsync (store.GetOwner(worktree, "diff.html")), Is.EqualTo(Some "launched-session")))
+
+    [<Test>]
     member _.``failed reassignment can be cancelled and retried without losing the old owner``() =
         withOwnershipFile (fun dir filePath ->
             let worktree = Path.Combine(dir, "worktree")

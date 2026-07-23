@@ -255,7 +255,36 @@ type private ServiceMsg =
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
 /// never collides) and the scheduler agent it feeds. Call Start once before serving; Dispose on
 /// shutdown. Owns the store's lifetime — Dispose disposes it.
-type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
+type SessionActivityService
+    (
+        store: SessionActivityStore,
+        scheduler: MailboxProcessor<RefreshScheduler.StateMsg>,
+        followDiffInteractionOwner: WorktreePath -> string -> Async<CanvasInteractionOwnership.FollowResult>
+    ) =
+
+    let lastActiveSessionId worktreePath (live: Map<SessionId, StoredStatus>) =
+        live
+        |> Map.values
+        |> Seq.filter (fun stored ->
+            stored.WorktreePath = worktreePath
+            && stored.UpdatedAt <> DateTimeOffset.MinValue)
+        |> List.ofSeq
+        |> StoredStatus.tryMostRecentActivity
+        |> Option.map (_.SessionId >> SessionId.value)
+
+    let syncDiffInteractionOwner previous current worktreePath =
+        async {
+            match lastActiveSessionId worktreePath previous, lastActiveSessionId worktreePath current with
+            | previousOwner, Some currentOwner when previousOwner <> Some currentOwner ->
+                match! followDiffInteractionOwner worktreePath currentOwner with
+                | CanvasInteractionOwnership.Deferred ->
+                    Log.log
+                        "Activity"
+                        $"Deferred diff interaction routing to {currentOwner} while an explicit ownership claim is pending"
+                | CanvasInteractionOwnership.Assigned
+                | CanvasInteractionOwnership.Unchanged -> ()
+            | _ -> ()
+        }
 
     // Apply one report on the single writer. State-only reports have independent persistence/order
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
@@ -453,9 +482,19 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                         with ex ->
                             Log.log "Activity" $"Ingest failed (report dropped, mailbox kept alive): {ex.Message}"
                             live
+                    do! syncDiffInteractionOwner live next report.WorktreePath
                     return! loop next
                 | Seed loaded ->
                     let seeded = loaded |> List.fold (fun m s -> Map.add s.SessionId s m) live
+                    do!
+                        seeded
+                        |> Map.values
+                        |> Seq.map _.WorktreePath
+                        |> Set.ofSeq
+                        |> Set.toList
+                        |> List.map (syncDiffInteractionOwner live seeded)
+                        |> Async.Sequential
+                        |> Async.Ignore
                     return! loop seeded
                 | Snapshot reply ->
                     reply.Reply live

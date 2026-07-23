@@ -4,6 +4,7 @@
 
 - Provide the universal selected-text Explain, Remove, and Comment actions in every SystemView.
 - Route generated-view interactions to one deterministic session without assigning an authored-document owner.
+- Keep diff interactions aligned with the worktree session that most recently performed real activity.
 - Let trusted SystemViews attach bounded structured source identity to selection messages.
 - Preserve existing SystemView behavior: no author liveness, Start-session button, archive, share, content awareness, or DOM morphing.
 
@@ -11,7 +12,10 @@
 
 - Selecting ordinary non-editable text in either an AgentDoc or SystemView shows the same contextual action toolbar and processing indicator.
 - AgentDoc messages continue routing through `CanvasDoc.OwnerSessionId`.
-- Each `(worktree, SystemView filename)` has a separate persistent interaction-session owner. The first explicitly started or claimed session becomes the target; subsequent interactions resume or route only to that session until ownership is reassigned or the view/worktree is removed.
+- Each `(worktree, SystemView filename)` has a separate persistent interaction-session owner.
+- `diff.html` automatically follows the worktree session with the newest real-activity timestamp. Heartbeats and usage gauges update liveness only and never transfer the diff target.
+- Other SystemViews keep sticky affinity: the first explicitly started or claimed session remains the target until ownership is reassigned or the view/worktree is removed.
+- An explicit pending initial claim or reassignment takes precedence over automatic diff following. The previous durable owner remains unchanged until that flow completes or is cancelled.
 - Resuming an offline interaction owner is successful only after that exact session re-registers its bridge. A spawn error or registration timeout is shown as a hard failure with an explicit **Start fresh and reassign** action; it is never left as a silent queued wait.
 - Starting fresh preserves the old durable owner while the replacement launches, suspends queue delivery to that old owner, then atomically changes the owner and drains to the new identified session when it registers. Launch failure or timeout cancels the pending reassignment, so retrying still targets the old owner.
 - A SystemView may provide optional selection metadata. Valid metadata is sent as nested `sourceContext`, separate from the human-readable `request` and selected text.
@@ -24,6 +28,12 @@
 `CanvasDocServer.buildInjection` includes `CanvasSendScript` and `CanvasSelectionScript` for both document kinds. SystemViews continue to omit heartbeat/author bridge, error/morph authoring machinery, and idiomorph.
 
 Interaction ownership is stored separately from `CanvasDocOwnership` because generated views have no author. Message routing resolves authored ownership for AgentDocs and interaction ownership for SystemViews. An unclaimed SystemView interaction is queued while Treemon starts or continues a session for that view; the session claims the interaction target before the queued message is delivered. Ownership persists across restarts and is removed with the view or worktree.
+
+The session-activity service compares the per-worktree winner before and after every ingested report.
+The winner is ordered by `StoredStatus.UpdatedAt`, the same real-activity clock used by resume and
+footer selection; `LastSeen` is excluded because bridge and activity heartbeats advance it. When the
+winner changes, `diff.html` is assigned to that session unless an explicit claim or reassignment is
+pending. Restart seeding performs the same reconciliation from the restored live statuses.
 
 For an owned SystemView whose bridge is offline, Treemon resumes the persisted owner and waits for
 a newer registration from that exact session. Spawn failure or registration timeout returns a
@@ -69,8 +79,9 @@ target, toolbar, and render-state diagnostics.
 ## Decisions
 
 - SystemView interaction ownership is distinct from authored-file ownership so generated views do not acquire incorrect liveness, archive, share, or morph behavior.
-- Ownership persists until explicit reassignment or view/worktree removal; session termination alone does not release it.
-- Conversation affinity wins over automatic availability: an unavailable owner is never reassigned automatically. The pane surfaces the failure and requires the user to choose **Start fresh and reassign**.
+- Beadspace and future sticky SystemViews preserve ownership until explicit reassignment or view/worktree removal; session termination alone does not release it.
+- Diff interaction affinity follows the most-recently-active session, using real activity rather than liveness heartbeats. A manual diff assignment remains in effect until another session becomes the real-activity winner.
+- Explicit claim/reassignment flows win over automatic diff following. Outside that pending window, an unavailable diff owner may be replaced only when another session produces newer real activity; otherwise the pane surfaces the failure and offers **Start fresh and reassign**.
 - Reassignment is committed only by a new identified bridge registration. Until then the old durable owner remains authoritative, so failed launches and registration timeouts are safe to retry.
 - The session deliberately started or continued for an unclaimed interaction receives an opaque
   launch token and claims only that token's view before draining; tokenless heartbeat refreshes
@@ -89,6 +100,7 @@ target, toolbar, and render-state diagnostics.
 | `src/Extension/canvas-selection-context.js` | Generic selection toolbar, metadata hook, and payload construction |
 | `src/Server/CanvasInteractionOwnership.fs` | Persistent generated-view interaction owner |
 | `src/Server/CanvasBridge.fs` | Owner-aware delivery and queue draining |
+| `src/Server/SessionActivityService.fs` | Automatic diff-owner updates from real session activity |
 | `src/Server/WorktreeApi.fs` | Resume/start behavior for unclaimed or offline interaction owners |
 | `src/Server/BeadspaceTemplate.html` | Beadspace task-ID metadata provider |
 | `src/Server/DiffTemplate.html` | Diff file/hunk/line metadata provider |
