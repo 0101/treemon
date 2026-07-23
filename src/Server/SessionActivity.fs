@@ -47,8 +47,10 @@ type SessionEvent =
     /// Join/rejoin hydration from `metadata.snapshot().summary`. Persisted without appending source
     /// history or advancing the lifecycle ordering clock.
     | TitleBootstrap of Message
-    /// ask_user — carries the question text to surface as the last assistant message.
-    | AwaitingUserInput of question: Message option
+    /// ask_user — carries the question text and its event time.
+    | AwaitingUserInput of question: Message option * at: DateTimeOffset
+    /// The SDK reports that the pending ask_user interaction completed.
+    | UserInputCompleted of at: DateTimeOffset
     | TurnEnded
     | WentIdle
     /// A liveness-only heartbeat: re-asserts the CLI is still open WITHOUT bearing on status. Handled
@@ -88,9 +90,9 @@ let toCodingToolStatus =
     | SessionLevelStatus.WaitingForUser -> WaitingForUser
     | SessionLevelStatus.Idle -> Idle
 
-/// The running per-session state produced by folding events oldest→newest. Deliberately smaller than
-/// the old SessionScanCache: no SubagentDepth, no LastAssistantWasAskUser, no separate raw-status
-/// type — the fold sets Status directly (incl. Idle from WentIdle).
+/// The running per-session state produced by folding events. Request/completion clocks are
+/// independent from base lifecycle Status so fire-and-forget report arrival order cannot change
+/// whether the session is waiting.
 type SessionStatus =
     { Status: SessionLevelStatus
       Skill: string option
@@ -100,7 +102,9 @@ type SessionStatus =
       LastAssistantMessage: Message option
       /// Latest context-window occupancy from a UsageInfo event; None until one arrives. A gauge,
       /// decoupled from Status.
-      ContextUsage: ContextUsage option }
+      ContextUsage: ContextUsage option
+      AwaitingUserSince: DateTimeOffset option
+      UserInputCompletedAt: DateTimeOffset option }
 
 /// The starting state for a session with no events yet.
 let emptyStatus =
@@ -110,19 +114,36 @@ let emptyStatus =
       Title = None
       LastUserMessage = None
       LastAssistantMessage = None
-      ContextUsage = None }
+      ContextUsage = None
+      AwaitingUserSince = None
+      UserInputCompletedAt = None }
 
 let private retainLatestChange current next =
     match current with
     | Some previous when previous.Text = next.Text || previous.At > next.At -> current
     | _ -> Some next
 
+let private latestTimestamp current next =
+    match current with
+    | Some previous when previous > next -> current
+    | _ -> Some next
+
+let effectiveStatus (status: SessionStatus) =
+    match status.AwaitingUserSince, status.UserInputCompletedAt with
+    | Some awaiting, Some completed when awaiting <= completed -> status.Status
+    | Some _, _ -> SessionLevelStatus.WaitingForUser
+    | None, _ -> status.Status
+
 /// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
 let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     match e with
     | TurnStarted -> { s with Status = SessionLevelStatus.Working }
-    | AssistantMessage m -> { s with Status = SessionLevelStatus.Working; LastAssistantMessage = Some m }
+    | AssistantMessage m ->
+        { s with
+            Status = SessionLevelStatus.Working
+            LastAssistantMessage = Some m
+            UserInputCompletedAt = latestTimestamp s.UserInputCompletedAt m.At }
     | SkillInvoked name -> { s with Skill = Some name }
     | IntentReported m ->
         // Intent is orthogonal to status. Keep the existing change-time when the text is unchanged so
@@ -135,12 +156,14 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
         // unchanged so `effectiveActivity`'s "freshest wins" reflects real changes, not re-emits (a
         // resume re-announces the same title). An older bootstrap cannot overwrite a newer live title.
         { s with Title = retainLatestChange s.Title m }
-    | AwaitingUserInput q ->
+    | AwaitingUserInput(q, at) ->
         // The ask_user question is surfaced as the last assistant message; keep the prior one if the
         // question carries no text.
         { s with
-            Status = SessionLevelStatus.WaitingForUser
-            LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage) }
+            LastAssistantMessage = (q |> Option.orElse s.LastAssistantMessage)
+            AwaitingUserSince = latestTimestamp s.AwaitingUserSince at }
+    | UserInputCompleted at ->
+        { s with UserInputCompletedAt = latestTimestamp s.UserInputCompletedAt at }
     | TurnEnded -> { s with Status = SessionLevelStatus.Idle }
     | WentIdle -> { s with Status = SessionLevelStatus.Idle }
     | Heartbeat -> s
@@ -150,11 +173,12 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     | UserPrompt m ->
         // A reply to an ask_user keeps the running skill; any other prompt is a new request that ends
         // the prior skill's run.
-        let keepSkill = s.Status = SessionLevelStatus.WaitingForUser
+        let keepSkill = effectiveStatus s = SessionLevelStatus.WaitingForUser
         { s with
             Status = SessionLevelStatus.Working
             Skill = (if keepSkill then s.Skill else None)
-            LastUserMessage = Some m }
+            LastUserMessage = Some m
+            UserInputCompletedAt = latestTimestamp s.UserInputCompletedAt m.At }
 
 /// Fold a batch of events (oldest→newest) onto an existing state.
 let foldMany (initial: SessionStatus) (events: SessionEvent seq) : SessionStatus =
@@ -195,8 +219,12 @@ let openWindow = TimeSpan.FromMinutes 3.0
 /// timeout reads as Idle. `session.idle` (WentIdle) already sets Idle directly, so an explicitly-idle
 /// session is unaffected. `last_seen` is the direct analogue of the old file mtime.
 let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: SessionStatus) : SessionStatus =
-    if s.Status <> SessionLevelStatus.Idle && now - lastSeen > stalenessTimeout then
-        { s with Status = SessionLevelStatus.Idle }
+    if effectiveStatus s <> SessionLevelStatus.Idle && now - lastSeen > stalenessTimeout then
+        { s with
+            Status = SessionLevelStatus.Idle
+            UserInputCompletedAt =
+                s.AwaitingUserSince
+                |> Option.fold latestTimestamp s.UserInputCompletedAt }
     else
         s
 
@@ -238,6 +266,6 @@ let debounceIdle
 /// winner-owned field sourced from one session.
 let pickActive statusOf activityKey sessions =
     sessions
-    |> List.filter (fun candidate -> (statusOf candidate).Status <> SessionLevelStatus.Idle)
+    |> List.filter (fun candidate -> statusOf candidate |> effectiveStatus <> SessionLevelStatus.Idle)
     |> List.sortByDescending activityKey
     |> List.tryHead
