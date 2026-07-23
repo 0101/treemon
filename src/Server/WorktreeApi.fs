@@ -14,31 +14,6 @@ open Server.SessionActivityStore
 
 let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 
-let internal overviewHistoryCachedWith
-    beforeRowsRead
-    cache
-    (activityStore: SessionActivityStore)
-    requestedWindow
-    =
-    activityStore.UsePublishedOverviewRollupSnapshot(
-        requestedWindow,
-        (fun state anchor readRows ->
-            let cacheKey =
-                OverviewHistoryCache.key
-                    requestedWindow
-                    state.PublishedGeneration
-                    anchor
-
-            OverviewHistoryCache.get cache cacheKey (fun () ->
-                async {
-                    return OverviewHistory.fromPublishedRows anchor (readRows ())
-                })),
-        beforeRowsRead = beforeRowsRead
-    )
-
-let internal overviewHistoryCached cache activityStore requestedWindow =
-    overviewHistoryCachedWith ignore cache activityStore requestedWindow
-
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
         let json = File.ReadAllText(path)

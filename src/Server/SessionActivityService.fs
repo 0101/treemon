@@ -12,7 +12,7 @@ open Server.SessionActivityStore
 // Ingestion for the push status model: the POST /api/session/activity endpoint plus the single
 // mutable boundary behind it. A dedicated MailboxProcessor is the ONLY writer of live status and
 // of the SQLite mirror, so status upserts never race. Per report it: folds the event onto that
-// session's prior state → updates the in-memory Map → persists (append raw event + upsert status)
+// session's prior state → updates the in-memory Map → persists (append accepted event + upsert status)
 // → feeds RefreshScheduler (UpdateSessionStatus) so the card path can read it. The handler mirrors
 // CanvasDocServer.canvasRegisterHandler (JSON DTO → domain, validate, known-worktree guard); the
 // csrfGuard is composed in front of it in the route (Program.fs). The service owns its lifecycle:
@@ -211,10 +211,9 @@ let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: S
 
 // --- Retention ---------------------------------------------------------------------------------
 
-/// How long the append-only streams (activity_events + task_snapshots) and any long-dead session rows
-/// are kept before the retention timer trims them. Well beyond the 2h idle window, so a live session is
-/// never pruned, while still bounding the unbounded tables. Comfortably covers the 72h Overview-history
-/// window that reads these streams; adjustable as we learn how fast the tables grow.
+/// How long accepted activity_events and long-dead session rows are kept before the retention timer
+/// trims them. Well beyond the 2h idle window, so a live session is never pruned while durable
+/// idempotency and resume state remain bounded.
 let internal retentionPeriod = TimeSpan.FromDays 60.0
 
 /// How often the retention timer fires.
@@ -277,7 +276,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         match report.Event with
         | Heartbeat ->
             // Liveness-only: bump the session's last_seen (the openness signal that keeps an idle-but-open
-            // CLI blue) WITHOUT moving updated_at, re-folding status, or appending a history row. Keeping
+            // CLI blue) WITHOUT moving updated_at, re-folding status, or appending an activity event. Keeping
             // it off the ordering/append path is what stops a heartbeat from overtaking a slightly-earlier
             // real event and dropping it (F20), and from inflating activity_events with synthetic rows
             // (F14). After a restart, an older but still-open session can be absent from the idle-window
@@ -300,7 +299,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // last-write-wins clock (UpdatedAt). Sharing that clock let a usage report's timestamp
             // block a slightly-earlier status transition (turn stuck Working), and in the reverse
             // arrival order let the status out-of-order guard discard the usage snapshot. So, like a
-            // heartbeat, it never moves UpdatedAt and never appends a history row; it is ordered only
+            // heartbeat, it never moves UpdatedAt and never appends an activity event; it is ordered only
             // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
             // to — a usage report for a session with no prior status is dropped (nothing to gauge).
             match live |> Map.tryFind report.SessionId with
@@ -327,7 +326,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                     live |> Map.add report.SessionId persisted
         | TitleBootstrap _ ->
             // Metadata hydration is current state, not a source event. Persist the title without
-            // appending history or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
+            // appending an activity event or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
@@ -369,9 +368,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 | Some p -> report.OccurredAt < p.UpdatedAt
                 | None -> false
 
-            // The history row records the fold state AFTER this event. For an out-of-order (older) event
+            // The durable event row records the fold state AFTER this event. For an out-of-order (older) event
             // that must be the event's OWN direct effect (fold onto empty), never the current newest live
-            // status — which never held at this event's point in history (F19). In-order events fold onto
+            // status — which never held when the event occurred (F19). In-order events fold onto
             // the running state as usual.
             let rowState = if isOutOfOrder then SessionActivity.fold emptyStatus report.Event else newStatus
 
@@ -407,15 +406,15 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   // gauge, and `fold` already preserves ContextUsage, so its ordering stamp survives too.
                   ContextUsageAt = prior |> Option.bind _.ContextUsageAt }
 
-            // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
-            // status can never diverge on a mid-pair failure. A duplicate event_id returns None
+            // Append + durable upsert (last-write-wins) in ONE transaction so the event and status
+            // records can never diverge on a mid-pair failure. A duplicate event_id returns None
             // (nothing appended or upserted), while a new event returns the authoritative persisted
             // row so retained context cannot diverge from the live maps.
             match store.AppendAndUpsert(eventRow, stored) with
             | None -> live
             | Some _ when isOutOfOrder ->
-                // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
-                // history substrate but must not regress the live fold state or the shown card.
+                // Mirror the ordering guard in memory: an out-of-order (older) event is recorded for
+                // idempotency but must not regress the live fold state or the shown card.
                 live
             | Some persisted ->
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)

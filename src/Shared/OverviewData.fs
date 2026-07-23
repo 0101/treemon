@@ -160,9 +160,8 @@ let private agentGroupOrder =
     (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting; AgentGroupKind.Idle ]
 
 /// The agent group a worktree's collapsed coding-tool status + skill maps to, or None when it is not
-/// a live agent (NoSession — grey, no open session). The SINGLE source of truth for status → agent
-/// group, shared by the live band aggregate and the event-derived history reconstruction
-/// (Server.OverviewHistory.sample), so the live band and its history bucket a status identically:
+/// a live agent (NoSession — grey, no open session). This is the single source of truth for the live
+/// aggregate's status-to-group mapping:
 ///   Working -> the skill-classified Activity group · WaitingForUser -> Waiting · Idle -> Idle.
 let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGroupKind option =
     match codingTool with
@@ -170,23 +169,6 @@ let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGr
     | CodingToolStatus.WaitingForUser -> Some AgentGroupKind.Waiting
     | CodingToolStatus.Idle -> Some AgentGroupKind.Idle
     | CodingToolStatus.NoSession -> None
-
-/// Count agents per group from a set of collapsed per-worktree (status, skill) pairs, in the canonical
-/// agent-group order with empty groups dropped — the count-only agent projection. Shared by the
-/// history reconstruction (Server.OverviewHistory.sample) so an event-derived Agents snapshot is
-/// bucketed and ordered exactly like `aggregate`'s live one.
-let agentCountsOf (worktrees: (CodingToolStatus * string option) seq) : AgentCount list =
-    let counts =
-        worktrees
-        |> Seq.choose (fun (codingTool, skill) -> agentGroupOf codingTool skill)
-        |> Seq.countBy id
-        |> Map.ofSeq
-
-    agentGroupOrder
-    |> List.choose (fun kind ->
-        match Map.tryFind kind counts with
-        | Some c when c > 0 -> Some { AgentCount.Kind = kind; Count = c }
-        | _ -> None)
 
 /// Fold every worktree across every repo into the Overview roll-up (spec: beads-overview-band.md).
 let aggregate (repos: RepoWorktrees list) : Overview =

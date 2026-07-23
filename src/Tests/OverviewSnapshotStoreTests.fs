@@ -225,8 +225,7 @@ END;
                    LastSeen = anchor
                    ContextUsageAt = None }
 
-             legacy.UpsertStatus stored
-             legacy.AppendEvent(
+             legacy.AppendAndUpsert(
                  { EventId = EventId "event-1"
                    SessionId = stored.SessionId
                    WorktreePath = stored.WorktreePath
@@ -234,15 +233,47 @@ END;
                    Kind = "turn_start"
                    Status = SessionLevelStatus.Working
                    Skill = None
-                   Ts = anchor }
+                   Ts = anchor },
+                 stored
              )
-             |> ignore
-             legacy.RecordLiveness(stored.SessionId, anchor)
-             legacy.AppendTaskSnapshot(anchor, [ task 42 ]))
+             |> ignore)
 
             execute
                 path
                 $"""
+CREATE TABLE session_liveness (
+    session_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    PRIMARY KEY (session_id, ts)
+);
+CREATE TABLE task_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    tasks TEXT NOT NULL
+);
+CREATE TABLE overview_history_rows (
+    bucket INTEGER PRIMARY KEY,
+    tasks TEXT NOT NULL,
+    agents TEXT NOT NULL
+);
+CREATE TABLE overview_history_state (
+    id INTEGER PRIMARY KEY
+);
+CREATE TABLE overview_history_staging (
+    generation INTEGER NOT NULL,
+    bucket INTEGER NOT NULL,
+    tasks TEXT NOT NULL,
+    agents TEXT NOT NULL
+);
+CREATE TABLE overview_history_session_bounds (
+    session_id TEXT PRIMARY KEY,
+    first_observed_at TEXT NOT NULL,
+    last_observed_at TEXT NOT NULL
+);
+INSERT INTO session_liveness(session_id, ts)
+VALUES ('session-1', '{anchor:O}');
+INSERT INTO task_snapshots(ts, tasks)
+VALUES ('{anchor:O}', '[{{"Kind":"planned","Count":42}}]');
 INSERT INTO overview_history_rows(bucket, tasks, agents)
 VALUES ({anchor.ToUnixTimeSeconds()}, '[]', '[]');
 INSERT INTO overview_history_staging(generation, bucket, tasks, agents)

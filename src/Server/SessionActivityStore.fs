@@ -2,29 +2,23 @@ module Server.SessionActivityStore
 
 open System
 open System.IO
-open System.Threading
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
-open Server.OverviewHistoryRollup
 open Server.SqliteStorage
 
 // The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
-// upserts the per-session fold result and appends the raw event to the authoritative source tables:
+// upserts the per-session fold result and appends accepted lifecycle events:
 //
 //   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
 //                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
-//   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
-//                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
+//   activity_events — accepted lifecycle events keyed by event_id. INSERT OR IGNORE makes a replay a
+//                     full no-op while retention bounds the durable idempotency window.
 //
-// The overview_history_* tables are disposable count-only rollups and reconstruction metadata.
-// Construction validates their schema and invariants, replacing only those derived tables when they
-// cannot be trusted; the source tables above remain intact for rebuilding.
-//
-// WAL journalling lets queryWindow / loadLiveStatuses read concurrently with the mailbox writer with
-// no lock contention; the writer being single means status upserts never race each other. The SQLite
-// file path is instance-specific (keyed by the server's data dir / port) so a side-by-side validation
-// instance never collides with main.
+// WAL journalling lets restart/resume reads run concurrently with the mailbox writer with no lock
+// contention; the writer being single means status upserts never race each other. The SQLite file
+// path is instance-specific (keyed by the server's data dir / port) so a side-by-side validation
+// instance never collides with main. Overview history is stored independently in overview_snapshots.
 
 // --- Row shapes -------------------------------------------------------------------------------
 
@@ -44,9 +38,8 @@ type StoredStatus =
       LastSeen: DateTimeOffset
       ContextUsageAt: DateTimeOffset option }
 
-/// One activity_events row: a single pushed event, already classified. `Status`/`Skill` are the fold
-/// result *after* applying this event, so the Overview history can read a bucket's state without
-/// re-folding.
+/// One activity_events row: a single accepted event. `Status`/`Skill` retain the fold result after
+/// applying it, preserving the existing durable event shape while event_id supplies idempotency.
 type ActivityEventRow =
     { EventId: EventId
       SessionId: SessionId
@@ -56,11 +49,6 @@ type ActivityEventRow =
       Status: SessionLevelStatus
       Skill: string option
       Ts: DateTimeOffset }
-
-type internal OverviewHistoryInputs =
-    { TaskSnapshots: (DateTimeOffset * OverviewData.TaskCount list) list
-      Events: ActivityEventRow list
-      Liveness: (SessionId * DateTimeOffset) list }
 
 // --- Serialisation helpers --------------------------------------------------------------------
 
@@ -143,16 +131,6 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
       LastSeen = parseIso (r.GetString 14)
       ContextUsageAt = contextUsageAt }
 
-let internal readEventRow (r: SqliteDataReader) : ActivityEventRow =
-    { EventId = EventId(r.GetString 0)
-      SessionId = SessionId(r.GetString 1)
-      WorktreePath = WorktreePath(r.GetString 2)
-      Provider = parseProvider (r.GetString 3)
-      Kind = r.GetString 4
-      Status = parseStatus (r.GetString 5)
-      Skill = readOptStr r 6
-      Ts = parseIso (r.GetString 7) }
-
 // --- SQL --------------------------------------------------------------------------------------
 
 let private schemaSql =
@@ -191,20 +169,6 @@ CREATE TABLE IF NOT EXISTS activity_events (
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
 CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
-
-CREATE TABLE IF NOT EXISTS session_liveness (
-    session_id TEXT NOT NULL,
-    ts         TEXT NOT NULL,
-    PRIMARY KEY (session_id, ts)
-);
-CREATE INDEX IF NOT EXISTS ix_liveness_ts ON session_liveness(ts);
-
-CREATE TABLE IF NOT EXISTS task_snapshots (
-    id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts    TEXT NOT NULL,
-    tasks TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_task_snapshots_ts ON task_snapshots(ts);
 """
 
 let private additiveColumnMigrations =
@@ -295,16 +259,10 @@ VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 
 // Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
 // or any message/skill field, and only ever forward. Heartbeats take this path instead of
-// upsert+append, so they refresh openness without moving the last-write-wins clock or polluting the
-// event history.
+// upsert+append, so they refresh openness without moving the last-write-wins clock.
 let private touchSql =
     """
 UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
-"""
-
-let private appendLivenessSql =
-    """
-INSERT OR IGNORE INTO session_liveness (session_id, ts) VALUES ($sid, $seen);
 """
 
 let private upsertContextUsageSql =
@@ -355,86 +313,8 @@ WHERE worktree_path = $wt
 ORDER BY last_seen DESC;
 """
 
-let private queryWindowSql =
-    """
-SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
-FROM activity_events
-WHERE ts >= $start AND ts <= $end
-ORDER BY ts, rowid;
-"""
-
-let private queryHistoryWindowSql =
-    """
-WITH relevant_sessions AS (
-    SELECT session_id
-    FROM activity_events
-    WHERE ts >= $lookback AND ts <= $end
-    UNION
-    SELECT session_id
-    FROM session_liveness
-    WHERE ts >= $lookback AND ts <= $end
-),
-baseline_rows AS (
-    SELECT (
-        SELECT baseline.rowid
-        FROM activity_events AS baseline
-        WHERE baseline.session_id = relevant.session_id AND baseline.ts < $start
-        ORDER BY baseline.ts DESC, baseline.rowid DESC
-        LIMIT 1
-    ) AS rowid
-    FROM relevant_sessions AS relevant
-)
-SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts, event.rowid
-FROM activity_events AS event
-WHERE event.rowid IN (SELECT rowid FROM baseline_rows WHERE rowid IS NOT NULL)
-UNION ALL
-SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts, rowid
-FROM activity_events
-WHERE ts >= $start AND ts <= $end
-ORDER BY ts, rowid;
-"""
-
-let private queryLivenessSql =
-    """
-SELECT session_id, ts
-FROM session_liveness
-WHERE ts >= $start AND ts <= $end
-ORDER BY ts;
-"""
-
-let private appendTaskSnapshotSql =
-    """
-INSERT INTO task_snapshots (ts, tasks) VALUES ($ts, $tasks);
-"""
-
-let private queryTaskSnapshotsSql =
-    """
-SELECT ts, tasks
-FROM task_snapshots
-WHERE ts >= $start AND ts <= $end
-ORDER BY ts, id;
-"""
-
-let private queryLatestTaskSnapshotSql =
-    """
-SELECT ts, tasks
-FROM task_snapshots
-ORDER BY ts DESC, id DESC
-LIMIT 1;
-"""
-
-let private queryTaskSnapshotBeforeSql =
-    """
-SELECT ts, tasks
-FROM task_snapshots
-WHERE ts < $start
-ORDER BY ts DESC, id DESC
-LIMIT 1;
-"""
-
-// Prune redundant history before the cutoff while retaining the one baseline needed to carry state
-// into later windows: the latest old event for each still-retained session and the latest old task
-// snapshot. Liveness needs no old baseline beyond openWindow.
+// Preserve the established retention behavior: events older than the cutoff are deleted except for
+// the latest old event belonging to a session row that is itself still retained.
 let private pruneSql =
     """
 WITH retained_event_baselines AS (
@@ -457,16 +337,6 @@ DELETE FROM activity_events
 WHERE ts < $cutoff
   AND rowid NOT IN (SELECT rowid FROM retained_event_baselines);
 
-DELETE FROM session_liveness WHERE ts < $cutoff;
-DELETE FROM task_snapshots
-WHERE ts < $cutoff
-  AND id <> (
-      SELECT baseline.id
-      FROM task_snapshots AS baseline
-      WHERE baseline.ts < $cutoff
-      ORDER BY baseline.ts DESC, baseline.id DESC
-      LIMIT 1
-  );
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
 
@@ -496,8 +366,7 @@ LIMIT 1;
 
 // --- Reader / binder helpers ------------------------------------------------------------------
 
-// Bind an activity_events row's parameters onto a prepared command — shared by AppendEvent and the
-// transactional AppendAndUpsert so the two paths can never drift.
+// Bind an activity_events row's parameters for the transactional AppendAndUpsert path.
 let private bindAppend (cmd: SqliteCommand) (row: ActivityEventRow) =
     cmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
     cmd.Parameters.AddWithValue("$sid", SessionId.value row.SessionId) |> ignore
@@ -560,51 +429,13 @@ let private appendEvent (conn: SqliteConnection) (tx: SqliteTransaction) row =
     bindAppend cmd row
     cmd.ExecuteNonQuery() = 1
 
-let private appendTaskSnapshot
-    (conn: SqliteConnection)
-    (tx: SqliteTransaction)
-    ts
-    tasks
-    =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- appendTaskSnapshotSql
-    cmd.Parameters.AddWithValue("$ts", isoUtc ts) |> ignore
-    cmd.Parameters.AddWithValue("$tasks", serializeTasks tasks) |> ignore
-    cmd.ExecuteNonQuery() |> ignore
-
-let private queryLatestTaskSnapshot
-    (conn: SqliteConnection)
-    (tx: SqliteTransaction)
-    =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- queryLatestTaskSnapshotSql
-    use reader = cmd.ExecuteReader()
-
-    if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
-    else None
-
-let private appendTaskSnapshotIfChanged
-    (conn: SqliteConnection)
-    (tx: SqliteTransaction)
-    ts
-    tasks
-    =
-    match queryLatestTaskSnapshot conn tx with
-    | Some (_, previous) when previous = tasks -> false
-    | _ ->
-        appendTaskSnapshot conn tx ts tasks
-        OverviewHistoryRollupStore.invalidateOverviewRollup conn tx ts
-        true
-
 // --- Store ------------------------------------------------------------------------------------
 
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
 /// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
-/// (restart rebuild, Overview history, prune timer) never share a connection. The optional observer
-/// runs after connection-local PRAGMAs and before store SQL so diagnostics can attach per connection
+/// (restart rebuild, resume lookup, prune timer) never share a connection. The optional observer runs
+/// after connection-local PRAGMAs and before store SQL so diagnostics can attach per connection
 /// without changing production callers. Dispose on shutdown.
 type SessionActivityStore
     (
@@ -643,9 +474,6 @@ type SessionActivityStore
             c.Dispose()
             reraise ()
 
-    let overviewMaintenanceGate = obj ()
-    let overviewWorkerLease = new SemaphoreSlim(1, 1)
-
     // Held open for the store's lifetime: keeps the DB file (and its WAL) live between operations and
     // owns schema creation. Never used for queries (that would share one connection across threads).
     let keepAlive =
@@ -654,97 +482,7 @@ type SessionActivityStore
          cmd.CommandText <- schemaSql + migrateSql
          cmd.ExecuteNonQuery() |> ignore)
         ensureAdditiveColumns c
-        OverviewHistoryRollupStore.ensureSchema c
         c
-
-    /// Run a related group of internal reads against one stable deferred WAL snapshot.
-    member internal _.ReadSnapshot(read: SqliteConnection -> SqliteTransaction -> 'T) : 'T =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction(deferred = true)
-        let result = read conn tx
-        tx.Commit()
-        result
-
-    /// Keep raw retention outside a multi-batch reconstruction and allow only one worker per store.
-    member internal _.WithOverviewRollupMaintenance(work: unit -> 'T) : 'T =
-        lock overviewMaintenanceGate work
-
-    member internal _.ClaimOverviewRollupWorker() : IDisposable =
-        if not (overviewWorkerLease.Wait 0) then
-            invalidOp "Only one Overview history rollup worker may run for a store."
-
-        let releaseGate = obj ()
-        // Lease disposal is an impure lifetime boundary; this flag makes repeated Dispose calls safe.
-        let mutable released = false
-
-        { new IDisposable with
-            member _.Dispose() =
-                lock releaseGate (fun () ->
-                    if not released then
-                        released <- true
-                        overviewWorkerLease.Release() |> ignore) }
-
-    member internal _.RebuildOverviewRollupObservationBounds() : unit =
-        OverviewHistoryRollupStore.rebuildObservationBounds openConn
-
-    member internal _.OverviewRollupState() : PublicationState =
-        OverviewHistoryRollupStore.publicationState openConn
-
-    /// Append one exact dense batch to the single-generation durable candidate range.
-    member internal _.StageOverviewRollup
-        (
-            candidate: RollupCandidate,
-            rows: StagedRollupRow list
-        ) : StagingResult =
-        OverviewHistoryRollupStore.stageCandidate openConn candidate rows
-
-    /// Atomically replace the candidate range only while its source generation is still current.
-    member internal _.PublishOverviewRollup(candidate: RollupCandidate) : PublicationResult =
-        OverviewHistoryRollupStore.publishCandidate openConn candidate
-
-    /// Atomically replace every published row with one complete retained-horizon rebuild.
-    member internal _.ReplaceOverviewRollup(candidate: RollupCandidate) : PublicationResult =
-        OverviewHistoryRollupStore.replacePublishedCandidate openConn candidate
-
-    member internal _.DiscardOverviewRollupStaging() : unit =
-        OverviewHistoryRollupStore.discardStaging openConn
-
-    member internal _.PruneOverviewRollup(oldestRetained: DateTimeOffset) : int =
-        OverviewHistoryRollupStore.prunePublishedRows openConn oldestRetained
-
-    /// Read publication metadata and rows from one WAL snapshot. The callback is a deterministic
-    /// test seam for committing a publisher after metadata is read but before rows are read.
-    member internal _.ReadPublishedOverviewRollup
-        (
-            startBoundary: DateTimeOffset,
-            endBoundary: DateTimeOffset,
-            ?afterStateRead: unit -> unit
-        ) : PublicationState * RollupRow list =
-        OverviewHistoryRollupStore.readPublishedSnapshot
-            openConn
-            startBoundary
-            endBoundary
-            (defaultArg afterStateRead ignore)
-
-    /// Read publication identity and, on a cache miss, only the selected rows for one history
-    /// window from the same deferred WAL snapshot.
-    member internal _.UsePublishedOverviewRollupSnapshot
-        (
-            window: OverviewData.HistoryWindow,
-            useSnapshot:
-                PublicationState ->
-                DateTimeOffset ->
-                (unit -> RollupRow list) ->
-                Async<'T>,
-            ?afterStateRead: unit -> unit,
-            ?beforeRowsRead: unit -> unit
-        ) : Async<'T> =
-        OverviewHistoryRollupStore.usePublishedSnapshot
-            openConn
-            window
-            (defaultArg afterStateRead ignore)
-            (defaultArg beforeRowsRead ignore)
-            useSnapshot
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).
@@ -755,24 +493,11 @@ type SessionActivityStore
         bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
 
-    /// Append a raw event. Returns true if inserted, false if the event_id already existed
-    /// (INSERT OR IGNORE dedupe).
-    member _.AppendEvent(row: ActivityEventRow) : bool =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        let inserted = appendEvent conn tx row
-
-        if inserted then
-            OverviewHistoryRollupStore.upsertObservationBounds conn tx row.SessionId row.Ts
-            OverviewHistoryRollupStore.invalidateOverviewRollup conn tx row.Ts
-
-        tx.Commit()
-        inserted
-
-    /// Atomically append the raw event AND upsert the session's live row in ONE transaction on ONE
-    /// connection, so the durable status can never diverge from the appended history. With the two on
-    /// separate connections a failed upsert AFTER a committed append left the event_id permanently
-    /// deduped on replay while the status never recovered; here a mid-pair failure rolls both back.
+    /// Atomically append the accepted event AND upsert the session's live row in ONE transaction on
+    /// ONE connection, so the durable status can never diverge from the idempotency record. With the
+    /// two on separate connections a failed upsert AFTER a committed append left the event_id
+    /// permanently deduped on replay while the status never recovered; here a mid-pair failure rolls
+    /// both back.
     /// Returns the authoritative persisted status when the event was newly inserted, or None when
     /// the event_id already existed (a full idempotent no-op — nothing appended or upserted).
     member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : StoredStatus option =
@@ -787,8 +512,6 @@ type SessionActivityStore
                 upsertCmd.CommandText <- upsertSql
                 bindUpsert upsertCmd stored
                 upsertCmd.ExecuteNonQuery() |> ignore
-                OverviewHistoryRollupStore.upsertObservationBounds conn tx row.SessionId row.Ts
-                OverviewHistoryRollupStore.invalidateOverviewRollup conn tx row.Ts
                 Some(readStoredBySession conn tx stored.SessionId)
             else
                 None
@@ -796,38 +519,19 @@ type SessionActivityStore
         tx.Commit()
         persisted
 
-    /// Advance `last_seen` and append the compact liveness point used by historical openness
-    /// reconstruction. Both writes share one transaction so live state and history cannot diverge;
-    /// stale or equal observations are a full no-op.
+    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. Stale or equal
+    /// observations are a full no-op.
     member _.RecordLiveness(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
         use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        let bind (cmd: SqliteCommand) =
-            cmd.Transaction <- tx
-            cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-            cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- touchSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
 
-        use touchCmd = conn.CreateCommand()
-        touchCmd.CommandText <- touchSql
-        bind touchCmd
-        let advanced = touchCmd.ExecuteNonQuery() = 1
-
-        if advanced then
-            use livenessCmd = conn.CreateCommand()
-            livenessCmd.CommandText <- appendLivenessSql
-            bind livenessCmd
-            let inserted = livenessCmd.ExecuteNonQuery() = 1
-
-            if inserted then
-                OverviewHistoryRollupStore.upsertObservationBounds conn tx sessionId lastSeen
-                OverviewHistoryRollupStore.invalidateOverviewRollup conn tx lastSeen
-
-        tx.Commit()
-
-    /// Persist the latest accepted context-window gauge and its liveness observation, inserting the
-    /// full session snapshot when a retained in-memory session outlives its pruned row. The gauge,
-    /// liveness row, and rollup invalidation commit atomically. Returns the authoritative persisted
-    /// state, including a newer gauge that may already have won the independent usage clock.
+    /// Persist the latest accepted context-window gauge and last_seen, inserting the full session
+    /// snapshot when a retained in-memory session outlives its pruned row. Returns the authoritative
+    /// persisted state, including a newer gauge that may already have won the independent usage clock.
     member _.UpsertContextUsage(stored: StoredStatus) : StoredStatus =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
@@ -835,19 +539,7 @@ type SessionActivityStore
         cmd.Transaction <- tx
         cmd.CommandText <- upsertContextUsageSql
         bindUpsert cmd stored
-        let accepted = cmd.ExecuteNonQuery() = 1
-
-        if accepted then
-            use livenessCmd = conn.CreateCommand()
-            livenessCmd.Transaction <- tx
-            livenessCmd.CommandText <- appendLivenessSql
-            livenessCmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
-            livenessCmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
-            let inserted = livenessCmd.ExecuteNonQuery() = 1
-
-            if inserted then
-                OverviewHistoryRollupStore.upsertObservationBounds conn tx stored.SessionId stored.LastSeen
-                OverviewHistoryRollupStore.invalidateOverviewRollup conn tx stored.LastSeen
+        cmd.ExecuteNonQuery() |> ignore
 
         let persisted = readStoredBySession conn tx stored.SessionId
         tx.Commit()
@@ -907,166 +599,15 @@ type SessionActivityStore
     /// Retention: drop events older than `cutoff` and session rows last seen before it. Returns the
     /// total number of rows deleted across both tables.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
-        lock overviewMaintenanceGate (fun () ->
-            use conn = openConn ()
-            use tx = conn.BeginTransaction()
-            use cmd = conn.CreateCommand()
-            cmd.Transaction <- tx
-            cmd.CommandText <- pruneSql
-            cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-            let deleted = cmd.ExecuteNonQuery()
-            tx.Commit()
-            deleted)
-
-    /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
-    /// run concurrently with the mailbox writer.
-    member _.QueryWindow(startTime: DateTimeOffset, endTime: DateTimeOffset) : ActivityEventRow list =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryWindowSql
-        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
-        use reader = cmd.ExecuteReader()
-
-        readRows reader readEventRow []
-
-    /// History events in [startTime, endTime], plus the latest pre-window status only for sessions
-    /// observed during the window or its openness lookback.
-    member _.QueryHistoryWindow(startTime: DateTimeOffset, endTime: DateTimeOffset) : ActivityEventRow list =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryHistoryWindowSql
-        cmd.Parameters.AddWithValue("$lookback", isoUtc (startTime - openWindow)) |> ignore
-        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
-        use reader = cmd.ExecuteReader()
-
-        readRows reader readEventRow []
-
-    /// Liveness-only points in [startTime, endTime], oldest first. These remain separate from
-    /// activity_events because they extend openness without changing status or skill.
-    member _.QueryLiveness(startTime: DateTimeOffset, endTime: DateTimeOffset) : (SessionId * DateTimeOffset) list =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryLivenessSql
-        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
-        use reader = cmd.ExecuteReader()
-
-        readRows reader (fun row -> SessionId(row.GetString 0), parseIso (row.GetString 1)) []
-
-    /// Read every durable input for one Overview history response from one WAL snapshot. The
-    /// optional boundary callback is an internal deterministic test seam for committing a writer
-    /// after the status read but before the liveness read.
-    member internal _.QueryOverviewHistoryInputs
-        (
-            startTime: DateTimeOffset,
-            endTime: DateTimeOffset,
-            ?beforeLivenessRead: unit -> unit
-        ) : OverviewHistoryInputs =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction(deferred = true)
-
-        let queryRows sql bind map =
-            use cmd = conn.CreateCommand()
-            cmd.Transaction <- tx
-            cmd.CommandText <- sql
-            bind cmd
-            use reader = cmd.ExecuteReader()
-            readRows reader map []
-
-        let queryRow sql bind map =
-            queryRows sql bind map |> List.tryHead
-
-        let bindStart (cmd: SqliteCommand) =
-            cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-
-        let bindRange (cmd: SqliteCommand) =
-            bindStart cmd
-            cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
-
-        let taskSnapshots =
-            (queryRow
-                queryTaskSnapshotBeforeSql
-                bindStart
-                (fun row -> parseIso (row.GetString 0), parseTasks (row.GetString 1))
-             |> Option.toList)
-            @ queryRows
-                queryTaskSnapshotsSql
-                bindRange
-                (fun row -> parseIso (row.GetString 0), parseTasks (row.GetString 1))
-
-        let events =
-            queryRows
-                queryHistoryWindowSql
-                (fun cmd ->
-                    cmd.Parameters.AddWithValue("$lookback", isoUtc (startTime - openWindow)) |> ignore
-                    bindRange cmd)
-                readEventRow
-
-        defaultArg beforeLivenessRead ignore ()
-
-        let liveness =
-            queryRows
-                queryLivenessSql
-                (fun cmd ->
-                    cmd.Parameters.AddWithValue("$start", isoUtc (startTime - openWindow)) |> ignore
-                    cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore)
-                (fun row -> SessionId(row.GetString 0), parseIso (row.GetString 1))
-
-        tx.Commit()
-
-        { TaskSnapshots = taskSnapshots
-          Events = events
-          Liveness = liveness }
-
-    /// Append one Tasks (beads) history snapshot — the count-only projection, logged only on change by
-    /// the scheduler. The Agents dimension is NOT stored here: it is derived on read from
-    /// `activity_events` (the push event stream), so only Tasks are snapshot-based.
-    member _.AppendTaskSnapshot(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : unit =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
-        appendTaskSnapshot conn tx ts tasks
-        OverviewHistoryRollupStore.invalidateOverviewRollup conn tx ts
+        use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
+        cmd.CommandText <- pruneSql
+        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+        let deleted = cmd.ExecuteNonQuery()
         tx.Commit()
-
-    member _.AppendTaskSnapshotIfChanged(ts: DateTimeOffset, tasks: OverviewData.TaskCount list) : bool =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        let appended = appendTaskSnapshotIfChanged conn tx ts tasks
-        tx.Commit()
-        appended
-
-    /// The Tasks history substrate: task snapshots with `ts` in [startTime, endTime], oldest first.
-    /// Merged with the event-derived Agents history into the OverviewSnapshot stream on read.
-    member _.QueryTaskSnapshots(startTime: DateTimeOffset, endTime: DateTimeOffset) : (DateTimeOffset * OverviewData.TaskCount list) list =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryTaskSnapshotsSql
-        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
-        use reader = cmd.ExecuteReader()
-
-        readRows reader (fun row -> parseIso (row.GetString 0), parseTasks (row.GetString 1)) []
-
-    member _.QueryLatestTaskSnapshot() : (DateTimeOffset * OverviewData.TaskCount list) option =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryLatestTaskSnapshotSql
-        use reader = cmd.ExecuteReader()
-
-        if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
-        else None
-
-    member _.QueryTaskSnapshotBefore(startTime: DateTimeOffset) : (DateTimeOffset * OverviewData.TaskCount list) option =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryTaskSnapshotBeforeSql
-        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-        use reader = cmd.ExecuteReader()
-
-        if reader.Read() then Some(parseIso (reader.GetString 0), parseTasks (reader.GetString 1))
-        else None
+        deleted
 
     interface IDisposable with
         member _.Dispose() = keepAlive.Dispose()

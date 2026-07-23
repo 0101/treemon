@@ -45,13 +45,12 @@ type ServerLifecycleTests() =
                 finally
                     (components.Service :> IDisposable).Dispose()
 
-                let events =
-                    components.Store.QueryWindow(
-                        occurredAt - TimeSpan.FromSeconds 1.0,
-                        occurredAt + TimeSpan.FromSeconds 1.0
-                    )
-
-                Assert.That(events |> List.map _.EventId, Is.EqualTo([ EventId "lifecycle-event" ]))
+                Assert.That(
+                    scalarInt
+                        path
+                        "SELECT count(*) FROM activity_events WHERE event_id = 'lifecycle-event';",
+                    Is.EqualTo 1
+                )
             finally
                 (components.Store :> IDisposable).Dispose())
 
