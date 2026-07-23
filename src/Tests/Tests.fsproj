@@ -68,7 +68,6 @@
     <Compile Include="ActivityClassifierTests.fs" />
     <Compile Include="OverviewDataTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
-    <Compile Include="OverviewTestHelpers.fs" />
     <Compile Include="OverviewSnapshotStoreTests.fs" />
     <Compile Include="OverviewHistoryApiTests.fs" />
     <Compile Include="OverviewSnapshotCaptureTests.fs" />

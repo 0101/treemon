@@ -244,6 +244,7 @@ type OverviewBandE2ETests() =
     [<SetUp>]
     member this.OpenOverview() =
         task {
+            do! this.Page.Clock.InstallAsync()
             let! _ = this.Page.GotoAsync(viteUrl)
             do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
 
@@ -689,6 +690,7 @@ type OverviewBandE2ETests() =
             do! toggle.ClickAsync()
             let! _ = initialResponse
             do! Assertions.Expect(charts).ToHaveCountAsync(2)
+            do! this.Page.Clock.FastForwardAsync(31_000L)
             let! refreshRoute = delayedRefresh.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
 
             do! svg.ScrollIntoViewIfNeededAsync()
