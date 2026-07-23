@@ -117,6 +117,12 @@ serving. A session with an unfinished background agent therefore returns as Work
 for a new SDK event. A session that has never reported usage (including a row migrated from the old
 schema) still renders the plain status dot.
 
+If that session later goes stale because the CLI crashed, the first accepted report for the resumed
+session closes every previously-active background lifecycle before refreshing `LastSeen` and folding
+the new report. The cleanup is persisted and mirrored into the live map, so old agents cannot
+reappear merely because `--resume` reused the same session id; later `turn_ended` or `went_idle`
+reports can settle Idle normally.
+
 ## Technical Approach
 
 ### Domain model (make illegal states unrepresentable)
@@ -262,6 +268,11 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   creates or updates an inactive lifecycle row. A later older start cannot resurrect it.
 - Accepted lifecycle reports advance `UpdatedAt` and `LastSeen` monotonically for representative
   selection and openness, while preserving all parent-authored footer and activity fields.
+- Before any report path advances a stale session's `LastSeen`, the service terminalizes all known
+  active background-agent rows in one store transaction and folds the report onto the returned
+  authoritative projection. The terminal boundary is immediately before the incoming event time,
+  so delayed starts from the crashed run remain inactive while the incoming report may itself begin
+  new background work.
 - `heartbeat` is liveness-only: it advances `last_seen` for an existing session without folding,
   changing `updated_at`, influencing representative-session selection, or appending history.
   `usage_info` arrives only on the live SDK stream but is durably status-preserving: it persists
@@ -455,6 +466,10 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   active starts only. Terminal clocks remain in SQLite for the 14-day activity-history/replay
   window; pruning atomically advances a persisted floor before deleting them, so reports outside
   the supported window cannot resurrect completed agents.
+- **A stale resume ends the crashed run before restoring liveness.** Every report path shares one
+  pre-fold stale-session check. Known active agents receive durable terminal clocks immediately
+  before the resumed report and the cleaned row replaces the live projection, preventing the reused
+  session id from reviving crashed work while preserving genuinely new starts.
 - **No durable `Done`.** A finished turn (`turn_ended`) reads as Idle; the next `turn_start` re-asserts
   Working within ≤0.1 s, so the mid-loop Idle window is invisible to polling. This matches what the CLI
   actually models (Working / WaitingForUser / Idle).

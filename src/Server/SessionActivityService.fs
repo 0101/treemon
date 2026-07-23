@@ -298,11 +298,33 @@ type SessionActivityService(
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
     // the scheduler. Returns the new in-memory live map.
     let apply (live: Map<SessionId, StoredStatus>) (report: SessionActivityReport) : Map<SessionId, StoredStatus> =
+        let preparePrior (prior: StoredStatus) =
+            if
+                not (Map.isEmpty prior.Status.BackgroundAgents)
+                && report.OccurredAt - prior.LastSeen > stalenessTimeout
+            then
+                // Close the crashed run immediately before this report. The current report may itself
+                // be a new background start (even reusing a tool id), so its timestamp must remain newer.
+                { prior with Status.BackgroundAgents = Map.empty },
+                Some(report.OccurredAt.AddTicks(-1L))
+            else
+                prior, None
+
+        let livePrior =
+            live
+            |> Map.tryFind report.SessionId
+            |> Option.map preparePrior
+
+        let priorForFold () =
+            livePrior
+            |> Option.orElseWith (fun () ->
+                store.StatusBySession report.SessionId
+                |> Option.map preparePrior)
+
         let foldReportState () =
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let prepared = priorForFold ()
+            let prior = prepared |> Option.map fst
+            let closeActiveAt = prepared |> Option.bind snd
             let status =
                 prior
                 |> Option.map _.Status
@@ -322,7 +344,7 @@ type SessionActivityService(
                       UpdatedAt = DateTimeOffset.MinValue
                       LastSeen = report.OccurredAt
                       ContextUsageAt = None }
-            prior, status, stored
+            prior, status, stored, closeActiveAt
 
         match report.Event with
         | Heartbeat ->
@@ -332,13 +354,19 @@ type SessionActivityService(
             // real event and dropping it (F20), and from inflating activity_events with synthetic rows
             // (F14). A heartbeat for a session with no prior event is ignored — there is nothing live to
             // keep alive.
-            match live |> Map.tryFind report.SessionId with
+            match livePrior with
             | None -> live
-            | Some prior ->
+            | Some(prior, closeActiveAt) ->
                 let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }
-                store.TouchLastSeen(report.SessionId, bumped.LastSeen)
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
-                live |> Map.add report.SessionId bumped
+                let persisted =
+                    match closeActiveAt with
+                    | Some closedAt ->
+                        store.TouchLastSeenAfterStale(report.SessionId, bumped.LastSeen, closedAt)
+                    | None ->
+                        store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                        bumped
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                live |> Map.add report.SessionId persisted
         | UsageInfo(currentTokens, tokenLimit) ->
             // A pure context-window gauge on its OWN order path, DECOUPLED from the status
             // last-write-wins clock (UpdatedAt). Sharing that clock let a usage report's timestamp
@@ -347,9 +375,9 @@ type SessionActivityService(
             // heartbeat, it never moves UpdatedAt and never appends a history row; it is ordered only
             // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
             // to — a usage report for a session with no prior status is dropped (nothing to gauge).
-            match live |> Map.tryFind report.SessionId with
+            match livePrior with
             | None -> live
-            | Some prior ->
+            | Some(prior, closeActiveAt) ->
                 // Usage LWW: a snapshot older than the one already held is ignored, so an out-of-order
                 // (delayed) older gauge can never clobber a fresher reading.
                 let isStaleUsage =
@@ -366,7 +394,10 @@ type SessionActivityService(
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
-                    let persisted = store.UpsertContextUsage bumped
+                    let persisted =
+                        match closeActiveAt with
+                        | Some closedAt -> store.UpsertContextUsageAfterStale(bumped, closedAt)
+                        | None -> store.UpsertContextUsage bumped
                     scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
                     live |> Map.add report.SessionId persisted
         | TitleBootstrap _ ->
@@ -375,13 +406,18 @@ type SessionActivityService(
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
-            let _, _, stored = foldReportState ()
-            store.UpsertStatus stored
-            scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
-            live |> Map.add report.SessionId stored
+            let _, _, stored, closeActiveAt = foldReportState ()
+            let persisted =
+                match closeActiveAt with
+                | Some closedAt -> store.UpsertStatusAfterStale(stored, closedAt)
+                | None ->
+                    store.UpsertStatus stored
+                    stored
+            scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+            live |> Map.add report.SessionId persisted
         | BackgroundAgentStarted(toolCallId, at)
         | BackgroundAgentFinished(toolCallId, at) ->
-            let prior, status, stored = foldReportState ()
+            let prior, status, stored, closeActiveAt = foldReportState ()
             let _, rowState = historyState prior report status
             let orderedStored =
                 { stored with
@@ -408,7 +444,7 @@ type SessionActivityService(
 
             let replayAfter = replayNow () - retentionPeriod
 
-            match store.AppendBackgroundAgentAndUpsert(eventRow, orderedStored, toolCallId, lifecycle, replayAfter) with
+            match store.AppendBackgroundAgentAndUpsert(eventRow, orderedStored, toolCallId, lifecycle, replayAfter, closeActiveAt) with
             | None -> live
             | Some persisted ->
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
@@ -420,7 +456,7 @@ type SessionActivityService(
             // Interaction clocks and activity fields are ordered independently from lifecycle status.
             // Ask events merge even when older while advancing UpdatedAt only forward; activity fields
             // preserve UpdatedAt so they cannot block an older lifecycle transition.
-            let _, status, stored = foldReportState ()
+            let _, status, stored, closeActiveAt = foldReportState ()
             let orderedStored =
                 match report.Event with
                 | AwaitingUserInput _
@@ -439,16 +475,15 @@ type SessionActivityService(
                   Skill = status.Skill
                   Ts = report.OccurredAt }
 
-            match store.AppendAndUpsert(eventRow, orderedStored) with
+            match store.AppendAndUpsert(eventRow, orderedStored, closeActiveAt) with
             | None -> live
             | Some persisted ->
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
                 live |> Map.add report.SessionId persisted
         | _ ->
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let prepared = priorForFold ()
+            let prior = prepared |> Option.map fst
+            let closeActiveAt = prepared |> Option.bind snd
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
             let newStatus = SessionActivity.fold priorStatus report.Event
 
@@ -494,12 +529,16 @@ type SessionActivityService(
             // status can never diverge on a mid-pair failure. A duplicate event_id returns None
             // (nothing appended or upserted), while a new event returns the authoritative persisted
             // row so retained context cannot diverge from the live maps.
-            match store.AppendAndUpsert(eventRow, stored) with
+            match store.AppendAndUpsert(eventRow, stored, closeActiveAt) with
             | None -> live
-            | Some _ when isOutOfOrder ->
+            | Some persisted when isOutOfOrder ->
                 // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
                 // history substrate but must not regress the live fold state or the shown card.
-                live
+                match closeActiveAt with
+                | Some _ ->
+                    scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                    live |> Map.add report.SessionId persisted
+                | None -> live
             | Some persisted ->
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
                 live |> Map.add report.SessionId persisted

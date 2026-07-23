@@ -115,6 +115,21 @@ let private schedulerStatus (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     let state = agent.PostAndReply RefreshScheduler.GetState
     state.SessionStatuses |> Map.tryFind (SessionId sid)
 
+let private resumePathEvent path at =
+    match path with
+    | "status" -> TurnStarted
+    | "heartbeat" -> Heartbeat
+    | "usage" -> UsageInfo(120000, 200000)
+    | "activity" -> TitleReported { Text = "Resumed session"; At = at }
+    | "background" -> BackgroundAgentFinished("other-tool", at)
+    | other -> invalidArg (nameof path) $"unknown resume path: {other}"
+
+let private idleEvent kind =
+    match kind with
+    | "turn_ended" -> TurnEnded
+    | "went_idle" -> WentIdle
+    | other -> invalidArg (nameof kind) $"unknown idle event: {other}"
+
 
 // ── DTO → domain parse ────────────────────────────────────────────────────────
 [<TestFixture>]
@@ -619,6 +634,157 @@ type IngestTests() =
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(events |> List.map _.Kind, Is.EqualTo([ "background_agent_started" ]))))
 
+    [<TestCase("status", "turn_ended")>]
+    [<TestCase("status", "went_idle")>]
+    [<TestCase("heartbeat", "turn_ended")>]
+    [<TestCase("heartbeat", "went_idle")>]
+    [<TestCase("usage", "turn_ended")>]
+    [<TestCase("usage", "went_idle")>]
+    [<TestCase("activity", "turn_ended")>]
+    [<TestCase("activity", "went_idle")>]
+    [<TestCase("background", "turn_ended")>]
+    [<TestCase("background", "went_idle")>]
+    member _.``the first report after a stale crash closes old agents and later idle settles``(
+        resumePath: string,
+        terminalKind: string
+    ) =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-stale-resume-{Guid.NewGuid()}")
+        let staleLastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
+        let oldStart = staleLastSeen - TimeSpan.FromMinutes 1.0
+
+        let seed (store: SessionActivityStore) =
+            store.UpsertStatus
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  Status = emptyStatus
+                  UpdatedAt = oldStart
+                  LastSeen = staleLastSeen
+                  ContextUsageAt = None }
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "crashed-tool",
+                { StartedAt = Some oldStart
+                  FinishedAt = None }
+            )
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, agent, store) ->
+            svc.Start()
+            svc.Submit(mkReport "s1" worktree "resume" (now.ToString("O")) (resumePathEvent resumePath now))
+            let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durableAfterResume = store.StatusBySession(SessionId "s1") |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(resumed.Status.BackgroundAgents, Is.Empty, "the live fold drops the crashed agent")
+                Assert.That(durableAfterResume.Status.BackgroundAgents, Is.Empty, "the durable lifecycle is terminalized")
+                Assert.That(resumed.LastSeen, Is.EqualTo now, "the resume report refreshes liveness only after cleanup")
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some resumed)))
+
+            svc.Submit(mkReport "s1" worktree "new-turn" (now.AddSeconds(1.0).ToString("O")) TurnStarted)
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "settle"
+                    (now.AddSeconds(2.0).ToString("O"))
+                    (idleEvent terminalKind))
+
+            let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durableSettled = store.StatusBySession(SessionId "s1") |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus durableSettled.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some settled))))
+
+    [<Test>]
+    member _.``fresh reports preserve an active background agent``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-fresh-background-{Guid.NewGuid()}")
+        let startedAt = now.AddSeconds(-30.0)
+
+        let seed (store: SessionActivityStore) =
+            store.UpsertStatus
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  Status = emptyStatus
+                  UpdatedAt = startedAt
+                  LastSeen = startedAt
+                  ContextUsageAt = None }
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "tool-1",
+                { StartedAt = Some startedAt
+                  FinishedAt = None }
+            )
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, _, store) ->
+            svc.Start()
+            svc.Submit(mkReport "s1" worktree "idle" (now.ToString("O")) TurnEnded)
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durable = store.StatusBySession(SessionId "s1") |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(live.Status.BackgroundAgents, Is.EqualTo(Map.ofList [ "tool-1", startedAt ]))
+                Assert.That(durable.Status.BackgroundAgents, Is.EqualTo live.Status.BackgroundAgents)
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)))
+
+    [<Test>]
+    member _.``a stale resume may start new background work with the same tool id``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-stale-restart-{Guid.NewGuid()}")
+        let staleLastSeen = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
+        let oldStart = staleLastSeen - TimeSpan.FromMinutes 1.0
+
+        let seed (store: SessionActivityStore) =
+            store.UpsertStatus
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  Status = emptyStatus
+                  UpdatedAt = oldStart
+                  LastSeen = staleLastSeen
+                  ContextUsageAt = None }
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "tool-1",
+                { StartedAt = Some oldStart
+                  FinishedAt = None }
+            )
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, _, store) ->
+            svc.Start()
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "resumed-start"
+                    (now.ToString("O"))
+                    (BackgroundAgentStarted("tool-1", now)))
+
+            let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(resumed.Status.BackgroundAgents, Is.EqualTo(Map.ofList [ "tool-1", now ]))
+
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "resumed-finish"
+                    (now.AddSeconds(1.0).ToString("O"))
+                    (BackgroundAgentFinished("tool-1", now.AddSeconds(1.0))))
+            svc.Submit(mkReport "s1" worktree "idle" (now.AddSeconds(2.0).ToString("O")) WentIdle)
+
+            let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durable = store.StatusBySession(SessionId "s1") |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(durable, Is.EqualTo settled)))
+
     [<Test>]
     member _.``background lifecycle preserves parent activity and footer fields``() =
         let parent =
@@ -784,7 +950,15 @@ type IngestTests() =
 
         withServiceSeeded
             "C:/wt/a"
-            (fun store -> store.UpsertStatus retained)
+            (fun store ->
+                store.UpsertStatus retained
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "s1",
+                    "crashed-tool",
+                    { StartedAt = Some(ts "2026-03-01T08:01:00Z")
+                      FinishedAt = None }
+                )
+                |> ignore)
             (fun (svc, _, store) ->
                 let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
                 svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
@@ -797,12 +971,17 @@ type IngestTests() =
                     Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
                     Assert.That(hydrated.Status.LastUserMessage, Is.EqualTo retained.Status.LastUserMessage)
                     Assert.That(hydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
+                    Assert.That(hydrated.Status.BackgroundAgents, Is.Empty)
                     Assert.That(hydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
                     Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
 
                 let durable = store.StatusBySession(SessionId "s1") |> Option.get
                 Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row")
-                Assert.That(store.QueryWindow(ts "2026-03-01T07:00:00Z", ts "2026-03-01T11:00:00Z"), Is.Empty))
+                Assert.That(store.QueryWindow(ts "2026-03-01T07:00:00Z", ts "2026-03-01T11:00:00Z"), Is.Empty)
+
+                svc.Submit(mkReport "s1" "C:/wt/a" "idle" "2026-03-01T10:30:01Z" WentIdle)
+                let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+                Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``an older title bootstrap cannot overwrite a newer live title``() =

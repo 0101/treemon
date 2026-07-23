@@ -369,6 +369,16 @@ WHERE session_id = $sid
 ORDER BY tool_call_id;
 """
 
+let private closeActiveBackgroundAgentsSql =
+    """
+UPDATE background_agent_lifecycle
+SET finished_at = $closedAt
+WHERE session_id = $sid
+  AND started_at IS NOT NULL
+  AND started_at < $closedAt
+  AND (finished_at IS NULL OR started_at > finished_at);
+"""
+
 let private liveBackgroundAgentsSql =
     """
 SELECT lifecycle.session_id, lifecycle.tool_call_id, lifecycle.started_at
@@ -701,6 +711,19 @@ let private advanceSessionBackgroundAgentReplay
     cmd.Parameters.AddWithValue("$replayAfter", isoUtc replayAfter) |> ignore
     cmd.ExecuteNonQuery() |> ignore
 
+let private closeActiveBackgroundAgents
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    (sessionId: SessionId)
+    (closedAt: DateTimeOffset)
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- closeActiveBackgroundAgentsSql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    cmd.Parameters.AddWithValue("$closedAt", isoUtc closedAt) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
 // --- Store ------------------------------------------------------------------------------------
 
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
@@ -744,6 +767,19 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
         cmd.ExecuteNonQuery() |> ignore
         c
 
+    let updateAfterStale
+        (sessionId: SessionId)
+        (closedAt: DateTimeOffset)
+        (write: SqliteConnection -> SqliteTransaction -> unit)
+        =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction()
+        closeActiveBackgroundAgents conn tx sessionId closedAt
+        write conn tx
+        let persisted = readStoredBySession observeBackgroundAgentRead conn tx sessionId
+        tx.Commit()
+        persisted
+
     new(dbPath: string) = new SessionActivityStore(dbPath, ignore)
 
     static member internal CreateWithBackgroundAgentReadObserver(
@@ -761,6 +797,15 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
         bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
 
+    /// Close stale active lifecycle and upsert a state-only report in the same transaction.
+    member _.UpsertStatusAfterStale(stored: StoredStatus, closedAt: DateTimeOffset) : StoredStatus =
+        updateAfterStale stored.SessionId closedAt (fun conn tx ->
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- upsertSql
+            bindUpsert cmd stored
+            cmd.ExecuteNonQuery() |> ignore)
+
     /// Append a raw event. Returns true if inserted, false if the event_id already existed
     /// (INSERT OR IGNORE dedupe).
     member _.AppendEvent(row: ActivityEventRow) : bool =
@@ -776,7 +821,11 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
     /// deduped on replay while the status never recovered; here a mid-pair failure rolls both back.
     /// Returns the authoritative persisted status when the event was newly inserted, or None when
     /// the event_id already existed (a full idempotent no-op — nothing appended or upserted).
-    member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : StoredStatus option =
+    member _.AppendAndUpsert(
+        row: ActivityEventRow,
+        stored: StoredStatus,
+        closeActiveAt: DateTimeOffset option
+    ) : StoredStatus option =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
         use appendCmd = conn.CreateCommand()
@@ -787,6 +836,8 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
 
         let persisted =
             if inserted then
+                closeActiveAt
+                |> Option.iter (closeActiveBackgroundAgents conn tx stored.SessionId)
                 use upsertCmd = conn.CreateCommand()
                 upsertCmd.Transaction <- tx
                 upsertCmd.CommandText <- upsertSql
@@ -808,6 +859,20 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
         cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
         cmd.ExecuteNonQuery() |> ignore
+
+    /// Close stale active lifecycle and advance liveness in the same transaction.
+    member _.TouchLastSeenAfterStale(
+        sessionId: SessionId,
+        lastSeen: DateTimeOffset,
+        closedAt: DateTimeOffset
+    ) : StoredStatus =
+        updateAfterStale sessionId closedAt (fun conn tx ->
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- touchSql
+            cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+            cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+            cmd.ExecuteNonQuery() |> ignore)
 
     /// Merge one background agent's independent start/terminal clocks by event time. Each clock only
     /// moves forward, so duplicates and out-of-order delivery are idempotent. Returns active starts
@@ -836,7 +901,8 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
         stored: StoredStatus,
         toolCallId: string,
         lifecycle: BackgroundAgentLifecycle,
-        replayAfter: DateTimeOffset
+        replayAfter: DateTimeOffset,
+        closeActiveAt: DateTimeOffset option
     ) : StoredStatus option =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
@@ -848,6 +914,8 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
 
         let persisted =
             if inserted then
+                closeActiveAt
+                |> Option.iter (closeActiveBackgroundAgents conn tx stored.SessionId)
                 let effectiveReplayAfter =
                     readBackgroundAgentReplayAfter conn (Some tx) stored.SessionId
                     |> Option.fold max replayAfter
@@ -889,6 +957,18 @@ type SessionActivityStore private (dbPath: string, observeBackgroundAgentRead: u
         let persisted = readStoredBySession observeBackgroundAgentRead conn tx stored.SessionId
         tx.Commit()
         persisted
+
+    /// Close stale active lifecycle and persist the latest context gauge in the same transaction.
+    member _.UpsertContextUsageAfterStale(
+        stored: StoredStatus,
+        closedAt: DateTimeOffset
+    ) : StoredStatus =
+        updateAfterStale stored.SessionId closedAt (fun conn tx ->
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- upsertContextUsageSql
+            bindUpsert cmd stored
+            cmd.ExecuteNonQuery() |> ignore)
 
     /// Read one durable session row regardless of the live idle-window cutoff.
     member _.StatusBySession(sessionId: SessionId) : StoredStatus option =

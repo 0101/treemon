@@ -358,6 +358,51 @@ type BackgroundAgentLifecyclePersistenceTests() =
             ))
 
     [<Test>]
+    member _.``Closing active lifecycle persists terminal clocks and permits later resumed starts``() =
+        withStore (fun store ->
+            store.UpsertStatus(
+                storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+            )
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "tool-1",
+                lifecycle (Some "2026-03-01T10:01:00Z") None
+            )
+            |> ignore
+
+            let closed =
+                store.TouchLastSeenAfterStale(
+                    SessionId "s1",
+                    ts "2026-03-01T10:10:00Z",
+                    ts "2026-03-01T10:09:59.9999999Z"
+                )
+
+            let afterDelayedOldStart =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "s1",
+                    "tool-1",
+                    lifecycle (Some "2026-03-01T10:05:00Z") None
+                )
+
+            let afterResumedStart =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "s1",
+                    "tool-1",
+                    lifecycle (Some "2026-03-01T10:10:00Z") None
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(closed.Status.BackgroundAgents, Is.Empty)
+                Assert.That(closed.LastSeen, Is.EqualTo(ts "2026-03-01T10:10:00Z"))
+                Assert.That(afterDelayedOldStart, Is.Empty, "the persisted terminal dominates old delayed starts")
+                Assert.That(
+                    afterResumedStart,
+                    Is.EqualTo(Map.ofList [ "tool-1", ts "2026-03-01T10:10:00Z" ]),
+                    "a genuinely new start after the closure boundary remains active"
+                )))
+
+    [<Test>]
     member _.``Background lifecycle survives restart reconstruction for live sessions``() =
         withDbPath (fun dbPath ->
             (use store = new SessionActivityStore(dbPath)
@@ -438,7 +483,7 @@ type AppendAndUpsertTests() =
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
             let stored = storedOf "s1" "C:/wt/a" status "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
 
-            Assert.That(store.AppendAndUpsert(e, stored), Is.EqualTo(Some stored), "a new event returns the persisted row")
+            Assert.That(store.AppendAndUpsert(e, stored, None), Is.EqualTo(Some stored), "a new event returns the persisted row")
 
             let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
             Assert.That(events.Length, Is.EqualTo 1, "the event was appended")
@@ -451,7 +496,7 @@ type AppendAndUpsertTests() =
             let first = { emptyStatus with Status = SessionLevelStatus.Working }
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
             Assert.That(
-                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z", None)
                 |> Option.isSome,
                 Is.True
             )
@@ -460,7 +505,7 @@ type AppendAndUpsertTests() =
             // the append, so the status can never advance off a deduped event.
             let laterStatus = { emptyStatus with Status = SessionLevelStatus.WaitingForUser }
             Assert.That(
-                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z")
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z", None)
                 |> Option.isNone,
                 Is.True,
                 "a duplicate event_id reports ignored"
@@ -773,7 +818,7 @@ type PruneOldTests() =
             let row = eventOf "late-start" "expired-session" "background_agent_started" SessionLevelStatus.Working None "2026-03-01T08:30:00Z"
 
             let persisted =
-                store.AppendBackgroundAgentAndUpsert(row, stored, "tool-1", lateStart, cutoff)
+                store.AppendBackgroundAgentAndUpsert(row, stored, "tool-1", lateStart, cutoff, None)
                 |> Option.get
 
             Assert.Multiple(fun () ->
