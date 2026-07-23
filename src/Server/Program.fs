@@ -432,7 +432,12 @@ let main args =
                     async {
                         let! activeSessions = SessionManager.getActiveSessions sessionAgent
                         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-                        let inputs = WorktreeApi.loadRepoAssemblyInputs (Some store) rootPaths state
+                        let inputs =
+                            WorktreeApi.loadRepoAssemblyInputs
+                                System.DateTimeOffset.UtcNow
+                                (Some store)
+                                rootPaths
+                                state
                         let repos = WorktreeApi.assembleRepos inputs rootPaths activeSessionPaths state
                         return
                             OverviewData.aggregate repos

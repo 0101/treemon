@@ -106,10 +106,9 @@ type TaskCount = { Kind: TaskBucketKind; Count: int }
 /// for why this is distinct from the `Members`-carrying `AgentGroup`).
 type AgentCount = { Kind: AgentGroupKind; Count: int }
 
-/// One point in the Overview band's history: the moment it was captured plus the count-only task-bucket
-/// and agent-group rolls (Members dropped, Scale re-derived by the view). These are sampled inside the
-/// anchored response from `IWorktreeApi.getOverviewHistory` and reconciled from the push event store (Tasks from
-/// `task_snapshots`, Agents derived from `activity_events`; see Server.OverviewHistory).
+/// One canonical point in the Overview band's history: its UTC capture boundary plus the count-only
+/// task-bucket and agent-group rolls from the same live aggregate. Members are dropped and Scale is
+/// re-derived by the view.
 type OverviewSnapshot =
     { Timestamp: DateTimeOffset
       Tasks: TaskCount list

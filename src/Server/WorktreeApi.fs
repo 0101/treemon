@@ -274,6 +274,7 @@ type RepoAssemblyInputs =
       TestFailureLogPaths: Set<string> }
 
 let loadRepoAssemblyInputs
+    (now: DateTimeOffset)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
     (state: RefreshScheduler.DashboardState)
@@ -286,7 +287,7 @@ let loadRepoAssemblyInputs
         |> Seq.filter (SyncEngine.testFailureLogPath >> File.Exists)
         |> Set.ofSeq
 
-    { Now = DateTimeOffset.UtcNow
+    { Now = now
       IgnorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
       RetainedByWorktree =
         activityStore
@@ -297,7 +298,7 @@ let loadRepoAssemblyInputs
         |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root))
       TestFailureLogPaths = testFailureLogPaths }
 
-/// Pure RepoWorktrees assembly shared by the client poll and scheduler history projection.
+/// Pure RepoWorktrees assembly shared by the client poll and canonical Overview snapshot capture.
 let assembleRepos
     (inputs: RepoAssemblyInputs)
     (rootPaths: Map<RepoId, string>)
@@ -347,7 +348,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let inputs = loadRepoAssemblyInputs activityStore rootPaths state
+        let inputs = loadRepoAssemblyInputs DateTimeOffset.UtcNow activityStore rootPaths state
         let repos = assembleRepos inputs rootPaths activeSessionPaths state
 
         return

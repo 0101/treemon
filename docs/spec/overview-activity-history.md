@@ -146,6 +146,7 @@ history work inside its task loop.
 | `src/Shared/OverviewData.fs` | Canonical aggregate, count types, windows, and response |
 | `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract |
 | `src/Server/OverviewSnapshotStore.fs` | Direct snapshot schema, migration, retention, and bounded reads |
+| `src/Server/OverviewSnapshotCapture.fs` | Canonical boundary timing, shared projection, and atomic capture |
 | `src/Server/WorktreeApi.fs` | Shared repo assembly and bounded history query |
 | `src/Server/RefreshScheduler.fs` | Immutable live state and `GetState` |
 | `src/Server/Program.fs` | Capture lifecycle |
