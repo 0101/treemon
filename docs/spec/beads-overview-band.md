@@ -66,7 +66,9 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 - An all-empty band renders nothing.
 - The band has no per-card activity stripe; the band alone conveys activity, and the card red dot is
   unchanged.
-- The band is static — no hover, click, or greenlight interactions (deferred).
+- Each rendered agent-group column and task-bucket column is clickable. Selecting a column toggles
+  the band's single drill-down selection; panel content, close behavior, and worktree navigation are
+  defined in `docs/spec/overview-drilldown.md`.
 
 ### Task buckets (definitions)
 
@@ -273,7 +275,8 @@ Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.m
 band is chrome-less and dashboard-scoped; aggregate-only; agent **circles** + task **true-scale
 bars**; empty categories omitted; **Planned vs Queued** = open vs in_progress parent feature; Loose →
 Planned; **Done** = Σ closed; **archived worktrees excluded from the whole roll-up** (every task
-bucket and every agent group); static interactions; reuse the single `getBeadsData`
+bucket and every agent group); clickable group columns with drill-down delegated to
+`docs/spec/overview-drilldown.md`; reuse the single `getBeadsData`
 call site; running skill and persisted per-session context usage from the existing session scan.
 
 **Resolved during planning:**
@@ -337,6 +340,8 @@ call site; running skill and persisted per-session context usage from the existi
 - `docs/spec/canvas-pane.md` — the toggle/persistence pattern this band mirrors.
 - `docs/spec/beadspace-canvas.md` — the per-worktree beads canvas doc (distinct from this
   cross-worktree roll-up; may share the data layer).
+- `docs/spec/overview-drilldown.md` — selection, breakdown panels, and worktree navigation for the
+  clickable group columns.
 - `docs/spec/worktree-monitor.md` — dashboard architecture and domain types.
 
 ## Verification Strategy

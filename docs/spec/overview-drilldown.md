@@ -172,4 +172,4 @@ type OverviewSelection =
 
 ## Related Specs
 
-- `docs/spec/beads-overview-band.md` — the read-only band this extends.
+- `docs/spec/beads-overview-band.md` — the canonical live Overview band this extends.
