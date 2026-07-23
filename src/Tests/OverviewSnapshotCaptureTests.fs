@@ -9,6 +9,7 @@ open NUnit.Framework
 open OverviewData
 open Server
 open Server.OverviewSnapshotCapture
+open Server.OverviewSnapshotBoundary
 open Shared
 
 let private timeout = TimeSpan.FromSeconds 5.0
@@ -109,20 +110,22 @@ let private stopCapture (cancellation: CancellationTokenSource) (running: Task) 
 type OverviewSnapshotCaptureTests() =
 
     [<Test>]
-    member _.``next boundary is always the next future UTC 30-second boundary``() =
+    member _.``canonical boundary helper floors the current bucket and returns the next future bucket``() =
         let at second millisecond =
             DateTimeOffset(2026, 7, 23, 12, 0, second, millisecond, TimeSpan.Zero)
 
-        [ at 0 0, at 30 0
-          at 0 1, at 30 0
-          at 29 999, at 30 0
-          at 30 0, DateTimeOffset(2026, 7, 23, 12, 1, 0, TimeSpan.Zero) ]
-        |> List.iter (fun (now, expected) ->
-            Assert.That(nextBoundary now, Is.EqualTo expected))
+        [ at 0 0, at 0 0, at 30 0
+          at 0 1, at 0 0, at 30 0
+          at 29 999, at 0 0, at 30 0
+          at 30 0, at 30 0, DateTimeOffset(2026, 7, 23, 12, 1, 0, TimeSpan.Zero) ]
+        |> List.iter (fun (now, expectedFloor, expectedNext) ->
+            Assert.Multiple(fun () ->
+                Assert.That(floor now, Is.EqualTo expectedFloor)
+                Assert.That(next now, Is.EqualTo expectedNext)))
 
     [<Test>]
     member _.``one boundary uses one pinned projection and reduces tasks and agents from the same aggregate``() =
-        let boundary = nextBoundary initial
+        let boundary = next initial
         let calls = ConcurrentQueue<string>()
         let inserted = ConcurrentQueue<OverviewSnapshot>()
 
@@ -184,7 +187,7 @@ type OverviewSnapshotCaptureTests() =
         let cancellation, running =
             runCapture clock.Clock dependencies (fun _ _ -> ())
 
-        let firstBoundary = nextBoundary initial
+        let firstBoundary = next initial
         Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo firstBoundary)
         clock.AdvanceTo(firstBoundary.AddSeconds 30.0)
 
@@ -222,7 +225,7 @@ type OverviewSnapshotCaptureTests() =
                 dependencies
                 (fun boundary ex -> errors.Enqueue(boundary, ex.Message))
 
-        let firstBoundary = nextBoundary initial
+        let firstBoundary = next initial
         clock.NextWait().GetAwaiter().GetResult() |> ignore
         clock.AdvanceTo firstBoundary
 
@@ -267,7 +270,7 @@ type OverviewSnapshotCaptureTests() =
 
         let cancellation, running =
             runCapture clock.Clock dependencies (fun _ _ -> ())
-        let firstBoundary = nextBoundary initial
+        let firstBoundary = next initial
         Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo firstBoundary)
         clock.AdvanceTo firstBoundary
         Assert.That(
@@ -312,7 +315,7 @@ type OverviewSnapshotCaptureTests() =
 
         let cancellation, running =
             runCapture clock.Clock dependencies (fun _ _ -> ())
-        let boundary = nextBoundary initial
+        let boundary = next initial
         clock.NextWait().GetAwaiter().GetResult() |> ignore
         clock.AdvanceTo boundary
         projectionStarted.Task.WaitAsync(timeout).GetAwaiter().GetResult()

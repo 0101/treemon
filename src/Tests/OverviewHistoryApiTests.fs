@@ -5,6 +5,7 @@ open Microsoft.Data.Sqlite
 open NUnit.Framework
 open OverviewData
 open Server
+open Server.OverviewSnapshotBoundary
 open Server.OverviewSnapshotStore
 
 let private anchor = DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)
@@ -59,9 +60,9 @@ type OverviewHistoryApiTests() =
     member _.``empty snapshot store returns a successful current-grid anchor``() =
         Tests.SqliteTestDatabase.withDbPath "treemon-overview-api-empty" (fun path ->
             let store = OverviewSnapshotStore path
-            let before = floorBoundary DateTimeOffset.UtcNow
+            let before = floor DateTimeOffset.UtcNow
             let response = readHistory store HistoryWindow.Hours12
-            let after = floorBoundary DateTimeOffset.UtcNow
+            let after = floor DateTimeOffset.UtcNow
 
             Assert.Multiple(fun () ->
                 Assert.That(response.Snapshots, Is.Empty)

@@ -5,11 +5,6 @@ open System.Threading
 open System.Threading.Tasks
 open Shared
 
-[<Literal>]
-let private resolutionSeconds = 30L
-
-let private resolution = TimeSpan.FromSeconds(float resolutionSeconds)
-
 type internal CaptureClock =
     { UtcNow: unit -> DateTimeOffset
       WaitUntil: DateTimeOffset -> CancellationToken -> Async<unit> }
@@ -38,11 +33,6 @@ let private systemClock =
             if delay > TimeSpan.Zero then
                 do! Task.Delay(delay, cancellationToken) |> Async.AwaitTask
         } }
-
-let internal nextBoundary (now: DateTimeOffset) =
-    let unixSeconds = now.ToUnixTimeSeconds()
-    let boundary = unixSeconds - unixSeconds % resolutionSeconds + resolutionSeconds
-    DateTimeOffset.FromUnixTimeSeconds boundary
 
 let internal snapshotAt
     (boundary: DateTimeOffset)
@@ -99,7 +89,8 @@ let rec private runLoop
     =
     async {
         if not cancellationToken.IsCancellationRequested then
-            let boundary = nextBoundary (clock.UtcNow())
+            let boundary =
+                OverviewSnapshotBoundary.next (clock.UtcNow())
 
             try
                 do! waitUntilReached clock boundary cancellationToken
@@ -107,7 +98,7 @@ let rec private runLoop
                 if not cancellationToken.IsCancellationRequested then
                     let startedAt = clock.UtcNow()
 
-                    if startedAt < boundary + resolution then
+                    if startedAt < boundary + OverviewSnapshotBoundary.resolution then
                         try
                             do! captureBoundary dependencies boundary cancellationToken
                         with

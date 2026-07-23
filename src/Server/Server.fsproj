@@ -26,6 +26,7 @@
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
     <Compile Include="SqliteStorage.fs" />
+    <Compile Include="OverviewSnapshotBoundary.fs" />
     <Compile Include="OverviewSnapshotStore.fs" />
     <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />

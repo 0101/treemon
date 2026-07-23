@@ -7,9 +7,6 @@ open Shared
 open Server.SqliteStorage
 
 [<Literal>]
-let private resolutionSeconds = 30L
-
-[<Literal>]
 let private retentionSeconds = 72L * 60L * 60L
 
 [<Literal>]
@@ -31,22 +28,8 @@ let private deserialize<'T> value =
         [| countConverter |]
     )
 
-let private bucketOf parameterName (timestamp: DateTimeOffset) =
-    let bucket = timestamp.ToUnixTimeSeconds()
-
-    if bucket % resolutionSeconds <> 0L
-       || timestamp.ToUniversalTime() <> DateTimeOffset.FromUnixTimeSeconds bucket then
-        invalidArg parameterName "Overview snapshot timestamps must be exact 30-second boundaries."
-
-    bucket
-
 let private timestampOf bucket =
     DateTimeOffset.FromUnixTimeSeconds bucket
-
-let internal floorBoundary (timestamp: DateTimeOffset) =
-    timestamp.ToUnixTimeSeconds()
-    |> fun seconds -> seconds - seconds % resolutionSeconds
-    |> timestampOf
 
 let private stride =
     function
@@ -70,7 +53,7 @@ let private collapseEqualRuns snapshots =
     |> List.rev
 
 let private migrationSql =
-    """
+    $"""
 DROP TABLE IF EXISTS overview_history_staging;
 DROP TABLE IF EXISTS overview_history_rows;
 DROP TABLE IF EXISTS overview_history_session_bounds;
@@ -79,7 +62,7 @@ DROP TABLE IF EXISTS session_liveness;
 DROP TABLE IF EXISTS task_snapshots;
 
 CREATE TABLE IF NOT EXISTS overview_snapshots (
-    bucket INTEGER PRIMARY KEY CHECK (bucket % 30 = 0),
+    bucket INTEGER PRIMARY KEY CHECK (bucket %% {OverviewSnapshotBoundary.resolutionSeconds} = 0),
     tasks  TEXT NOT NULL,
     agents TEXT NOT NULL
 );
@@ -116,7 +99,11 @@ type OverviewSnapshotStore(dbPath: string) =
     /// Insert one canonical snapshot and prune only rows strictly older than its 72-hour cutoff.
     /// A duplicate bucket is a no-op and never overwrites the first committed observation.
     member _.Insert(snapshot: OverviewData.OverviewSnapshot) : bool =
-        let bucket = bucketOf (nameof snapshot.Timestamp) snapshot.Timestamp
+        let bucket =
+            OverviewSnapshotBoundary.bucketOf
+                (nameof snapshot.Timestamp)
+                snapshot.Timestamp
+
         let tasks = serialize snapshot.Tasks
         let agents = serialize snapshot.Agents
 
@@ -161,10 +148,13 @@ VALUES ($bucket, $tasks, $agents);
             anchor: DateTimeOffset,
             window: OverviewData.HistoryWindow
         ) : OverviewData.OverviewSnapshot list =
-        let anchorBucket = bucketOf (nameof anchor) anchor
+        let anchorBucket =
+            OverviewSnapshotBoundary.bucketOf (nameof anchor) anchor
+
         let startBucket =
             anchorBucket - int64 (OverviewData.HistoryWindow.duration window).TotalSeconds
-        let stepSeconds = resolutionSeconds * stride window
+        let stepSeconds =
+            OverviewSnapshotBoundary.resolutionSeconds * stride window
 
         use connection = openConnection ()
         use command = connection.CreateCommand()
@@ -199,10 +189,13 @@ LIMIT $limit;
             now: DateTimeOffset,
             window: OverviewData.HistoryWindow
         ) : OverviewData.OverviewHistoryResponse =
-        let emptyAnchor = floorBoundary now |> _.ToUnixTimeSeconds()
+        let emptyAnchor =
+            OverviewSnapshotBoundary.floor now |> _.ToUnixTimeSeconds()
+
         let durationSeconds =
             int64 (OverviewData.HistoryWindow.duration window).TotalSeconds
-        let stepSeconds = resolutionSeconds * stride window
+        let stepSeconds =
+            OverviewSnapshotBoundary.resolutionSeconds * stride window
 
         use connection = openConnection ()
         use command = connection.CreateCommand()
@@ -253,4 +246,4 @@ ORDER BY sampled.bucket;
                 { Anchor = anchor
                   Snapshots = snapshots |> List.rev |> collapseEqualRuns }
 
-        read (floorBoundary now) []
+        read (OverviewSnapshotBoundary.floor now) []

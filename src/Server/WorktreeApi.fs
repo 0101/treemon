@@ -88,7 +88,7 @@ let readOnlyApi
             async {
                 return
                     { OverviewData.OverviewHistoryResponse.Anchor =
-                        OverviewSnapshotStore.floorBoundary DateTimeOffset.UtcNow
+                        OverviewSnapshotBoundary.floor DateTimeOffset.UtcNow
                       Snapshots = [] }
             } }
 

@@ -70,6 +70,20 @@ ORDER BY name;
 type OverviewSnapshotStoreTests() =
 
     [<Test>]
+    member _.``store accepts only exact canonical snapshot boundaries``() =
+        withDbPath "treemon-overview-snapshot-boundaries" (fun path ->
+            let store = OverviewSnapshotStore path
+            Assert.That(store.Insert(snapshot anchor 1 1), Is.True)
+
+            [ anchor.AddSeconds 1.0; anchor.AddMilliseconds 1.0 ]
+            |> List.iter (fun timestamp ->
+                let error =
+                    Assert.Throws<ArgumentException>(fun () ->
+                        store.Insert(snapshot timestamp 2 2) |> ignore)
+
+                Assert.That(error.ParamName, Is.EqualTo "Timestamp")))
+
+    [<Test>]
     member _.``empty store has no latest anchor and returns an empty window``() =
         withDbPath "treemon-overview-snapshot-empty" (fun path ->
             let store = OverviewSnapshotStore path

@@ -106,11 +106,13 @@ the same implementation.
 
 ### Snapshot store and capture
 
-A small history store owns table creation, atomic insert/prune, bounded window reads, serialization,
-retention, insert-once behavior, and anchor-aligned sampling. Its latest-anchor and sampled-row read
-is one SQLite statement, so both come from the same read snapshot; equal runs are collapsed after
-the bounded read. A separate capture component owns canonical-boundary timing and obtains immutable
-scheduler state through `GetState`.
+A shared snapshot-boundary module owns the canonical resolution, exact-boundary validation, floor,
+and next-future-boundary arithmetic. The history store uses it for validation, sampling, and empty
+anchors while owning table creation, atomic insert/prune, bounded window reads, serialization,
+retention, and insert-once behavior. Its latest-anchor and sampled-row read is one SQLite statement,
+so both come from the same read snapshot; equal runs are collapsed after the bounded read. A
+separate capture component uses the same boundary module and obtains immutable scheduler state
+through `GetState`.
 
 Capture failures are logged and isolated to the affected boundary. The store has no staging,
 publication generations, recovery worker, or reconstruction dependency.
@@ -131,6 +133,7 @@ history work inside its task loop.
 | Authoritative data | The canonical `OverviewData.aggregate` result observed at capture time |
 | Storage | One durable SQLite `overview_snapshots` table |
 | Canonical resolution | 30 seconds |
+| Boundary arithmetic | One shared server module for capture, validation, sampling, and empty anchors |
 | Capture cadence | Independent fixed boundary loop |
 | Stored shape | Count-only tasks and agents captured atomically |
 | Retention | Exactly 72 hours |
@@ -148,8 +151,9 @@ history work inside its task loop.
 |---|---|
 | `src/Shared/OverviewData.fs` | Canonical aggregate, count types, windows, and response |
 | `src/Shared/WorktreeApi.fs` | `getOverviewHistory` API contract |
+| `src/Server/OverviewSnapshotBoundary.fs` | Canonical resolution and boundary arithmetic |
 | `src/Server/OverviewSnapshotStore.fs` | Direct snapshot schema, migration, retention, and bounded reads |
-| `src/Server/OverviewSnapshotCapture.fs` | Canonical boundary timing, shared projection, and atomic capture |
+| `src/Server/OverviewSnapshotCapture.fs` | Serial capture scheduling, shared projection, and atomic capture |
 | `src/Server/WorktreeApi.fs` | Shared repo assembly and bounded history query |
 | `src/Server/RefreshScheduler.fs` | Immutable live state and `GetState` |
 | `src/Server/Program.fs` | Capture lifecycle |
