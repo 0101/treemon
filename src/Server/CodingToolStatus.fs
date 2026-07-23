@@ -159,12 +159,6 @@ let private selectSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
         activeWinner
         |> Option.orElse (sessions |> StoredStatus.tryMostRecentActivity) }
 
-/// The exact session represented by the card footer: the active winner when one is running,
-/// otherwise the session with the greatest activity UpdatedAt.
-let selectFooterSessionId (now: DateTimeOffset) (sessions: StoredStatus list) : string option =
-    (selectSessions now sessions).Footer
-    |> Option.map (_.SessionId >> SessionId.value)
-
 let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
     let selection = selectSessions now sessions
 
@@ -225,8 +219,9 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       LastActivity = selection.ActiveWinner |> Option.map _.LastSeen }
 
 /// Add each worktree's durable representative to the live candidate set. Live rows win duplicate
-/// session ids; retained rows with distinct ids remain available for footer selection, while their
-/// own `LastSeen` still independently determines whether they contribute an open status dot.
+/// session ids; retained rows with distinct ids remain available for footer and auto-sync fallback
+/// selection, while their own `LastSeen` still independently determines whether they contribute an
+/// open status dot.
 let includeRetainedSessions (retained: Map<string, StoredStatus>) (live: StoredStatus seq) : StoredStatus seq =
     let addSession (sessions: Map<SessionId, StoredStatus>) (session: StoredStatus) =
         Map.add session.SessionId session sessions

@@ -65,7 +65,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Clicking the toggle updates the card optimistically and calls `IWorktreeApi.toggleAutoSync`; an API error restores the previous state. The card's `S` key binding invokes the same toggle action.
 - `autoSyncBranches` is intentionally not pruned when a worktree is archived or deleted. Branch-name reuse may restore the preference; avoiding cleanup machinery is preferred for this low-impact case.
 - When enabled, fresh Git observations request a sync when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
-- The prompt targets the same session selected for the card footer: the active winner when one is running, otherwise the session with the greatest activity `UpdatedAt` (see `docs/spec/session-status-push.md`).
+- The prompt targets the active open session when one is running; otherwise it targets the open
+  session with the greatest activity `UpdatedAt`. A retained/offline session identity is used only
+  when no open session exists (see `docs/spec/session-status-push.md`).
 - A live session receives the prompt immediately through `SessionBridge`; the extension serializes it through the same `enqueueSend` chain used by canvas messages, including while the session is busy.
 - `SessionBridge` POSTs a typed `{kind,prompt}` envelope. The extension passes `agent-prompt` text verbatim to `session.send`; `canvas` retains the existing `[canvas]` display/routing prefix.
 - With no live bridge session, Treemon opens a terminal and starts a new session with the sync prompt. A per-worktree in-flight guard prevents duplicate launches.
@@ -213,7 +215,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
-| `src/Server/AutoSync.fs` | Agent auto-sync prompt, footer-session selection, base-revision eligibility, and live-delivery/fallback orchestration |
+| `src/Server/AutoSync.fs` | Agent auto-sync prompt, open-session-first target selection, base-revision eligibility, and live-delivery/fallback orchestration |
 | `src/Server/CardEventLog.fs` | Transient post-fork lifecycle events surfaced on worktree cards through `getSyncStatus` |
 | `src/Server/SessionBridge.fs` | Generic session registration, liveness, queued prompt delivery, and forwarding |
 | `src/Extension/extension.mjs`, `session-prompt.mjs` | Session bridge HTTP receiver, serialized `session.send` queue, and typed prompt-transport decoding |
@@ -249,7 +251,10 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
 - Agent-driven auto-sync over a deterministic pipeline: one persistent preference delegates synchronization and conflict handling to the coding session instead of maintaining a second Git/test/push implementation.
-- Footer-selected session as the auto-sync target: reuses the session the card already represents rather than introducing another per-worktree session-selection rule.
+- Open-session-first auto-sync target: prefer the active open winner, then the greatest-`UpdatedAt`
+  open idle session; use retained/offline identity only when no open session exists. Delivery
+  liveness outranks footer identity so an open CLI receives the prompt instead of triggering an
+  unnecessary second session.
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
 - New session fallback: if no live bridge exists, launch a new prompted session immediately rather than leaving auto-sync dormant.
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
@@ -269,4 +274,4 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/contextual-actions.md` — contextual action buttons (fix comments, fix build, create PR) launched from card badges
 - `docs/spec/remoting-csrf-hardening.md` — Origin/Referer CSRF guard fronting the remoting and canvas POST surfaces (the create-worktree auto-launch made state-changing remoting an agent-execution sink)
 - `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
-- `docs/spec/session-status-push.md` — coding-tool session collapse and the footer-session selection reused by auto-sync
+- `docs/spec/session-status-push.md` — coding-tool session collapse and the related auto-sync target selection

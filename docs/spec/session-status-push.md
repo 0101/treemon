@@ -68,8 +68,9 @@ message — is sourced from the active winner, or otherwise the session with the
 therefore does **not** blank that session's retained footer fields; durable fallback keeps them
 available beyond the live window.
 
-The selected footer session is also the target for worktree auto-sync prompts. The selection rule
-remains owned here; the prompt is delivered by `SessionBridge`, while the reporting extension stays
+Worktree auto-sync uses a related but delivery-aware target pick: the active open winner first,
+otherwise the greatest-`UpdatedAt` open session, and only then a retained/offline identity when no
+open session exists. The prompt is delivered by `SessionBridge`, while the reporting extension stays
 passive and never calls `session.send`.
 
 The session title is the reliable activity source: after joining, subscribing, and replaying
@@ -87,6 +88,8 @@ A worktree's live sessions collapse to one card via two decoupled picks:
   so a newly-idled session cannot hide an actively-Working sibling.
 - **Footer** — the active winner if one runs, else the session with the greatest `UpdatedAt` of any
   status.
+- **Auto-sync target** — the active open winner if one runs, else the open session with the greatest
+  `UpdatedAt`; only when no session is open may the retained/footer identity be used.
 
 ### Overview "Agents" dimension
 
@@ -390,7 +393,9 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   collapsed status enters Idle and hold it.
 - **Footer decoupled from the dot.** Card messages/skill come from the active winner, otherwise the
   session with the greatest `UpdatedAt`; retained fallback covers sessions outside the live window.
-  Auto-sync reuses this selected session rather than defining another representative-session rule.
+- **Auto-sync prioritizes delivery liveness over footer identity.** It uses the active open winner,
+  then the greatest-`UpdatedAt` open idle session, and falls back to retained identity only when
+  nothing is open. This avoids launching a second session while an idle CLI can accept the prompt.
 - **Display pick ≠ footer pick ≠ resume pick.** Display = greatest-`UpdatedAt` *open active*; footer =
   active winner or greatest-`UpdatedAt` fallback; resume = greatest-`UpdatedAt` session from the
   durable store. `LastSeen` continues to drive openness, freshness, retention, and per-session dot

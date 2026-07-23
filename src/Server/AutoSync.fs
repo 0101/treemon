@@ -2,6 +2,8 @@ module Server.AutoSync
 
 open System
 open Shared
+open Server.SessionActivity
+open Server.SessionActivityStore
 
 type DeliveryRequest =
     { WorktreePath: WorktreePath
@@ -14,9 +16,19 @@ let prompt upstreamRemote baseBranch =
 let revision enabled (gitData: GitWorktree.GitData) =
     if enabled && gitData.MainBehindCount > 0 then gitData.BaseRevision else None
 
+let internal selectTargetSessionId (now: DateTimeOffset) (sessions: StoredStatus list) =
+    let openSessions =
+        sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
+
+    openSessions
+    |> pickActive _.Status StoredStatus.activityOrderKey
+    |> Option.orElseWith (fun () -> openSessions |> StoredStatus.tryMostRecentActivity)
+    |> Option.orElseWith (fun () -> sessions |> StoredStatus.tryMostRecentActivity)
+    |> Option.map (_.SessionId >> SessionId.value)
+
 let selectSessionId
     (activityStore: SessionActivityStore.SessionActivityStore option)
-    (liveSessions: SessionActivityStore.StoredStatus seq)
+    (liveSessions: StoredStatus seq)
     (path: string)
     =
     let retained =
@@ -28,7 +40,7 @@ let selectSessionId
     |> CodingToolStatus.includeRetainedSessions retained
     |> Seq.filter (fun stored -> WorktreePath.value stored.WorktreePath = path)
     |> Seq.toList
-    |> CodingToolStatus.selectFooterSessionId DateTimeOffset.UtcNow
+    |> selectTargetSessionId DateTimeOffset.UtcNow
 
 let deliver
     (tryDeliver: SessionBridge.SendRequest -> Async<bool>)

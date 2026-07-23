@@ -87,7 +87,7 @@ type AutoSyncSelectionTests() =
     let now = DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)
 
     [<Test>]
-    member _.``Active footer winner supplies the auto-sync session id``() =
+    member _.``Active open winner supplies the auto-sync session id``() =
         let active =
             storedSession
                 "active"
@@ -105,11 +105,11 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-1.0))
 
         Assert.That(
-            CodingToolStatus.selectFooterSessionId now [ newerIdle; active ],
+            selectTargetSessionId now [ newerIdle; active ],
             Is.EqualTo(Some "active"))
 
     [<Test>]
-    member _.``Greatest activity UpdatedAt supplies the idle footer session id``() =
+    member _.``Greatest activity UpdatedAt supplies the open idle auto-sync session id``() =
         let older =
             storedSession
                 "older"
@@ -127,7 +127,29 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-2.0))
 
         Assert.That(
-            CodingToolStatus.selectFooterSessionId now [ older; newer ],
+            selectTargetSessionId now [ older; newer ],
+            Is.EqualTo(Some "newer"))
+
+    [<Test>]
+    member _.``Greatest activity UpdatedAt supplies a retained id only when no session is open``() =
+        let older =
+            storedSession
+                "older"
+                "/repo/wt"
+                SessionLevelStatus.Idle
+                (now.AddMinutes(-2.0))
+                (now.AddMinutes(-20.0))
+
+        let newer =
+            storedSession
+                "newer"
+                "/repo/wt"
+                SessionLevelStatus.Idle
+                (now.AddMinutes(-1.0))
+                (now.AddMinutes(-10.0))
+
+        Assert.That(
+            selectTargetSessionId now [ older; newer ],
             Is.EqualTo(Some "newer"))
 
 [<TestFixture>]
@@ -244,6 +266,58 @@ type AutoSyncDeliveryTests() =
             Assert.That(
                 delivered,
                 Is.EqualTo(Some expected)))
+
+    [<Test>]
+    member _.``Open idle session beats newer retained session without fallback launch``() =
+        let root = tempDirectory ()
+
+        try
+            let now = DateTimeOffset.UtcNow
+            let path = "/repo/wt"
+            let openIdle =
+                storedSession
+                    "open-idle"
+                    path
+                    SessionLevelStatus.Idle
+                    (now.AddMinutes(-2.0))
+                    now
+
+            let newerClosed =
+                storedSession
+                    "newer-closed"
+                    path
+                    SessionLevelStatus.Idle
+                    (now.AddMinutes(-1.0))
+                    (now.AddMinutes(-10.0))
+
+            use store = new SessionActivityStore(Path.Combine(root, "session-activity.db"))
+            store.UpsertStatus newerClosed
+
+            let sessionId = selectSessionId (Some store) [ openIdle ] path
+
+            let tryDeliver (value: SessionBridge.SendRequest) =
+                async {
+                    Assert.That(value.SessionId, Is.EqualTo(Some "open-idle"))
+                    return true
+                }
+
+            let tryBeginLaunch _ = failwith "fallback launch guard must not run"
+            let launch _ _ = failwith "fallback launch must not run"
+
+            let accepted =
+                deliver
+                    tryDeliver
+                    tryBeginLaunch
+                    ignore
+                    launch
+                    { request with SessionId = sessionId }
+                |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(sessionId, Is.EqualTo(Some "open-idle"))
+                Assert.That(accepted, Is.True))
+        finally
+            if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
     member _.``No live bridge launches one prompted session and releases the guard``() =
