@@ -300,9 +300,14 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // block a slightly-earlier status transition (turn stuck Working), and in the reverse
             // arrival order let the status out-of-order guard discard the usage snapshot. So, like a
             // heartbeat, it never moves UpdatedAt and never appends an activity event; it is ordered only
-            // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
-            // to — a usage report for a session with no prior status is dropped (nothing to gauge).
-            match live |> Map.tryFind report.SessionId with
+            // against prior usage via its own ContextUsageAt clock. Like a heartbeat, it can revive
+            // retained durable state after restart; only a session with no prior status is dropped.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+
+            match prior with
             | None -> live
             | Some prior ->
                 // Usage LWW: a snapshot older than the one already held is ignored, so an out-of-order

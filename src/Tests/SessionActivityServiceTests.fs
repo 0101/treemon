@@ -663,6 +663,49 @@ type IngestTests() =
             | None -> Assert.Fail "the gauge was not fed to the scheduler")
 
     [<Test>]
+    member _.``usage rehydrates a retained durable session after restart``() =
+        let retained =
+            { SessionId = SessionId "s1"
+              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              Provider = CopilotCli
+              Status =
+                { emptyStatus with
+                    Status = SessionLevelStatus.WaitingForUser
+                    LastAssistantMessage = Some(msg "Which option?" "2026-03-01T08:00:00Z") }
+              UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LastSeen = ts "2026-03-01T08:00:00Z"
+              ContextUsageAt = None }
+        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+
+        withServiceSeeded
+            "C:/wt/a"
+            (fun store -> store.UpsertStatus retained)
+            (fun (svc, agent, store) ->
+                svc.Start()
+                Assert.That(
+                    svc.LiveSnapshot().ContainsKey(SessionId "s1"),
+                    Is.False,
+                    "the restart rebuild excludes retained sessions outside the idle window"
+                )
+
+                svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:30:00Z" (UsageInfo(usage.CurrentTokens, usage.TokenLimit)))
+                let rehydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+
+                Assert.Multiple(fun () ->
+                    Assert.That(rehydrated.Status.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
+                    Assert.That(rehydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
+                    Assert.That(rehydrated.Status.ContextUsage, Is.EqualTo(Some usage))
+                    Assert.That(rehydrated.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:30:00Z")))
+                    Assert.That(rehydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
+                    Assert.That(rehydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
+
+                Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some rehydrated))
+
+                match schedulerStatus agent "s1" with
+                | Some fed -> Assert.That(fed, Is.EqualTo rehydrated)
+                | None -> Assert.Fail "the rehydrated session was not fed to the scheduler")
+
+    [<Test>]
     member _.``a later usage report does not block a slightly-earlier status transition``() =
         withService "C:/wt/a" (fun (svc, _, _) ->
             // The gauge (10:00:05) is NEWER than the turn_ended (10:00:03) but arrives first. Sharing the
