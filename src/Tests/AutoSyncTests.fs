@@ -42,6 +42,7 @@ let private gitData path branch behind revision dirty : GitWorktree.GitData =
 [<Category("Fast")>]
 type AutoSyncPersistenceTests() =
 
+    // NUnit lifecycle field: setup creates the per-test directory and teardown consumes it, so it must span fixture members.
     let mutable root = ""
 
     [<SetUp>]
@@ -317,11 +318,14 @@ type AutoSyncDeliveryTests() =
 
     [<Test>]
     member _.``Live selected session receives the agent prompt without fallback launch``() =
-        let mutable delivered = None
+        let expected: SessionBridge.SendRequest =
+            { WorktreePath = "/repo/wt"
+              SessionId = Some "session-a"
+              Prompt = SessionBridge.Prompt.agentPrompt "Sync with upstream/main." }
 
-        let tryDeliver value =
+        let tryDeliver (value: SessionBridge.SendRequest) =
             async {
-                delivered <- Some value
+                Assert.That(value, Is.EqualTo expected)
                 return SessionBridge.DeliveryResult.Delivered
             }
 
@@ -337,15 +341,7 @@ type AutoSyncDeliveryTests() =
                 request
             |> Async.RunSynchronously
 
-        Assert.Multiple(fun () ->
-            Assert.That(accepted, Is.True)
-            let expected: SessionBridge.SendRequest =
-                { WorktreePath = "/repo/wt"
-                  SessionId = Some "session-a"
-                  Prompt = SessionBridge.Prompt.agentPrompt "Sync with upstream/main." }
-            Assert.That(
-                delivered,
-                Is.EqualTo(Some expected)))
+        Assert.That(accepted, Is.True)
 
     [<Test>]
     member _.``Open idle session beats newer retained session without fallback launch``() =
@@ -437,15 +433,20 @@ type AutoSyncDeliveryTests() =
     [<Test>]
     member _.``Registration grace expiry launches exactly one prompted session and releases the guard``() =
         // Callback probes cross async boundaries, so immutable values cannot capture invocation counts.
-        let mutable launched = None
-        let mutable completed = []
         let mutable deliveryAttempts = 0
         let mutable launchAttempts = 0
+        let launched =
+            TaskCompletionSource<WorktreePath * string>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let completed =
+            TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
 
         let launch path prompt =
             async {
                 launchAttempts <- launchAttempts + 1
-                launched <- Some(path, prompt)
+
+                if not (launched.TrySetResult(path, prompt)) then
+                    failwith "fallback launch must run exactly once"
+
                 return Ok ()
             }
 
@@ -458,7 +459,9 @@ type AutoSyncDeliveryTests() =
                     })
                 (fun () -> async { return () })
                 (fun _ -> async { return true })
-                (fun path -> completed <- path :: completed)
+                (fun path ->
+                    if not (completed.TrySetResult path) then
+                        failwith "launch completion must run exactly once")
                 launch
                 request
             |> Async.RunSynchronously
@@ -467,8 +470,12 @@ type AutoSyncDeliveryTests() =
             Assert.That(accepted, Is.True)
             Assert.That(deliveryAttempts, Is.EqualTo(2))
             Assert.That(launchAttempts, Is.EqualTo(1))
-            Assert.That(launched, Is.EqualTo(Some(WorktreePath "/repo/wt", "Sync with upstream/main.")))
-            Assert.That(completed, Is.EqualTo([ "/repo/wt" ])))
+            Assert.That(
+                launched.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
+                Is.EqualTo((WorktreePath "/repo/wt", "Sync with upstream/main.")))
+            Assert.That(
+                completed.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
+                Is.EqualTo("/repo/wt")))
 
     [<Test>]
     member _.``No selected session launches immediately without registration grace``() =
@@ -576,6 +583,7 @@ type AutoSyncDeliveryTests() =
 [<Category("Fast")>]
 type AutoSyncEndpointTests() =
 
+    // NUnit lifecycle fields: setup initializes per-test paths consumed by tests and teardown, so immutable locals cannot span those members.
     let mutable root = ""
     let mutable worktree = ""
 
