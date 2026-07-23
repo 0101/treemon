@@ -75,6 +75,10 @@ let private eventOf eid sid kind status skill t : ActivityEventRow =
       Skill = skill
       Ts = ts t }
 
+let private lifecycle startedAt finishedAt =
+    { StartedAt = startedAt |> Option.map ts
+      FinishedAt = finishedAt |> Option.map ts }
+
 let private find sid (rows: StoredStatus list) =
     rows |> List.find (fun r -> r.SessionId = SessionId sid)
 
@@ -236,6 +240,138 @@ type ContextUsagePersistenceTests() =
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
             Assert.That(row, Is.EqualTo(recreated)))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BackgroundAgentLifecyclePersistenceTests() =
+
+    [<Test>]
+    member _.``Lifecycle writes persist and return the authoritative session aggregate``() =
+        withStore (fun store ->
+            store.UpsertStatus(
+                storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+            )
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "tool-1",
+                lifecycle (Some "2026-03-01T10:01:00Z") None
+            )
+            |> ignore
+
+            let aggregate =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "s1",
+                    "tool-2",
+                    lifecycle None (Some "2026-03-01T10:02:00Z")
+                )
+
+            Assert.That(
+                aggregate,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "tool-1",
+                          lifecycle (Some "2026-03-01T10:01:00Z") None
+                          "tool-2",
+                          lifecycle None (Some "2026-03-01T10:02:00Z") ]
+                )
+            )
+
+            let stored = store.StatusBySession(SessionId "s1") |> Option.get
+            Assert.That(stored.Status.BackgroundAgents, Is.EqualTo(aggregate))
+            Assert.That(effectiveStatus stored.Status, Is.EqualTo SessionLevelStatus.Working))
+
+    [<Test>]
+    member _.``Duplicate and out-of-order lifecycle writes merge each clock by maximum event time``() =
+        withStore (fun store ->
+            store.UpsertStatus(
+                storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
+            )
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "tool-1",
+                lifecycle None (Some "2026-03-01T10:05:00Z")
+            )
+            |> ignore
+
+            let completionBeforeStart =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "s1",
+                    "tool-1",
+                    lifecycle (Some "2026-03-01T10:04:00Z") None
+                )
+
+            Assert.That(
+                effectiveStatus
+                    { emptyStatus with
+                        BackgroundAgents = completionBeforeStart },
+                Is.EqualTo SessionLevelStatus.Idle,
+                "an older late start must not resurrect an already-finished agent"
+            )
+
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "s1",
+                "tool-1",
+                lifecycle (Some "2026-03-01T10:06:00Z") (Some "2026-03-01T10:03:00Z")
+            )
+            |> ignore
+
+            let authoritative =
+                store.UpsertBackgroundAgentLifecycle(
+                    SessionId "s1",
+                    "tool-1",
+                    lifecycle (Some "2026-03-01T10:04:00Z") (Some "2026-03-01T10:05:00Z")
+                )
+
+            Assert.That(
+                authoritative,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "tool-1",
+                          lifecycle
+                              (Some "2026-03-01T10:06:00Z")
+                              (Some "2026-03-01T10:05:00Z") ]
+                ),
+                "the return value must be reread from persisted winners, not echo the stale input"
+            )
+
+            Assert.That(
+                effectiveStatus
+                    { emptyStatus with
+                        BackgroundAgents = authoritative },
+                Is.EqualTo SessionLevelStatus.Working
+            ))
+
+    [<Test>]
+    member _.``Background lifecycle survives restart reconstruction for live sessions``() =
+        withDbPath (fun dbPath ->
+            (use store = new SessionActivityStore(dbPath)
+             store.UpsertStatus(
+                 storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z"
+             )
+
+             store.UpsertBackgroundAgentLifecycle(
+                 SessionId "s1",
+                 "tool-1",
+                 lifecycle (Some "2026-03-01T11:31:00Z") None
+             )
+             |> ignore)
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
+
+            Assert.That(
+                row.Status.BackgroundAgents,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "tool-1",
+                          lifecycle (Some "2026-03-01T11:31:00Z") None ]
+                )
+            )
+
+            Assert.That(effectiveStatus row.Status, Is.EqualTo SessionLevelStatus.Working))
 
 
 [<TestFixture>]
@@ -495,10 +631,23 @@ type PruneOldTests() =
 
             store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
             store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "old",
+                "old-tool",
+                lifecycle (Some "2026-03-01T01:00:00Z") None
+            )
+            |> ignore
+            store.UpsertBackgroundAgentLifecycle(
+                SessionId "recent",
+                "recent-tool",
+                lifecycle (Some "2026-03-01T03:00:00Z") None
+            )
+            |> ignore
 
-            // cutoff 02:30 → e1(01:00), e2(02:00), old(01:00) go; e3(03:00), recent(03:00) stay.
+            // cutoff 02:30 → e1(01:00), e2(02:00), old(01:00), and old-tool go;
+            // e3(03:00), recent(03:00), and recent-tool stay.
             let deleted = store.PruneOld(ts "2026-03-01T02:30:00Z")
-            Assert.That(deleted, Is.EqualTo(3))
+            Assert.That(deleted, Is.EqualTo(4))
 
             let remainingEvents =
                 store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-01T23:59:59Z")
@@ -506,11 +655,21 @@ type PruneOldTests() =
 
             Assert.That(remainingEvents, Is.EqualTo([ "e3" ]))
 
-            let remainingSessions =
-                store.LoadLiveStatuses(ts "2026-03-01T03:30:00Z")
-                |> List.map (_.SessionId >> SessionId.value)
+            let remainingSessions = store.LoadLiveStatuses(ts "2026-03-01T03:30:00Z")
 
-            Assert.That(remainingSessions, Is.EqualTo([ "recent" ])))
+            Assert.That(
+                remainingSessions |> List.map (_.SessionId >> SessionId.value),
+                Is.EqualTo([ "recent" ])
+            )
+
+            Assert.That(
+                (find "recent" remainingSessions).Status.BackgroundAgents,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "recent-tool",
+                          lifecycle (Some "2026-03-01T03:00:00Z") None ]
+                )
+            ))
 
     [<Test>]
     member _.``pruneOld on an empty store deletes nothing``() =
@@ -631,6 +790,7 @@ VALUES
              let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
              Assert.That(legacy.Status.Intent, Is.EqualTo(None))
              Assert.That(legacy.Status.Title, Is.EqualTo(None))
+             Assert.That(legacy.Status.BackgroundAgents, Is.Empty)
 
              let intent = msg "investigating the fold" "2026-03-01T11:45:00Z"
              let title = msg "Investigate the fold" "2026-03-01T11:46:00Z"

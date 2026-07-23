@@ -12,6 +12,8 @@ open Server.SessionActivity
 //
 //   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
 //                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
+//   background_agent_lifecycle — independent per-tool start/finish clocks used to reconstruct the
+//                     effective session status without trusting report arrival order.
 //   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
 //                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
 //
@@ -122,6 +124,11 @@ let private readOptStr (r: SqliteDataReader) (i: int) =
 let private readOptTimestamp (r: SqliteDataReader) i =
     readOptStr r i |> Option.map parseIso
 
+let private readBackgroundAgent (r: SqliteDataReader) =
+    r.GetString 0,
+    { StartedAt = readOptTimestamp r 1
+      FinishedAt = readOptTimestamp r 2 }
+
 let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimitIndex usageAtIndex =
     match r.IsDBNull currentTokensIndex, r.IsDBNull tokenLimitIndex, r.IsDBNull usageAtIndex with
     | true, true, true -> None, None
@@ -198,6 +205,14 @@ CREATE TABLE IF NOT EXISTS session_status (
     user_input_completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
+
+CREATE TABLE IF NOT EXISTS background_agent_lifecycle (
+    session_id   TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT,
+    PRIMARY KEY(session_id, tool_call_id)
+);
 
 CREATE TABLE IF NOT EXISTS activity_events (
     event_id      TEXT PRIMARY KEY,
@@ -313,6 +328,36 @@ let private touchSql =
 UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
 """
 
+let private upsertBackgroundAgentSql =
+    """
+INSERT INTO background_agent_lifecycle
+    (session_id, tool_call_id, started_at, finished_at)
+VALUES ($sid, $toolCallId, $startedAt, $finishedAt)
+ON CONFLICT(session_id, tool_call_id) DO UPDATE SET
+    started_at = CASE
+        WHEN excluded.started_at IS NULL THEN background_agent_lifecycle.started_at
+        WHEN background_agent_lifecycle.started_at IS NULL
+          OR background_agent_lifecycle.started_at < excluded.started_at
+            THEN excluded.started_at
+        ELSE background_agent_lifecycle.started_at
+    END,
+    finished_at = CASE
+        WHEN excluded.finished_at IS NULL THEN background_agent_lifecycle.finished_at
+        WHEN background_agent_lifecycle.finished_at IS NULL
+          OR background_agent_lifecycle.finished_at < excluded.finished_at
+            THEN excluded.finished_at
+        ELSE background_agent_lifecycle.finished_at
+    END;
+"""
+
+let private backgroundAgentsBySessionSql =
+    """
+SELECT tool_call_id, started_at, finished_at
+FROM background_agent_lifecycle
+WHERE session_id = $sid
+ORDER BY tool_call_id;
+"""
+
 let private upsertContextUsageSql =
     """
 INSERT INTO session_status
@@ -373,10 +418,14 @@ WHERE ts >= $start AND ts <= $end
 ORDER BY ts;
 """
 
-// pruneOld trims both tables past the retention cutoff: the append-only event stream (the unbounded
-// one) plus long-dead session rows well outside any live window.
+// pruneOld trims all three tables past the retention cutoff: the append-only event stream (the
+// unbounded one), long-dead session rows, and their associated background-agent clocks.
 let private pruneSql =
     """
+DELETE FROM background_agent_lifecycle
+WHERE session_id IN (
+    SELECT session_id FROM session_status WHERE last_seen < $cutoff
+);
 DELETE FROM activity_events WHERE ts < $cutoff;
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
@@ -454,6 +503,24 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$awaitingUserSince", timestampToDb s.AwaitingUserSince) |> ignore
     cmd.Parameters.AddWithValue("$userInputCompletedAt", timestampToDb s.UserInputCompletedAt) |> ignore
 
+let private readBackgroundAgents
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction option)
+    (sessionId: SessionId)
+    : Map<string, BackgroundAgentLifecycle>
+    =
+    use cmd = conn.CreateCommand()
+    tx |> Option.iter (fun transaction -> cmd.Transaction <- transaction)
+    cmd.CommandText <- backgroundAgentsBySessionSql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    use reader = cmd.ExecuteReader()
+
+    readRows reader readBackgroundAgent [] |> Map.ofList
+
+let private attachBackgroundAgents (conn: SqliteConnection) (stored: StoredStatus) =
+    { stored with
+        Status.BackgroundAgents = readBackgroundAgents conn None stored.SessionId }
+
 let private readStoredBySession
     (conn: SqliteConnection)
     (tx: SqliteTransaction)
@@ -464,12 +531,15 @@ let private readStoredBySession
     cmd.Transaction <- tx
     cmd.CommandText <- statusBySessionSql
     cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-    use reader = cmd.ExecuteReader()
+    let stored =
+        use reader = cmd.ExecuteReader()
+        if reader.Read() then Some(readStored reader) else None
 
-    if reader.Read() then
-        readStored reader
-    else
-        failwith $"{nameof StoredStatus}: persisted session row missing"
+    match stored with
+    | Some row ->
+        { row with
+            Status.BackgroundAgents = readBackgroundAgents conn (Some tx) row.SessionId }
+    | None -> failwith $"{nameof StoredStatus}: persisted session row missing"
 
 // --- Store ------------------------------------------------------------------------------------
 
@@ -571,6 +641,28 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
+    /// Merge one background agent's independent start/terminal clocks by event time. Each clock only
+    /// moves forward, so duplicates and out-of-order delivery are idempotent. Returns the complete
+    /// authoritative lifecycle map reread in the same transaction.
+    member _.UpsertBackgroundAgentLifecycle(
+        sessionId: SessionId,
+        toolCallId: string,
+        lifecycle: BackgroundAgentLifecycle
+    ) : Map<string, BackgroundAgentLifecycle> =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction()
+        use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
+        cmd.CommandText <- upsertBackgroundAgentSql
+        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+        cmd.Parameters.AddWithValue("$toolCallId", toolCallId) |> ignore
+        cmd.Parameters.AddWithValue("$startedAt", timestampToDb lifecycle.StartedAt) |> ignore
+        cmd.Parameters.AddWithValue("$finishedAt", timestampToDb lifecycle.FinishedAt) |> ignore
+        cmd.ExecuteNonQuery() |> ignore
+        let persisted = readBackgroundAgents conn (Some tx) sessionId
+        tx.Commit()
+        persisted
+
     /// Persist the latest accepted context-window gauge, inserting the full session snapshot when a
     /// retained in-memory session outlives its pruned row. Returns the authoritative persisted state,
     /// including a newer gauge that may already have won the independent usage clock.
@@ -592,8 +684,11 @@ type SessionActivityStore(dbPath: string) =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- statusBySessionSql
         cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-        use reader = cmd.ExecuteReader()
-        if reader.Read() then Some(readStored reader) else None
+        let stored =
+            use reader = cmd.ExecuteReader()
+            if reader.Read() then Some(readStored reader) else None
+
+        stored |> Option.map (attachBackgroundAgents conn)
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.
@@ -603,9 +698,11 @@ type SessionActivityStore(dbPath: string) =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- loadSql
         cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        use reader = cmd.ExecuteReader()
+        let rows =
+            use reader = cmd.ExecuteReader()
+            readRows reader readStored []
 
-        readRows reader readStored []
+        rows |> List.map (attachBackgroundAgents conn)
 
     /// The most recently active stored session per worktree across ALL rows, IGNORING the idle
     /// window (unlike LoadLiveStatuses). The durable footer/resume substrate for cards: after a
@@ -616,9 +713,12 @@ type SessionActivityStore(dbPath: string) =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- allStatusesSql
-        use reader = cmd.ExecuteReader()
+        let rows =
+            use reader = cmd.ExecuteReader()
+            readRows reader readStored []
 
-        readRows reader readStored []
+        rows
+        |> List.map (attachBackgroundAgents conn)
         |> List.groupBy (_.WorktreePath >> WorktreePath.value)
         |> List.choose (fun (path, sessions) ->
             sessions
@@ -637,12 +737,14 @@ type SessionActivityStore(dbPath: string) =
         use cmd = conn.CreateCommand()
         cmd.CommandText <- worktreeStatusesSql
         cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
-        use reader = cmd.ExecuteReader()
+        let rows =
+            use reader = cmd.ExecuteReader()
+            readRows reader readStored []
 
-        readRows reader readStored []
+        rows |> List.map (attachBackgroundAgents conn)
 
-    /// Retention: drop events older than `cutoff` and session rows last seen before it. Returns the
-    /// total number of rows deleted across both tables.
+    /// Retention: drop events older than `cutoff`, session rows last seen before it, and their
+    /// background-agent clocks. Returns the total number of rows deleted across all three tables.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
