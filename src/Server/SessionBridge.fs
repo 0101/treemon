@@ -45,7 +45,7 @@ type SessionEntry =
       SessionId: string option
       RegisteredAt: DateTime }
 
-type private QueuedPrompt =
+type internal QueuedPrompt =
     { EnqueuedAt: DateTime
       TargetSessionId: string option
       Prompt: Prompt }
@@ -60,6 +60,7 @@ let private httpClient = new HttpClient()
 
 let private maxQueueSize = 10
 let private queueTtl = TimeSpan.FromMinutes 5.0
+let private livenessTtl = TimeSpan.FromSeconds 60.0
 
 let private promptKindName =
     function
@@ -71,24 +72,24 @@ let internal serializePrompt (prompt: Prompt) =
         {| kind = promptKindName prompt.Kind
            prompt = prompt.Text |})
 
-let private cleanExpired (prompts: QueuedPrompt list) =
-    let cutoff = DateTime.UtcNow - queueTtl
+let internal cleanExpired (now: DateTime) (prompts: QueuedPrompt list) =
+    let cutoff = now - queueTtl
     prompts |> List.filter (fun prompt -> prompt.EnqueuedAt > cutoff)
 
 let private capQueue prompts =
     let excess = List.length prompts - maxQueueSize
     if excess > 0 then prompts |> List.skip excess else prompts
 
-let private enqueue worktreeKey targetSessionId prompt =
+let private enqueue now worktreeKey targetSessionId prompt =
     let queued =
-        { EnqueuedAt = DateTime.UtcNow
+        { EnqueuedAt = now
           TargetSessionId = targetSessionId
           Prompt = prompt }
 
     promptQueue.AddOrUpdate(
         worktreeKey,
         [ queued ],
-        fun _ existing -> cleanExpired existing @ [ queued ] |> capQueue)
+        fun _ existing -> cleanExpired now existing @ [ queued ] |> capQueue)
     |> ignore
 
 let private deliverableTo (sessionId: string option) (queued: QueuedPrompt) =
@@ -96,12 +97,12 @@ let private deliverableTo (sessionId: string option) (queued: QueuedPrompt) =
     | None -> true
     | Some target -> sessionId = Some target
 
-let private requeue (worktreeKey: string) (survivors: QueuedPrompt list) =
+let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
     if not (List.isEmpty survivors) then
         promptQueue.AddOrUpdate(
             worktreeKey,
             survivors,
-            fun _ existing -> survivors @ cleanExpired existing |> capQueue)
+            fun _ existing -> survivors @ cleanExpired now existing |> capQueue)
         |> ignore
 
 let private postPrompt (entry: SessionEntry) (prompt: Prompt) (worktreeKey: string) : Async<Result<unit, string>> =
@@ -123,16 +124,16 @@ let private postPrompt (entry: SessionEntry) (prompt: Prompt) (worktreeKey: stri
             return Error ex.Message
     }
 
-let private drainQueue (worktreeKey: string) (entry: SessionEntry) =
+let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
     match promptQueue.TryRemove(worktreeKey) with
     | false, _ -> ()
     | true, queued ->
         let deliver, survivors =
             queued
-            |> cleanExpired
+            |> cleanExpired now
             |> List.partition (deliverableTo entry.SessionId)
 
-        requeue worktreeKey survivors
+        requeue now worktreeKey survivors
 
         if not (List.isEmpty deliver) then
             Log.log "SessionBridge" $"Draining {List.length deliver} queued prompt(s) for {worktreeKey}"
@@ -153,9 +154,8 @@ let private registrationClockLock = obj ()
 // Mutable under registrationClockLock so registrations receive a strictly monotonic timestamp.
 let mutable private lastRegisteredAt = DateTime.MinValue
 
-let private nextRegisteredAt () =
+let private nextRegisteredAt now =
     lock registrationClockLock (fun () ->
-        let now = DateTime.UtcNow
         let timestamp = if now > lastRegisteredAt then now else lastRegisteredAt.AddTicks 1L
         lastRegisteredAt <- timestamp
         timestamp)
@@ -171,6 +171,7 @@ let private registryKeyFor normalizedWorktree sessionId =
     | None -> "wt:" + normalizedWorktree
 
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
+    let now = DateTime.UtcNow
     let sessionId = normalizeSessionId sessionId
     let worktreeKey = normalizePath worktreePath
     let registryKey = registryKeyFor worktreeKey sessionId
@@ -179,15 +180,16 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
         { WorktreePath = worktreeKey
           InjectUrl = injectUrl
           SessionId = sessionId
-          RegisteredAt = nextRegisteredAt () }
+          RegisteredAt = nextRegisteredAt now }
 
     sessionRegistry[registryKey] <- entry
     Log.log "SessionBridge" $"Session registered {worktreeKey} (key={registryKey}) -> {injectUrl}"
-    drainQueue worktreeKey entry
+    drainQueue now worktreeKey entry
 
 let registerPoll (worktreePath: string) =
+    let now = DateTime.UtcNow
     let key = normalizePath worktreePath
-    pollRegistry[key] <- DateTime.UtcNow
+    pollRegistry[key] <- now
     Log.log "SessionBridge" $"Poll heartbeat for {key}"
 
 let sessionsForWorktree (worktreePath: string) : SessionEntry list =
@@ -203,53 +205,60 @@ let private freshestSession (worktreePath: string) =
     |> List.sortByDescending _.RegisteredAt
     |> List.tryHead
 
-let private isSessionAlive (entry: SessionEntry) =
-    DateTime.UtcNow - entry.RegisteredAt < TimeSpan.FromSeconds 60.0
+let internal isSessionAlive now (entry: SessionEntry) =
+    now - entry.RegisteredAt < livenessTtl
 
-let private isPollAlive (lastHeartbeat: DateTime) =
-    DateTime.UtcNow - lastHeartbeat < TimeSpan.FromSeconds 60.0
+let internal isPollAlive now (lastHeartbeat: DateTime) =
+    now - lastHeartbeat < livenessTtl
 
-let private liveTarget (worktreePath: string) (targetSessionId: string option) =
+let private liveTarget now (worktreePath: string) (targetSessionId: string option) =
     targetSessionId
     |> Option.bind (fun target ->
         sessionsForWorktree worktreePath
-        |> List.filter isSessionAlive
+        |> List.filter (isSessionAlive now)
         |> List.tryFind (fun entry -> entry.SessionId = Some target))
 
 /// Attempt immediate delivery to the selected live session. A failed POST is queued for that
 /// session, while an absent live target remains distinct so auto-sync can apply its fallback policy.
-let tryDeliver (request: SendRequest) =
+let private tryDeliverAt now (request: SendRequest) =
     async {
         let worktreeKey = normalizePath request.WorktreePath
         let targetSessionId = normalizeSessionId request.SessionId
 
-        match liveTarget request.WorktreePath targetSessionId with
+        match liveTarget now request.WorktreePath targetSessionId with
         | None -> return DeliveryResult.NoLiveSession
         | Some entry ->
             match! postPrompt entry request.Prompt worktreeKey with
             | Ok () -> return DeliveryResult.Delivered
             | Error _ ->
-                enqueue worktreeKey targetSessionId request.Prompt
+                enqueue now worktreeKey targetSessionId request.Prompt
                 return DeliveryResult.DeliveryFailed
+    }
+
+let tryDeliver (request: SendRequest) =
+    async {
+        let now = DateTime.UtcNow
+        return! tryDeliverAt now request
     }
 
 let send (request: SendRequest) =
     async {
+        let now = DateTime.UtcNow
         let worktreeKey = normalizePath request.WorktreePath
         let targetSessionId = normalizeSessionId request.SessionId
 
-        match! tryDeliver request with
+        match! tryDeliverAt now request with
         | DeliveryResult.Delivered -> return SendResult.Delivered
         | DeliveryResult.DeliveryFailed -> return SendResult.Queued
         | DeliveryResult.NoLiveSession ->
-            enqueue worktreeKey targetSessionId request.Prompt
+            enqueue now worktreeKey targetSessionId request.Prompt
             return SendResult.Queued
     }
 
 /// Atomically drain anonymous pending prompts of one transport kind. Canvas iframe heartbeats use
 /// this for legacy owner-unknown canvas messages; owner-bound and agent prompts stay queued for a
 /// matching live session registration.
-let private drainPending (kind: PromptKind) (worktreePath: string) : Prompt list =
+let private drainPending now (kind: PromptKind) (worktreePath: string) : Prompt list =
     let key = normalizePath worktreePath
 
     match promptQueue.TryRemove(key) with
@@ -257,11 +266,11 @@ let private drainPending (kind: PromptKind) (worktreePath: string) : Prompt list
     | true, queued ->
         let deliver, survivors =
             queued
-            |> cleanExpired
+            |> cleanExpired now
             |> List.partition (fun prompt ->
                 deliverableTo None prompt && prompt.Prompt.Kind = kind)
 
-        requeue key survivors
+        requeue now key survivors
 
         if not (List.isEmpty deliver) then
             Log.log "SessionBridge" $"Drained {List.length deliver} pending {promptKindName kind} prompt(s) for {Path.GetFileName(key)} via poll"
@@ -269,30 +278,31 @@ let private drainPending (kind: PromptKind) (worktreePath: string) : Prompt list
         deliver |> List.map _.Prompt
 
 let drainPendingCanvas worktreePath =
-    drainPending PromptKind.Canvas worktreePath
+    drainPending DateTime.UtcNow PromptKind.Canvas worktreePath
 
-let private computeLiveness (session: SessionEntry option) (poll: bool * DateTime) =
+let internal computeLiveness now (session: SessionEntry option) (poll: bool * DateTime) =
     match session, poll with
     | Some entry, (true, heartbeat) ->
         let age =
             min
-                (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds
-                (DateTime.UtcNow - heartbeat).TotalSeconds
-        Some (age, { IsAlive = isSessionAlive entry || isPollAlive heartbeat; SessionId = entry.SessionId })
+                (now - entry.RegisteredAt).TotalSeconds
+                (now - heartbeat).TotalSeconds
+        Some (age, { IsAlive = isSessionAlive now entry || isPollAlive now heartbeat; SessionId = entry.SessionId })
     | Some entry, (false, _) ->
-        let age = (DateTime.UtcNow - entry.RegisteredAt).TotalSeconds
-        Some (age, { IsAlive = isSessionAlive entry; SessionId = entry.SessionId })
+        let age = (now - entry.RegisteredAt).TotalSeconds
+        Some (age, { IsAlive = isSessionAlive now entry; SessionId = entry.SessionId })
     | None, (true, heartbeat) ->
-        let age = (DateTime.UtcNow - heartbeat).TotalSeconds
-        Some (age, { IsAlive = isPollAlive heartbeat; SessionId = None })
+        let age = (now - heartbeat).TotalSeconds
+        Some (age, { IsAlive = isPollAlive now heartbeat; SessionId = None })
     | None, (false, _) -> None
 
 let getStatus (worktreePath: string) =
+    let now = DateTime.UtcNow
     let key = normalizePath worktreePath
     let session = freshestSession worktreePath
     let poll = pollRegistry.TryGetValue(key)
 
-    match computeLiveness session poll with
+    match computeLiveness now session poll with
     | Some (age, liveness) ->
         {| Registered = true
            LastHeartbeatAge = Some age
@@ -308,10 +318,12 @@ let getSessionForWorktree worktreePath =
     freshestSession worktreePath |> Option.bind _.SessionId
 
 let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
+    let now = DateTime.UtcNow
+
     worktreePaths
     |> List.choose (fun path ->
         let key = normalizePath path
         let session = freshestSession path
         let poll = pollRegistry.TryGetValue(key)
-        computeLiveness session poll |> Option.map (fun (_, liveness) -> path, liveness))
+        computeLiveness now session poll |> Option.map (fun (_, liveness) -> path, liveness))
     |> Map.ofList
