@@ -28,8 +28,8 @@ let private withJsonProperty (path: string) (propertyName: string) (onFound: Jso
             Log.log "TreemonConfig" $"Failed to read {propertyName} from {path}: {ex.Message}"
             defaultValue
 
-let private readBranchesCore (path: string) : string list =
-    withJsonProperty path "archivedBranches" (fun elem ->
+let private readStringArrayCore (path: string) (propertyName: string) : string list =
+    withJsonProperty path propertyName (fun elem ->
         if elem.ValueKind = JsonValueKind.Array then
             elem.EnumerateArray()
             |> Seq.choose (fun v ->
@@ -38,7 +38,7 @@ let private readBranchesCore (path: string) : string list =
             |> Seq.toList
         else []) []
 
-let private writeBranchesCore (path: string) (branches: string list) : unit =
+let private writeStringArrayCore (path: string) (propertyName: string) (values: string list) : unit =
     let root =
         if File.Exists(path) then
             try
@@ -49,17 +49,17 @@ let private writeBranchesCore (path: string) (branches: string list) : unit =
         else
             JsonObject()
 
-    let branchArray = JsonArray(branches |> List.map (fun s -> JsonValue.Create(s) :> JsonNode) |> List.toArray)
-    root["archivedBranches"] <- branchArray
+    let valuesArray = JsonArray(values |> List.map (fun s -> JsonValue.Create(s) :> JsonNode) |> List.toArray)
+    root[propertyName] <- valuesArray
 
     let options = JsonSerializerOptions(WriteIndented = true)
     File.WriteAllText(path, root.ToJsonString(options))
 
 let readArchivedBranches (repoRoot: string) : string list =
-    lock configLock (fun () -> configPath repoRoot |> readBranchesCore)
+    lock configLock (fun () -> readStringArrayCore (configPath repoRoot) "archivedBranches")
 
 let setArchivedBranches (repoRoot: string) (branches: string list) : unit =
-    lock configLock (fun () -> configPath repoRoot |> writeBranchesCore <| branches)
+    lock configLock (fun () -> writeStringArrayCore (configPath repoRoot) "archivedBranches" branches)
 
 let readArchivedBranchSet (repoRoot: string option) : Set<string> =
     repoRoot
@@ -70,9 +70,28 @@ let readArchivedBranchSet (repoRoot: string option) : Set<string> =
 let modifyArchivedBranches (repoRoot: string) (modify: string list -> string list) : unit =
     let path = configPath repoRoot
     lock configLock (fun () ->
-        readBranchesCore path
+        readStringArrayCore path "archivedBranches"
         |> modify
-        |> writeBranchesCore path)
+        |> writeStringArrayCore path "archivedBranches")
+
+let readAutoSyncBranches (repoRoot: string) : string list =
+    lock configLock (fun () -> readStringArrayCore (configPath repoRoot) "autoSyncBranches")
+
+let setAutoSyncBranches (repoRoot: string) (branches: string list) : unit =
+    lock configLock (fun () -> writeStringArrayCore (configPath repoRoot) "autoSyncBranches" branches)
+
+let readAutoSyncBranchSet (repoRoot: string option) : Set<string> =
+    repoRoot
+    |> Option.map readAutoSyncBranches
+    |> Option.defaultValue []
+    |> Set.ofList
+
+let modifyAutoSyncBranches (repoRoot: string) (modify: string list -> string list) : unit =
+    let path = configPath repoRoot
+    lock configLock (fun () ->
+        readStringArrayCore path "autoSyncBranches"
+        |> modify
+        |> writeStringArrayCore path "autoSyncBranches")
 
 let private readStringConfig (repoRoot: string) (propertyName: string) : string option =
     lock configLock (fun () ->

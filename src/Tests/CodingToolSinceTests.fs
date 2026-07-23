@@ -203,6 +203,7 @@ type AssembleFromStateDebounceTests() =
             displayNow
             Set.empty
             Set.empty
+            Set.empty
             false
             pushByWorktree
             state.CodingToolSinceByWorktree

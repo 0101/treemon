@@ -411,6 +411,7 @@ type SubmitCreateWorktreeRequestMappingTests() =
         { getWorktrees = fun _ -> failwith "unused"
           openTerminal = fun _ -> failwith "unused"
           openEditor = fun _ -> failwith "unused"
+          toggleAutoSync = fun _ _ -> failwith "unused"
           startSync = fun _ -> failwith "unused"
           cancelSync = fun _ -> failwith "unused"
           getSyncStatus = fun _ -> failwith "unused"

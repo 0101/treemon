@@ -313,6 +313,7 @@ type WorktreeStatus =
       LastAssistantMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int
+      AutoSyncEnabled: bool
       IsDirty: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
@@ -403,6 +404,7 @@ type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
       openEditor: WorktreePath -> Async<unit>
+      toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       startSync: WorktreePath -> Async<Result<unit, string>>
       cancelSync: WorktreePath -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>

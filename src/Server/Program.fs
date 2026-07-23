@@ -296,7 +296,12 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
             | None ->
-                RefreshScheduler.start agent worktreeRoots cts.Token
+                RefreshScheduler.start
+                    agent
+                    { SessionAgent = sessionAgent
+                      ActivityStore = sessionActivityStore }
+                    worktreeRoots
+                    cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
             WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch

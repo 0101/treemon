@@ -52,6 +52,7 @@ let readOnlyApi
       getSyncStatus = getSyncStatus
       openTerminal = fun _ -> async { return () }
       openEditor = fun _ -> async { return () }
+      toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       startSync = fun _ -> async { return Error $"Sync is not available in {modeName}" }
       cancelSync = fun _ -> async { return () }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
@@ -133,6 +134,7 @@ let internal assembleFromState
     (now: DateTimeOffset)
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
+    (autoSyncBranches: Set<string>)
     (hasTestFailureLog: bool)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (codingToolSince: Map<string, DateTimeOffset>)
@@ -186,6 +188,10 @@ let internal assembleFromState
       LastAssistantMessage = codingToolData.LastAssistantMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
+      AutoSyncEnabled =
+        wt.Branch
+        |> Option.map (fun branch -> Set.contains branch autoSyncBranches)
+        |> Option.defaultValue false
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
@@ -276,12 +282,17 @@ let getWorktrees
                     |> Map.tryFind repoId
                     |> TreemonConfig.readArchivedBranchSet
 
+                let autoSyncBranches =
+                    rootPaths
+                    |> Map.tryFind repoId
+                    |> TreemonConfig.readAutoSyncBranchSet
+
                 let statuses =
                     repo.WorktreeList
                     |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
                     |> List.map (fun wt ->
                         let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState now activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
+                        assembleFromState now activeSessionPaths archivedBranches autoSyncBranches hasLog pushByWorktree codingToolSince repo wt)
 
                 let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -417,6 +428,9 @@ let worktreeApi
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+    let schedulerServices : RefreshScheduler.SchedulerServices =
+        { SessionAgent = sessionAgent
+          ActivityStore = activityStore }
 
     let validatePath path =
         async {
@@ -450,6 +464,39 @@ let worktreeApi
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
+          toggleAutoSync = fun wtPath enabled ->
+              let path = WorktreePath.value wtPath
+              async {
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                  match tryResolveWorktreeContext rootPaths state path with
+                  | None -> return Error $"No worktree found at path '{path}'"
+                  | Some { Branch = None; Worktree = wt } ->
+                      return Error $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
+                  | Some ({ Branch = Some branch } as ctx) ->
+                      try
+                          TreemonConfig.modifyAutoSyncBranches ctx.RepoRoot (fun existing ->
+                              existing
+                              |> Set.ofList
+                              |> (if enabled then Set.add branch else Set.remove branch)
+                              |> Set.toList)
+
+                          if not enabled then
+                              agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger path)
+                          else
+                              match state.Repos |> Map.tryFind ctx.RepoId with
+                              | Some repo ->
+                                  match repo.GitData |> Map.tryFind ctx.Worktree.Path with
+                                  | Some gitData ->
+                                      do! RefreshScheduler.triggerAutoSync agent schedulerServices ctx.RepoRoot repo gitData
+                                  | None -> ()
+                              | None -> ()
+
+                          return Ok ()
+                      with ex ->
+                          Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
+                          return Error $"Failed to persist auto-sync preference: {ex.Message}"
+              }
           startSync = fun wtPath ->
               let path = WorktreePath.value wtPath
               asyncResult {

@@ -24,6 +24,7 @@ let baseWt: WorktreeStatus =
       LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false

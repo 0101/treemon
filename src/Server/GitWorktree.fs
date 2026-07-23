@@ -24,6 +24,7 @@ type GitData =
       LastCommitTime: DateTimeOffset
       UpstreamBranch: string option
       MainBehindCount: int
+      BaseRevision: string option
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
@@ -150,6 +151,16 @@ let getMainBehindCount (worktreePath: string) (mainRef: string) =
             |> Option.defaultValue 0
     }
 
+let getBaseRevision (worktreePath: string) (mainRef: string) =
+    async {
+        let! output = runGit worktreePath $"rev-parse {mainRef}"
+
+        return
+            output
+            |> Option.map _.Trim()
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+    }
+
 let getUpstreamBranch (worktreePath: string) =
     async {
         let! output = runGit worktreePath "rev-parse --abbrev-ref @{u}"
@@ -214,10 +225,12 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
         let! diffStatsChild = Async.StartChild(getDiffStats worktreePath mainRef)
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath mainRef)
+        let! baseRevisionChild = Async.StartChild(getBaseRevision worktreePath mainRef)
 
         let! commit = commitChild
         let! upstream = upstreamChild
         let! mainBehind = mainBehindChild
+        let! baseRevision = baseRevisionChild
         let! dirty = dirtyChild
         let! commitCount = commitCountChild
         let! (linesAdded, linesRemoved) = diffStatsChild
@@ -245,6 +258,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = upstreamBranch
               MainBehindCount = mainBehind
+              BaseRevision = baseRevision
               IsDirty = dirty
               WorkMetrics = workMetrics }
     }

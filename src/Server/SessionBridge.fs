@@ -203,19 +203,32 @@ let private isSessionAlive (entry: SessionEntry) =
 let private isPollAlive (lastHeartbeat: DateTime) =
     DateTime.UtcNow - lastHeartbeat < TimeSpan.FromSeconds 60.0
 
+let private liveTarget (worktreePath: string) (targetSessionId: string option) =
+    targetSessionId
+    |> Option.bind (fun target ->
+        sessionsForWorktree worktreePath
+        |> List.filter isSessionAlive
+        |> List.tryFind (fun entry -> entry.SessionId = Some target))
+
+/// Attempt immediate delivery to the selected live session without queueing. Auto-sync uses this
+/// because its no-live-session path launches a fresh prompted session directly.
+let tryDeliver (request: SendRequest) =
+    async {
+        match liveTarget request.WorktreePath (normalizeSessionId request.SessionId) with
+        | None -> return false
+        | Some entry ->
+            let worktreeKey = normalizePath request.WorktreePath
+            match! postPrompt entry request.Prompt worktreeKey with
+            | Ok () -> return true
+            | Error _ -> return false
+    }
+
 let send (request: SendRequest) =
     async {
         let worktreeKey = normalizePath request.WorktreePath
         let targetSessionId = normalizeSessionId request.SessionId
 
-        let liveTarget =
-            targetSessionId
-            |> Option.bind (fun target ->
-                sessionsForWorktree request.WorktreePath
-                |> List.filter isSessionAlive
-                |> List.tryFind (fun entry -> entry.SessionId = Some target))
-
-        match liveTarget with
+        match liveTarget request.WorktreePath targetSessionId with
         | Some entry ->
             match! postPrompt entry request.Prompt worktreeKey with
             | Ok() -> return SendResult.Delivered

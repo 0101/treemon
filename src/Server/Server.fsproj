@@ -33,6 +33,7 @@
     <Compile Include="PrStatus.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
     <Compile Include="SessionBridge.fs" />
+    <Compile Include="AutoSync.fs" />
     <Compile Include="CanvasBridge.fs" />
     <Compile Include="EmbeddedResource.fs" />
     <Compile Include="CanvasDocKinds.fs" />

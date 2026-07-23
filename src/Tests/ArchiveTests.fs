@@ -256,6 +256,7 @@ type NavigationArchiveTests() =
           LastAssistantMessage = None
           Pr = NoPr
           MainBehindCount = 0
+          AutoSyncEnabled = false
           IsDirty = false
           WorkMetrics = None
           HasActiveSession = false
@@ -360,7 +361,7 @@ type ArchiveE2ETests() =
             "Beads":{{"Open":0,"InProgress":0,"Blocked":0,"Closed":0}},
             "Planning":{{"Planned":0,"Queued":0,"Loose":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
-            "Pr":"NoPr","MainBehindCount":0,"IsDirty":false,
+            "Pr":"NoPr","MainBehindCount":0,"AutoSyncEnabled":false,"IsDirty":false,
             "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[],"Sessions":[]
         }}"""
 

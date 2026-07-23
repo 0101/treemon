@@ -142,14 +142,16 @@ let private sessionStatusOrder =
     | Idle -> 2
     | NoSession -> 3
 
-let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
-    // OPENNESS: only sessions seen within openWindow drive the status dot. A closed/crashed session's
-    // last_seen goes stale and drops out here.
+type private SessionSelection =
+    { OpenSessions: StoredStatus list
+      AdjustedOpen: StoredStatus list
+      ActiveWinner: StoredStatus option
+      Footer: StoredStatus option }
+
+let private selectSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
         sessions |> List.filter (fun s -> now - s.LastSeen < SessionActivity.openWindow)
 
-    // Freshness crash-net (defensive): with openness applied first it rarely fires, but a
-    // Working/WaitingForUser open session past the staleness timeout still reads as Idle.
     let adjustedOpen =
         openSessions
         |> List.map (fun s ->
@@ -159,11 +161,27 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
         adjustedOpen
         |> SessionActivity.pickActive _.Status StoredStatus.activityOrderKey
 
+    { OpenSessions = openSessions
+      AdjustedOpen = adjustedOpen
+      ActiveWinner = activeWinner
+      Footer =
+        activeWinner
+        |> Option.orElse (sessions |> StoredStatus.tryMostRecentActivity) }
+
+/// The exact session represented by the card footer: the active winner when one is running,
+/// otherwise the session with the greatest activity UpdatedAt.
+let selectFooterSessionId (now: DateTimeOffset) (sessions: StoredStatus list) : string option =
+    (selectSessions now sessions).Footer
+    |> Option.map (_.SessionId >> SessionId.value)
+
+let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
+    let selection = selectSessions now sessions
+
     let status =
-        match openSessions with
+        match selection.OpenSessions with
         | [] -> NoSession
         | _ ->
-            activeWinner
+            selection.ActiveWinner
             |> Option.map (fun winner ->
                 winner.Status
                 |> SessionActivity.effectiveStatus
@@ -177,7 +195,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     // that has reported usage renders a donut regardless of which session currently wins status. Empty
     // ⇔ status = NoSession, so the client reproduces the single grey dot from an empty list.
     let sessionStatuses =
-        adjustedOpen
+        selection.AdjustedOpen
         |> List.map (fun s ->
             { Status =
                 s.Status
@@ -195,13 +213,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     // Footer source: the active winner if running, else the most-recently-active session of ANY
     // status so the footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain
     // their last messages + skill), NOT a freshness-adjusted one — freshness only rewrites the dot.
-    let footer =
-        activeWinner
-        |> Option.map _.Status
-        |> Option.orElse (
-            sessions
-            |> StoredStatus.tryMostRecentActivity
-            |> Option.map _.Status)
+    let footer = selection.Footer |> Option.map _.Status
 
     { Status = status
       SessionStatuses = sessionStatuses
@@ -219,7 +231,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
         footer
         |> Option.bind _.LastAssistantMessage
         |> Option.map (toFooterMessage 80)
-      LastActivity = activeWinner |> Option.map _.LastSeen }
+      LastActivity = selection.ActiveWinner |> Option.map _.LastSeen }
 
 /// Add each worktree's durable representative to the live candidate set. Live rows win duplicate
 /// session ids; retained rows with distinct ids remain available for footer selection, while their

@@ -62,6 +62,7 @@
     <Compile Include="CanvasShareClientTests.fs" />
     <Compile Include="FormattingTests.fs" />
     <Compile Include="SessionBridgeTests.fs" />
+    <Compile Include="AutoSyncTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />

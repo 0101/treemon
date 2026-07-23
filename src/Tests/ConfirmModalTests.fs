@@ -28,6 +28,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = hasSession

@@ -170,6 +170,7 @@ let private wtAzDoMain: WorktreeStatus =
       LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false
@@ -197,6 +198,7 @@ let private wtRetryLogic: WorktreeStatus =
       LastAssistantMessage = Some("Updating the retry helper to spread out retries with jitter…", baseTimestamp.AddSeconds(-40.0))
       Pr = HasPr prRetryBuilding
       MainBehindCount = 2
+      AutoSyncEnabled = true
       IsDirty = true
       WorkMetrics = Some { CommitCount = 8; LinesAdded = 342; LinesRemoved = 67 }
       HasActiveSession = true
@@ -222,6 +224,7 @@ let private wtConfigLoading: WorktreeStatus =
       LastAssistantMessage = Some("Splitting config validation into its own module", baseTimestamp.AddMinutes(-1.0))
       Pr = NoPr
       MainBehindCount = 5
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
       HasActiveSession = true
@@ -247,6 +250,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       LastAssistantMessage = Some("Added the admin role guard — let me know if that covers it", baseTimestamp.AddMinutes(-8.0))
       Pr = HasPr prAuth
       MainBehindCount = 1
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
       HasActiveSession = false
@@ -272,6 +276,7 @@ let private wtArchived: WorktreeStatus =
       LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 12
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = Some { CommitCount = 15; LinesAdded = 890; LinesRemoved = 234 }
       HasActiveSession = false
@@ -297,6 +302,7 @@ let private wtGithubMain: WorktreeStatus =
       LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false
@@ -325,6 +331,7 @@ let private wtStreaming: WorktreeStatus =
       LastAssistantMessage = Some("Windowed aggregation added; running the tests now", baseTimestamp.AddSeconds(-20.0))
       Pr = HasPr prStreaming
       MainBehindCount = 1
+      AutoSyncEnabled = true
       IsDirty = false
       WorkMetrics = Some { CommitCount = 12; LinesAdded = 567; LinesRemoved = 123 }
       HasActiveSession = true
@@ -350,6 +357,7 @@ let private wtCsvFix: WorktreeStatus =
       LastAssistantMessage = None
       Pr = HasPr prCsvMerged
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = Some { CommitCount = 4; LinesAdded = 45; LinesRemoved = 12 }
       HasActiveSession = false
